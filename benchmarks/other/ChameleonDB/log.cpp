@@ -31,7 +31,7 @@ Log::Log(std::string db_path, size_t log_size, ChameleonDB *db, int num_workers,
     ERROR_EXIT("fallocate file failed");
   }
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
-                             MAP_SHARED, log_pool_fd, 0);
+                             MAP_SHARED_VALIDATE | MAP_SYNC, log_pool_fd, 0);
   close(log_pool_fd);
 #else
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,

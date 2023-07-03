@@ -168,7 +168,7 @@ class MMAPAllocator : public IndexAllocator {
       ERROR_EXIT("fallocate file failed");
     }
     idx_start_addr_ = (char *)mmap(NULL, idx_pool_size_, PROT_READ | PROT_WRITE,
-                                   MAP_SHARED, idx_pool_fd, 0);
+                                   MAP_SHARED_VALIDATE | MAP_SYNC, idx_pool_fd, 0);
     close(idx_pool_fd);
 #else
     idx_start_addr_ = (char *)mmap(NULL, idx_pool_size_, PROT_READ | PROT_WRITE,
