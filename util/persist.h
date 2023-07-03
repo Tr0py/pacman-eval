@@ -78,11 +78,15 @@ clflushopt_fence(const void *addr, size_t len)
 static force_inline void
 clwb_fence(const void *addr, size_t len)
 {
+#ifdef CLWB_SUPPORTED
 	uintptr_t uptr;
 	for (uptr = (uintptr_t)addr & ~(FLUSH_ALIGN - 1);
 		uptr < (uintptr_t)addr + len; uptr += FLUSH_ALIGN)
 		pmem_clwb((char *)uptr);
 	_mm_sfence();
+#else
+	clflushopt_fence(addr, len);
+#endif
 }
 
 static force_inline void
@@ -104,11 +108,7 @@ idx_clflushopt_fence(const void *addr, size_t len)
 static force_inline void
 idx_clwb_fence(const void *addr, size_t len)
 {
-#ifdef CLWB_SUPPOERTED
 #ifdef IDX_PERSISTENT
 	clwb_fence(addr, len);
-#endif
-#else
-	clflushopt_fence(addr, len);
 #endif
 }
