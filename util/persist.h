@@ -104,7 +104,11 @@ idx_clflushopt_fence(const void *addr, size_t len)
 static force_inline void
 idx_clwb_fence(const void *addr, size_t len)
 {
+#ifdef CLWB_SUPPOERTED
 #ifdef IDX_PERSISTENT
 	clwb_fence(addr, len);
+#endif
+#else
+	clflushopt_fence(addr, len);
 #endif
 }
