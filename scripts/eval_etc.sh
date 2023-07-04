@@ -63,14 +63,19 @@ fi
 
 NUMA_AFFINITY=0
 LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
-NUM_KEYS=200000000
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
 NUM_OPS_PER_THREAD=20000000
+#NUM_OPS_PER_THREAD=200000
 
 mkdir -p ../results
 mkdir -p ../build
 cd ../build
 
-THREADS=24
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
 if [[ $1 -le 6 ]]; then
   FILTER="--benchmark_filter=/(80)/.*/threads:(${THREADS})$"
   OUTPUT_FILE=../results/etc_$1_$2
@@ -87,11 +92,11 @@ cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
   ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
   -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
   -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
-  -DNUM_GC_THREADS=4 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON ..
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON ..
 make ${TARGET} -j
 
 # disable cpu scaling
-sudo cpupower frequency-set --governor performance > /dev/null
+#sudo cpupower frequency-set --governor performance > /dev/null
 # clean cache
 sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 
@@ -99,4 +104,4 @@ numactl --membind=${NUMA_AFFINITY} --cpunodebind=${NUMA_AFFINITY} \
   ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
   --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
 
-sudo cpupower frequency-set --governor powersave > /dev/null
+#sudo cpupower frequency-set --governor powersave > /dev/null

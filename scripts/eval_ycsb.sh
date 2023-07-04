@@ -47,11 +47,13 @@ if [[ $2 == 1 ]]; then
   PACMAN_OPT="-DPACMAN=ON"
 fi
 
-FILTER="--benchmark_filter=/(80)/.*/threads:(24)$"
+THREADS=4
+FILTER="--benchmark_filter=/(80)/.*/threads:(${THREADS})$"
 SKEW="true" # true (Zipfian), false (uniform)
 
 NUMA_AFFINITY=0
-NUM_KEYS=200000000
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
 NUM_OPS_PER_THREAD=20000000
 
 mkdir -p ../results
@@ -82,7 +84,7 @@ fi
 ls | grep -v _deps | xargs rm -rf
 
 # disable cpu scaling
-sudo cpupower frequency-set --governor performance > /dev/null
+#sudo cpupower frequency-set --governor performance > /dev/null
 
 for workload in "${WORKLOAD_TYPE[@]}"; do
   echo | tee -a ${OUTPUT_FILE}
@@ -91,7 +93,7 @@ for workload in "${WORKLOAD_TYPE[@]}"; do
   cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
     ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} ${PACMAN_OPT} \
     -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
-    -DNUM_GC_THREADS=4 -DYCSB_TYPE=${workload} -DSKEW=${SKEW} ..
+    -DNUM_GC_THREADS=2 -DYCSB_TYPE=${workload} -DSKEW=${SKEW} ..
   make ${TARGET} -j
 
   # clean cache
@@ -106,4 +108,4 @@ for workload in "${WORKLOAD_TYPE[@]}"; do
 done
 rm ${TMP_OUTPUT}
 
-sudo cpupower frequency-set --governor powersave > /dev/null
+#sudo cpupower frequency-set --governor powersave > /dev/null
