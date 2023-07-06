@@ -1,8 +1,17 @@
 #!/bin/bash
 
-# Function to extract the number from a log file
+# Function to extract the number and its unit from a log file
 extract_number () {
-    grep -o -P '(?<=items_per_second=)[0-9]*\.[0-9]*' $1
+    num_unit=$(grep -o -P '(?<=items_per_second=)[0-9]*\.[0-9]*[kM]?' $1)
+    num=${num_unit%[kM]*}
+    unit=${num_unit#${num}}
+
+    # Check if the unit is 'M' or 'm', if so convert to k (k/s)
+    if [[ $unit == "M" || $unit == "m" ]]; then
+        num=$(echo "$num * 1000" | bc)
+    fi
+
+    echo $num
 }
 
 # Function to format the number (add leading zero if necessary)
@@ -59,12 +68,12 @@ echo "The results file has been generated and saved to $real_path"
 column -t -s, $real_path
 
 # After generating the csv file, plot the data
-gnuplot ../plot.gp
+gnuplot -e "workload='$dir_name'" ../plot.gp
 
 # Print the real path of the figures
 real_path_perf=$(realpath performance.pdf)
 real_path_norm=$(realpath normalized_performance.pdf)
-echo "The figures have been generated and saved to $real_path_perf and $real_path_norm"
+echo -e "The figures have been generated and saved to \n raw performance: $real_path_perf and \n normalized performance: $real_path_norm"
 
 # Change back to the previous directory
 cd ..
