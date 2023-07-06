@@ -48,12 +48,13 @@ if [[ $2 == 1 ]]; then
 fi
 
 THREADS=4
-FILTER="--benchmark_filter=/(80)/.*/threads:(${THREADS})$"
+#FILTER="--benchmark_filter=/(80)/.*/threads:(${THREADS})$"
+FILTER="--benchmark_filter=/(50)/.*/threads:(${THREADS})$"
 SKEW="true" # true (Zipfian), false (uniform)
 
 NUMA_AFFINITY=0
 #NUM_KEYS=200000000
-NUM_KEYS=20000000
+NUM_KEYS=40000000
 NUM_OPS_PER_THREAD=20000000
 
 mkdir -p ../results

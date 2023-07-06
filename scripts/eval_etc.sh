@@ -76,8 +76,9 @@ cd ../build
 # If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
 # difference
 THREADS=4
+CAPACITY_RATIO=50
 if [[ $1 -le 6 ]]; then
-  FILTER="--benchmark_filter=/(80)/.*/threads:(${THREADS})$"
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
   OUTPUT_FILE=../results/etc_$1_$2
 else
   FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
