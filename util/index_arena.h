@@ -164,7 +164,8 @@ class MMAPAllocator : public IndexAllocator {
     if (idx_pool_fd < 0) {
       ERROR_EXIT("open file failed");
     }
-    if (fallocate(idx_pool_fd, 0, 0, idx_pool_size_) != 0) {
+    //if (fallocate(idx_pool_fd, 0, 0, idx_pool_size_) != 0) {
+    if (ftruncate(idx_pool_fd, idx_pool_size_) != 0) {
       ERROR_EXIT("fallocate file failed");
     }
     idx_start_addr_ = (char *)mmap(NULL, idx_pool_size_, PROT_READ | PROT_WRITE,
@@ -175,6 +176,7 @@ class MMAPAllocator : public IndexAllocator {
                                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 #endif
     if (idx_start_addr_ == nullptr || idx_start_addr_ == MAP_FAILED) {
+	    perror("mmap");
       ERROR_EXIT("idx_pool mmap failed");
     }
     pool_end_addr_ = idx_start_addr_ + idx_pool_size_;

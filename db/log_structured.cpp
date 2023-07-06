@@ -27,6 +27,7 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
     ERROR_EXIT("open file failed");
   }
   if (fallocate(log_pool_fd, 0, 0, total_log_size_) != 0) {
+  //if (ftruncate(log_pool_fd, total_log_size_) != 0) {
     ERROR_EXIT("fallocate file failed");
   }
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
