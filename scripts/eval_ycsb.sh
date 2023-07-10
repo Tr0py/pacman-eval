@@ -85,7 +85,7 @@ fi
 ls | grep -v _deps | xargs rm -rf
 
 # disable cpu scaling
-#sudo cpupower frequency-set --governor performance > /dev/null
+sudo cpupower frequency-set --governor performance > /dev/null
 
 for workload in "${WORKLOAD_TYPE[@]}"; do
   echo | tee -a ${OUTPUT_FILE}
@@ -109,4 +109,4 @@ for workload in "${WORKLOAD_TYPE[@]}"; do
 done
 rm ${TMP_OUTPUT}
 
-#sudo cpupower frequency-set --governor powersave > /dev/null
+sudo cpupower frequency-set --governor powersave > /dev/null

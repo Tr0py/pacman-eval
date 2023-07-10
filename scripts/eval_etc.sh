@@ -97,7 +97,7 @@ cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
 make ${TARGET} -j
 
 # disable cpu scaling
-#sudo cpupower frequency-set --governor performance > /dev/null
+sudo cpupower frequency-set --governor performance > /dev/null
 # clean cache
 sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 
@@ -105,4 +105,4 @@ numactl --membind=${NUMA_AFFINITY} --cpunodebind=${NUMA_AFFINITY} \
   ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
   --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
 
-#sudo cpupower frequency-set --governor powersave > /dev/null
+sudo cpupower frequency-set --governor powersave > /dev/null
