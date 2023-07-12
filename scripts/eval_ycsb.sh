@@ -47,7 +47,7 @@ if [[ $2 == 1 ]]; then
   PACMAN_OPT="-DPACMAN=ON"
 fi
 
-THREADS=4
+THREADS=1
 #FILTER="--benchmark_filter=/(80)/.*/threads:(${THREADS})$"
 FILTER="--benchmark_filter=/(50)/.*/threads:(${THREADS})$"
 SKEW="true" # true (Zipfian), false (uniform)
@@ -94,7 +94,7 @@ for workload in "${WORKLOAD_TYPE[@]}"; do
   cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
     ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} ${PACMAN_OPT} \
     -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
-    -DNUM_GC_THREADS=2 -DYCSB_TYPE=${workload} -DSKEW=${SKEW} ..
+    -DNUM_GC_THREADS=1 -DYCSB_TYPE=${workload} -DSKEW=${SKEW} ..
   make ${TARGET} -j
 
   # clean cache

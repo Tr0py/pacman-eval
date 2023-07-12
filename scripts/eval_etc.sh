@@ -67,6 +67,7 @@ LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled fo
 NUM_KEYS=20000000
 NUM_OPS_PER_THREAD=20000000
 #NUM_OPS_PER_THREAD=200000
+NUM_WARMUP_OPS_PER_THREAD=2000000
 
 mkdir -p ../results
 mkdir -p ../build
@@ -75,7 +76,7 @@ cd ../build
 #THREADS=24
 # If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
 # difference
-THREADS=4
+THREADS=1
 CAPACITY_RATIO=50
 if [[ $1 -le 6 ]]; then
   FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
@@ -93,7 +94,8 @@ cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
   ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
   -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
   -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
-  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON ..
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=1 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON ..
 make ${TARGET} -j
 
 # disable cpu scaling
