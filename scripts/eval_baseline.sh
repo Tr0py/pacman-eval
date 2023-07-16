@@ -5,6 +5,7 @@ set -e
 NAME=$1
 CMD=$2
 LOG_DIR=$NAME
+SUFFIX=vpmbaseline
 
 if [ -z "$1" ]
 then
@@ -16,7 +17,7 @@ mkdir -p $LOG_DIR
 
 echo "Got task name $NAME, command $CMD"
 
-LOG_FILE=$LOG_DIR/$NAME-baseline.log
+LOG_FILE=$LOG_DIR/$NAME-$SUFFIX.log
 echo -n "Init done. Current time:"
 date
 echo "Executing commands, output written to logfile: $LOG_FILE"
