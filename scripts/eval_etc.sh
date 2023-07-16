@@ -22,6 +22,7 @@ elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
 fi
 
 # to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
 ./clean_pmem_dir.sh
 
 INDEX_TYPE=1
@@ -65,12 +66,14 @@ NUMA_AFFINITY=0
 LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
 #NUM_KEYS=200000000
 NUM_KEYS=20000000
-NUM_OPS_PER_THREAD=20000000
-#NUM_OPS_PER_THREAD=200000
-NUM_WARMUP_OPS_PER_THREAD=2000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+NUM_OPS_PER_THREAD=2000000000
+NUM_WARMUP_OPS_PER_THREAD=1
 
 mkdir -p ../results
 mkdir -p ../build
+sudo chown $USER -R ../build
 cd ../build
 
 #THREADS=24
@@ -103,8 +106,8 @@ sudo cpupower frequency-set --governor performance > /dev/null
 # clean cache
 sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 
-numactl --membind=${NUMA_AFFINITY} --cpunodebind=${NUMA_AFFINITY} \
+numactl --cpunodebind=${NUMA_AFFINITY} \
   ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
   --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
 
-sudo cpupower frequency-set --governor powersave > /dev/null
+#sudo cpupower frequency-set --governor powersave > /dev/null
