@@ -17,6 +17,8 @@
 #include <condition_variable>
 #include <unistd.h>
 
+//#define VPM_DEBUG
+
 // key, value in Index
 using KeyType = uint64_t;
 using ValueType = uint64_t;
@@ -135,7 +137,7 @@ class BaseFixture : public benchmark::Fixture {
         }
         RunYCSBWorkload(st, 2048, warm_up_key_bases);
       } else {
-        RunETCWorkload(st, 2048);
+        RunETCWorkload(st, 512);
       }
 #ifdef MEASURE_LATENCY
       latency_statistics[st.thread_index()].Clear();  // clear warmup statistics
@@ -263,6 +265,10 @@ class BaseFixture : public benchmark::Fixture {
 #endif
         std::string value;
         bool found = Get(Slice((const char *)&key, sizeof(KeyType)), &value);
+#ifdef VPM_DEBUG
+        printf("Get %lu %s\n", key, found ? "found" : "not found");
+#endif
+
       } else {
 #ifdef MEASURE_LATENCY
         Histogram *sampled_hist =
@@ -274,6 +280,9 @@ class BaseFixture : public benchmark::Fixture {
         size_t val_size = ETC_get_value_size(rand, kind);
         memcpy(buf, &key, sizeof(KeyType));
         Put(Slice((const char *)&key, sizeof(KeyType)), Slice(buf, val_size));
+#ifdef VPM_DEBUG
+        printf("Put %lu\n", key);
+#endif
       }
     }
   }

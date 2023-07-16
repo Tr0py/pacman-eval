@@ -105,6 +105,7 @@ BENCHMARK_DEFINE_F(DBFixture, bench)(benchmark::State &st) {
     db_->StartCleanStatistics();
   }
 #ifdef LOG_BATCHING
+  printf("starting index update...\n");
   worker->FlushRemainAndUpdateIndex();
 #endif
   for (auto _ : st) {
@@ -141,10 +142,10 @@ BENCHMARK_DEFINE_F(DBFixture, bench)(benchmark::State &st) {
 
 BENCHMARK_REGISTER_F(DBFixture, bench)
     ->Arg(0)
-    ->DenseRange(50, 90, 10)
+    ->DenseRange(10, 90, 10)
     ->DenseThreadRange(1, 32, 1)
     ->Iterations(1)
-    ->Unit(benchmark::kMicrosecond)
+    ->Unit(benchmark::kMillisecond)
     ->UseRealTime();
 
 BENCHMARK_MAIN();
