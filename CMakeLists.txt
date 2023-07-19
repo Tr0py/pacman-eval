@@ -62,6 +62,8 @@ set(SKEW true CACHE STRING "Zipfian (skew) workload") # true false
 option(MEASURE_LATENCY "MEASURE_LATENCY" OFF)
 option(USE_ALL_CORES "use all cores in a numa node" OFF)
 option(TEST_LOAD "TEST_LOAD" OFF)
+option(ETC_50_50 "ETC_50_50" OFF)
+option(FIRST_TOUCH "FIRST_TOUCH" OFF)
 
 configure_file(
   "${PROJECT_SOURCE_DIR}/benchmarks/bench_config.h.in"

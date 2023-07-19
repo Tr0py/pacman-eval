@@ -49,7 +49,13 @@ class DBFixture : public BaseFixture {
         // infinity log space <=> no gc
         YCSB_Type type = ycsb_type;
         if constexpr (benchmark_workload == ETC) {
+#ifdef ETC_50_50
+          /* 50% put, 50% get */
           type = YCSB_A;
+#else
+          /* 95% put, 5% get */
+          type = YCSB_B;
+#endif
         }
         uint64_t total_put_ops =
             NUM_KEYS + (uint64_t)actual_num_ops_per_thread *

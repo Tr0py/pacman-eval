@@ -26,8 +26,8 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
   if (log_pool_fd < 0) {
     ERROR_EXIT("open file failed");
   }
-  if (fallocate(log_pool_fd, 0, 0, total_log_size_) != 0) {
-  //if (ftruncate(log_pool_fd, total_log_size_) != 0) {
+  //if (fallocate(log_pool_fd, 0, 0, total_log_size_) != 0) {
+  if (ftruncate(log_pool_fd, total_log_size_) != 0) {
     ERROR_EXIT("fallocate file failed");
   }
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
@@ -37,6 +37,11 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   madvise(pool_start_, total_log_size_, MADV_HUGEPAGE);
+#endif
+#ifdef FIRST_TOUCH
+#warning "VPM touch all pages"
+  /* touch all pages */
+  memset(pool_start_, 0, total_log_size_);
 #endif
   if (pool_start_ == nullptr || pool_start_ == MAP_FAILED) {
     ERROR_EXIT("mmap failed");

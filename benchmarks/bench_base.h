@@ -255,7 +255,15 @@ class BaseFixture : public benchmark::Fixture {
       }
       KeyType key = key_base;
 
+#ifdef ETC_50_50
+#warning "ETC_50_50"
+      /* 50% PUT, 50% GET */
       if (get_op_type(&rand, YCSB_A) == OP_Read) {
+#else
+      /* 95% PUT, 5% GET */
+      if (get_op_type(&rand, YCSB_B) == OP_Read) {
+#endif
+
 #ifdef MEASURE_LATENCY
         Histogram *sampled_hist =
             i % MEASURE_SAMPLE == 0

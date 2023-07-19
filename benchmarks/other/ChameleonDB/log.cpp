@@ -37,6 +37,11 @@ Log::Log(std::string db_path, size_t log_size, ChameleonDB *db, int num_workers,
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 #endif
+#ifdef FIRST_TOUCH
+#warning "VPM touch all pages"
+  /* touch all pages */
+  memset(pool_start_, 0, total_log_size_);
+#endif
   if (pool_start_ == nullptr || pool_start_ == MAP_FAILED) {
     ERROR_EXIT("mmap failed");
   }
