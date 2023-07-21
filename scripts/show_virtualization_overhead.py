@@ -5,9 +5,12 @@ import argparse
 import glob
 
 def get_throughput(path, filename_suffix):
-    # Get all files in the path ending with the suffix
-    files = glob.glob(os.path.join(path, f"*-{filename_suffix}"))
+    # Get all files in the path ending with the suffix, for both possible patterns
+    files = glob.glob(os.path.join(path, f"*{filename_suffix}.log"))
     if len(files) == 0:
+        files = glob.glob(os.path.join(path, f"{filename_suffix}.log"))
+    if len(files) == 0:
+        print(f"cannot find {path}/{filename_suffix}.log")
         return None
 
     # Assume the first file if multiple are found
@@ -39,8 +42,8 @@ def main(config, workload):
             print(f"Directory {path} does not exist. Skipping.")
             continue
 
-        pm_throughput = get_throughput(path, 'pmbaseline.log')
-        vp_throughput = get_throughput(path, 'vpmbaseline.log')
+        pm_throughput = get_throughput(path, 'pmbaseline')
+        vp_throughput = get_throughput(path, 'vpmbaseline')
         if pm_throughput is None or vp_throughput is None:
             print(f"Could not extract throughput data from log files in {path}. Skipping.")
             continue
