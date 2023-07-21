@@ -17,7 +17,7 @@ mkdir -p $LOG_DIR
 
 echo "Got task name $NAME, command $CMD"
 
-LOG_FILE=$LOG_DIR/$NAME-$SUFFIX.log
+LOG_FILE=$LOG_DIR/$SUFFIX.log
 echo -n "Init done. Current time:"
 date
 echo "Executing commands, output written to logfile: $LOG_FILE"
