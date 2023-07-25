@@ -26,8 +26,8 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
   if (log_pool_fd < 0) {
     ERROR_EXIT("open file failed");
   }
-  //if (fallocate(log_pool_fd, 0, 0, total_log_size_) != 0) {
-  if (ftruncate(log_pool_fd, total_log_size_) != 0) {
+  if (fallocate(log_pool_fd, 0, 0, total_log_size_) != 0) {
+  //if (ftruncate(log_pool_fd, total_log_size_) != 0) {
     ERROR_EXIT("fallocate file failed");
   }
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
@@ -41,7 +41,18 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
 #ifdef FIRST_TOUCH
 #warning "VPM touch all pages"
   /* touch all pages */
-  memset(pool_start_, 0, total_log_size_);
+  //memset(pool_start_, 0, total_log_size_);
+  int urandom = open("/dev/urandom", O_RDONLY);
+  if (urandom < 0) {
+    perror("Error opening /dev/urandom");
+    return;
+  }
+  ssize_t result = read(urandom, pool_start_, total_log_size_);
+  if (result < 0) {
+    perror("Error reading /dev/urandom");
+    return;
+  }
+  close(urandom);
 #endif
   if (pool_start_ == nullptr || pool_start_ == MAP_FAILED) {
     ERROR_EXIT("mmap failed");

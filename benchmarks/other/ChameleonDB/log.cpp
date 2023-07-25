@@ -40,7 +40,18 @@ Log::Log(std::string db_path, size_t log_size, ChameleonDB *db, int num_workers,
 #ifdef FIRST_TOUCH
 #warning "VPM touch all pages"
   /* touch all pages */
-  memset(pool_start_, 0, total_log_size_);
+  //memset(pool_start_, 0, total_log_size_);
+  int urandom = open("/dev/urandom", O_RDONLY);
+  if (urandom < 0) {
+    perror("Error opening /dev/urandom");
+    return;
+  }
+  ssize_t result = read(urandom, pool_start_, total_log_size_);
+  if (result < 0) {
+    perror("Error reading /dev/urandom");
+    return;
+  }
+  close(urandom);
 #endif
   if (pool_start_ == nullptr || pool_start_ == MAP_FAILED) {
     ERROR_EXIT("mmap failed");

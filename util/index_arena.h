@@ -164,8 +164,8 @@ class MMAPAllocator : public IndexAllocator {
     if (idx_pool_fd < 0) {
       ERROR_EXIT("open file failed");
     }
-    //if (fallocate(idx_pool_fd, 0, 0, idx_pool_size_) != 0) {
-    if (ftruncate(idx_pool_fd, idx_pool_size_) != 0) {
+    if (fallocate(idx_pool_fd, 0, 0, idx_pool_size_) != 0) {
+    //if (ftruncate(idx_pool_fd, idx_pool_size_) != 0) {
       ERROR_EXIT("fallocate file failed");
     }
     idx_start_addr_ = (char *)mmap(NULL, idx_pool_size_, PROT_READ | PROT_WRITE,
@@ -181,6 +181,11 @@ class MMAPAllocator : public IndexAllocator {
     }
     pool_end_addr_ = idx_start_addr_ + idx_pool_size_;
     cur_alloc_addr_ = idx_start_addr_;
+#ifdef FIRST_TOUCH_IDX
+#warning "VPM touch all pages for index pool"
+    /* touch all pages */
+    memset(idx_start_addr_, 0x21, idx_pool_size_);
+#endif
   }
 
   virtual size_t ToPoolOffset(const char *addr) override {
