@@ -21,6 +21,8 @@ task_name=$2
 #     <apply_pacman>: 0: false, 1: true
 
 
+$script_name  ${task_name}-flatstore-h-ycsb "./eval_ycsb.sh 1 0"
+$script_name  ${task_name}-flatstore-h-pacman-ycsb "./eval_ycsb.sh 1 1"
 $script_name  ${task_name}-flatstore-ph-ycsb "./eval_ycsb.sh 2 0"
 $script_name  ${task_name}-flatstore-ph-pacman-ycsb "./eval_ycsb.sh 2 1"
 $script_name  ${task_name}-flatstore-ff-ycsb "./eval_ycsb.sh 3 0"
