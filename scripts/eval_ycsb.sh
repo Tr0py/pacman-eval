@@ -100,7 +100,7 @@ for workload in "${WORKLOAD_TYPE[@]}"; do
   # clean cache
   sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 
-  numactl --membind=${NUMA_AFFINITY} --cpunodebind=${NUMA_AFFINITY} \
+  numactl --cpunodebind=${NUMA_AFFINITY} \
     ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
     --benchmark_out=${TMP_OUTPUT} --benchmark_out_format=json
   cat ${TMP_OUTPUT} >> ${OUTPUT_FILE}
