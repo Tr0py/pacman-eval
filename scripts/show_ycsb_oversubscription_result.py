@@ -5,6 +5,7 @@ import argparse
 import glob
 import logging
 import matplotlib.pyplot as plt
+import numpy as np
 
 # Setup color logging
 class ColorFormatter(logging.Formatter):
@@ -43,6 +44,8 @@ def get_throughputs(path, filename):
             throughput = float(match.replace('k/s', '')) / 1000
         else:
             throughput = float(match.replace('M/s', ''))
+        if i>=3:
+            break
         throughputs[i] = throughput
     if len(matches) < 3:
         logging.warning(f"Expected 3 throughputs in {os.path.join(path, filename)}, but found only {len(matches)}")
@@ -51,7 +54,9 @@ def get_throughputs(path, filename):
 
 def draw_figure(df, output_file, title):
     plt.figure(figsize=(10, 6))
+    df = df.replace('N/A', np.nan)
     for i, row in df.iterrows():
+        row = row.dropna()
         plt.plot(row.index[1:], row.values[1:], label=row.values[0])
     plt.title(title)
     plt.xlabel('Available PMEM sizes')
@@ -97,6 +102,7 @@ def main(config):
         # Save to csv
         sizes.insert(0, "engine")
         df = pd.DataFrame(results, columns=sizes)
+        df = df.replace('N/A', np.nan)
         output_file = os.path.join(config_dir, f"oversubscription-{workload}.csv")
         df.to_csv(output_file, index=False)
 
