@@ -10,6 +10,10 @@ def plot_from_csv(filename):
     #data = pd.read_csv(filename)
     #data = data[:10000]
     data["fault_address"] = data["fault_address"].astype(int)
+    '''
+    data = data[data["timestamp(s)"] > 32.0]
+    data = data[data["timestamp(s)"] < 33.0]
+    '''
     print(data)
 
     # Filter data by fault type
@@ -18,8 +22,8 @@ def plot_from_csv(filename):
 
     plt.figure(figsize=(10,5))
     # Plot data
-    plt.scatter(major_faults["timestamp(s)"], major_faults["fault_address"], color='red', label='Major Faults')
-    plt.scatter(minor_faults["timestamp(s)"], minor_faults["fault_address"], color='blue', label='Minor Faults')
+    plt.scatter(major_faults["timestamp(s)"], major_faults["fault_address"], color='red', label='Major Faults', marker='+')
+    plt.scatter(minor_faults["timestamp(s)"], minor_faults["fault_address"], color='blue', label='Minor Faults', s=1)
 
     # Setting labels, title, and legend
     plt.xlabel("timestamp(s)")
@@ -48,10 +52,11 @@ def plot_from_csv(filename):
     plt.gca().yaxis.set_major_locator(MultipleLocator(y_step))
     '''
     plt.gca().yaxis.set_major_formatter(FuncFormatter(lambda x, y: hex(int(x))))
+    #plt.xlim([20, 790])
 
 
     # Save the figure as PDF
-    output_filename = filename.split('.')[0] + '.png'
+    output_filename = filename.split('.')[0] + '-full.png'
     plt.savefig(output_filename)
     print(f"output fig saved to {output_filename}")
 
