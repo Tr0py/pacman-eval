@@ -38,6 +38,10 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   madvise(pool_start_, total_log_size_, MADV_HUGEPAGE);
 #endif
+  if (pool_start_ == nullptr || pool_start_ == MAP_FAILED) {
+    perror("mmap failed:");
+    ERROR_EXIT("mmap failed");
+  }
 #ifdef FIRST_TOUCH
 #warning "VPM touch all pages"
   /* touch all pages */
@@ -54,19 +58,23 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
   }
   close(urandom);
 #endif
-  if (pool_start_ == nullptr || pool_start_ == MAP_FAILED) {
-    ERROR_EXIT("mmap failed");
-  }
   LOG("Log: pool_start %p total segments: %d  cleaners: %d\n", pool_start_,
       num_segments_, num_cleaners_);
   all_segments_.resize(num_segments_, nullptr);
   int i = 0;
+  struct timeval ts;
+  gettimeofday(&ts, NULL);
+  printf("[%ld]\tInitializing log segments...\n", ts.tv_sec);
+  printf("Log: pool_start %p total segments: %d  cleaners: %d\n", pool_start_,
+      num_segments_, num_cleaners_);
   for (i = 0; i < num_segments_ - num_cleaners_; i++) {
     all_segments_[i] =
         new LogSegment(pool_start_ + i * SEGMENT_SIZE, SEGMENT_SIZE);
     free_segments_.push(all_segments_[i]);
   }
   num_free_segments_ = num_segments_ - num_cleaners_;
+  gettimeofday(&ts, NULL);
+  printf("[%ld]Initialized %d free log segments...\n", ts.tv_sec, (int)num_free_segments_);
 
   log_cleaners_.resize(num_cleaners_, nullptr);
   for (int j = 0; i < num_segments_; i++, j++) {
