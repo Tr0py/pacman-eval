@@ -16,7 +16,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <unistd.h>
-#include <time.h>
+#include <sys/time.h>
 
 //#define VPM_DEBUG
 
@@ -307,9 +307,6 @@ class BaseFixture : public benchmark::Fixture {
         Put(Slice((const char *)&key, sizeof(KeyType)), Slice(buf, val_size));
 #ifdef VPM_DEBUG
         printf("Put %lu\n", key);
-#endif
-#ifdef VPM_THRPT
-
 #endif
       }
     }
