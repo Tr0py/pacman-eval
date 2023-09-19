@@ -73,7 +73,13 @@ class BaseFixture : public benchmark::Fixture {
                  std::default_random_engine(1234));
   }
 
-  virtual void SetUp(benchmark::State &st) override final {
+  void DoSetUp(benchmark::State &st) {
+    struct timeval t0, t1;
+    double elapsed;
+
+    gettimeofday(&t0, NULL);
+    printf("[%ld]\tSetup starts!\n", t0.tv_sec);
+
     PreSetUp(st);
 
     const int num_threads = st.threads();
@@ -93,6 +99,11 @@ class BaseFixture : public benchmark::Fixture {
     }
     OpenDB(st);
     barrier.Wait(st.threads());
+
+    gettimeofday(&t1, NULL);
+    elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_usec - t0.tv_usec) / 1000000.0;
+    printf("[%ld]\tDB init finished in %lf seconds\n", t1.tv_sec, elapsed);
+    t0 = t1;
 
 #ifndef TEST_LOAD
     // prefill
@@ -116,6 +127,11 @@ class BaseFixture : public benchmark::Fixture {
       }
     }
 #endif
+
+    gettimeofday(&t1, NULL);
+    elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_usec - t0.tv_usec) / 1000000.0;
+    printf("[%ld]\tDB load finished in %lf seconds\n", t1.tv_sec, elapsed);
+    t0 = t1;
 
     barrier.Wait(st.threads());
     if (NUM_WARMUP_OPS_PER_THREAD > 0) {
@@ -145,6 +161,17 @@ class BaseFixture : public benchmark::Fixture {
 #endif
       barrier.Wait(st.threads());
     }
+
+    gettimeofday(&t1, NULL);
+    elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_usec - t0.tv_usec) / 1000000.0;
+    printf("[%ld]\tDB warmup finished in %lf seconds\n", t1.tv_sec, elapsed);
+    t0 = t1;
+  }
+
+  virtual void SetUp(benchmark::State &st) override final {
+#ifndef TEST_SETUP
+    DoSetUp(st);
+#endif
   }
 
   virtual void TearDown(benchmark::State &st) override {
@@ -313,6 +340,9 @@ class BaseFixture : public benchmark::Fixture {
   }
 
   virtual void RunWorkload(benchmark::State &st) {
+#ifdef TEST_SETUP
+    DoSetUp(st);
+#endif
 #ifdef TEST_LOAD
     Load(st);
 #else
