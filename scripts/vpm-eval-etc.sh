@@ -14,10 +14,16 @@ fi
 script_name=$1
 task_name=$2
 
+$script_name  ${task_name}-flatstore-h-etc "./eval_etc.sh 1 0"
+$script_name  ${task_name}-flatstore-h-pacman-etc "./eval_etc.sh 1 1"
 $script_name  ${task_name}-flatstore-ph-etc "./eval_etc.sh 2 0"
 $script_name  ${task_name}-flatstore-ph-pacman-etc "./eval_etc.sh 2 1"
 $script_name  ${task_name}-flatstore-ff-etc "./eval_etc.sh 3 0"
 $script_name  ${task_name}-flatstore-ff-pacman-etc "./eval_etc.sh 3 1"
+$script_name  ${task_name}-flatstore-m-etc "./eval_etc.sh 4 0"
+$script_name  ${task_name}-flatstore-m-pacman-etc "./eval_etc.sh 4 1"
+$script_name  ${task_name}-viper-etc "./eval_etc.sh 5 0"
+$script_name  ${task_name}-viper-pacman-etc "./eval_etc.sh 5 1"
 $script_name  ${task_name}-chameleondb-etc "./eval_etc.sh 6 0"
 $script_name  ${task_name}-chameleondb-pacman-etc "./eval_etc.sh 6 1"
 $script_name  ${task_name}-pmemrocksdb-etc "./eval_etc.sh 7 0"
