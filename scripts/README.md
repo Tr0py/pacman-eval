@@ -17,3 +17,18 @@ sudo ~/bin/perf trace -F all -o \
 	./eval_etc.sh 2 1 \
 	&> ./vpm-50-1-1-extraOPS9-nowarmup-noftouch-50-nopdf-flatstore-ph-etc/pm-pf-trace-withtimestamp.log
 ```
+
+## Evaluating Init Phase
+
+Run experiments.
+
+```shell
+./vpm_eval.py eval_init_run
+```
+
+Analyze data.
+
+```shell
+./vpm_eval.py eval_init_draw
+```
+
