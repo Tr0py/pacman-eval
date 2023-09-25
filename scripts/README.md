@@ -23,12 +23,12 @@ sudo ~/bin/perf trace -F all -o \
 Run experiments.
 
 ```shell
-./vpm_eval.py eval_init_run
+./vpm eval init run
 ```
 
 Analyze data.
 
 ```shell
-./vpm_eval.py eval_init_draw
+./vpm eval init draw
 ```
 
