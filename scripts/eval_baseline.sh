@@ -6,6 +6,7 @@ NAME=$1
 CMD=$2
 LOG_DIR=$NAME
 SUFFIX=vpmbaseline
+N_RUNS=3
 
 if [ -z "$1" ]
 then
@@ -17,8 +18,10 @@ mkdir -p $LOG_DIR
 
 echo "Got task name $NAME, command $CMD"
 
-LOG_FILE=$LOG_DIR/$SUFFIX.log
 echo -n "Init done. Current time:"
-date
-echo "Executing commands, output written to logfile: $LOG_FILE"
-/usr/bin/time $CMD &> ./$LOG_FILE
+for i in $(seq 1 $N_RUNS); do
+	date
+	LOG_FILE=$LOG_DIR/$SUFFIX-$i.log
+	echo "Executing command, $i-th run, output written to logfile: $LOG_FILE"
+	/usr/bin/time $CMD &> ./$LOG_FILE
+done
