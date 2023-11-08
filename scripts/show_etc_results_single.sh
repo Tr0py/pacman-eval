@@ -68,7 +68,7 @@ echo "The results file has been generated and saved to $real_path"
 column -t -s, $real_path
 
 # After generating the csv file, plot the data
-gnuplot -e "workload='$dir_name'" ../plot.gp
+gnuplot -e "workload='$dir_name'" ../../plot.gp
 
 # Print the real path of the figures
 real_path_perf=$(realpath performance.pdf)

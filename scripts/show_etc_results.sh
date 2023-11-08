@@ -7,7 +7,7 @@ dir_name=$1
 cd $dir_name
 
 for workload in $(ls); do
-	echo "===============\nResults for $workload\n================"
+	echo "===============Results for $workload================"
 	../show_etc_results_single.sh $workload
 done
 
