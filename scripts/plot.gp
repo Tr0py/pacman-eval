@@ -10,6 +10,7 @@ set terminal pdfcairo enhanced color font "Sans,16" size 3in,2.5in
 set xlabel "Available PMEM Size (GB)"
 set ylabel "Throughput (Mops/s)" offset 1,0
 set key off
+set arrow from 48, graph 0 to 48, graph 1 nohead linecolor rgb "red" linewidth 2
 
 # Convert MB to GB
 plot "results.csv" using ($1/1024):($2/1024) with linespoints
