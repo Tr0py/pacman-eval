@@ -1,8 +1,9 @@
 set datafile separator ","
-set autoscale
-set xtic auto
-set ytic auto
-
+#set autoscale
+set xtic auto nomirror
+set ytic auto nomirror
+set grid
+set xrange [*:55]
 
 set output "performance_".workload.".pdf"
 set terminal pdfcairo enhanced color font "Sans,16" size 3in,2.5in
