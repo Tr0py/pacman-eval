@@ -21,10 +21,13 @@ time_seconds = data[0]
 throughput_ops = data[1] / 1e6  # Convert to Mops/s
 
 # Plot the figure
+plt.figure(figsize=(2.5, 2.5),  constrained_layout=True)
+plt.ylim(ymin=1.2, ymax=1.7)
+plt.xlim(xmin=0, xmax=60)
 plt.plot(time_seconds, throughput_ops)
-plt.xlabel('time (s)')
-plt.ylabel('throughput (Mops/s)')
-plt.title('Application Throughput Over Time')
+plt.xlabel('Time (s)')
+plt.ylabel('Throughput (Mops/s)')
+# plt.title('Application Throughput Over Time')
 plt.grid(True)
 plt.savefig(f'{file_name}.pdf', format='pdf')  # Save to PDF
 
