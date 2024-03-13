@@ -32,6 +32,15 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
   }
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,
                              MAP_SHARED_VALIDATE | MAP_SYNC, log_pool_fd, 0);
+#define VPM_HUGE
+#ifdef VPM_HUGE
+    // use MADVISE_HUGE
+    printf("Using MADVISE_HUGE\n");
+    if (madvise(pool_start_, total_log_size_, MADV_HUGEPAGE) != 0) {
+      perror("madvise");
+      ERROR_EXIT("madvise huge page failed");
+    }
+#endif
   close(log_pool_fd);
 #else
   pool_start_ = (char *)mmap(NULL, total_log_size_, PROT_READ | PROT_WRITE,

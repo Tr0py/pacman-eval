@@ -170,6 +170,15 @@ class MMAPAllocator : public IndexAllocator {
     }
     idx_start_addr_ = (char *)mmap(NULL, idx_pool_size_, PROT_READ | PROT_WRITE,
                                    MAP_SHARED_VALIDATE | MAP_SYNC, idx_pool_fd, 0);
+#define VPM_HUGE
+#ifdef VPM_HUGE
+    // use MADVISE_HUGE
+    printf("Using MADVISE_HUGE\n");
+    if (madvise(idx_start_addr_, idx_pool_size_, MADV_HUGEPAGE) != 0) {
+      perror("madvise");
+      ERROR_EXIT("madvise huge page failed");
+    }
+#endif
     close(idx_pool_fd);
 #else
     idx_start_addr_ = (char *)mmap(NULL, idx_pool_size_, PROT_READ | PROT_WRITE,
