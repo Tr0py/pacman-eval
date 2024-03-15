@@ -112,8 +112,11 @@ sudo cpupower frequency-set --governor performance > /dev/null
 # clean cache
 sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 
-numactl --cpunodebind=${NUMA_AFFINITY} \
-  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
-  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+#numactl --cpunodebind=${NUMA_AFFINITY} \
+#  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+#  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
 
 #sudo cpupower frequency-set --governor powersave > /dev/null
