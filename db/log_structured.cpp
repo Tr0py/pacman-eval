@@ -36,6 +36,8 @@ LogStructured::LogStructured(std::string db_path, size_t log_size, DB *db,
 #ifdef VPM_HUGE
     // use MADVISE_HUGE
     printf("Using MADVISE_HUGE\n");
+    printf("pool_start_ %p, is aligned to 2M? %d\n", pool_start_, ((uintptr_t)pool_start_ & (2 * 1024 * 1024 - 1)) == 0);
+    printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
     if (madvise(pool_start_, total_log_size_, MADV_HUGEPAGE) != 0) {
       perror("madvise");
       ERROR_EXIT("madvise huge page failed");
