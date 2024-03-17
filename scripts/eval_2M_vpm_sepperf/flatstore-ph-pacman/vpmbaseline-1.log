@@ -1,0 +1,546 @@
+remove /mnt/pmem0/log_kvs
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+#numactl --cpunodebind=${NUMA_AFFINITY} \
+#  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+#  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/index/CCEH/pair.h:5,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/index/CCEH/CCEH.h:3,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/index/CCEH/CCEH_MSB.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/include/db.h:11,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/log_cleaner.h:7,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/recovery.cpp:2:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/include/db.h:11,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/db.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/include/db.h:11,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/log_cleaner.h:7,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/log_cleaner.cpp:6:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/include/db.h:11,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/hotkeyset.cpp:2:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/segment.h:8,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.h:13,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:9:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/include/db_common.h:10,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/include/db.h:11,
+                 from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:2:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h: In member function ‘virtual void MMAPAllocator::Initialize()’:
+/home/ziyi/git/vpm-eval/deps/pacman/util/index_arena.h:179:31: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  179 |     printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                              ~^                             ~~~~~~~~~~~~~~
+      |                               |                             |
+      |                               void*                         size_t {aka long unsigned int}
+      |                              %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-03-17T11:40:38-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 0.85, 0.24, 0.07
+[1710693638]	Setup starts!
+[1710693638]	Setup starts!
+[1710693638]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1710693638]	Setup starts!
+Using MADVISE_HUGE
+idx_start_addr_ = 0x7fb571e00000, is aligned to 2MB = 1
+idx_pool_size_ = 0xa00000000, is aligned to 2MB = 1
+DB index type: CCEH
+Using MADVISE_HUGE
+pool_start_ 0x7fb376a00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1710693638]	Initializing log segments...
+Log: pool_start 0x7fb376a00000 total segments: 2028  cleaners: 2
+[1710693639]Initialized 2026 free log segments...
+[1710693639]	DB init finished in 0.924795 seconds
+[1710693639]	DB init finished in 0.925132 seconds
+[1710693639]	DB init finished in 0.924908 seconds
+[1710693639]	DB init finished in 0.924932 seconds
+[1710693642]	DB load finished in 2.937456 seconds
+[1710693642]	DB load finished in 3.245859 seconds
+[1710693642]	DB load finished in 3.812215 seconds
+[1710693642]	DB load finished in 3.829872 seconds
+[1710693642]	DB warmup finished in 0.000024 seconds
+[1710693642]	DB warmup finished in 0.017752 seconds
+[1710693642]	DB warmup finished in 0.892490 seconds
+[1710693642]	DB warmup finished in 0.584102 seconds
+[1710693642]	ETC init!
+[1710693642]	ETC starts!
+[1710693642]	ETC init!
+[1710693642]	ETC starts!
+[1710693642]	ETC init!
+[1710693642]	ETC starts!
+[1710693642]	ETC init!
+[1710693642]	ETC starts!
+[1710693644]	2000000 OPS in 1.480100 seconds, throughput 1351260.049997
+[1710693644]	2000000 OPS in 1.728765 seconds, throughput 1156895.240244
+[1710693644]	2000000 OPS in 1.750395 seconds, throughput 1142599.241885
+[1710693644]	2000000 OPS in 1.769742 seconds, throughput 1130108.230465
+[1710693645]	2000000 OPS in 1.319834 seconds, throughput 1515342.080898
+[1710693646]	2000000 OPS in 1.609913 seconds, throughput 1242303.155512
+[1710693646]	2000000 OPS in 1.624491 seconds, throughput 1231154.866355
+[1710693646]	2000000 OPS in 1.635433 seconds, throughput 1222917.722707
+[1710693647]	2000000 OPS in 1.314705 seconds, throughput 1521253.817396
+[1710693647]	2000000 OPS in 1.603091 seconds, throughput 1247589.812431
+[1710693647]	2000000 OPS in 1.619635 seconds, throughput 1234846.122738
+[1710693647]	2000000 OPS in 1.593196 seconds, throughput 1255338.326232
+[1710693648]	2000000 OPS in 1.330179 seconds, throughput 1503557.040068
+[1710693649]	2000000 OPS in 1.332590 seconds, throughput 1500836.716469
+[1710693649]	2000000 OPS in 1.566418 seconds, throughput 1276798.402470
+[1710693649]	2000000 OPS in 1.560638 seconds, throughput 1281527.170298
+[1710693649]	2000000 OPS in 1.309715 seconds, throughput 1527049.778005
+[1710693650]	2000000 OPS in 1.309040 seconds, throughput 1527837.193669
+[1710693650]	2000000 OPS in 1.261670 seconds, throughput 1585200.567502
+[1710693650]	2000000 OPS in 1.520911 seconds, throughput 1315001.338014
+[1710693651]	2000000 OPS in 1.522282 seconds, throughput 1313817.019448
+[1710693651]	2000000 OPS in 1.257923 seconds, throughput 1589922.435634
+[1710693652]	2000000 OPS in 1.228149 seconds, throughput 1628466.904260
+[1710693652]	2000000 OPS in 1.484400 seconds, throughput 1347345.728914
+[1710693652]	2000000 OPS in 1.485516 seconds, throughput 1346333.529898
+[1710693653]	2000000 OPS in 1.279129 seconds, throughput 1563563.956411
+[1710693653]	2000000 OPS in 1.250430 seconds, throughput 1599449.789272
+[1710693653]	2000000 OPS in 1.515178 seconds, throughput 1319976.926803
+[1710693654]	2000000 OPS in 1.515832 seconds, throughput 1319407.427736
+[1710693654]	2000000 OPS in 1.308035 seconds, throughput 1529011.073863
+[1710693654]	2000000 OPS in 1.273289 seconds, throughput 1570735.316177
+[1710693655]	2000000 OPS in 1.522654 seconds, throughput 1313496.040466
+[1710693655]	2000000 OPS in 1.526023 seconds, throughput 1310596.236099
+[1710693655]	2000000 OPS in 1.317384 seconds, throughput 1518160.232704
+[1710693655]	2000000 OPS in 1.266881 seconds, throughput 1578680.239107
+[1710693657]	2000000 OPS in 1.529873 seconds, throughput 1307298.056767
+[1710693657]	2000000 OPS in 1.321440 seconds, throughput 1513500.423780
+[1710693657]	2000000 OPS in 1.526719 seco./benchmarks/pacman_bench: Segmentation fault
+
+ Performance counter stats for './benchmarks/pacman_bench --benchmark_repetitions=1 --benchmark_filter=/(50)/.*/threads:(4)$ --benchmark_out=../results/etc_2_1 --benchmark_out_format=json':
+
+       973,579,660      ls_l1_d_tlb_miss.all                                          (33.12%)
+                 0      ls_l1_d_tlb_miss.tlb_reload_1g_l2_hit                                     (33.35%)
+           216,394      ls_l1_d_tlb_miss.tlb_reload_1g_l2_miss                                     (33.11%)
+       200,159,758      ls_l1_d_tlb_miss.tlb_reload_2m_l2_hit                                     (33.19%)
+       140,087,639      ls_l1_d_tlb_miss.tlb_reload_2m_l2_miss                                     (33.18%)
+        54,149,289      ls_l1_d_tlb_miss.tlb_reload_32k_l2_hit                                     (33.24%)
+         1,556,542      ls_l1_d_tlb_miss.tlb_reload_32k_l2_miss                                     (33.39%)
+       443,829,107      ls_l1_d_tlb_miss.tlb_reload_4k_l2_hit                                     (33.76%)
+       125,153,060      ls_l1_d_tlb_miss.tlb_reload_4k_l2_miss                                     (33.68%)
+   114,413,661,449      instructions              #    0.39  insn per cycle           (33.76%)
+   107,496,540,812      instructions:u                                                (33.69%)
+     6,651,443,541      instructions:k                                                (33.31%)
+           132,291      page-faults                                                 
+           127,048      minor-faults                                                
+             5,242      major-faults                                                
+            30,458      xfs:xfs_filemap_fault                                       
+   293,365,100,360      cycles                                                        (33.20%)
+           553,864      context-switches                                            
+               144      cpu-migrations                                              
+    18,782,732,034      branches                                                      (33.19%)
+       472,717,821      branch-misses             #    2.52% of all branches          (33.11%)
+                 0      filemap:mm_filemap_delete_from_page_cache                                   
+             5,517      filemap:mm_filemap_add_to_page_cache                                   
+                 0      filemap:filemap_set_wb_err                                   
+                 0      filemap:file_check_and_advance_wb_err                                   
+                 0      fs_dax:dax_pmd_fault                                        
+                 0      fs_dax:dax_pmd_fault_done                                   
+                 0      fs_dax:dax_pmd_load_hole                                    
+                 0      fs_dax:dax_pmd_load_hole_fallback                                   
+                 0      fs_dax:dax_pmd_insert_mapping                                   
+                 0      fs_dax:dax_pte_fault                                        
+                 0      fs_dax:dax_pte_fault_done                                   
+                 0      fs_dax:dax_load_hole                                        
+                 0      fs_dax:dax_insert_pfn_mkwrite_no_entry                                   
+                 0      fs_dax:dax_insert_pfn_mkwrite                                   
+                 0      fs_dax:dax_insert_mapping                                   
+                 0      fs_dax:dax_writeback_range                                   
+                 0      fs_dax:dax_writeback_range_done                                   
+                 0      fs_dax:dax_writeback_one                                    
+
+      25.853356424 seconds time elapsed
+
+      98.462419000 seconds user
+      12.827853000 seconds sys
+
+
+119.48user 18.83system 0:42.70elapsed 323%CPU (0avgtext+0avgdata 10632244maxresident)k
+278065inputs+20861880outputs (6601major+1170502minor)pagefaults 0swaps
