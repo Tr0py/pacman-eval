@@ -176,7 +176,7 @@ class MMAPAllocator : public IndexAllocator {
     printf("Using MADVISE_HUGE\n");
     // cehck if aligned to 2MB
     printf("idx_start_addr_ = %p, is aligned to 2MB = %d\n", idx_start_addr_, ((size_t)idx_start_addr_ & (2 * 1024 * 1024 - 1)) == 0);
-    printf("idx_pool_size_ = %p, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
+    printf("idx_pool_size_ = %ld, is aligned to 2MB = %d\n", idx_pool_size_, (idx_pool_size_ & (2 * 1024 * 1024 - 1)) == 0);
     if (madvise(idx_start_addr_, idx_pool_size_, MADV_HUGEPAGE) != 0) {
       perror("madvise");
       ERROR_EXIT("madvise huge page failed");
