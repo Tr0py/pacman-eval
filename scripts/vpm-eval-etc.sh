@@ -14,6 +14,9 @@ fi
 script_name=$1
 task_name=$2
 
+# The script_name can be  ~/eval_with_resizing_pm.sh for oversubscription
+# or ./eval_baseline.sh for virtualization overhead
+
 $script_name  ${task_name}/flatstore-h "./eval_etc.sh 1 0"
 $script_name  ${task_name}/flatstore-h-pacman "./eval_etc.sh 1 1"
 $script_name  ${task_name}/flatstore-ph "./eval_etc.sh 2 0"
