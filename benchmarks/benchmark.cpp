@@ -68,7 +68,7 @@ class DBFixture : public BaseFixture {
           "Init capacity utilization %d%%  threads of service / gc : %d / "
           "%d\n",
           init_util, num_threads, num_gc_threads);
-      std::string db_path = std::string(PMEM_DIR) + "log_kvs";
+      std::string db_path = std::string(PMEM_DIR) + "log_kvs" + std::to_string(getpid());
       std::filesystem::remove_all(db_path);
       std::filesystem::create_directory(db_path);
 
