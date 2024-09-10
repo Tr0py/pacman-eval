@@ -24,6 +24,7 @@ fi
 # to avoid no available space
 sudo chown -R $USER /mnt/pmem0/
 ./clean_pmem_dir.sh
+~/clean-up-pmem.sh
 
 cat ./eval_etc.sh
 
