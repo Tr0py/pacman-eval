@@ -1,0 +1,2377 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 82%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 82%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-09-19T10:21:52-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.62, 5.12, 4.93
+[1726759312]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1726759312]	Setup starts!
+[1726759312]	Setup starts!
+[1726759312]	Setup starts!
+Using MADVISE_HUGE
+idx_start_addr_ = 0x7f879d000000, is aligned to 2MB = 1
+idx_pool_size_ = 42949672960, is aligned to 2MB = 1
+DB index type: CCEH
+Using MADVISE_HUGE
+pool_start_ 0x7f85a1400000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1726759314]	Initializing log segments...
+Log: pool_start 0x7f85a1400000 total segments: 2028  cleaners: 2
+[1726759316]Initialized 2026 free log segments...
+[1726759316]	DB init finished in 3.516276 seconds
+[1726759316]	DB init finished in 3.516426 seconds
+[1726759316]	DB init finished in 3.516541 seconds
+[1726759316]	DB init finished in 3.516470 seconds
+[1726759320]	DB load finished in 4.206342 seconds
+[1726759320]	DB load finished in 4.219984 seconds
+[1726759320]	DB load finished in 4.245235 seconds
+[1726759320]	DB load finished in 4.278851 seconds
+[1726759320]	DB warmup finished in 0.000018 seconds
+[1726759320]	DB warmup finished in 0.059074 seconds
+[1726759320]	DB warmup finished in 0.033824 seconds
+[1726759320]	DB warmup finished in 0.072714 seconds
+[1726759320]	ETC init!
+[1726759320]	ETC starts!
+[1726759320]	ETC init!
+[1726759320]	ETC starts!
+[1726759320]	ETC init!
+[1726759320]	ETC starts!
+[1726759320]	ETC init!
+[1726759320]	ETC starts!
+542237	[1726759321]	2000000 OPS in 1.595721 seconds, throughput 1253351.933076
+542237	[1726759321]	2000000 OPS in 1.605659 seconds, throughput 1245594.487995
+542237	[1726759321]	2000000 OPS in 1.629177 seconds, throughput 1227613.696977
+542237	[1726759322]	2000000 OPS in 1.686947 seconds, throughput 1185573.702078
+542237	[1726759323]	2000000 OPS in 1.547953 seconds, throughput 1292028.892350
+542237	[1726759323]	2000000 OPS in 1.545766 seconds, throughput 1293856.896839
+542237	[1726759323]	2000000 OPS in 1.558820 seconds, throughput 1283021.772879
+542237	[1726759323]	2000000 OPS in 1.540380 seconds, throughput 1298380.918994
+542237	[1726759325]	2000000 OPS in 1.553747 seconds, throughput 1287210.852217
+542237	[1726759325]	2000000 OPS in 1.547052 seconds, throughput 1292781.367401
+542237	[1726759325]	2000000 OPS in 1.561717 seconds, throughput 1280641.755196
+542237	[1726759325]	2000000 OPS in 1.545763 seconds, throughput 1293859.407943
+542237	[1726759326]	2000000 OPS in 1.544847 seconds, throughput 1294626.587617
+542237	[1726759326]	2000000 OPS in 1.557647 seconds, throughput 1283987.963897
+542237	[1726759326]	2000000 OPS in 1.566764 seconds, throughput 1276516.437702
+542237	[1726759326]	2000000 OPS in 1.548270 seconds, throughput 1291764.356346
+542237	[1726759328]	2000000 OPS in 1.551312 seconds, throughput 1289231.308724
+542237	[1726759328]	2000000 OPS in 1.550333 seconds, throughput 1290045.428950
+542237	[1726759328]	2000000 OPS in 1.547707 seconds, throughput 1292234.253641
+542237	[1726759328]	2000000 OPS in 1.555674 seconds, throughput 1285616.395209
+542237	[1726759329]	2000000 OPS in 1.525163 seconds, throughput 1311335.247446
+542237	[1726759329]	2000000 OPS in 1.538754 seconds, throughput 1299752.916970
+542237	[1726759329]	2000000 OPS in 1.534365 seconds, throughput 1303470.816918
+542237	[1726759329]	2000000 OPS in 1.535705 seconds, throughput 1302333.455970
+542237	[1726759331]	2000000 OPS in 1.537370 seconds, throughput 1300923.004872
+542237	[1726759331]	2000000 OPS in 1.558044 seconds, throughput 1283660.795202
+542237	[1726759331]	2000000 OPS in 1.554789 seconds, throughput 1286348.179721
+542237	[1726759331]	2000000 OPS in 1.552069 seconds, throughput 1288602.504141
+542237	[1726759332]	2000000 OPS in 1.551391 seconds, throughput 1289165.658432
+542237	[1726759332]	2000000 OPS in 1.573895 seconds, throughput 1270732.799837
+542237	[1726759332]	2000000 OPS in 1.559060 seconds, throughput 1282824.265904
+542237	[1726759332]	2000000 OPS in 1.572721 seconds, throughput 1271681.372602
+542237	[1726759334]	2000000 OPS in 1.557382 seconds, throughput 1284206.443891
+542237	[1726759334]	2000000 OPS in 1.587282 seconds, throughput 1260015.548592
+542237	[1726759334]	2000000 OPS in 1.566928 seconds, throughput 1276382.833161
+542237	[1726759334]	2000000 OPS in 1.588725 seconds, throughput 1258871.107334
+542237	[1726759335]	2000000 OPS in 1.560004 seconds, throughput 1282047.994749
+542237	[1726759335]	2000000 OPS in 1.595329 seconds, throughput 1253659.903380
+542237	[1726759335]	2000000 OPS in 1.570283 seconds, throughput 1273655.767782
+542237	[1726759336]	2000000 OPS in 1.580958 seconds, throughput 1265055.744681
+542237	[1726759337]	2000000 OPS in 1.564040 seconds, throughput 1278739.674177
+542237	[1726759337]	2000000 OPS in 1.576502 seconds, throughput 1268631.438463
+542237	[1726759337]	2000000 OPS in 1.591684 seconds, throughput 1256530.818931
+542237	[1726759337]	2000000 OPS in 1.588658 seconds, throughput 1258924.198915
+542237	[1726759339]	2000000 OPS in 1.566056 seconds, throughput 1277093.539439
+542237	[1726759339]	2000000 OPS in 1.575940 seconds, throughput 1269083.848370
+542237	[1726759339]	2000000 OPS in 1.590257 seconds, throughput 1257658.353335
+542237	[1726759339]	2000000 OPS in 1.584863 seconds, throughput 1261938.729089
+542237	[1726759340]	2000000 OPS in 1.583121 seconds, throughput 1263327.313579
+542237	[1726759340]	2000000 OPS in 1.596339 seconds, throughput 1252866.715654
+542237	[1726759340]	2000000 OPS in 1.583446 seconds, throughput 1263068.017476
+542237	[1726759340]	2000000 OPS in 1.576320 seconds, throughput 1268777.913114
+542237	[1726759342]	2000000 OPS in 1.585797 seconds, throughput 1261195.474578
+542237	[1726759342]	2000000 OPS in 1.575413 seconds, throughput 1269508.376534
+542237	[1726759342]	2000000 OPS in 1.599866 seconds, throughput 1250104.696268
+542237	[1726759342]	2000000 OPS in 1.573477 seconds, throughput 1271070.374718
+542237	[1726759343]	2000000 OPS in 1.588179 seconds, throughput 1259303.894586
+542237	[1726759343]	2000000 OPS in 1.579789 seconds, throughput 1265991.850810
+542237	[1726759343]	2000000 OPS in 1.575816 seconds, throughput 1269183.711804
+542237	[1726759343]	2000000 OPS in 1.602115 seconds, throughput 1248349.837558
+542237	[1726759345]	2000000 OPS in 1.589195 seconds, throughput 1258498.799707
+542237	[1726759345]	2000000 OPS in 1.581030 seconds, throughput 1264998.134128
+542237	[1726759345]	2000000 OPS in 1.574457 seconds, throughput 1270279.213723
+542237	[1726759345]	2000000 OPS in 1.601536 seconds, throughput 1248801.150895
+542237	[1726759346]	2000000 OPS in 1.590301 seconds, throughput 1257623.556798
+542237	[1726759347]	2000000 OPS in 1.580938 seconds, throughput 1265071.748544
+542237	[1726759347]	2000000 OPS in 1.577569 seconds, throughput 1267773.390578
+542237	[1726759347]	2000000 OPS in 1.601517 seconds, throughput 1248815.966362
+542237	[1726759348]	2000000 OPS in 1.588095 seconds, throughput 1259370.503654
+542237	[1726759348]	2000000 OPS in 1.576749 seconds, throughput 1268432.705523
+542237	[1726759348]	2000000 OPS in 1.575285 seconds, throughput 1269611.530612
+542237	[1726759348]	2000000 OPS in 1.600414 seconds, throughput 1249676.646168
+542237	[1726759350]	2000000 OPS in 1.587796 seconds, throughput 1259607.657407
+542237	[1726759350]	2000000 OPS in 1.579549 seconds, throughput 1266184.208277
+542237	[1726759350]	2000000 OPS in 1.576671 seconds, throughput 1268495.456566
+542237	[1726759350]	2000000 OPS in 1.602043 seconds, throughput 1248405.941663
+542237	[1726759351]	2000000 OPS in 1.588668 seconds, throughput 1258916.274514
+542237	[1726759351]	2000000 OPS in 1.580408 seconds, throughput 1265495.998502
+542237	[1726759351]	2000000 OPS in 1.578720 seconds, throughput 1266849.092936
+542237	[1726759351]	2000000 OPS in 1.601951 seconds, throughput 1248477.637581
+542237	[1726759353]	2000000 OPS in 1.594632 seconds, throughput 1254207.867395
+542237	[1726759353]	2000000 OPS in 1.581831 seconds, throughput 1264357.570436
+542237	[1726759353]	2000000 OPS in 1.578606 seconds, throughput 1266940.579220
+542237	[1726759353]	2000000 OPS in 1.607609 seconds, throughput 1244083.604906
+542237	[1726759354]	2000000 OPS in 1.593623 seconds, throughput 1255001.967216
+542237	[1726759354]	2000000 OPS in 1.585911 seconds, throughput 1261104.816096
+542237	[1726759354]	2000000 OPS in 1.582622 seconds, throughput 1263725.640109
+542237	[1726759355]	2000000 OPS in 1.606999 seconds, throughput 1244555.846021
+542237	[1726759356]	2000000 OPS in 1.597852 seconds, throughput 1251680.380911
+542237	[1726759356]	2000000 OPS in 1.587322 seconds, throughput 1259983.796608
+542237	[1726759356]	2000000 OPS in 1.582829 seconds, throughput 1263560.371967
+542237	[1726759356]	2000000 OPS in 1.601938 seconds, throughput 1248487.769190
+542237	[1726759358]	2000000 OPS in 1.596670 seconds, throughput 1252606.988294
+542237	[1726759358]	2000000 OPS in 1.585206 seconds, throughput 1261665.676259
+542237	[1726759358]	2000000 OPS in 1.589842 seconds, throughput 1257986.642698
+542237	[1726759358]	2000000 OPS in 1.594838 seconds, throughput 1254045.865473
+542237	[1726759359]	2000000 OPS in 1.583761 seconds, throughput 1262816.801272
+542237	[1726759359]	2000000 OPS in 1.596484 seconds, throughput 1252752.924552
+542237	[1726759359]	2000000 OPS in 1.598253 seconds, throughput 1251366.335618
+542237	[1726759359]	2000000 OPS in 1.597654 seconds, throughput 1251835.503807
+542237	[1726759361]	2000000 OPS in 1.585880 seconds, throughput 1261129.467551
+542237	[1726759361]	2000000 OPS in 1.599309 seconds, throughput 1250540.076996
+542237	[1726759361]	2000000 OPS in 1.601575 seconds, throughput 1248770.741302
+542237	[1726759361]	2000000 OPS in 1.598342 seconds, throughput 1251296.656160
+542237	[1726759362]	2000000 OPS in 1.587041 seconds, throughput 1260206.888165
+542237	[1726759362]	2000000 OPS in 1.598493 seconds, throughput 1251178.453706
+542237	[1726759362]	2000000 OPS in 1.603102 seconds, throughput 1247581.251848
+542237	[1726759363]	2000000 OPS in 1.599547 seconds, throughput 1250354.006478
+542237	[1726759364]	2000000 OPS in 1.590024 seconds, throughput 1257842.648916
+542237	[1726759364]	2000000 OPS in 1.598970 seconds, throughput 1250805.205851
+542237	[1726759364]	2000000 OPS in 1.615262 seconds, throughput 1238189.222553
+542237	[1726759364]	2000000 OPS in 1.600394 seconds, throughput 1249692.263280
+542237	[1726759366]	2000000 OPS in 1.590877 seconds, throughput 1257168.216022
+542237	[1726759366]	2000000 OPS in 1.604133 seconds, throughput 1246779.412929
+542237	[1726759366]	2000000 OPS in 1.609417 seconds, throughput 1242686.016116
+542237	[1726759366]	2000000 OPS in 1.604233 seconds, throughput 1246701.694829
+542237	[1726759367]	2000000 OPS in 1.593195 seconds, throughput 1255339.114170
+542237	[1726759367]	2000000 OPS in 1.608130 seconds, throughput 1243680.548214
+542237	[1726759367]	2000000 OPS in 1.615291 seconds, throughput 1238166.992820
+542237	[1726759367]	2000000 OPS in 1.605617 seconds, throughput 1245627.070466
+542237	[1726759369]	2000000 OPS in 1.588676 seconds, throughput 1258909.935065
+542237	[1726759369]	2000000 OPS in 1.616860 seconds, throughput 1236965.476294
+542237	[1726759369]	2000000 OPS in 1.597662 seconds, throughput 1251829.235470
+542237	[1726759369]	2000000 OPS in 1.854954 seconds, throughput 1078193.852786
+542237	[1726759370]	2000000 OPS in 1.585310 seconds, throughput 1261582.908075
+542237	[1726759371]	2000000 OPS in 1.618764 seconds, throughput 1235510.550025
+542237	[1726759371]	2000000 OPS in 1.600424 seconds, throughput 1249668.837758
+542237	[1726759371]	2000000 OPS in 1.772258 seconds, throughput 1128503.863433
+542237	[1726759372]	2000000 OPS in 1.596449 seconds, throughput 1252780.389477
+542237	[1726759372]	2000000 OPS in 1.616785 seconds, throughput 1237022.857090
+542237	[1726759372]	2000000 OPS in 1.608968 seconds, throughput 1243032.801150
+542237	[1726759372]	2000000 OPS in 1.608823 seconds, throughput 1243144.833210
+542237	[1726759373]	2000000 OPS in 1.595722 seconds, throughput 1253351.147631
+542237	[1726759374]	2000000 OPS in 1.620542 seconds, throughput 1234154.992589
+542237	[1726759374]	2000000 OPS in 1.605800 seconds, throughput 1245485.116453
+542237	[1726759374]	2000000 OPS in 1.707692 seconds, throughput 1171171.382193
+542237	[1726759375]	2000000 OPS in 1.595632 seconds, throughput 1253421.841628
+542237	[1726759375]	2000000 OPS in 1.620503 seconds, throughput 1234184.694505
+542237	[1726759375]	2000000 OPS in 1.610207 seconds, throughput 1242076.329317
+542237	[1726759376]	2000000 OPS in 1.614474 seconds, throughput 1238793.563724
+542237	[1726759377]	2000000 OPS in 1.599521 seconds, throughput 1250374.330815
+542237	[1726759377]	2000000 OPS in 1.621805 seconds, throughput 1233193.879659
+542237	[1726759377]	2000000 OPS in 1.609583 seconds, throughput 1242557.855047
+542237	[1726759377]	2000000 OPS in 1.612728 seconds, throughput 1240134.728237
+542237	[1726759378]	2000000 OPS in 1.598850 seconds, throughput 1250899.083716
+542237	[1726759379]	2000000 OPS in 1.621197 seconds, throughput 1233656.366253
+542237	[1726759379]	2000000 OPS in 1.611260 seconds, throughput 1241264.600375
+542237	[1726759379]	2000000 OPS in 1.615132 seconds, throughput 1238288.882890
+542237	[1726759380]	2000000 OPS in 1.601072 seconds, throughput 1249163.060749
+542237	[1726759380]	2000000 OPS in 1.621769 seconds, throughput 1233221.254075
+542237	[1726759380]	2000000 OPS in 1.612573 seconds, throughput 1240253.929590
+542237	[1726759381]	2000000 OPS in 1.615645 seconds, throughput 1237895.701098
+542237	[1726759381]	2000000 OPS in 1.601708 seconds, throughput 1248667.047926
+542237	[1726759382]	2000000 OPS in 1.623690 seconds, throughput 1231762.220621
+542237	[1726759382]	2000000 OPS in 1.610681 seconds, throughput 1241710.804312
+542237	[1726759382]	2000000 OPS in 1.837571 seconds, throughput 1088393.319224
+542237	[1726759383]	2000000 OPS in 1.591203 seconds, throughput 1256910.651878
+542237	[1726759384]	2000000 OPS in 1.624549 seconds, throughput 1231110.911398
+542237	[1726759384]	2000000 OPS in 1.608929 seconds, throughput 1243062.931926
+542237	[1726759384]	2000000 OPS in 1.725124 seconds, throughput 1159336.952010
+542237	[1726759385]	2000000 OPS in 1.603484 seconds, throughput 1247284.039005
+542237	[1726759385]	2000000 OPS in 1.622856 seconds, throughput 1232395.234081
+542237	[1726759385]	2000000 OPS in 1.615422 seconds, throughput 1238066.585697
+542237	[1726759386]	2000000 OPS in 1.615069 seconds, throughput 1238337.185594
+542237	[1726759386]	2000000 OPS in 1.603273 seconds, throughput 1247448.188799
+542237	[1726759387]	2000000 OPS in 1.622640 seconds, throughput 1232559.286102
+542237	[1726759387]	2000000 OPS in 1.616973 seconds, throughput 1236879.032612
+542237	[1726759387]	2000000 OPS in 1.613655 seconds, throughput 1239422.305264
+542237	[1726759388]	2000000 OPS in 1.604822 seconds, throughput 1246244.131748
+542237	[1726759388]	2000000 OPS in 1.625202 seconds, throughput 1230616.255702
+542237	[1726759388]	2000000 OPS in 1.617861 seconds, throughput 1236200.143276
+542237	[1726759389]	2000000 OPS in 1.616879 seconds, throughput 1236950.940670
+542237	[1726759389]	2000000 OPS in 1.603863 seconds, throughput 1246989.300208
+542237	[1726759390]	2000000 OPS in 1.624299 seconds, throughput 1231300.394816
+542237	[1726759390]	2000000 OPS in 1.618355 seconds, throughput 1235822.795369
+542237	[1726759391]	2000000 OPS in 1.616555 seconds, throughput 1237198.858065
+542237	[1726759391]	2000000 OPS in 1.606910 seconds, throughput 1244624.776745
+542237	[1726759392]	2000000 OPS in 1.622234 seconds, throughput 1232867.761371
+542237	[1726759392]	2000000 OPS in 1.618647 seconds, throughput 1235599.855929
+542237	[1726759392]	2000000 OPS in 1.700621 seconds, throughput 1176040.987380
+542237	[1726759393]	2000000 OPS in 1.602015 seconds, throughput 1248427.761288
+542237	[1726759393]	2000000 OPS in 1.627526 seconds, throughput 1228859.016692
+542237	[1726759393]	2000000 OPS in 1.615185 seconds, throughput 1238248.250200
+542237	[1726759394]	2000000 OPS in 1.662262 seconds, throughput 1203179.763479
+542237	[1726759394]	2000000 OPS in 1.607112 seconds, throughput 1244468.338237
+542237	[1726759395]	2000000 OPS in 1.620224 seconds, throughput 1234397.219150
+542237	[1726759395]	2000000 OPS in 1.625993 seconds, throughput 1230017.595402
+542237	[1726759396]	2000000 OPS in 1.616721 seconds, throughput 1237071.826246
+542237	[1726759396]	2000000 OPS in 1.605876 seconds, throughput 1245426.172382
+542237	[1726759396]	2000000 OPS in 1.620970 seconds, throughput 1233829.127004
+542237	[1726759396]	2000000 OPS in 1.623795 seconds, throughput 1231682.570768
+542237	[1726759397]	2000000 OPS in 1.618709 seconds, throughput 1235552.529825
+542237	[1726759398]	2000000 OPS in 1.607241 seconds, throughput 1244368.455011
+542237	[1726759398]	2000000 OPS in 1.618801 seconds, throughput 1235482.310673
+542237	[1726759398]	2000000 OPS in 1.626018 seconds, throughput 1229998.683901
+542237	[1726759399]	2000000 OPS in 1.619433 seconds, throughput 1235000.151288
+542237	[1726759399]	2000000 OPS in 1.609671 seconds, throughput 1242489.924960
+542237	[1726759400]	2000000 OPS in 1.618732 seconds, throughput 1235534.974289
+542237	[1726759400]	2000000 OPS in 1.626330 seconds, throughput 1229762.717284
+542237	[1726759401]	2000000 OPS in 1.618775 seconds, throughput 1235502.154407
+542237	[1726759401]	2000000 OPS in 1.610233 seconds, throughput 1242056.273844
+542237	[1726759401]	2000000 OPS in 1.621592 seconds, throughput 1233355.862634
+542237	[1726759401]	2000000 OPS in 1.626766 seconds, throughput 1229433.120682
+542237	[1726759402]	2000000 OPS in 1.618623 seconds, throughput 1235618.176685
+542237	[1726759402]	2000000 OPS in 1.610792 seconds, throughput 1241625.237771
+542237	[1726759403]	2000000 OPS in 1.622621 seconds, throughput 1232573.718693
+542237	[1726759403]	2000000 OPS in 1.627760 seconds, throughput 1228682.361036
+542237	[1726759404]	2000000 OPS in 1.619232 seconds, throughput 1235153.455465
+542237	[1726759404]	2000000 OPS in 1.609768 seconds, throughput 1242415.056083
+542237	[1726759405]	2000000 OPS in 1.626052 seconds, throughput 1229972.965194
+542237	[1726759405]	2000000 OPS in 1.628677 seconds, throughput 1227990.571488
+542237	[1726759405]	2000000 OPS in 1.623827 seconds, throughput 1231658.298575
+542237	[1726759406]	2000000 OPS in 1.611320 seconds, throughput 1241218.379962
+542237	[1726759406]	2000000 OPS in 1.623555 seconds, throughput 1231864.642713
+542237	[1726759406]	2000000 OPS in 1.631052 seconds, throughput 1226202.475458
+542237	[1726759407]	2000000 OPS in 1.622021 seconds, throughput 1233029.658679
+542237	[1726759407]	2000000 OPS in 1.609847 seconds, throughput 1242354.087065
+542237	[1726759408]	2000000 OPS in 1.623838 seconds, throughput 1231649.955230
+542237	[1726759408]	2000000 OPS in 1.630755 seconds, throughput 1226425.796640
+542237	[1726759409]	2000000 OPS in 1.624788 seconds, throughput 1230929.819767
+542237	[1726759409]	2000000 OPS in 1.613712 seconds, throughput 1239378.526032
+542237	[1726759409]	2000000 OPS in 1.628060 seconds, throughput 1228455.953712
+542237	[1726759410]	2000000 OPS in 1.630098 seconds, throughput 1226920.099282
+542237	[1726759410]	2000000 OPS in 1.624100 seconds, throughput 1231451.265316
+542237	[1726759410]	2000000 OPS in 1.613600 seconds, throughput 1239464.551314
+542237	[1726759411]	2000000 OPS in 1.629348 seconds, throughput 1227484.858974
+542237	[1726759411]	2000000 OPS in 1.635067 seconds, throughput 1223191.465549
+542237	[1726759412]	2000000 OPS in 1.622994 seconds, throughput 1232290.445929
+542237	[1726759412]	2000000 OPS in 1.612784 seconds, throughput 1240091.667576
+542237	[1726759413]	2000000 OPS in 1.626620 seconds, throughput 1229543.470509
+542237	[1726759413]	2000000 OPS in 1.629959 seconds, throughput 1227024.728843
+542237	[1726759414]	2000000 OPS in 1.624092 seconds, throughput 1231457.331235
+542237	[1726759414]	2000000 OPS in 1.616194 seconds, throughput 1237475.204091
+542237	[1726759414]	2000000 OPS in 1.625783 seconds, throughput 1230176.474966
+542237	[1726759414]	2000000 OPS in 1.632133 seconds, throughput 1225390.332773
+542237	[1726759415]	2000000 OPS in 1.624909 seconds, throughput 1230838.157706
+542237	[1726759415]	2000000 OPS in 1.614678 seconds, throughput 1238637.053332
+542237	[1726759416]	2000000 OPS in 1.624762 seconds, throughput 1230949.517529
+542237	[1726759416]	2000000 OPS in 1.635934 seconds, throughput 1222543.207733
+542237	[1726759417]	2000000 OPS in 1.626774 seconds, throughput 1229427.074689
+542237	[1726759417]	2000000 OPS in 1.615090 seconds, throughput 1238321.084274
+542237	[1726759418]	2000000 OPS in 1.622105 seconds, throughput 1232965.806776
+542237	[1726759418]	2000000 OPS in 1.636784 seconds, throughput 1221908.327550
+542237	[1726759418]	2000000 OPS in 1.626644 seconds, throughput 1229525.329451
+542237	[1726759418]	2000000 OPS in 1.616073 seconds, throughput 1237567.857393
+542237	[1726759419]	2000000 OPS in 1.622357 seconds, throughput 1232774.290739
+542237	[1726759419]	2000000 OPS in 1.633569 seconds, throughput 1224313.145022
+542237	[1726759420]	2000000 OPS in 1.624214 seconds, throughput 1231364.832467
+542237	[1726759420]	2000000 OPS in 1.614511 seconds, throughput 1238765.174099
+542237	[1726759421]	2000000 OPS in 1.629219 seconds, throughput 1227582.050050
+542237	[1726759421]	2000000 OPS in 1.634681 seconds, throughput 1223480.299826
+542237	[1726759422]	2000000 OPS in 1.626779 seconds, throughput 1229423.295973
+542237	[1726759422]	2000000 OPS in 1.614993 seconds, throughput 1238395.460538
+542237	[1726759422]	2000000 OPS in 1.628764 seconds, throughput 1227924.978696
+542237	[1726759423]	2000000 OPS in 1.632573 seconds, throughput 1225060.073883
+542237	[1726759423]	2000000 OPS in 1.627396 seconds, throughput 1228957.180674
+542237	[1726759423]	2000000 OPS in 1.616043 seconds, throughput 1237590.831432
+542237	[1726759424]	2000000 OPS in 1.631506 seconds, throughput 1225861.259474
+542237	[1726759424]	2000000 OPS in 1.637766 seconds, throughput 1221175.674669
+542237	[1726759425]	2000000 OPS in 1.624658 seconds, throughput 1231028.314882
+542237	[1726759425]	2000000 OPS in 1.616108 seconds, throughput 1237541.055425
+542237	[1726759426]	2000000 OPS in 1.626243 seconds, throughput 1229828.506564
+542237	[1726759426]	2000000 OPS in 1.631563 seconds, throughput 1225818.433000
+542237	[1726759427]	2000000 OPS in 1.609885 seconds, throughput 1242324.762328
+542237	[1726759427]	2000000 OPS in 1.913385 seconds, throughput 1045267.941371
+542237	[1726759427]	2000000 OPS in 1.617624 seconds, throughput 1236381.260417
+542237	[1726759428]	2000000 OPS in 1.638022 seconds, throughput 1220984.821938
+542237	[1726759428]	2000000 OPS in 1.607457 seconds, throughput 1244201.244575
+542237	[1726759429]	2000000 OPS in 2.081805 seconds, throughput 960704.773021
+542237	[1726759429]	2000000 OPS in 1.620932 seconds, throughput 1233858.052034
+542237	[1726759429]	2000000 OPS in 1.638654 seconds, throughput 1220513.909587
+542237	[1726759430]	2000000 OPS in 1.611717 seconds, throughput 1240912.641611
+542237	[1726759431]	2000000 OPS in 1.627330 seconds, throughput 1229007.023775
+542237	[1726759431]	2000000 OPS in 1.761744 seconds, throughput 1135238.717998
+542237	[1726759431]	2000000 OPS in 1.634583 seconds, throughput 1223553.652522
+542237	[1726759431]	2000000 OPS in 1.619114 seconds, throughput 1235243.472665
+542237	[1726759432]	2000000 OPS in 1.630943 seconds, throughput 1226284.425636
+542237	[1726759432]	2000000 OPS in 1.629184 seconds, throughput 1227608.422376
+542237	[1726759432]	2000000 OPS in 1.638135 seconds, throughput 1220900.597326
+542237	[1726759433]	2000000 OPS in 1.617993 seconds, throughput 1236099.290912
+542237	[1726759434]	2000000 OPS in 1.630064 seconds, throughput 1226945.690476
+542237	[1726759434]	2000000 OPS in 1.628384 seconds, throughput 1228211.527502
+542237	[1726759434]	2000000 OPS in 1.635665 seconds, throughput 1222744.266094
+542237	[1726759435]	2000000 OPS in 1.619200 seconds, throughput 1235177.865613
+542237	[1726759436]	2000000 OPS in 1.630961 seconds, throughput 1226270.891824
+542237	[1726759436]	2000000 OPS in 1.629037 seconds, throughput 1227719.198520
+542237	[1726759436]	2000000 OPS in 1.636832 seconds, throughput 1221872.495161
+542237	[1726759436]	2000000 OPS in 1.615632 seconds, throughput 1237905.661685
+542237	[1726759437]	2000000 OPS in 1.629200 seconds, throughput 1227596.366315
+542237	[1726759437]	2000000 OPS in 1.627341 seconds, throughput 1228998.716311
+542237	[1726759437]	2000000 OPS in 1.634602 seconds, throughput 1223539.430393
+542237	[1726759438]	2000000 OPS in 1.618562 seconds, throughput 1235664.744384
+542237	[1726759439]	2000000 OPS in 1.637199 seconds, throughput 1221598.596139
+542237	[1726759439]	2000000 OPS in 1.630835 seconds, throughput 1226365.634782
+542237	[1726759439]	2000000 OPS in 1.637389 seconds, throughput 1221456.843792
+542237	[1726759439]	2000000 OPS in 1.618416 seconds, throughput 1235776.215757
+542237	[1726759440]	2000000 OPS in 1.630725 seconds, throughput 1226448.358859
+542237	[1726759440]	2000000 OPS in 1.631140 seconds, throughput 1226136.321836
+542237	[1726759441]	2000000 OPS in 1.637288 seconds, throughput 1221532.192259
+542237	[1726759441]	2000000 OPS in 1.619418 seconds, throughput 1235011.590584
+542237	[1726759442]	2000000 OPS in 1.631152 seconds, throughput 1226127.301441
+542237	[1726759442]	2000000 OPS in 1.630643 seconds, throughput 1226510.033159
+542237	[1726759442]	2000000 OPS in 1.637270 seconds, throughput 1221545.621675
+542237	[1726759443]	2000000 OPS in 1.619327 seconds, throughput 1235080.993524
+542237	[1726759444]	2000000 OPS in 1.632869 seconds, throughput 1224837.999864
+542237	[1726759444]	2000000 OPS in 1.630755 seconds, throughput 1226425.796640
+542237	[1726759444]	2000000 OPS in 1.636505 seconds, throughput 1222116.644923
+542237	[1726759444]	2000000 OPS in 1.619817 seconds, throughput 1234707.377438
+542237	[1726759445]	2000000 OPS in 1.632276 seconds, throughput 1225282.979104
+542237	[1726759445]	2000000 OPS in 1.630561 seconds, throughput 1226571.713662
+542237	[1726759446]	2000000 OPS in 1.638345 seconds, throughput 1220744.104569
+542237	[1726759446]	2000000 OPS in 1.619753 seconds, throughput 1234756.163440
+542237	[1726759447]	2000000 OPS in 1.632991 seconds, throughput 1224746.492785
+542237	[1726759447]	2000000 OPS in 1.629522 seconds, throughput 1227353.788412
+542237	[1726759447]	2000000 OPS in 1.637661 seconds, throughput 1221253.971365
+542237	[1726759448]	2000000 OPS in 1.621749 seconds, throughput 1233236.462609
+542237	[1726759449]	2000000 OPS in 1.624963 seconds, throughput 1230797.255076
+542237	[1726759449]	2000000 OPS in 1.631993 seconds, throughput 1225495.452493
+542237	[1726759449]	2000000 OPS in 1.638304 seconds, throughput 1220774.654765
+542237	[1726759449]	2000000 OPS in 1.622616 seconds, throughput 1232577.516800
+542237	[1726759450]	2000000 OPS in 1.620112 seconds, throughput 1234482.554293
+542237	[1726759450]	2000000 OPS in 1.630075 seconds, throughput 1226937.410855
+542237	[1726759450]	2000000 OPS in 1.638208 seconds, throughput 1220846.192913
+542237	[1726759451]	2000000 OPS in 1.618174 seconds, throughput 1235961.027677
+542237	[1726759452]	2000000 OPS in 1.619482 seconds, throughput 1234962.784396
+542237	[1726759452]	2000000 OPS in 1.631403 seconds, throughput 1225938.655256
+542237	[1726759452]	2000000 OPS in 1.637202 seconds, throughput 1221596.357688
+542237	[1726759452]	2000000 OPS in 1.621892 seconds, throughput 1233127.729837
+542237	[1726759453]	2000000 OPS in 1.624419 seconds, throughput 1231209.435497
+542237	[1726759453]	2000000 OPS in 1.634332 seconds, throughput 1223741.565361
+542237	[1726759454]	2000000 OPS in 1.642439 seconds, throughput 1217701.235784
+542237	[1726759454]	2000000 OPS in 1.621191 seconds, throughput 1233660.931994
+542237	[1726759455]	2000000 OPS in 1.636439 seconds, throughput 1222165.934691
+542237	[1726759455]	2000000 OPS in 1.630704 seconds, throughput 1226464.152906
+542237	[1726759455]	2000000 OPS in 1.641997 seconds, throughput 1218029.021978
+542237	[1726759456]	2000000 OPS in 1.620161 seconds, throughput 1234445.218716
+542237	[1726759457]	2000000 OPS in 1.635162 seconds, throughput 1223120.400303
+542237	[1726759457]	2000000 OPS in 1.632877 seconds, throughput 1224831.998981
+542237	[1726759457]	2000000 OPS in 1.638131 seconds, throughput 1220903.578529
+542237	[1726759457]	2000000 OPS in 1.620986 seconds, throughput 1233816.948450
+542237	[1726759458]	2000000 OPS in 1.632931 seconds, throughput 1224791.494558
+542237	[1726759458]	2000000 OPS in 1.632167 seconds, throughput 1225364.806420
+542237	[1726759459]	2000000 OPS in 1.642051 seconds, throughput 1217988.966238
+542237	[1726759459]	2000000 OPS in 1.622638 seconds, throughput 1232560.805306
+542237	[1726759460]	2000000 OPS in 1.632571 seconds, throughput 1225061.574657
+542237	[1726759460]	2000000 OPS in 1.630401 seconds, throughput 1226692.083727
+542237	[1726759460]	2000000 OPS in 1.640741 seconds, throughput 1218961.432670
+542237	[1726759461]	2000000 OPS in 1.624634 seconds, throughput 1231046.500319
+542237	[1726759462]	2000000 OPS in 1.632715 seconds, throughput 1224953.528326
+542237	[1726759462]	2000000 OPS in 1.632966 seconds, throughput 1224765.243122
+542237	[1726759462]	2000000 OPS in 1.639990 seconds, throughput 1219519.631217
+542237	[1726759462]	2000000 OPS in 1.621500 seconds, throughput 1233425.840271
+542237	[1726759463]	2000000 OPS in 1.636489 seconds, throughput 1222128.593593
+542237	[1726759463]	2000000 OPS in 1.632486 seconds, throughput 1225125.360953
+542237	[1726759464]	2000000 OPS in 1.644252 seconds, throughput 1216358.563043
+542237	[1726759464]	2000000 OPS in 1.621620 seconds, throughput 1233334.566668
+542237	[1726759465]	2000000 OPS in 1.636570 seconds, throughput 1222068.105856
+542237	[1726759465]	2000000 OPS in 1.633060 seconds, throughput 1224694.744835
+542237	[1726759465]	2000000 OPS in 1.639529 seconds, throughput 1219862.533691
+542237	[1726759465]	2000000 OPS in 1.623467 seconds, throughput 1231931.415914
+542237	[1726759466]	2000000 OPS in 1.626980 seconds, throughput 1229271.410835
+542237	[1726759467]	2000000 OPS in 1.922514 seconds, throughput 1040304.517938
+542237	[1726759467]	2000000 OPS in 1.641214 seconds, throughput 1218610.126406
+542237	[1726759467]	2000000 OPS in 1.612789 seconds, throughput 1240087.823020
+542237	[1726759468]	2000000 OPS in 1.632674 seconds, throughput 1224984.289576
+542237	[1726759468]	2000000 OPS in 1.652942 seconds, throughput 1209963.809982
+542237	[1726759468]	2000000 OPS in 1.643372 seconds, throughput 1217009.904027
+542237	[1726759469]	2000000 OPS in 1.624631 seconds, throughput 1231048.773537
+542237	[1726759470]	2000000 OPS in 1.632133 seconds, throughput 1225390.332773
+542237	[1726759470]	2000000 OPS in 1.642500 seconds, throughput 1217656.012177
+542237	[1726759470]	2000000 OPS in 1.803362 seconds, throughput 1109039.671458
+542237	[1726759470]	2000000 OPS in 1.617119 seconds, throughput 1236767.362204
+542237	[1726759471]	2000000 OPS in 1.625792 seconds, throughput 1230169.665000
+542237	[1726759472]	2000000 OPS in 1.641885 seconds, throughput 1218112.108948
+542237	[1726759472]	2000000 OPS in 1.612883 seconds, throughput 1240015.549795
+542237	[1726759472]	2000000 OPS in 2.009783 seconds, throughput 995132.310304
+542237	[1726759473]	2000000 OPS in 1.632816 seconds, throughput 1224877.757200
+542237	[1726759473]	2000000 OPS in 1.640857 seconds, throughput 1218875.258478
+542237	[1726759474]	2000000 OPS in 1.624495 seconds, throughput 1231151.834878
+542237	[1726759474]	2000000 OPS in 1.633467 seconds, throughput 1224389.595872
+542237	[1726759475]	2000000 OPS in 1.636773 seconds, throughput 1221916.539435
+542237	[1726759475]	2000000 OPS in 1.641212 seconds, throughput 1218611.611419
+542237	[1726759475]	2000000 OPS in 1.622684 seconds, throughput 1232525.864555
+542237	[1726759476]	2000000 OPS in 1.632423 seconds, throughput 1225172.642140
+542237	[1726759476]	2000000 OPS in 1.636071 seconds, throughput 1222440.835392
+542237	[1726759477]	2000000 OPS in 1.641422 seconds, throughput 1218455.704871
+542237	[1726759477]	2000000 OPS in 1.625422 seconds, throughput 1230449.692449
+542237	[1726759477]	2000000 OPS in 1.632604 seconds, throughput 1225036.812356
+542237	[1726759478]	2000000 OPS in 1.635885 seconds, throughput 1222579.826822
+542237	[1726759478]	2000000 OPS in 1.642711 seconds, throughput 1217499.608878
+542237	[1726759478]	2000000 OPS in 1.625342 seconds, throughput 1230510.255688
+542237	[1726759479]	2000000 OPS in 1.635059 seconds, throughput 1223197.450367
+542237	[1726759480]	2000000 OPS in 1.636346 seconds, throughput 1222235.395204
+542237	[1726759480]	2000000 OPS in 1.642599 seconds, throughput 1217582.623635
+542237	[1726759480]	2000000 OPS in 1.624121 seconds, throughput 1231435.342564
+542237	[1726759480]	2000000 OPS in 1.635178 seconds, throughput 1223108.432232
+542237	[1726759481]	2000000 OPS in 1.635279 seconds, throughput 1223032.889189
+542237	[1726759482]	2000000 OPS in 1.644535 seconds, throughput 1216149.245835
+542237	[1726759482]	2000000 OPS in 1.624740 seconds, throughput 1230966.185359
+542237	[1726759482]	2000000 OPS in 1.633977 seconds, throughput 1224007.437069
+542237	[1726759483]	2000000 OPS in 1.637000 seconds, throughput 1221747.098351
+542237	[1726759483]	2000000 OPS in 1.640067 seconds, throughput 1219462.375622
+542237	[1726759483]	2000000 OPS in 1.622342 seconds, throughput 1232785.688837
+542237	[1726759484]	2000000 OPS in 1.633911 seconds, throughput 1224056.879475
+542237	[1726759484]	2000000 OPS in 1.633634 seconds, throughput 1224264.431323
+542237	[1726759485]	2000000 OPS in 1.625508 seconds, throughput 1230384.593616
+542237	[1726759485]	2000000 OPS in 1.642247 seconds, throughput 1217843.600871
+542237	[1726759485]	2000000 OPS in 1.632495 seconds, throughput 1225118.606795
+542237	[1726759486]	2000000 OPS in 1.636210 seconds, throughput 1222336.986084
+542237	[1726759487]	2000000 OPS in 1.623831 seconds, throughput 1231655.264618
+542237	[1726759487]	2000000 OPS in 1.640439 seconds, throughput 1219185.839888
+542237	[1726759487]	2000000 OPS in 1.633250 seconds, throughput 1224552.273075
+542237	[1726759488]	2000000 OPS in 1.635079 seconds, throughput 1223182.488430
+542237	[1726759488]	2000000 OPS in 1.622535 seconds, throughput 1232639.049389
+542237	[1726759488]	2000000 OPS in 1.642189 seconds, throughput 1217886.613538
+542237	[1726759489]	2000000 OPS in 1.633627 seconds, throughput 1224269.677227
+542237	[1726759489]	2000000 OPS in 1.634125 seconds, throughput 1223896.580739
+542237	[1726759490]	2000000 OPS in 1.625708 seconds, throughput 1230233.227615
+542237	[1726759490]	2000000 OPS in 1.642697 seconds, throughput 1217509.985104
+542237	[1726759490]	2000000 OPS in 1.636845 seconds, throughput 1221862.790918
+542237	[1726759491]	2000000 OPS in 1.638287 seconds, throughput 1220787.322368
+542237	[1726759491]	2000000 OPS in 1.624773 seconds, throughput 1230941.183784
+542237	[1726759491]	2000000 OPS in 1.642393 seconds, throughput 1217735.341054
+542237	[1726759492]	2000000 OPS in 1.635212 seconds, throughput 1223083.000859
+542237	[1726759493]	2000000 OPS in 1.635312 seconds, throughput 1223008.208831
+542237	[1726759493]	2000000 OPS in 1.625498 seconds, throughput 1230392.162894
+542237	[1726759493]	2000000 OPS in 1.643236 seconds, throughput 1217110.628053
+542237	[1726759494]	2000000 OPS in 1.636446 seconds, throughput 1222160.706800
+542237	[1726759494]	2000000 OPS in 1.636466 seconds, throughput 1222145.770215
+542237	[1726759495]	2000000 OPS in 1.626577 seconds, throughput 1229575.974577
+542237	[1726759495]	2000000 OPS in 1.643987 seconds, throughput 1216554.632123
+542237	[1726759495]	2000000 OPS in 1.635897 seconds, throughput 1222570.858679
+542237	[1726759496]	2000000 OPS in 1.639348 seconds, throughput 1219997.218406
+542237	[1726759496]	2000000 OPS in 1.623338 seconds, throughput 1232029.312441
+542237	[1726759496]	2000000 OPS in 1.641608 seconds, throughput 1218317.649524
+542237	[1726759497]	2000000 OPS in 1.635921 seconds, throughput 1222552.922788
+542237	[1726759498]	2000000 OPS in 1.635821 seconds, throughput 1222627.659139
+542237	[1726759498]	2000000 OPS in 1.622713 seconds, throughput 1232503.837709
+542237	[1726759498]	2000000 OPS in 1.641698 seconds, throughput 1218250.859781
+542237	[1726759499]	2000000 OPS in 1.919744 seconds, throughput 1041805.574077
+542237	[1726759499]	2000000 OPS in 1.631068 seconds, throughput 1226190.446995
+542237	[1726759499]	2000000 OPS in 1.615795 seconds, throughput 1237780.782834
+542237	[1726759500]	2000000 OPS in 1.645807 seconds, throughput 1215209.316767
+542237	[1726759501]	2000000 OPS in 1.910653 seconds, throughput 1046762.546627
+542237	[1726759501]	2000000 OPS in 1.631244 seconds, throughput 1226058.149486
+542237	[1726759501]	2000000 OPS in 1.622285 seconds, throughput 1232829.003535
+542237	[1726759501]	2000000 OPS in 1.643076 seconds, throughput 1217229.148256
+542237	[1726759502]	2000000 OPS in 1.637110 seconds, throughput 1221665.007238
+542237	[1726759502]	2000000 OPS in 1.635540 seconds, throughput 1222837.717207
+542237	[1726759503]	2000000 OPS in 1.624333 seconds, throughput 1231274.621645
+542237	[1726759503]	2000000 OPS in 1.646173 seconds, throughput 1214939.134587
+542237	[1726759504]	2000000 OPS in 1.635620 seconds, throughput 1222777.906849
+542237	[1726759504]	2000000 OPS in 1.638034 seconds, throughput 1220975.877180
+542237	[1726759504]	2000000 OPS in 1.623659 seconds, throughput 1231785.738262
+542237	[1726759505]	2000000 OPS in 1.645459 seconds, throughput 1215466.322771
+542237	[1726759506]	2000000 OPS in 1.636466 seconds, throughput 1222145.770215
+542237	[1726759506]	2000000 OPS in 1.634625 seconds, throughput 1223522.214575
+542237	[1726759506]	2000000 OPS in 1.625173 seconds, throughput 1230638.215132
+542237	[1726759506]	2000000 OPS in 1.645522 seconds, throughput 1215419.787763
+542237	[1726759507]	2000000 OPS in 1.636711 seconds, throughput 1221962.826669
+542237	[1726759507]	2000000 OPS in 1.636746 seconds, throughput 1221936.696348
+542237	[1726759508]	2000000 OPS in 1.622217 seconds, throughput 1232880.681191
+542237	[1726759508]	2000000 OPS in 1.645870 seconds, throughput 1215162.801436
+542237	[1726759509]	2000000 OPS in 1.637154 seconds, throughput 1221632.173882
+542237	[1726759509]	2000000 OPS in 1.637866 seconds, throughput 1221101.115720
+542237	[1726759509]	2000000 OPS in 1.624838 seconds, throughput 1230891.941227
+542237	[1726759510]	2000000 OPS in 1.643596 seconds, throughput 1216844.041967
+542237	[1726759510]	2000000 OPS in 1.637396 seconds, throughput 1221451.621966
+542237	[1726759511]	2000000 OPS in 1.639876 seconds, throughput 1219604.409114
+542237	[1726759511]	2000000 OPS in 1.626256 seconds, throughput 1229818.675534
+542237	[1726759511]	2000000 OPS in 1.645911 seconds, throughput 1215132.531467
+542237	[1726759512]	2000000 OPS in 1.639690 seconds, throughput 1219742.756253
+542237	[1726759512]	2000000 OPS in 1.638199 seconds, throughput 1220852.900045
+542237	[1726759512]	2000000 OPS in 1.626160 seconds, throughput 1229891.277611
+542237	[1726759513]	2000000 OPS in 1.644355 seconds, throughput 1216282.372116
+542237	[1726759514]	2000000 OPS in 1.640369 seconds, throughput 1219237.866602
+542237	[1726759514]	2000000 OPS in 1.637330 seconds, throughput 1221500.858104
+542237	[1726759514]	2000000 OPS in 1.627225 seconds, throughput 1229086.327951
+542237	[1726759514]	2000000 OPS in 1.645070 seconds, throughput 1215753.736923
+542237	[1726759515]	2000000 OPS in 1.640114 seconds, throughput 1219427.430044
+542237	[1726759516]	2000000 OPS in 1.638423 seconds, throughput 1220685.988905
+542237	[1726759516]	2000000 OPS in 1.625699 seconds, throughput 1230240.038285
+542237	[1726759516]	2000000 OPS in 1.644848 seconds, throughput 1215917.823410
+542237	[1726759517]	2000000 OPS in 1.639893 seconds, throughput 1219591.766048
+542237	[1726759517]	2000000 OPS in 1.636113 seconds, throughput 1222409.454604
+542237	[1726759517]	2000000 OPS in 1.624674 seconds, throughput 1231016.191556
+542237	[1726759518]	2000000 OPS in 1.643308 seconds, throughput 1217057.301492
+542237	[1726759519]	2000000 OPS in 1.638337 seconds, throughput 1220750.065463
+542237	[1726759519]	2000000 OPS in 1.637838 seconds, throughput 1221121.991308
+542237	[1726759519]	2000000 OPS in 1.625932 seconds, throughput 1230063.741903
+542237	[1726759519]	2000000 OPS in 1.643487 seconds, throughput 1216924.745982
+542237	[1726759520]	2000000 OPS in 1.639438 seconds, throughput 1219930.244389
+542237	[1726759520]	2000000 OPS in 1.639174 seconds, throughput 1220126.722361
+542237	[1726759521]	2000000 OPS in 1.626438 seconds, throughput 1229681.057624
+542237	[1726759521]	2000000 OPS in 1.643371 seconds, throughput 1217010.644584
+542237	[1726759522]	2000000 OPS in 1.639499 seconds, throughput 1219884.855069
+542237	[1726759522]	2000000 OPS in 1.641669 seconds, throughput 1218272.380120
+542237	[1726759522]	2000000 OPS in 1.626247 seconds, throughput 1229825.481615
+542237	[1726759523]	2000000 OPS in 1.643417 seconds, throughput 1216976.579894
+542237	[1726759524]	2000000 OPS in 1.638497 seconds, throughput 1220630.858647
+542237	[1726759524]	2000000 OPS in 1.640424 seconds, throughput 1219196.988096
+542237	[1726759524]	2000000 OPS in 1.627513 seconds, throughput 1228868.832384
+542237	[1726759524]	2000000 OPS in 1.645566 seconds, throughput 1215387.289237
+542237	[1726759525]	2000000 OPS in 1.642374 seconds, throughput 1217749.428571
+542237	[1726759525]	2000000 OPS in 1.639465 seconds, throughput 1219910.153617
+542237	[1726759526]	2000000 OPS in 1.625995 seconds, throughput 1230016.082460
+542237	[1726759526]	2000000 OPS in 1.646351 seconds, throughput 1214807.777928
+542237	[1726759527]	2000000 OPS in 1.641172 seconds, throughput 1218641.312428
+542237	[1726759527]	2000000 OPS in 1.640041 seconds, throughput 1219481.708079
+542237	[1726759527]	2000000 OPS in 1.627892 seconds, throughput 1228582.731533
+542237	[1726759528]	2000000 OPS in 1.644417 seconds, throughput 1216236.514218
+542237	[1726759528]	2000000 OPS in 1.640380 seconds, throughput 1219229.690681
+542237	[1726759529]	2000000 OPS in 1.637888 seconds, throughput 1221084.713973
+542237	[1726759529]	2000000 OPS in 1.624771 seconds, throughput 1230942.699002
+542237	[1726759529]	2000000 OPS in 1.644849 seconds, throughput 1215917.084182
+542237	[1726759530]	2000000 OPS in 1.641107 seconds, throughput 1218689.579656
+542237	[1726759530]	2000000 OPS in 1.641394 seconds, throughput 1218476.490105
+542237	[1726759530]	2000000 OPS in 1.627001 seconds, throughput 1229255.544403
+542237	[1726759531]	2000000 OPS in 1.643082 seconds, throughput 1217224.703332
+542237	[1726759532]	2000000 OPS in 1.640277 seconds, throughput 1219306.251322
+542237	[1726759532]	2000000 OPS in 1.640753 seconds, throughput 1218952.517533
+542237	[1726759532]	2000000 OPS in 1.625963 seconds, throughput 1230040.289970
+542237	[1726759533]	2000000 OPS in 1.644385 seconds, throughput 1216260.182378
+542237	[1726759533]	2000000 OPS in 1.640519 seconds, throughput 1219126.386223
+542237	[1726759534]	2000000 OPS in 1.640325 seconds, throughput 1219270.571381
+542237	[1726759534]	2000000 OPS in 1.628817 seconds, throughput 1227885.023302
+542237	[1726759534]	2000000 OPS in 1.647897 seconds, throughput 1213668.087265
+542237	[1726759535]	2000000 OPS in 1.641578 seconds, throughput 1218339.914399
+542237	[1726759535]	2000000 OPS in 1.640046 seconds, throughput 1219477.990251
+542237	[1726759535]	2000000 OPS in 1.627113 seconds, throughput 1229170.930353
+542237	[1726759536]	2000000 OPS in 1.644159 seconds, throughput 1216427.364993
+542237	[1726759537]	2000000 OPS in 1.640518 seconds, throughput 1219127.129358
+542237	[1726759537]	2000000 OPS in 1.641996 seconds, throughput 1218029.763775
+542237	[1726759537]	2000000 OPS in 1.628859 seconds, throughput 1227853.362384
+542237	[1726759538]	2000000 OPS in 1.644741 seconds, throughput 1215996.925960
+542237	[1726759538]	2000000 OPS in 1.639702 seconds, throughput 1219733.829684
+542237	[1726759539]	2000000 OPS in 1.639846 seconds, throughput 1219626.721046
+542237	[1726759539]	2000000 OPS in 1.628614 seconds, throughput 1228038.074092
+542237	[1726759539]	2000000 OPS in 1.643704 seconds, throughput 1216764.088911
+542237	[1726759540]	2000000 OPS in 1.638703 seconds, throughput 1220477.414150
+542237	[1726759540]	2000000 OPS in 1.637907 seconds, throughput 1221070.549183
+542237	[1726759540]	2000000 OPS in 1.626952 seconds, throughput 1229292.566714
+542237	[1726759541]	2000000 OPS in 1.645250 seconds, throughput 1215620.726333
+542237	[1726759542]	2000000 OPS in 1.639122 seconds, throughput 1220165.430029
+542237	[1726759542]	2000000 OPS in 1.625491 seconds, throughput 1230397.461444
+542237	[1726759542]	2000000 OPS in 1.637662 seconds, throughput 1221253.225635
+542237	[1726759542]	2000000 OPS in 1.645842 seconds, throughput 1215183.474477
+542237	[1726759543]	2000000 OPS in 1.640982 seconds, throughput 1218782.411995
+542237	[1726759543]	2000000 OPS in 1.627486 seconds, throughput 1228889.219324
+542237	[1726759543]	2000000 OPS in 1.638524 seconds, throughput 1220610.744792
+542237	[1726759544]	2000000 OPS in 1.643903 seconds, throughput 1216616.795517
+542237	[1726759545]	2000000 OPS in 1.640472 seconds, throughput 1219161.314548
+542237	[1726759545]	2000000 OPS in 1.625918 seconds, throughput 1230074.333392
+542237	[1726759545]	2000000 OPS in 1.641186 seconds, throughput 1218630.916910
+542237	[1726759546]	2000000 OPS in 1.643639 seconds, throughput 1216812.207547
+542237	[1726759547]	2000000 OPS in 1.642113 seconds, throughput 1217942.979564
+542237	[1726759547]	2000000 OPS in 1.627825 seconds, throughput 1228633.299034
+542237	[1726759547]	2000000 OPS in 1.639071 seconds, throughput 1220203.395704
+542237	[1726759547]	2000000 OPS in 1.645390 seconds, throughput 1215517.293772
+542237	[1726759548]	2000000 OPS in 1.640282 seconds, throughput 1219302.534564
+542237	[1726759548]	2000000 OPS in 1.627430 seconds, throughput 1228931.505503
+542237	[1726759548]	2000000 OPS in 1.640163 seconds, throughput 1219390.999553
+542237	[1726759549]	2000000 OPS in 1.644421 seconds, throughput 1216233.555762
+542237	[1726759550]	2000000 OPS in 1.641031 seconds, throughput 1218746.020033
+542237	[1726759550]	2000000 OPS in 1.628612 seconds, throughput 1228039.582172
+542237	[1726759550]	2000000 OPS in 1.640494 seconds, throughput 1219144.964870
+542237	[1726759551]	2000000 OPS in 1.647090 seconds, throughput 1214262.730027
+542237	[1726759551]	2000000 OPS in 1.641820 seconds, throughput 1218160.334263
+542237	[1726759552]	2000000 OPS in 1.628065 seconds, throughput 1228452.180963
+542237	[1726759552]	2000000 OPS in 1.638590 seconds, throughput 1220561.580383
+542237	[1726759552]	2000000 OPS in 1.645755 seconds, throughput 1215247.713056
+542237	[1726759553]	2000000 OPS in 1.639019 seconds, throughput 1220242.108237
+542237	[1726759553]	2000000 OPS in 1.627287 seconds, throughput 1229039.499486
+542237	[1726759553]	2000000 OPS in 1.640031 seconds, throughput 1219489.143803
+542237	[1726759554]	2000000 OPS in 1.643693 seconds, throughput 1216772.231798
+542237	[1726759555]	2000000 OPS in 1.641505 seconds, throughput 1218394.095662
+542237	[1726759555]	2000000 OPS in 1.627856 seconds, throughput 1228609.901613
+542237	[1726759555]	2000000 OPS in 1.638944 seconds, throughput 1220297.947947
+542237	[1726759556]	2000000 OPS in 1.646511 seconds, throughput 1214689.728766
+542237	[1726759556]	2000000 OPS in 1.643011 seconds, throughput 1217277.303682
+542237	[1726759556]	2000000 OPS in 1.627593 seconds, throughput 1228808.430609
+542237	[1726759557]	2000000 OPS in 1.639325 seconds, throughput 1220014.335168
+542237	[1726759557]	2000000 OPS in 1.647303 seconds, throughput 1214105.723112
+542237	[1726759558]	2000000 OPS in 1.642498 seconds, throughput 1217657.494865
+542237	[1726759558]	2000000 OPS in 1.627872 seconds, throughput 1228597.825873
+542237	[1726759558]	2000000 OPS in 1.639429 seconds, throughput 1219936.941459
+542237	[1726759559]	2000000 OPS in 1.645001 seconds, throughput 1215804.732034
+542237	[1726759560]	2000000 OPS in 1.641679 seconds, throughput 1218264.959228
+542237	[1726759560]	2000000 OPS in 1.627476 seconds, throughput 1228896.770214
+542237	[1726759560]	2000000 OPS in 1.639321 seconds, throughput 1220017.312046
+542237	[1726759561]	2000000 OPS in 1.645717 seconds, throughput 1215275.773417
+542237	[1726759561]	2000000 OPS in 1.640839 seconds, throughput 1218888.629536
+542237	[1726759561]	2000000 OPS in 1.629292 seconds, throughput 1227527.048559
+542237	[1726759561]	2000000 OPS in 1.641445 seconds, throughput 1218438.631815
+542237	[1726759562]	2000000 OPS in 1.645875 seconds, throughput 1215159.109896
+542237	[1726759563]	2000000 OPS in 1.628159 seconds, throughput 1228381.257604
+542237	[1726759563]	2000000 OPS in 1.641922 seconds, throughput 1218084.659320
+542237	[1726759563]	2000000 OPS in 1.638610 seconds, throughput 1220546.682859
+542237	[1726759564]	2000000 OPS in 1.646146 seconds, throughput 1214959.061954
+542237	[1726759565]	2000000 OPS in 1.629230 seconds, throughput 1227573.761838
+542237	[1726759565]	2000000 OPS in 1.642448 seconds, throughput 1217694.563237
+542237	[1726759565]	2000000 OPS in 1.639970 seconds, throughput 1219534.503680
+542237	[1726759565]	2000000 OPS in 1.646774 seconds, throughput 1214495.735298
+542237	[1726759566]	2000000 OPS in 1.628601 seconds, throughput 1228047.876675
+542237	[1726759566]	2000000 OPS in 1.641571 seconds, throughput 1218345.109654
+542237	[1726759566]	2000000 OPS in 1.642014 seconds, throughput 1218016.411553
+542237	[1726759567]	2000000 OPS in 1.644655 seconds, throughput 1216060.511171
+542237	[1726759568]	2000000 OPS in 1.627518 seconds, throughput 1228865.057099
+542237	[1726759568]	2000000 OPS in 1.641178 seconds, throughput 1218636.857184
+542237	[1726759568]	2000000 OPS in 1.639129 seconds, throughput 1220160.219238
+542237	[1726759569]	2000000 OPS in 1.648242 seconds, throughput 1213414.049636
+542237	[1726759569]	2000000 OPS in 1.628166 seconds, throughput 1228375.976405
+542237	[1726759570]	2000000 OPS in 1.643448 seconds, throughput 1216953.624331
+542237	[1726759570]	2000000 OPS in 1.640624 seconds, throughput 1219048.362087
+542237	[1726759570]	2000000 OPS in 1.647507 seconds, throughput 1213955.388353
+542237	[1726759571]	2000000 OPS in 1.626943 seconds, throughput 1229299.366972
+542237	[1726759571]	2000000 OPS in 1.640017 seconds, throughput 1219499.553968
+542237	[1726759571]	2000000 OPS in 1.639425 seconds, throughput 1219939.917959
+542237	[1726759572]	2000000 OPS in 1.647402 seconds, throughput 1214032.761888
+542237	[1726759573]	2000000 OPS in 1.626958 seconds, throughput 1229288.033250
+542237	[1726759573]	2000000 OPS in 1.641190 seconds, throughput 1218627.946795
+542237	[1726759573]	2000000 OPS in 1.642259 seconds, throughput 1217834.702078
+542237	[1726759574]	2000000 OPS in 1.645841 seconds, throughput 1215184.212813
+542237	[1726759574]	2000000 OPS in 1.629864 seconds, throughput 1227096.248521
+542237	[1726759574]	2000000 OPS in 1.640915 seconds, throughput 1218832.175951
+542237	[1726759575]	2000000 OPS in 1.640983 seconds, throughput 1218781.669280
+542237	[1726759575]	2000000 OPS in 1.646878 seconds, throughput 1214419.040147
+542237	[1726759576]	2000000 OPS in 1.628973 seconds, throughput 1227767.433837
+542237	[1726759576]	2000000 OPS in 1.642907 seconds, throughput 1217354.360289
+542237	[1726759576]	2000000 OPS in 1.640616 seconds, throughput 1219054.306431
+542237	[1726759577]	2000000 OPS in 1.644986 seconds, throughput 1215815.818493
+542237	[1726759578]	2000000 OPS in 1.627145 seconds, throughput 1229146.757050
+542237	[1726759578]	2000000 OPS in 1.642947 seconds, throughput 1217324.721978
+542237	[1726759578]	2000000 OPS in 1.643918 seconds, throughput 1216605.694445
+542237	[1726759579]	2000000 OPS in 1.646159 seconds, throughput 1214949.467214
+542237	[1726759579]	2000000 OPS in 1.629324 seconds, throughput 1227502.939870
+542237	[1726759579]	2000000 OPS in 1.640362 seconds, throughput 1219243.069518
+542237	[1726759580]	2000000 OPS in 1.639672 seconds, throughput 1219756.146351
+542237	[1726759580]	2000000 OPS in 1.647570 seconds, throughput 1213908.968966
+542237	[1726759581]	2000000 OPS in 1.629305 seconds, throughput 1227517.254289
+542237	[1726759581]	2000000 OPS in 1.642073 seconds, throughput 1217972.647988
+542237	[1726759581]	2000000 OPS in 1.642220 seconds, throughput 1217863.623631
+542237	[1726759582]	2000000 OPS in 1.647820 seconds, throughput 1213724.800039
+542237	[1726759582]	2000000 OPS in 1.628548 seconds, throughput 1228087.842667
+542237	[1726759583]	2000000 OPS in 1.642836 seconds, throughput 1217406.971846
+542237	[1726759583]	2000000 OPS in 1.640767 seconds, throughput 1218942.116705
+542237	[1726759584]	2000000 OPS in 1.645995 seconds, throughput 1215070.519655
+542237	[1726759584]	2000000 OPS in 1.628796 seconds, throughput 1227900.854373
+542237	[1726759584]	2000000 OPS in 1.641555 seconds, throughput 1218356.984688
+542237	[1726759584]	2000000 OPS in 1.644073 seconds, throughput 1216490.995230
+542237	[1726759585]	2000000 OPS in 1.645241 seconds, throughput 1215627.376172
+542237	[1726759586]	2000000 OPS in 1.628385 seconds, throughput 1228210.773251
+542237	[1726759586]	2000000 OPS in 1.641566 seconds, throughput 1218348.820577
+542237	[1726759586]	2000000 OPS in 1.639873 seconds, throughput 1219606.640270
+542237	[1726759587]	2000000 OPS in 1.647701 seconds, throughput 1213812.457479
+542237	[1726759587]	2000000 OPS in 1.629222 seconds, throughput 1227579.789617
+542237	[1726759588]	2000000 OPS in 1.639814 seconds, throughput 1219650.521340
+542237	[1726759588]	2000000 OPS in 1.639448 seconds, throughput 1219922.803285
+542237	[1726759589]	2000000 OPS in 1.647851 seconds, throughput 1213701.966986
+542237	[1726759589]	2000000 OPS in 1.629884 seconds, throughput 1227081.191054
+542237	[1726759589]	2000000 OPS in 1.642509 seconds, throughput 1217649.340125
+542237	[1726759589]	2000000 OPS in 1.641344 seconds, throughput 1218513.608360
+542237	[1726759590]	2000000 OPS in 1.645836 seconds, throughput 1215187.904506
+542237	[1726759591]	2000000 OPS in 1.629773 seconds, throughput 1227164.764664
+542237	[1726759591]	2000000 OPS in 1.643090 seconds, throughput 1217218.776817
+542237	[1726759591]	2000000 OPS in 1.638414 seconds, throughput 1220692.694276
+542237	[1726759592]	2000000 OPS in 1.646338 seconds, throughput 1214817.370431
+542237	[1726759592]	2000000 OPS in 1.628027 seconds, throughput 1228480.854433
+542237	[1726759592]	2000000 OPS in 1.640084 seconds, throughput 1219449.735501
+542237	[1726759593]	2000000 OPS in 1.641495 seconds, throughput 1218401.518128
+542237	[1726759593]	2000000 OPS in 1.645705 seconds, throughput 1215284.634853
+542237	[1726759594]	2000000 OPS in 1.628641 seconds, throughput 1228017.715384
+542237	[1726759594]	2000000 OPS in 1.642280 seconds, throughput 1217819.129503
+542237	[1726759594]	2000000 OPS in 1.640234 seconds, throughput 1219338.216376
+542237	[1726759595]	2000000 OPS in 1.645190 seconds, throughput 1215665.059963
+542237	[1726759596]	2000000 OPS in 1.627365 seconds, throughput 1228980.591324
+542237	[1726759596]	2000000 OPS in 1.638946 seconds, throughput 1220296.458822
+542237	[1726759596]	2000000 OPS in 1.641124 seconds, throughput 1218676.955550
+542237	[1726759597]	2000000 OPS in 1.647258 seconds, throughput 1214138.890204
+542237	[1726759597]	2000000 OPS in 1.627470 seconds, throughput 1228901.300792
+542237	[1726759597]	2000000 OPS in 1.642099 seconds, throughput 1217953.363348
+542237	[1726759598]	2000000 OPS in 1.638135 seconds, throughput 1220900.597326
+542237	[1726759598]	2000000 OPS in 1.641922 seconds, throughput 1218084.659320
+542237	[1726759599]	2000000 OPS in 1.628815 seconds, throughput 1227886.531006
+542237	[1726759599]	2000000 OPS in 1.640519 seconds, throughput 1219126.386223
+542237	[1726759599]	2000000 OPS in 1.638209 seconds, throughput 1220845.447681
+542237	[1726759600]	2000000 OPS in 1.646852 seconds, throughput 1214438.213027
+542237	[1726759600]	2000000 OPS in 1.628548 seconds, throughput 1228087.842667
+542237	[1726759601]	2000000 OPS in 1.641802 seconds, throughput 1218173.689641
+542237	[1726759601]	2000000 OPS in 1.641559 seconds, throughput 1218354.015908
+542237	[1726759602]	2000000 OPS in 1.647828 seconds, throughput 1213718.907556
+542237	[1726759602]	2000000 OPS in 1.625212 seconds, throughput 1230608.683667
+542237	[1726759602]	2000000 OPS in 1.756824 seconds, throughput 1138417.963325
+542237	[1726759602]	2000000 OPS in 1.638506 seconds, throughput 1220624.153955
+542237	[1726759603]	2000000 OPS in 1.644526 seconds, throughput 1216155.901457
+542237	[1726759604]	2000000 OPS in 1.628719 seconds, throughput 1227958.905127
+542237	[1726759604]	2000000 OPS in 1.641608 seconds, throughput 1218317.649524
+542237	[1726759604]	2000000 OPS in 1.640816 seconds, throughput 1218905.715205
+542237	[1726759605]	2000000 OPS in 1.645779 seconds, throughput 1215229.991390
+542237	[1726759605]	2000000 OPS in 1.629133 seconds, throughput 1227646.852651
+542237	[1726759606]	2000000 OPS in 1.640234 seconds, throughput 1219338.216376
+542237	[1726759606]	2000000 OPS in 1.712496 seconds, throughput 1167885.939588
+542237	[1726759607]	2000000 OPS in 1.646857 seconds, throughput 1214434.525888
+542237	[1726759607]	2000000 OPS in 1.625190 seconds, throughput 1230625.342268
+542237	[1726759607]	2000000 OPS in 1.635963 seconds, throughput 1222521.536245
+542237	[1726759607]	2000000 OPS in 1.684928 seconds, throughput 1186994.340411
+542237	[1726759608]	2000000 OPS in 1.648672 seconds, throughput 1213097.571864
+542237	[1726759609]	2000000 OPS in 1.626486 seconds, throughput 1229644.767923
+542237	[1726759609]	2000000 OPS in 1.640151 seconds, throughput 1219399.921105
+542237	[1726759609]	2000000 OPS in 1.642320 seconds, throughput 1217789.468557
+542237	[1726759610]	2000000 OPS in 1.649033 seconds, throughput 1212832.005181
+542237	[1726759610]	2000000 OPS in 1.623479 seconds, throughput 1231922.310051
+542237	[1726759611]	2000000 OPS in 1.636886 seconds, throughput 1221832.186237
+542237	[1726759611]	2000000 OPS in 1.757571 seconds, throughput 1137934.114753
+542237	[1726759612]	2000000 OPS in 1.647539 seconds, throughput 1213931.809808
+542237	[1726759612]	2000000 OPS in 1.629724 seconds, throughput 1227201.661140
+542237	[1726759612]	2000000 OPS in 1.639185 seconds, throughput 1220118.534516
+542237	[1726759613]	2000000 OPS in 1.641604 seconds, throughput 1218320.618127
+542237	[1726759613]	2000000 OPS in 1.644398 seconds, throughput 1216250.567077
+542237	[1726759613]	2000000 OPS in 1.629651 seconds, throughput 1227256.633476
+542237	[1726759614]	2000000 OPS in 1.640457 seconds, throughput 1219172.462308
+542237	[1726759614]	2000000 OPS in 1.771394 seconds, throughput 1129054.292834
+542237	[1726759615]	2000000 OPS in 1.647236 seconds, throughput 1214155.105886
+542237	[1726759615]	2000000 OPS in 1.625956 seconds, throughput 1230045.585489
+542237	[1726759616]	2000000 OPS in 1.642163 seconds, throughput 1217905.896065
+542237	[1726759616]	2000000 OPS in 1.641898 seconds, throughput 1218102.464343
+542237	[1726759617]	2000000 OPS in 1.645198 seconds, throughput 1215659.148625
+542237	[1726759617]	2000000 OPS in 1.629564 seconds, throughput 1227322.154883
+542237	[1726759617]	2000000 OPS in 1.641849 seconds, throughput 1218138.817882
+542237	[1726759618]	2000000 OPS in 1.642913 seconds, throughput 1217349.914451
+542237	[1726759618]	2000000 OPS in 1.647994 seconds, throughput 1213596.651444
+542237	[1726759618]	2000000 OPS in 1.628801 seconds, throughput 1227897.085034
+542237	[1726759619]	2000000 OPS in 1.639688 seconds, throughput 1219744.244027
+542237	[1726759619]	2000000 OPS in 1.643750 seconds, throughput 1216730.038023
+542237	[1726759620]	2000000 OPS in 1.645961 seconds, throughput 1215095.618912
+542237	[1726759620]	2000000 OPS in 1.632085 seconds, throughput 1225426.371788
+542237	[1726759621]	2000000 OPS in 1.640766 seconds, throughput 1218942.859616
+542237	[1726759621]	2000000 OPS in 1.642479 seconds, throughput 1217671.580580
+542237	[1726759621]	2000000 OPS in 1.645486 seconds, throughput 1215446.378760
+542237	[1726759622]	2000000 OPS in 1.629639 seconds, throughput 1227265.670495
+542237	[1726759622]	2000000 OPS in 1.636434 seconds, throughput 1222169.668926
+542237	[1726759623]	2000000 OPS in 1.948966 seconds, throughput 1026185.166904
+542237	[1726759623]	2000000 OPS in 1.648217 seconds, throughput 1213432.454586
+542237	[1726759623]	2000000 OPS in 1.619883 seconds, throughput 1234657.070912
+542237	[1726759624]	2000000 OPS in 1.633578 seconds, throughput 1224306.399817
+542237	[1726759625]	2000000 OPS in 1.648357 seconds, throughput 1213329.394057
+542237	[1726759625]	2000000 OPS in 1.621058 seconds, throughput 1233762.147931
+542237	[1726759625]	2000000 OPS in 1.979722 seconds, throughput 1010242.852279
+542237	[1726759625]	2000000 OPS in 1.637301 seconds, throughput 1221522.493421
+542237	[1726759626]	2000000 OPS in 1.648189 seconds, throughput 1213453.068792
+542237	[1726759626]	2000000 OPS in 1.629065 seconds, throughput 1227698.096761
+542237	[1726759626]	2000000 OPS in 1.644362 seconds, throughput 1216277.194438
+542237	[1726759627]	2000000 OPS in 1.641692 seconds, throughput 1218255.312202
+542237	[1726759628]	2000000 OPS in 1.628804 seconds, throughput 1227894.823441
+542237	[1726759628]	2000000 OPS in 1.649548 seconds, throughput 1212453.350857
+542237	[1726759628]	2000000 OPS in 1.645184 seconds, throughput 1215669.493503
+542237	[1726759629]	2000000 OPS in 1.640398 seconds, throughput 1219216.312139
+542237	[1726759630]	2000000 OPS in 1.627888 seconds, throughput 1228585.750371
+542237	[1726759630]	2000000 OPS in 1.646531 seconds, throughput 1214674.974234
+542237	[1726759630]	2000000 OPS in 1.642161 seconds, throughput 1217907.379362
+542237	[1726759630]	2000000 OPS in 1.643460 seconds, throughput 1216944.738539
+542237	[1726759631]	2000000 OPS in 1.630183 seconds, throughput 1226856.125969
+542237	[1726759631]	2000000 OPS in 1.648247 seconds, throughput 1213410.368713
+542237	[1726759631]	2000000 OPS in 1.641870 seconds, throughput 1218123.237528
+542237	[1726759632]	2000000 OPS in 1.643528 seconds, throughput 1216894.388170
+542237	[1726759633]	2000000 OPS in 1.629254 seconds, throughput 1227555.678857
+542237	[1726759633]	2000000 OPS in 1.648433 seconds, throughput 1213273.454244
+542237	[1726759633]	2000000 OPS in 1.642310 seconds, throughput 1217796.883658
+542237	[1726759634]	2000000 OPS in 1.643144 seconds, throughput 1217178.774350
+542237	[1726759635]	2000000 OPS in 1.624105 seconds, throughput 1231447.474147
+542237	[1726759635]	2000000 OPS in 1.645450 seconds, throughput 1215472.970920
+542237	[1726759635]	2000000 OPS in 1.774189 seconds, throughput 1127275.617197
+542237	[1726759635]	2000000 OPS in 1.637343 seconds, throughput 1221491.159763
+542237	[1726759636]	2000000 OPS in 1.628108 seconds, throughput 1228419.736283
+542237	[1726759636]	2000000 OPS in 1.645264 seconds, throughput 1215610.382285
+542237	[1726759636]	2000000 OPS in 1.641998 seconds, throughput 1218028.280181
+542237	[1726759637]	2000000 OPS in 1.640215 seconds, throughput 1219352.341004
+542237	[1726759638]	2000000 OPS in 1.628038 seconds, throughput 1228472.554080
+542237	[1726759638]	2000000 OPS in 1.647430 seconds, throughput 1214012.127981
+542237	[1726759638]	2000000 OPS in 1.641473 seconds, throughput 1218417.847872
+542237	[1726759639]	2000000 OPS in 1.640727 seconds, throughput 1218971.833827
+542237	[1726759639]	2000000 OPS in 1.628834 seconds, throughput 1227872.207972
+542237	[1726759640]	2000000 OPS in 1.646116 seconds, throughput 1214981.204241
+542237	[1726759640]	2000000 OPS in 1.643646 seconds, throughput 1216807.025357
+542237	[1726759640]	2000000 OPS in 1.641618 seconds, throughput 1218310.228080
+542237	[1726759641]	2000000 OPS in 1.631683 seconds, throughput 1225728.281780
+542237	[1726759641]	2000000 OPS in 1.647550 seconds, throughput 1213923.704895
+542237	[1726759641]	2000000 OPS in 1.642733 seconds, throughput 1217483.303738
+542237	[1726759642]	2000000 OPS in 1.639525 seconds, throughput 1219865.509828
+542237	[1726759643]	2000000 OPS in 1.629403 seconds, throughput 1227443.425598
+542237	[1726759643]	2000000 OPS in 1.644553 seconds, throughput 1216135.934810
+542237	[1726759643]	2000000 OPS in 1.640152 seconds, throughput 1219399.177637
+542237	[1726759643]	2000000 OPS in 1.637869 seconds, throughput 1221098.879092
+542237	[1726759644]	2000000 OPS in 1.629776 seconds, throughput 1227162.505768
+542237	[1726759645]	2000000 OPS in 1.646107 seconds, throughput 1214987.847084
+542237	[1726759645]	2000000 OPS in 1.640700 seconds, throughput 1218991.893704
+542237	[1726759645]	2000000 OPS in 1.640063 seconds, throughput 1219465.349807
+542237	[1726759646]	2000000 OPS in 1.629937 seconds, throughput 1227041.290553
+542237	[1726759646]	2000000 OPS in 1.646266 seconds, throughput 1214870.500879
+542237	[1726759646]	2000000 OPS in 1.643153 seconds, throughput 1217172.107527
+542237	[1726759647]	2000000 OPS in 1.640672 seconds, throughput 1219012.697236
+542237	[1726759648]	2000000 OPS in 1.629054 seconds, throughput 1227706.386651
+542237	[1726759648]	2000000 OPS in 1.648233 seconds, throughput 1213420.675354
+542237	[1726759648]	2000000 OPS in 1.643822 seconds, throughput 1216676.744806
+542237	[1726759648]	2000000 OPS in 1.639448 seconds, throughput 1219922.803285
+542237	[1726759649]	2000000 OPS in 1.630210 seconds, throughput 1226835.806430
+542237	[1726759649]	2000000 OPS in 1.648417 seconds, throughput 1213285.230618
+542237	[1726759650]	2000000 OPS in 1.641641 seconds, throughput 1218293.159101
+542237	[1726759650]	2000000 OPS in 1.645206 seconds, throughput 1215653.237345
+542237	[1726759651]	2000000 OPS in 1.628532 seconds, throughput 1228099.908384
+542237	[1726759651]	2000000 OPS in 1.644846 seconds, throughput 1215919.301868
+542237	[1726759651]	2000000 OPS in 1.639690 seconds, throughput 1219742.756253
+542237	[1726759652]	2000000 OPS in 1.640584 seconds, throughput 1219078.084389
+542237	[1726759652]	2000000 OPS in 1.628184 seconds, throughput 1228362.396388
+542237	[1726759653]	2000000 OPS in 1.644465 seconds, throughput 1216201.013704
+542237	[1726759653]	2000000 OPS in 1.644753 seconds, throughput 1215988.054133
+542237	[1726759653]	2000000 OPS in 1.639251 seconds, throughput 1220069.409749
+542237	[1726759654]	2000000 OPS in 1.630326 seconds, throughput 1226748.515328
+542237	[1726759654]	2000000 OPS in 1.647296 seconds, throughput 1214110.882319
+542237	[1726759655]	2000000 OPS in 1.640445 seconds, throughput 1219181.380662
+542237	[1726759655]	2000000 OPS in 1.642988 seconds, throughput 1217294.344207
+542237	[1726759656]	2000000 OPS in 1.630080 seconds, throughput 1226933.647428
+542237	[1726759656]	2000000 OPS in 1.646496 seconds, throughput 1214700.794900
+542237	[1726759656]	2000000 OPS in 1.642490 seconds, throughput 1217663.425653
+542237	[1726759657]	2000000 OPS in 1.640780 seconds, throughput 1218932.458952
+542237	[1726759657]	2000000 OPS in 1.629109 seconds, throughput 1227664.938319
+542237	[1726759658]	2000000 OPS in 1.647155 seconds, throughput 1214214.812814
+542237	[1726759658]	2000000 OPS in 1.645312 seconds, throughput 1215574.918313
+542237	[1726759658]	2000000 OPS in 1.639708 seconds, throughput 1219729.366448
+542237	[1726759659]	2000000 OPS in 1.627893 seconds, throughput 1228581.976825
+542237	[1726759659]	2000000 OPS in 1.645091 seconds, throughput 1215738.217521
+542237	[1726759659]	2000000 OPS in 1.643358 seconds, throughput 1217020.271907
+542237	[1726759660]	2000000 OPS in 1.638967 seconds, throughput 1220280.823226
+542237	[1726759661]	2000000 OPS in 1.628224 seconds, throughput 1228332.219645
+542237	[1726759661]	2000000 OPS in 1.649362 seconds, throughput 1212590.080286
+542237	[1726759661]	2000000 OPS in 1.641532 seconds, throughput 1218374.055456
+542237	[1726759662]	2000000 OPS in 1.641485 seconds, throughput 1218408.940685
+542237	[1726759662]	2000000 OPS in 1.628267 seconds, throughput 1228299.781301
+542237	[1726759663]	2000000 OPS in 1.649428 seconds, throughput 1212541.559862
+542237	[1726759663]	2000000 OPS in 1.644668 seconds, throughput 1216050.899026
+542237	[1726759663]	2000000 OPS in 1.640147 seconds, throughput 1219402.894984
+542237	[1726759664]	2000000 OPS in 1.629586 seconds, throughput 1227305.585590
+542237	[1726759664]	2000000 OPS in 1.648873 seconds, throughput 1212949.693518
+542237	[1726759664]	2000000 OPS in 1.642124 seconds, throughput 1217934.821000
+542237	[1726759665]	2000000 OPS in 1.640557 seconds, throughput 1219098.147763
+542237	[1726759666]	2000000 OPS in 1.629971 seconds, throughput 1227015.695371
+542237	[1726759666]	2000000 OPS in 1.648349 seconds, throughput 1213335.282759
+542237	[1726759666]	2000000 OPS in 1.644997 seconds, throughput 1215807.688403
+542237	[1726759666]	2000000 OPS in 1.638928 seconds, throughput 1220309.861080
+542237	[1726759667]	2000000 OPS in 1.627560 seconds, throughput 1228833.345622
+542237	[1726759668]	2000000 OPS in 1.647361 seconds, throughput 1214062.977089
+542237	[1726759668]	2000000 OPS in 1.643168 seconds, throughput 1217160.996319
+542237	[1726759668]	2000000 OPS in 1.644317 seconds, throughput 1216310.480278
+542237	[1726759669]	2000000 OPS in 1.629784 seconds, throughput 1227156.482086
+542237	[1726759669]	2000000 OPS in 1.648779 seconds, throughput 1213018.846067
+542237	[1726759669]	2000000 OPS in 1.647007 seconds, throughput 1214323.922121
+542237	[1726759670]	2000000 OPS in 1.641597 seconds, throughput 1218325.813217
+542237	[1726759670]	2000000 OPS in 1.631790 seconds, throughput 1225647.908125
+542237	[1726759671]	2000000 OPS in 1.646932 seconds, throughput 1214379.221486
+542237	[1726759671]	2000000 OPS in 1.642033 seconds, throughput 1218002.317858
+542237	[1726759671]	2000000 OPS in 1.642601 seconds, throughput 1217581.141129
+542237	[1726759672]	2000000 OPS in 1.632936 seconds, throughput 1224787.744284
+542237	[1726759673]	2000000 OPS in 1.648979 seconds, throughput 1212871.722442
+542237	[1726759673]	2000000 OPS in 1.643268 seconds, throughput 1217086.926782
+542237	[1726759673]	2000000 OPS in 1.641574 seconds, throughput 1218342.883111
+542237	[1726759674]	2000000 OPS in 1.630748 seconds, throughput 1226431.061084
+542237	[1726759674]	2000000 OPS in 1.648437 seconds, throughput 1213270.510186
+542237	[1726759674]	2000000 OPS in 1.643521 seconds, throughput 1216899.571104
+542237	[1726759675]	2000000 OPS in 1.643578 seconds, throughput 1216857.368497
+542237	[1726759675]	2000000 OPS in 1.630763 seconds, throughput 1226419.780189
+542237	[1726759676]	2000000 OPS in 1.648079 seconds, throughput 1213534.059957
+542237	[1726759676]	2000000 OPS in 1.643003 seconds, throughput 1217283.230767
+542237	[1726759676]	2000000 OPS in 1.640928 seconds, throughput 1218822.519940
+542237	[1726759677]	2000000 OPS in 1.629957 seconds, throughput 1227026.234434
+542237	[1726759677]	2000000 OPS in 1.663865 seconds, throughput 1202020.596623
+542237	[1726759678]	2000000 OPS in 1.645233 seconds, throughput 1215633.287200
+542237	[1726759678]	2000000 OPS in 1.634760 seconds, throughput 1223421.174974
+542237	[1726759679]	2000000 OPS in 1.621482 seconds, throughput 1233439.532477
+542237	[1726759679]	2000000 OPS in 1.643300 seconds, throughput 1217063.226435
+542237	[1726759680]	2000000 OPS in 1.633858 seconds, throughput 1224096.586117
+542237	[1726759680]	2000000 OPS in 2.089195 seconds, throughput 957306.522369
+542237	[1726759680]	2000000 OPS in 1.623945 seconds, throughput 1231568.803131
+542237	[1726759681]	2000000 OPS in 1.644884 seconds, throughput 1215891.211781
+542237	[1726759681]	2000000 OPS in 1.640296 seconds, throughput 1219292.127762
+542237	[1726759681]	2000000 OPS in 1.708356 seconds, throughput 1170716.173912
+542237	[1726759682]	2000000 OPS in 1.630527 seconds, throughput 1226597.290324
+542237	[1726759682]	2000000 OPS in 1.643176 seconds, throughput 1217155.070425
+542237	[1726759683]	2000000 OPS in 1.643747 seconds, throughput 1216732.258675
+542237	[1726759683]	2000000 OPS in 1.636467 seconds, throughput 1222145.023395
+542237	[1726759683]	2000000 OPS in 1.629443 seconds, throughput 1227413.293991
+542237	[1726759684]	2000000 OPS in 1.644722 seconds, throughput 1216010.973283
+542237	[1726759684]	2000000 OPS in 1.643436 seconds, throughput 1216962.510253
+542237	[1726759685]	2000000 OPS in 1.641917 seconds, throughput 1218088.368657
+542237	[1726759685]	2000000 OPS in 1.630887 seconds, throughput 1226326.532740
+542237	[1726759686]	2000000 OPS in 1.708109 seconds, throughput 1170885.464569
+542237	[1726759686]	2000000 OPS in 1.636100 seconds, throughput 1222419.167533
+542237	[1726759686]	2000000 OPS in 1.639623 seconds, throughput 1219792.598664
+542237	[1726759687]	2000000 OPS in 1.626118 seconds, throughput 1229923.043715
+542237	[1726759687]	2000000 OPS in 1.689036 seconds, throughput 1184107.384330
+542237	[1726759688]	2000000 OPS in 1.639622 seconds, throughput 1219793.342612
+542237	[1726759688]	2000000 OPS in 1.640849 seconds, throughput 1218881.201134
+542237	[1726759688]	2000000 OPS in 1.627285 seconds, throughput 1229041.010026
+542237	[1726759689]	2000000 OPS in 1.642335 seconds, throughput 1217778.346074
+542237	[1726759689]	2000000 OPS in 1.643396 seconds, throughput 1216992.130929
+542237	[1726759689]	2000000 OPS in 1.639138 seconds, throughput 1220153.519716
+542237	[1726759690]	2000000 OPS in 1.626686 seconds, throughput 1229493.583888
+542237	[1726759691]	2000000 OPS in 1.726149 seconds, throughput 1158648.529183
+542237	[1726759691]	2000000 OPS in 1.643958 seconds, throughput 1216576.092577
+542237	[1726759691]	2000000 OPS in 1.640360 seconds, throughput 1219244.556073
+542237	[1726759692]	2000000 OPS in 1.629474 seconds, throughput 1227389.943012
+542237	[1726759692]	2000000 OPS in 1.642213 seconds, throughput 1217868.814825
+542237	[1726759693]	2000000 OPS in 1.641608 seconds, throughput 1218317.649524
+542237	[1726759693]	2000000 OPS in 1.640590 seconds, throughput 1219073.625952
+542237	[1726759693]	2000000 OPS in 1.631710 seconds, throughput 1225707.999583
+542237	[1726759694]	2000000 OPS in 1.643737 seconds, throughput 1216739.660907
+542237	[1726759694]	2000000 OPS in 1.643413 seconds, throughput 1216979.541965
+542237	[1726759694]	2000000 OPS in 1.640180 seconds, throughput 1219378.360912
+542237	[1726759695]	2000000 OPS in 1.628811 seconds, throughput 1227889.546424
+542237	[1726759696]	2000000 OPS in 1.643458 seconds, throughput 1216946.219496
+542237	[1726759696]	2000000 OPS in 1.641292 seconds, throughput 1218552.213744
+542237	[1726759696]	2000000 OPS in 1.641088 seconds, throughput 1218703.689260
+542237	[1726759696]	2000000 OPS in 1.629341 seconds, throughput 1227490.132514
+542237	[1726759697]	2000000 OPS in 1.641085 seconds, throughput 1218705.917122
+542237	[1726759698]	2000000 OPS in 1.638983 seconds, throughput 1220268.910660
+542237	[1726759698]	2000000 OPS in 1.639254 seconds, throughput 1220067.176899
+542237	[1726759698]	2000000 OPS in 1.629357 seconds, throughput 1227478.078776
+542237	[1726759699]	2000000 OPS in 1.642752 seconds, throughput 1217469.222378
+542237	[1726759699]	2000000 OPS in 1.642320 seconds, throughput 1217789.468557
+542237	[1726759699]	2000000 OPS in 1.639557 seconds, throughput 1219841.701142
+542237	[1726759700]	2000000 OPS in 1.630640 seconds, throughput 1226512.289653
+542237	[1726759701]	2000000 OPS in 1.644644 seconds, throughput 1216068.644643
+542237	[1726759701]	2000000 OPS in 1.640886 seconds, throughput 1218853.716833
+542237	[1726759701]	2000000 OPS in 1.639407 seconds, throughput 1219953.312387
+542237	[1726759701]	2000000 OPS in 1.630340 seconds, throughput 1226737.981035
+542237	[1726759702]	2000000 OPS in 1.640058 seconds, throughput 1219469.067557
+542237	[1726759703]	2000000 OPS in 1.642124 seconds, throughput 1217934.821000
+542237	[1726759703]	2000000 OPS in 1.640076 seconds, throughput 1219455.683761
+542237	[1726759703]	2000000 OPS in 1.630617 seconds, throughput 1226529.589720
+542237	[1726759704]	2000000 OPS in 1.644350 seconds, throughput 1216286.070484
+542237	[1726759704]	2000000 OPS in 1.640998 seconds, throughput 1218770.528666
+542237	[1726759704]	2000000 OPS in 1.639980 seconds, throughput 1219527.067403
+542237	[1726759705]	2000000 OPS in 1.630020 seconds, throughput 1226978.810076
+542237	[1726759706]	2000000 OPS in 1.643188 seconds, throughput 1217146.181691
+542237	[1726759706]	2000000 OPS in 1.640864 seconds, throughput 1218870.058701
+542237	[1726759706]	2000000 OPS in 1.639552 seconds, throughput 1219845.421188
+542237	[1726759706]	2000000 OPS in 1.629079 seconds, throughput 1227687.546153
+542237	[1726759707]	2000000 OPS in 1.641484 seconds, throughput 1218409.682945
+542237	[1726759707]	2000000 OPS in 1.645893 seconds, throughput 1215145.820536
+542237	[1726759708]	2000000 OPS in 1.637633 seconds, throughput 1221274.852180
+542237	[1726759708]	2000000 OPS in 1.629541 seconds, throughput 1227339.477804
+542237	[1726759709]	2000000 OPS in 1.641468 seconds, throughput 1218421.559238
+542237	[1726759709]	2000000 OPS in 1.643560 seconds, throughput 1216870.695320
+542237	[1726759709]	2000000 OPS in 1.642421 seconds, throughput 1217714.581097
+542237	[1726759710]	2000000 OPS in 1.629199 seconds, throughput 1227597.119812
+542237	[1726759711]	2000000 OPS in 1.641657 seconds, throughput 1218281.285311
+542237	[1726759711]	2000000 OPS in 1.641822 seconds, throughput 1218158.850350
+542237	[1726759711]	2000000 OPS in 1.640146 seconds, throughput 1219403.638457
+542237	[1726759711]	2000000 OPS in 1.629858 seconds, throughput 1227100.765834
+542237	[1726759712]	2000000 OPS in 1.644425 seconds, throughput 1216230.597321
+542237	[1726759712]	2000000 OPS in 1.641683 seconds, throughput 1218261.990896
+542237	[1726759712]	2000000 OPS in 1.641796 seconds, throughput 1218178.141499
+542237	[1726759713]	2000000 OPS in 1.629044 seconds, throughput 1227713.923013
+542237	[1726759714]	2000000 OPS in 1.644703 seconds, throughput 1216025.020931
+542237	[1726759714]	2000000 OPS in 1.639172 seconds, throughput 1220128.211072
+542237	[1726759714]	2000000 OPS in 1.640851 seconds, throughput 1218879.715465
+542237	[1726759714]	2000000 OPS in 1.628293 seconds, throughput 1228280.168250
+542237	[1726759715]	2000000 OPS in 1.642554 seconds, throughput 1217615.980966
+542237	[1726759716]	2000000 OPS in 1.640956 seconds, throughput 1218801.722898
+542237	[1726759716]	2000000 OPS in 1.640186 seconds, throughput 1219373.900277
+542237	[1726759716]	2000000 OPS in 1.628710 seconds, throughput 1227965.690639
+542237	[1726759717]	2000000 OPS in 1.643117 seconds, throughput 1217198.775255
+542237	[1726759717]	2000000 OPS in 1.644052 seconds, throughput 1216506.533857
+542237	[1726759717]	2000000 OPS in 1.639498 seconds, throughput 1219885.599129
+542237	[1726759718]	2000000 OPS in 1.630402 seconds, throughput 1226691.331340
+542237	[1726759719]	2000000 OPS in 1.644932 seconds, throughput 1215855.731422
+542237	[1726759719]	2000000 OPS in 1.643627 seconds, throughput 1216821.091403
+542237	[1726759719]	2000000 OPS in 1.641475 seconds, throughput 1218416.363332
+542237	[1726759719]	2000000 OPS in 1.631002 seconds, throughput 1226240.065923
+542237	[1726759720]	2000000 OPS in 1.642919 seconds, throughput 1217345.468645
+542237	[1726759721]	2000000 OPS in 1.643051 seconds, throughput 1217247.669123
+542237	[1726759721]	2000000 OPS in 1.639625 seconds, throughput 1219791.110772
+542237	[1726759721]	2000000 OPS in 1.628998 seconds, throughput 1227748.591465
+542237	[1726759722]	2000000 OPS in 1.644940 seconds, throughput 1215849.818230
+542237	[1726759722]	2000000 OPS in 1.639752 seconds, throughput 1219696.637052
+542237	[1726759722]	2000000 OPS in 1.638810 seconds, throughput 1220397.727619
+542237	[1726759723]	2000000 OPS in 1.630924 seconds, throughput 1226298.711651
+542237	[1726759724]	2000000 OPS in 1.642509 seconds, throughput 1217649.340125
+542237	[1726759724]	2000000 OPS in 1.643384 seconds, throughput 1217001.017413
+542237	[1726759724]	2000000 OPS in 1.639404 seconds, throughput 1219955.544820
+542237	[1726759724]	2000000 OPS in 1.628869 seconds, throughput 1227845.824311
+542237	[1726759725]	2000000 OPS in 1.643992 seconds, throughput 1216550.932121
+542237	[1726759726]	2000000 OPS in 1.638882 seconds, throughput 1220344.112633
+542237	[1726759726]	2000000 OPS in 1.639132 seconds, throughput 1220157.986056
+542237	[1726759726]	2000000 OPS in 1.629580 seconds, throughput 1227310.104444
+542237	[1726759727]	2000000 OPS in 1.643771 seconds, throughput 1216714.493686
+542237	[1726759727]	2000000 OPS in 1.642549 seconds, throughput 1217619.687449
+542237	[1726759727]	2000000 OPS in 1.643217 seconds, throughput 1217124.701120
+542237	[1726759727]	2000000 OPS in 1.628314 seconds, throughput 1228264.327396
+542237	[1726759729]	2000000 OPS in 1.645959 seconds, throughput 1215097.095371
+542237	[1726759729]	2000000 OPS in 1.640800 seconds, throughput 1218917.601170
+542237	[1726759729]	2000000 OPS in 1.640458 seconds, throughput 1219171.719117
+542237	[1726759729]	2000000 OPS in 1.630352 seconds, throughput 1226728.951785
+542237	[1726759730]	2000000 OPS in 1.643918 seconds, throughput 1216605.694445
+542237	[1726759730]	2000000 OPS in 1.640619 seconds, throughput 1219052.077295
+542237	[1726759730]	2000000 OPS in 1.640048 seconds, throughput 1219476.503127
+542237	[1726759731]	2000000 OPS in 1.629961 seconds, throughput 1227023.223255
+542237	[1726759732]	2000000 OPS in 1.643081 seconds, throughput 1217225.444150
+542237	[1726759732]	2000000 OPS in 1.641929 seconds, throughput 1218079.466286
+542237	[1726759732]	2000000 OPS in 1.641239 seconds, throughput 1218591.564056
+542237	[1726759732]	2000000 OPS in 1.630104 seconds, throughput 1226915.583300
+542237	[1726759734]	2000000 OPS in 1.641268 seconds, throughput 1218570.032438
+542237	[1726759734]	2000000 OPS in 1.640878 seconds, throughput 1218859.659280
+542237	[1726759734]	2000000 OPS in 1.639752 seconds, throughput 1219696.637052
+542237	[1726759734]	2000000 OPS in 1.629946 seconds, throughput 1227034.515254
+542237	[1726759735]	2000000 OPS in 1.641300 seconds, throughput 1218546.274295
+542237	[1726759735]	2000000 OPS in 1.643743 seconds, throughput 1216735.219557
+542237	[1726759735]	2000000 OPS in 1.639839 seconds, throughput 1219631.927281
+542237	[1726759736]	2000000 OPS in 1.631832 seconds, throughput 1225616.362469
+542237	[1726759737]	2000000 OPS in 1.641575 seconds, throughput 1218342.140932
+542237	[1726759737]	2000000 OPS in 1.643006 seconds, throughput 1217281.008103
+542237	[1726759737]	2000000 OPS in 1.638951 seconds, throughput 1220292.736024
+542237	[1726759737]	2000000 OPS in 1.629946 seconds, throughput 1227034.515254
+542237	[1726759739]	2000000 OPS in 1.642985 seconds, throughput 1217296.566919
+542237	[1726759739]	2000000 OPS in 1.641796 seconds, throughput 1218178.141499
+542237	[1726759739]	2000000 OPS in 1.639627 seconds, throughput 1219789.622884
+542237	[1726759739]	2000000 OPS in 1.628698 seconds, throughput 1227974.738104
+542237	[1726759740]	2000000 OPS in 1.640493 seconds, throughput 1219145.708028
+542237	[1726759740]	2000000 OPS in 1.641336 seconds, throughput 1218519.547491
+542237	[1726759740]	2000000 OPS in 1.638048 seconds, throughput 1220965.441794
+542237	[1726759740]	2000000 OPS in 1.629736 seconds, throughput 1227192.625063
+542237	[1726759742]	2000000 OPS in 1.649288 seconds, throughput 1212644.486591
+542237	[1726759742]	2000000 OPS in 1.636583 seconds, throughput 1222058.398505
+542237	[1726759742]	2000000 OPS in 1.633462 seconds, throughput 1224393.343708
+542237	[1726759742]	2000000 OPS in 1.626298 seconds, throughput 1229786.914821
+542237	[1726759743]	2000000 OPS in 1.642052 seconds, throughput 1217988.224490
+542237	[1726759744]	2000000 OPS in 1.641099 seconds, throughput 1218695.520502
+542237	[1726759744]	2000000 OPS in 1.637962 seconds, throughput 1221029.547694
+542237	[1726759744]	2000000 OPS in 1.631320 seconds, throughput 1226001.029841
+542237	[1726759745]	2000000 OPS in 1.646248 seconds, throughput 1214883.784217
+542237	[1726759745]	2000000 OPS in 1.639787 seconds, throughput 1219670.603560
+542237	[1726759745]	2000000 OPS in 1.640363 seconds, throughput 1219242.326241
+542237	[1726759745]	2000000 OPS in 1.630367 seconds, throughput 1226717.665409
+542237	[1726759747]	2000000 OPS in 1.643963 seconds, throughput 1216572.392444
+542237	[1726759747]	2000000 OPS in 1.639975 seconds, throughput 1219530.785530
+542237	[1726759747]	2000000 OPS in 1.640773 seconds, throughput 1218937.659262
+542237	[1726759747]	2000000 OPS in 1.630334 seconds, throughput 1226742.495709
+542237	[1726759748]	2000000 OPS in 1.642083 seconds, throughput 1217965.230747
+542237	[1726759749]	2000000 OPS in 1.643111 seconds, throughput 1217203.219989
+542237	[1726759749]	2000000 OPS in 1.639773 seconds, throughput 1219681.016824
+542237	[1726759749]	2000000 OPS in 1.630548 seconds, throughput 1226581.492848
+542237	[1726759750]	2000000 OPS in 1.643896 seconds, throughput 1216621.976086
+542237	[1726759750]	2000000 OPS in 1.640035 seconds, throughput 1219486.169502
+542237	[1726759750]	2000000 OPS in 1.639217 seconds, throughput 1220094.715953
+542237	[1726759750]	2000000 OPS in 1.627704 seconds, throughput 1228724.632980
+542237	[1726759752]	2000000 OPS in 1.641714 seconds, throughput 1218238.986815
+542237	[1726759752]	2000000 OPS in 1.641852 seconds, throughput 1218136.592092
+542237	[1726759752]	2000000 OPS in 1.642544 seconds, throughput 1217623.393955
+542237	[1726759752]	2000000 OPS in 1.628331 seconds, throughput 1228251.504147
+542237	[1726759753]	2000000 OPS in 1.641153 seconds, throughput 1218655.420914
+542237	[1726759753]	2000000 OPS in 1.646746 seconds, throughput 1214516.385648
+542237	[1726759753]	2000000 OPS in 1.647367 seconds, throughput 1214058.555258
+542237	[1726759754]	2000000 OPS in 1.627574 seconds, throughput 1228822.775493
+542237	[1726759755]	2000000 OPS in 1.639309 seconds, throughput 1220026.242764
+542237	[1726759755]	2000000 OPS in 1.643186 seconds, throughput 1217147.663137
+542237	[1726759755]	2000000 OPS in 1.649493 seconds, throughput 1212493.778391
+542237	[1726759755]	2000000 OPS in 1.628934 seconds, throughput 1227796.829092
+542237	[1726759757]	2000000 OPS in 1.645772 seconds, throughput 1215235.160156
+542237	[1726759757]	2000000 OPS in 1.642444 seconds, throughput 1217697.528805
+542237	[1726759757]	2000000 OPS in 1.646148 seconds, throughput 1214957.585831
+542237	[1726759757]	2000000 OPS in 1.630034 seconds, throughput 1226968.271827
+542237	[1726759758]	2000000 OPS in 1.643131 seconds, throughput 1217188.404333
+542237	[1726759758]	2000000 OPS in 1.641378 seconds, throughput 1218488.367701
+542237	[1726759758]	2000000 OPS in 1.630266 seconds, throughput 1226793.664347
+542237	[1726759758]	2000000 OPS in 1.665628 seconds, throughput 1200748.306345
+542237	[1726759760]	2000000 OPS in 1.642062 seconds, throughput 1217980.807058
+542237	[1726759760]	2000000 OPS in 1.641604 seconds, throughput 1218320.618127
+542237	[1726759760]	2000000 OPS in 1.630663 seconds, throughput 1226494.990075
+542237	[1726759760]	2000000 OPS in 1.647629 seconds, throughput 1213865.500061
+542237	[1726759762]	2000000 OPS in 1.644089 seconds, throughput 1216479.156542
+542237	[1726759762]	2000000 OPS in 1.643125 seconds, throughput 1217192.848992
+542237	[1726759762]	2000000 OPS in 1.630819 seconds, throughput 1226377.666682
+542237	[1726759762]	2000000 OPS in 1.648041 seconds, throughput 1213562.041236
+542237	[1726759763]	2000000 OPS in 1.641940 seconds, throughput 1218071.305894
+542237	[1726759763]	2000000 OPS in 1.630436 seconds, throughput 1226665.750756
+542237	[1726759763]	2000000 OPS in 1.641847 seconds, throughput 1218140.301746
+542237	[1726759763]	2000000 OPS in 1.646162 seconds, throughput 1214947.253065
+542237	[1726759765]	2000000 OPS in 1.643870 seconds, throughput 1216641.218588
+542237	[1726759765]	2000000 OPS in 1.629526 seconds, throughput 1227350.775624
+542237	[1726759765]	2000000 OPS in 1.640946 seconds, throughput 1218809.150332
+542237	[1726759765]	2000000 OPS in 1.647190 seconds, throughput 1214189.012804
+542237	[1726759766]	2000000 OPS in 1.640199 seconds, throughput 1219364.235681
+542237	[1726759767]	2000000 OPS in 1.630211 seconds, throughput 1226835.053867
+542237	[1726759767]	2000000 OPS in 1.642869 seconds, throughput 1217382.518022
+542237	[1726759767]	2000000 OPS in 1.662823 seconds, throughput 1202773.837023
+542237	[1726759768]	2000000 OPS in 1.644212 seconds, throughput 1216388.154326
+542237	[1726759768]	2000000 OPS in 1.629938 seconds, throughput 1227040.537738
+542237	[1726759768]	2000000 OPS in 1.643062 seconds, throughput 1217239.519872
+542237	[1726759768]	2000000 OPS in 1.646848 seconds, throughput 1214441.162755
+542237	[1726759770]	2000000 OPS in 1.643390 seconds, throughput 1216996.574155
+542237	[1726759770]	2000000 OPS in 1.631957 seconds, throughput 1225522.486193
+542237	[1726759770]	2000000 OPS in 1.645590 seconds, throughput 1215369.563500
+542237	[1726759770]	2000000 OPS in 1.650383 seconds, throughput 1211839.918370
+542237	[1726759771]	2000000 OPS in 1.641701 seconds, throughput 1218248.633582
+542237	[1726759771]	2000000 OPS in 1.630622 seconds, throughput 1226525.828794
+542237	[1726759772]	2000000 OPS in 1.645017 seconds, throughput 1215792.906699
+542237	[1726759772]	2000000 OPS in 1.647418 seconds, throughput 1214020.970998
+542237	[1726759773]	2000000 OPS in 1.642095 seconds, throughput 1217956.330176
+542237	[1726759773]	2000000 OPS in 1.630815 seconds, throughput 1226380.674693
+542237	[1726759773]	2000000 OPS in 1.640707 seconds, throughput 1218986.692932
+542237	[1726759773]	2000000 OPS in 1.646971 seconds, throughput 1214350.465187
+542237	[1726759775]	2000000 OPS in 1.641641 seconds, throughput 1218293.159101
+542237	[1726759775]	2000000 OPS in 1.628322 seconds, throughput 1228258.292893
+542237	[1726759775]	2000000 OPS in 1.642227 seconds, throughput 1217858.432482
+542237	[1726759775]	2000000 OPS in 1.663888 seconds, throughput 1202003.981037
+542237	[1726759776]	2000000 OPS in 1.644426 seconds, throughput 1216229.857713
+542237	[1726759776]	2000000 OPS in 1.629235 seconds, throughput 1227569.994507
+542237	[1726759776]	2000000 OPS in 1.641350 seconds, throughput 1218509.154050
+542237	[1726759777]	2000000 OPS in 1.649034 seconds, throughput 1212831.269701
+542237	[1726759778]	2000000 OPS in 1.641263 seconds, throughput 1218573.744732
+542237	[1726759778]	2000000 OPS in 1.628480 seconds, throughput 1228139.123600
+542237	[1726759778]	2000000 OPS in 1.640138 seconds, throughput 1219409.586267
+542237	[1726759778]	2000000 OPS in 1.670329 seconds, throughput 1197368.901576
+542237	[1726759780]	2000000 OPS in 1.641344 seconds, throughput 1218513.608360
+542237	[1726759780]	2000000 OPS in 1.630819 seconds, throughput 1226377.666682
+542237	[1726759780]	2000000 OPS in 1.643507 seconds, throughput 1216909.937104
+542237	[1726759780]	2000000 OPS in 1.648986 seconds, throughput 1212866.573761
+542237	[1726759781]	2000000 OPS in 1.629753 seconds, throughput 1227179.824182
+542237	[1726759781]	2000000 OPS in 1.644691 seconds, throughput 1216033.893297
+542237	[1726759781]	2000000 OPS in 1.644115 seconds, throughput 1216459.919166
+542237	[1726759782]	2000000 OPS in 1.665250 seconds, throughput 1201020.867738
+542237	[1726759783]	2000000 OPS in 1.628816 seconds, throughput 1227885.777153
+542237	[1726759783]	2000000 OPS in 1.644700 seconds, throughput 1216027.239010
+542237	[1726759783]	2000000 OPS in 1.644551 seconds, throughput 1216137.413799
+542237	[1726759783]	2000000 OPS in 1.646240 seconds, throughput 1214889.688016
+542237	[1726759784]	2000000 OPS in 1.630911 seconds, throughput 1226308.486484
+542237	[1726759785]	2000000 OPS in 1.644327 seconds, throughput 1216303.083268
+542237	[1726759785]	2000000 OPS in 1.642579 seconds, throughput 1217597.448890
+542237	[1726759785]	2000000 OPS in 1.646752 seconds, throughput 1214511.960514
+542237	[1726759786]	2000000 OPS in 1.631481 seconds, throughput 1225880.043960
+542237	[1726759786]	2000000 OPS in 1.640912 seconds, throughput 1218834.404282
+542237	[1726759786]	2000000 OPS in 1.643468 seconds, throughput 1216938.814750
+542237	[1726759786]	2000000 OPS in 1.648471 seconds, throughput 1213245.486272
+542237	[1726759788]	2000000 OPS in 1.630736 seconds, throughput 1226440.085949
+542237	[1726759788]	2000000 OPS in 1.642265 seconds, throughput 1217830.252730
+542237	[1726759788]	2000000 OPS in 1.642634 seconds, throughput 1217556.680307
+542237	[1726759788]	2000000 OPS in 1.645294 seconds, throughput 1215588.217060
+542237	[1726759789]	2000000 OPS in 1.629302 seconds, throughput 1227519.514491
+542237	[1726759789]	2000000 OPS in 1.639316 seconds, throughput 1220021.033163
+542237	[1726759790]	2000000 OPS in 1.644369 seconds, throughput 1216272.016804
+542237	[1726759790]	2000000 OPS in 1.663666 seconds, throughput 1202164.376744
+542237	[1726759791]	2000000 OPS in 1.631088 seconds, throughput 1226175.411750
+542237	[1726759791]	2000000 OPS in 1.645102 seconds, throughput 1215730.088469
+542237	[1726759791]	2000000 OPS in 1.645273 seconds, throughput 1215603.732633
+542237	[1726759791]	2000000 OPS in 1.646707 seconds, throughput 1214545.149805
+542237	[1726759793]	2000000 OPS in 1.630677 seconds, throughput 1226484.460135
+542237	[1726759793]	2000000 OPS in 1.641440 seconds, throughput 1218442.343308
+542237	[1726759793]	2000000 OPS in 1.642294 seconds, throughput 1217808.748007
+542237	[1726759793]	2000000 OPS in 1.645349 seconds, throughput 1215547.582914
+542237	[1726759794]	2000000 OPS in 1.631043 seconds, throughput 1226209.241571
+542237	[1726759794]	2000000 OPS in 1.644997 seconds, throughput 1215807.688403
+542237	[1726759795]	2000000 OPS in 1.641189 seconds, throughput 1218628.689322
+542237	[1726759795]	2000000 OPS in 1.666004 seconds, throughput 1200477.309778
+542237	[1726759796]	2000000 OPS in 1.630206 seconds, throughput 1226838.816689
+542237	[1726759796]	2000000 OPS in 1.641798 seconds, throughput 1218176.657543
+542237	[1726759796]	2000000 OPS in 1.639415 seconds, throughput 1219947.359271
+542237	[1726759796]	2000000 OPS in 1.647898 seconds, throughput 1213667.350770
+542237	[1726759798]	2000000 OPS in 1.629692 seconds, throughput 1227225.757996
+542237	[1726759798]	2000000 OPS in 1.643106 seconds, throughput 1217206.923960
+542237	[1726759798]	2000000 OPS in 1.640923 seconds, throughput 1218826.233772
+542237	[1726759798]	2000000 OPS in 1.649632 seconds, throughput 1212391.612190
+542237	[1726759799]	2000000 OPS in 1.622910 seconds, throughput 1232354.227899
+542237	[1726759799]	2000000 OPS in 1.648543 seconds, throughput 1213192.497860
+542237	[1726759799]	2000000 OPS in 1.632255 seconds, throughput 1225298.743150
+542237	[1726759800]	2000000 OPS in 2.016576 seconds, throughput 991780.126313
+542237	[1726759801]	2000000 OPS in 1.621158 seconds, throughput 1233686.044173
+542237	[1726759801]	2000000 OPS in 1.648964 seconds, throughput 1212882.755476
+542237	[1726759801]	2000000 OPS in 1.631563 seconds, throughput 1225818.433000
+542237	[1726759802]	2000000 OPS in 1.929917 seconds, throughput 1036313.996923
+542237	[1726759802]	2000000 OPS in 1.626995 seconds, throughput 1229260.077628
+542237	[1726759803]	2000000 OPS in 1.645075 seconds, throughput 1215750.041791
+542237	[1726759803]	2000000 OPS in 1.638904 seconds, throughput 1220327.731215
+542237	[1726759804]	2000000 OPS in 1.637572 seconds, throughput 1221320.344999
+542237	[1726759804]	2000000 OPS in 1.630073 seconds, throughput 1226938.916233
+542237	[1726759804]	2000000 OPS in 1.643584 seconds, throughput 1216852.926288
+542237	[1726759804]	2000000 OPS in 1.641559 seconds, throughput 1218354.015908
+542237	[1726759805]	2000000 OPS in 1.640528 seconds, throughput 1219119.698048
+542237	[1726759806]	2000000 OPS in 1.629007 seconds, throughput 1227741.808353
+542237	[1726759806]	2000000 OPS in 1.643060 seconds, throughput 1217241.001546
+542237	[1726759806]	2000000 OPS in 1.640611 seconds, throughput 1219058.021676
+542237	[1726759807]	2000000 OPS in 1.638846 seconds, throughput 1220370.919537
+542237	[1726759807]	2000000 OPS in 1.629806 seconds, throughput 1227139.917266
+542237	[1726759808]	2000000 OPS in 1.641564 seconds, throughput 1218350.304953
+542237	[1726759808]	2000000 OPS in 1.645460 seconds, throughput 1215465.584092
+542237	[1726759809]	2000000 OPS in 1.639624 seconds, throughput 1219791.854718
+542237	[1726759809]	2000000 OPS in 1.631924 seconds, throughput 1225547.268133
+542237	[1726759809]	2000000 OPS in 1.642875 seconds, throughput 1217378.071977
+542237	[1726759809]	2000000 OPS in 1.641359 seconds, throughput 1218502.472646
+542237	[1726759810]	2000000 OPS in 1.642125 seconds, throughput 1217934.079318
+542237	[1726759811]	2000000 OPS in 1.623822 seconds, throughput 1231662.091042
+542237	[1726759811]	2000000 OPS in 1.635082 seconds, throughput 1223180.244171
+542237	[1726759811]	2000000 OPS in 1.890758 seconds, throughput 1057776.828129
+542237	[1726759812]	2000000 OPS in 1.640736 seconds, throughput 1218965.147349
+542237	[1726759812]	2000000 OPS in 1.629294 seconds, throughput 1227525.541738
+542237	[1726759813]	2000000 OPS in 1.643701 seconds, throughput 1216766.309688
+542237	[1726759813]	2000000 OPS in 1.644408 seconds, throughput 1216243.170795
+542237	[1726759813]	2000000 OPS in 1.639579 seconds, throughput 1219825.333211
+542237	[1726759814]	2000000 OPS in 1.631443 seconds, throughput 1225908.597481
+542237	[1726759814]	2000000 OPS in 1.641152 seconds, throughput 1218656.163475
+542237	[1726759814]	2000000 OPS in 1.643574 seconds, throughput 1216860.329988
+542237	[1726759815]	2000000 OPS in 1.638637 seconds, throughput 1220526.571779
+542237	[1726759815]	2000000 OPS in 1.628632 seconds, throughput 1228024.501545
+542237	[1726759816]	2000000 OPS in 1.641065 seconds, throughput 1218720.769744
+542237	[1726759816]	2000000 OPS in 1.642833 seconds, throughput 1217409.194970
+542237	[1726759817]	2000000 OPS in 1.639052 seconds, throughput 1220217.540383
+542237	[1726759817]	2000000 OPS in 1.629914 seconds, throughput 1227058.605546
+542237	[1726759817]	2000000 OPS in 1.641371 seconds, throughput 1218493.564222
+542237	[1726759818]	2000000 OPS in 1.646694 seconds, throughput 1214554.738160
+542237	[1726759818]	2000000 OPS in 1.642418 seconds, throughput 1217716.805344
+542237	[1726759819]	2000000 OPS in 1.631220 seconds, throughput 1226076.188374
+542237	[1726759819]	2000000 OPS in 1.641524 seconds, throughput 1218379.993226
+542237	[1726759819]	2000000 OPS in 1.644450 seconds, throughput 1216212.107392
+542237	[1726759820]	2000000 OPS in 1.629734 seconds, throughput 1227194.131067
+542237	[1726759820]	2000000 OPS in 1.622068 seconds, throughput 1232993.931204
+542237	[1726759821]	2000000 OPS in 1.633984 seconds, throughput 1224002.193412
+542237	[1726759821]	2000000 OPS in 1.657075 seconds, throughput 1206945.974081
+542237	[1726759822]	2000000 OPS in 1.640780 seconds, throughput 1218932.458952
+542237	[1726759822]	2000000 OPS in 1.627455 seconds, throughput 1228912.627384
+542237	[1726759822]	2000000 OPS in 1.636704 seconds, throughput 1221968.052867
+542237	[1726759823]	2000000 OPS in 1.886653 seconds, throughput 1060078.350391
+542237	[1726759823]	2000000 OPS in 1.643632 seconds, throughput 1216817.389781
+542237	[1726759824]	2000000 OPS in 1.624667 seconds, throughput 1231021.495482
+542237	[1726759824]	2000000 OPS in 1.642060 seconds, throughput 1217982.290537
+542237	[1726759824]	2000000 OPS in 1.644101 seconds, throughput 1216470.277678
+542237	[1726759825]	2000000 OPS in 1.649807 seconds, throughput 1212263.010158
+542237	[1726759825]	2000000 OPS in 1.628184 seconds, throughput 1228362.396388
+542237	[1726759826]	2000000 OPS in 1.644553 seconds, throughput 1216135.934810
+542237	[1726759826]	2000000 OPS in 1.645365 seconds, throughput 1215535.762582
+542237	[1726759827]	2000000 OPS in 1.644600 seconds, throughput 1216101.179618
+542237	[1726759827]	2000000 OPS in 1.627417 seconds, throughput 1228941.322353
+542237	[1726759827]	2000000 OPS in 1.642110 seconds, throughput 1217945.204645
+542237	[1726759828]	2000000 OPS in 1.642538 seconds, throughput 1217627.841791
+542237	[1726759828]	2000000 OPS in 1.648057 seconds, throughput 1213550.259487
+542237	[1726759828]	2000000 OPS in 1.631011 seconds, throughput 1226233.299469
+542237	[1726759829]	2000000 OPS in 1.640249 seconds, throughput 1219327.065586
+542237	[1726759829]	2000000 OPS in 1.644227 seconds, throughput 1216377.057426
+542237	[1726759830]	2000000 OPS in 1.666775 seconds, throughput 1199922.005070
+542237	[1726759830]	2000000 OPS in 1.623902 seconds, throughput 1231601.414371
+542237	[1726759831]	2000000 OPS in 1.635052 seconds, throughput 1223202.687132
+542237	[1726759831]	2000000 OPS in 2.074566 seconds, throughput 964057.060609
+542237	[1726759832]	2000000 OPS in 1.652504 seconds, throughput 1210284.513683
+542237	[1726759832]	2000000 OPS in 1.620295 seconds, throughput 1234343.128875
+542237	[1726759832]	2000000 OPS in 1.634113 seconds, throughput 1223905.568342
+542237	[1726759833]	2000000 OPS in 1.650637 seconds, throughput 1211653.440460
+542237	[1726759833]	2000000 OPS in 1.620546 seconds, throughput 1234151.946319
+542237	[1726759834]	2000000 OPS in 2.073404 seconds, throughput 964597.348129
+542237	[1726759834]	2000000 OPS in 1.634981 seconds, throughput 1223255.805419
+542237	[1726759835]	2000000 OPS in 1.663634 seconds, throughput 1202187.500376
+542237	[1726759835]	2000000 OPS in 1.625474 seconds, throughput 1230410.329541
+542237	[1726759835]	2000000 OPS in 1.660066 seconds, throughput 1204771.376560
+542237	[1726759835]	2000000 OPS in 1.640484 seconds, throughput 1219152.396488
+542237	[1726759837]	2000000 OPS in 1.622470 seconds, throughput 1232688.431835
+542237	[1726759837]	2000000 OPS in 1.894589 seconds, throughput 1055637.924637
+542237	[1726759837]	2000000 OPS in 1.643543 seconds, throughput 1216883.282032
+542237	[1726759837]	2000000 OPS in 1.631669 seconds, throughput 1225738.798739
+542237	[1726759838]	2000000 OPS in 1.620788 seconds, throughput 1233967.674983
+542237	[1726759839]	2000000 OPS in 1.804771 seconds, throughput 1108173.834797
+542237	[1726759839]	2000000 OPS in 1.758105 seconds, throughput 1137588.483054
+542237	[1726759839]	2000000 OPS in 1.636018 seconds, throughput 1222480.437257
+542237	[1726759840]	2000000 OPS in 1.631368 seconds, throughput 1225964.957018
+542237	[1726759840]	2000000 OPS in 1.646188 seconds, throughput 1214928.064109
+542237	[1726759840]	2000000 OPS in 1.641077 seconds, throughput 1218711.858127
+542237	[1726759840]	2000000 OPS in 1.643888 seconds, throughput 1216627.896791
+542237	[1726759841]	2000000 OPS in 1.629088 seconds, throughput 1227680.763716
+542237	[1726759842]	2000000 OPS in 1.648040 seconds, throughput 1213562.777602
+542237	[1726759842]	2000000 OPS in 1.744677 seconds, throughput 1146343.993759
+542237	[1726759842]	2000000 OPS in 1.640810 seconds, throughput 1218910.172415
+542237	[1726759843]	2000000 OPS in 1.623468 seconds, throughput 1231930.657087
+542237	[1726759844]	2000000 OPS in 1.647564 seconds, throughput 1213913.389707
+542237	[1726759844]	2000000 OPS in 1.641301 seconds, throughput 1218545.531868
+542237	[1726759844]	2000000 OPS in 1.643934 seconds, throughput 1216593.853525
+542237	[1726759845]	2000000 OPS in 1.628564 seconds, throughput 1228075.777188
+542237	[1726759845]	2000000 OPS in 1.647777 seconds, throughput 1213756.473115
+542237	[1726759845]	2000000 OPS in 1.643246 seconds, throughput 1217103.221307
+542237	[1726759845]	2000000 OPS in 1.640744 seconds, throughput 1218959.203873
+542237	[1726759846]	2000000 OPS in 1.631639 seconds, throughput 1225761.335688
+542237	[1726759847]	2000000 OPS in 1.647228 seconds, throughput 1214161.002606
+542237	[1726759847]	2000000 OPS in 1.643131 seconds, throughput 1217188.404333
+542237	[1726759847]	2000000 OPS in 1.643147 seconds, throughput 1217176.552067
+542237	[1726759848]	2000000 OPS in 1.630733 seconds, throughput 1226442.342186
+542237	[1726759848]	2000000 OPS in 1.647957 seconds, throughput 1213623.899167
+542237	[1726759849]	2000000 OPS in 1.643144 seconds, throughput 1217178.774350
+542237	[1726759849]	2000000 OPS in 1.643283 seconds, throughput 1217075.817129
+542237	[1726759850]	2000000 OPS in 1.628970 seconds, throughput 1227769.694961
+542237	[1726759850]	2000000 OPS in 1.642110 seconds, throughput 1217945.204645
+542237	[1726759850]	2000000 OPS in 1.768598 seconds, throughput 1130839.229718
+542237	[1726759850]	2000000 OPS in 1.637402 seconds, throughput 1221447.146150
+542237	[1726759851]	2000000 OPS in 1.626688 seconds, throughput 1229492.072235
+542237	[1726759852]	2000000 OPS in 1.644438 seconds, throughput 1216220.982488
+542237	[1726759852]	2000000 OPS in 1.647312 seconds, throughput 1214099.089911
+542237	[1726759852]	2000000 OPS in 1.644538 seconds, throughput 1216147.027311
+542237	[1726759853]	2000000 OPS in 1.630717 seconds, throughput 1226454.375591
+542237	[1726759853]	2000000 OPS in 1.643597 seconds, throughput 1216843.301612
+542237	[1726759854]	2000000 OPS in 1.639099 seconds, throughput 1220182.551512
+542237	[1726759854]	2000000 OPS in 1.647574 seconds, throughput 1213906.021824
+542237	[1726759854]	2000000 OPS in 1.631560 seconds, throughput 1225820.686950
+542237	[1726759855]	2000000 OPS in 1.641598 seconds, throughput 1218325.071059
+542237	[1726759855]	2000000 OPS in 1.641754 seconds, throughput 1218209.305414
+542237	[1726759855]	2000000 OPS in 1.646294 seconds, throughput 1214849.838486
+542237	[1726759856]	2000000 OPS in 1.632432 seconds, throughput 1225165.887461
+542237	[1726759857]	2000000 OPS in 1.640916 seconds, throughput 1218831.433175
+542237	[1726759857]	2000000 OPS in 1.640308 seconds, throughput 1219283.207788
+542237	[1726759857]	2000000 OPS in 1.645209 seconds, throughput 1215651.020630
+542237	[1726759858]	2000000 OPS in 1.629302 seconds, throughput 1227519.514491
+542237	[1726759858]	2000000 OPS in 1.643000 seconds, throughput 1217285.453439
+542237	[1726759858]	2000000 OPS in 1.642564 seconds, throughput 1217608.568068
+542237	[1726759858]	2000000 OPS in 1.645151 seconds, throughput 1215693.878556
+542237	[1726759859]	2000000 OPS in 1.628727 seconds, throughput 1227952.873625
+542237	[1726759860]	2000000 OPS in 1.642779 seconds, throughput 1217449.212584
+542237	[1726759860]	2000000 OPS in 1.643958 seconds, throughput 1216576.092577
+542237	[1726759860]	2000000 OPS in 1.646148 seconds, throughput 1214957.585831
+542237	[1726759861]	2000000 OPS in 1.630489 seconds, throughput 1226625.877267
+542237	[1726759862]	2000000 OPS in 1.642757 seconds, throughput 1217465.516811
+542237	[1726759862]	2000000 OPS in 1.645349 seconds, throughput 1215547.582914
+542237	[1726759862]	2000000 OPS in 1.648594 seconds, throughput 1213154.967202
+542237	[1726759863]	2000000 OPS in 1.629417 seconds, throughput 1227432.879367
+542237	[1726759863]	2000000 OPS in 1.643892 seconds, throughput 1216624.936431
+542237	[1726759863]	2000000 OPS in 1.642749 seconds, throughput 1217471.445729
+542237	[1726759863]	2000000 OPS in 1.649140 seconds, throughput 1212753.313848
+542237	[1726759864]	2000000 OPS in 1.630507 seconds, throughput 1226612.335918
+542237	[1726759865]	2000000 OPS in 1.641915 seconds, throughput 1218089.852398
+542237	[1726759865]	2000000 OPS in 1.642582 seconds, throughput 1217595.225079
+542237	[1726759865]	2000000 OPS in 1.649566 seconds, throughput 1212440.120614
+542237	[1726759866]	2000000 OPS in 1.629728 seconds, throughput 1227198.649100
+542237	[1726759867]	2000000 OPS in 1.642796 seconds, throughput 1217436.614163
+542237	[1726759867]	2000000 OPS in 1.640356 seconds, throughput 1219247.529195
+542237	[1726759867]	2000000 OPS in 1.646278 seconds, throughput 1214861.645482
+542237	[1726759868]	2000000 OPS in 1.628810 seconds, throughput 1227890.300281
+542237	[1726759868]	2000000 OPS in 1.643472 seconds, throughput 1216935.852877
+542237	[1726759868]	2000000 OPS in 1.642311 seconds, throughput 1217796.142144
+542237	[1726759868]	2000000 OPS in 1.649677 seconds, throughput 1212358.540490
+542237	[1726759869]	2000000 OPS in 1.627499 seconds, throughput 1228879.403305
+542237	[1726759870]	2000000 OPS in 1.644576 seconds, throughput 1216118.926702
+542237	[1726759870]	2000000 OPS in 1.641458 seconds, throughput 1218428.982039
+542237	[1726759870]	2000000 OPS in 1.647198 seconds, throughput 1214183.115812
+542237	[1726759871]	2000000 OPS in 1.629364 seconds, throughput 1227472.805340
+542237	[1726759872]	2000000 OPS in 1.641540 seconds, throughput 1218368.117743
+542237	[1726759872]	2000000 OPS in 1.639789 seconds, throughput 1219669.115966
+542237	[1726759872]	2000000 OPS in 1.647000 seconds, throughput 1214329.083182
+542237	[1726759872]	2000000 OPS in 1.628776 seconds, throughput 1227915.931964
+542237	[1726759873]	2000000 OPS in 1.643720 seconds, throughput 1216752.244908
+542237	[1726759873]	2000000 OPS in 1.641192 seconds, throughput 1218626.461742
+542237	[1726759873]	2000000 OPS in 1.646205 seconds, throughput 1214915.517812
+542237	[1726759874]	2000000 OPS in 1.629340 seconds, throughput 1227490.885880
+542237	[1726759875]	2000000 OPS in 1.643407 seconds, throughput 1216983.985099
+542237	[1726759875]	2000000 OPS in 1.645715 seconds, throughput 1215277.250314
+542237	[1726759875]	2000000 OPS in 1.646361 seconds, throughput 1214800.399183
+542237	[1726759876]	2000000 OPS in 1.630371 seconds, throughput 1226714.655744
+542237	[1726759876]	2000000 OPS in 1.645201 seconds, throughput 1215656.931889
+542237	[1726759877]	2000000 OPS in 1.641808 seconds, throughput 1218169.237816
+542237	[1726759877]	2000000 OPS in 1.646661 seconds, throughput 1214579.078511
+542237	[1726759877]	2000000 OPS in 1.630805 seconds, throughput 1226388.194787
+542237	[1726759878]	2000000 OPS in 1.645187 seconds, throughput 1215667.276729
+542237	[1726759878]	2000000 OPS in 1.642845 seconds, throughput 1217400.302524
+542237	[1726759878]	2000000 OPS in 1.647037 seconds, throughput 1214301.803785
+542237	[1726759879]	2000000 OPS in 1.629024 seconds, throughput 1227728.996012
+542237	[1726759880]	2000000 OPS in 1.642663 seconds, throughput 1217535.185245
+542237	[1726759880]	2000000 OPS in 1.645241 seconds, throughput 1215627.376172
+542237	[1726759880]	2000000 OPS in 1.647610 seconds, throughput 1213879.498182
+542237	[1726759881]	2000000 OPS in 1.629423 seconds, throughput 1227428.359610
+542237	[1726759881]	2000000 OPS in 1.643622 seconds, throughput 1216824.793049
+542237	[1726759881]	2000000 OPS in 1.645154 seconds, throughput 1215691.661692
+542237	[1726759882]	2000000 OPS in 1.647823 seconds, throughput 1213722.590351
+542237	[1726759882]	2000000 OPS in 1.631129 seconds, throughput 1226144.590649
+542237	[1726759883]	2000000 OPS in 1.644461 seconds, throughput 1216203.972001
+542237	[1726759883]	2000000 OPS in 1.643153 seconds, throughput 1217172.107527
+542237	[1726759883]	2000000 OPS in 1.649851 seconds, throughput 1212230.680225
+542237	[1726759884]	2000000 OPS in 1.629623 seconds, throughput 1227277.720062
+542237	[1726759885]	2000000 OPS in 1.641522 seconds, throughput 1218381.477677
+542237	[1726759885]	2000000 OPS in 1.642354 seconds, throughput 1217764.257888
+542237	[1726759885]	2000000 OPS in 1.649195 seconds, throughput 1212712.869006
+542237	[1726759885]	2000000 OPS in 1.629981 seconds, throughput 1227008.167580
+542237	[1726759886]	2000000 OPS in 1.642467 seconds, throughput 1217680.476990
+542237	[1726759886]	2000000 OPS in 1.640615 seconds, throughput 1219055.049478
+542237	[1726759886]	2000000 OPS in 1.647971 seconds, throughput 1213613.589074
+542237	[1726759887]	2000000 OPS in 1.628957 seconds, throughput 1227779.493259
+542237	[1726759888]	2000000 OPS in 1.644065 seconds, throughput 1216496.914660
+542237	[1726759888]	2000000 OPS in 1.643879 seconds, throughput 1216634.557653
+542237	[1726759888]	2000000 OPS in 1.645575 seconds, throughput 1215380.642025
+542237	[1726759889]	2000000 OPS in 1.629049 seconds, throughput 1227710.154820
+542237	[1726759890]	2000000 OPS in 1.639795 seconds, throughput 1219664.653204
+542237	[1726759890]	2000000 OPS in 1.643757 seconds, throughput 1216724.856533
+542237	[1726759890]	2000000 OPS in 1.644959 seconds, throughput 1215835.774630
+542237	[1726759890]	2000000 OPS in 1.633165 seconds, throughput 1224616.006344
+542237	[1726759891]	2000000 OPS in 1.642663 seconds, throughput 1217535.185245
+542237	[1726759891]	2000000 OPS in 1.641058 seconds, throughput 1218725.968247
+542237	[1726759891]	2000000 OPS in 1.646055 seconds, throughput 1215026.229379
+542237	[1726759892]	2000000 OPS in 1.629594 seconds, throughput 1227299.560504
+542237	[1726759893]	2000000 OPS in 1.643464 seconds, throughput 1216941.776638
+542237	[1726759893]	2000000 OPS in 1.641564 seconds, throughput 1218350.304953
+542237	[1726759893]	2000000 OPS in 1.650500 seconds, throughput 1211754.013935
+542237	[1726759894]	2000000 OPS in 1.630131 seconds, throughput 1226895.261792
+542237	[1726759895]	2000000 OPS in 1.643484 seconds, throughput 1216926.967345
+542237	[1726759895]	2000000 OPS in 1.642104 seconds, throughput 1217949.654833
+542237	[1726759895]	2000000 OPS in 1.646723 seconds, throughput 1214533.348960
+542237	[1726759895]	2000000 OPS in 1.630479 seconds, throughput 1226633.400369
+542237	[1726759896]	2000000 OPS in 1.644700 seconds, throughput 1216027.239010
+542237	[1726759896]	2000000 OPS in 1.640893 seconds, throughput 1218848.517240
+542237	[1726759896]	2000000 OPS in 1.645071 seconds, throughput 1215752.997895
+542237	[1726759897]	2000000 OPS in 1.629742 seconds, throughput 1227188.107075
+542237	[1726759898]	2000000 OPS in 1.643636 seconds, throughput 1216814.428499
+542237	[1726759898]	2000000 OPS in 1.644404 seconds, throughput 1216246.129297
+542237	[1726759898]	2000000 OPS in 1.647607 seconds, throughput 1213881.708441
+542237	[1726759898]	2000000 OPS in 1.631602 seconds, throughput 1225789.132399
+542237	[1726759899]	2000000 OPS in 1.642395 seconds, throughput 1217733.858177
+542237	[1726759900]	2000000 OPS in 1.642350 seconds, throughput 1217767.223795
+542237	[1726759900]	2000000 OPS in 1.646544 seconds, throughput 1214665.383980
+542237	[1726759900]	2000000 OPS in 1.630002 seconds, throughput 1226992.359519
+542237	[1726759901]	2000000 OPS in 1.643378 seconds, throughput 1217005.460704
+542237	[1726759901]	2000000 OPS in 1.641539 seconds, throughput 1218368.859954
+542237	[1726759901]	2000000 OPS in 1.646312 seconds, throughput 1214836.555890
+542237	[1726759902]	2000000 OPS in 1.628437 seconds, throughput 1228171.553459
+542237	[1726759903]	2000000 OPS in 1.643402 seconds, throughput 1216987.687736
+542237	[1726759903]	2000000 OPS in 1.638979 seconds, throughput 1220271.888780
+542237	[1726759903]	2000000 OPS in 1.645822 seconds, throughput 1215198.241365
+542237	[1726759903]	2000000 OPS in 1.629599 seconds, throughput 1227295.794855
+542237	[1726759904]	2000000 OPS in 1.644128 seconds, throughput 1216450.300707
+542237	[1726759904]	2000000 OPS in 1.641776 seconds, throughput 1218192.981259
+542237	[1726759905]	2000000 OPS in 1.645786 seconds, throughput 1215224.822668
+542237	[1726759905]	2000000 OPS in 1.631799 seconds, throughput 1225641.148205
+542237	[1726759906]	2000000 OPS in 1.643646 seconds, throughput 1216807.025357
+542237	[1726759906]	2000000 OPS in 1.642407 seconds, throughput 1217724.960987
+542237	[1726759906]	2000000 OPS in 1.645212 seconds, throughput 1215648.803923
+542237	[1726759907]	2000000 OPS in 1.630789 seconds, throughput 1226400.227129
+542237	[1726759908]	2000000 OPS in 1.643031 seconds, throughput 1217262.486222
+542237	[1726759908]	2000000 OPS in 1.641749 seconds, throughput 1218213.015510
+542237	[1726759908]	2000000 OPS in 1.646268 seconds, throughput 1214869.024970
+542237	[1726759908]	2000000 OPS in 1.629300 seconds, throughput 1227521.021297
+542237	[1726759909]	2000000 OPS in 1.644711 seconds, throughput 1216019.106092
+542237	[1726759909]	2000000 OPS in 1.640764 seconds, throughput 1218944.345439
+542237	[1726759910]	2000000 OPS in 1.649385 seconds, throughput 1212573.171212
+542237	[1726759910]	2000000 OPS in 1.629607 seconds, throughput 1227289.769865
+542237	[1726759911]	2000000 OPS in 1.643135 seconds, throughput 1217185.441245
+542237	[1726759911]	2000000 OPS in 1.640922 seconds, throughput 1218826.976541
+542237	[1726759911]	2000000 OPS in 1.647392 seconds, throughput 1214040.131311
+542237	[1726759912]	2000000 OPS in 1.630866 seconds, throughput 1226342.323649
+542237	[1726759913]	2000000 OPS in 1.639938 seconds, throughput 1219558.300375
+542237	[1726759913]	2000000 OPS in 1.642360 seconds, throughput 1217759.809055
+542237	[1726759913]	2000000 OPS in 1.645670 seconds, throughput 1215310.481445
+542237	[1726759913]	2000000 OPS in 1.631214 seconds, throughput 1226080.698179
+542237	[1726759914]	2000000 OPS in 1.644946 seconds, throughput 1215845.383374
+542237	[1726759914]	2000000 OPS in 1.644723 seconds, throughput 1216010.233942
+542237	[1726759914]	2000000 OPS in 1.647856 seconds, throughput 1213698.284316
+542237	[1726759915]	2000000 OPS in 1.630247 seconds, throughput 1226807.962229
+542237	[1726759916]	2000000 OPS in 1.643742 seconds, throughput 1216735.959780
+542237	[1726759916]	2000000 OPS in 1.643637 seconds, throughput 1216813.688181
+542237	[1726759916]	2000000 OPS in 1.648587 seconds, throughput 1213160.118332
+542237	[1726759916]	2000000 OPS in 1.629385 seconds, throughput 1227456.985304
+542237	[1726759918]	2000000 OPS in 1.646605 seconds, throughput 1214620.385581
+542237	[1726759918]	2000000 OPS in 1.641742 seconds, throughput 1218218.209682
+542237	[1726759918]	2000000 OPS in 1.647964 seconds, throughput 1213618.744099
+542237	[1726759918]	2000000 OPS in 1.630631 seconds, throughput 1226519.059186
+542237	[1726759919]	2000000 OPS in 1.641625 seconds, throughput 1218305.033123
+542237	[1726759919]	2000000 OPS in 1.642654 seconds, throughput 1217541.856045
+542237	[1726759919]	2000000 OPS in 1.646641 seconds, throughput 1214593.830714
+542237	[1726759920]	2000000 OPS in 1.629043 seconds, throughput 1227714.676654
+542237	[1726759921]	2000000 OPS in 1.641972 seconds, throughput 1218047.567194
+542237	[1726759921]	2000000 OPS in 1.645283 seconds, throughput 1215596.344216
+542237	[1726759921]	2000000 OPS in 1.647931 seconds, throughput 1213643.046948
+542237	[1726759921]	2000000 OPS in 1.628641 seconds, throughput 1228017.715384
+542237	[1726759923]	2000000 OPS in 1.641052 seconds, throughput 1218730.424143
+542237	[1726759923]	2000000 OPS in 1.641716 seconds, throughput 1218237.502711
+542237	[1726759923]	2000000 OPS in 1.646630 seconds, throughput 1214601.944578
+542237	[1726759923]	2000000 OPS in 1.629382 seconds, throughput 1227459.245284
+542237	[1726759924]	2000000 OPS in 1.641480 seconds, throughput 1218412.651997
+542237	[1726759924]	2000000 OPS in 1.643593 seconds, throughput 1216846.263035
+542237	[1726759924]	2000000 OPS in 1.649429 seconds, throughput 1212540.824734
+542237	[1726759925]	2000000 OPS in 1.632865 seconds, throughput 1224841.000328
+542237	[1726759926]	2000000 OPS in 1.640987 seconds, throughput 1218778.698430
+542237	[1726759926]	2000000 OPS in 1.643629 seconds, throughput 1216819.610752
+542237	[1726759926]	2000000 OPS in 1.646674 seconds, throughput 1214569.489772
+542237	[1726759926]	2000000 OPS in 1.630328 seconds, throughput 1226747.010418
+542237	[1726759927]	2000000 OPS in 1.639059 seconds, throughput 1220212.329147
+542237	[1726759927]	2000000 OPS in 1.642388 seconds, throughput 1217739.048264
+542237	[1726759928]	2000000 OPS in 1.647244 seconds, throughput 1214149.209225
+542237	[1726759928]	2000000 OPS in 1.629525 seconds, throughput 1227351.528820
+542237	[1726759929]	2000000 OPS in 1.639454 seconds, throughput 1219918.338666
+542237	[1726759929]	2000000 OPS in 1.641325 seconds, throughput 1218527.713890
+542237	[1726759929]	2000000 OPS in 1.645789 seconds, throughput 1215222.607515
+542237	[1726759929]	2000000 OPS in 1.629303 seconds, throughput 1227518.761090
+542237	[1726759931]	2000000 OPS in 1.642629 seconds, throughput 1217560.386429
+542237	[1726759931]	2000000 OPS in 1.644673 seconds, throughput 1216047.202088
+542237	[1726759931]	2000000 OPS in 1.647485 seconds, throughput 1213971.599134
+542237	[1726759931]	2000000 OPS in 1.630774 seconds, throughput 1226411.507664
+542237	[1726759932]	2000000 OPS in 1.644712 seconds, throughput 1216018.366741
+542237	[1726759932]	2000000 OPS in 1.645398 seconds, throughput 1215511.383872
+542237	[1726759933]	2000000 OPS in 1.645506 seconds, throughput 1215431.605840
+542237	[1726759933]	2000000 OPS in 1.629340 seconds, throughput 1227490.885880
+542237	[1726759934]	2000000 OPS in 1.642338 seconds, throughput 1217776.121602
+542237	[1726759934]	2000000 OPS in 1.641161 seconds, throughput 1218649.480459
+542237	[1726759934]	2000000 OPS in 1.647211 seconds, throughput 1214173.533324
+542237	[1726759934]	2000000 OPS in 1.630746 seconds, throughput 1226432.565219
+542237	[1726759936]	2000000 OPS in 1.641931 seconds, throughput 1218077.982571
+542237	[1726759936]	2000000 OPS in 1.640897 seconds, throughput 1218845.546064
+542237	[1726759936]	2000000 OPS in 1.647395 seconds, throughput 1214037.920474
+542237	[1726759936]	2000000 OPS in 1.630835 seconds, throughput 1226365.634782
+542237	[1726759937]	2000000 OPS in 1.640601 seconds, throughput 1219065.452234
+542237	[1726759937]	2000000 OPS in 1.642312 seconds, throughput 1217795.400630
+542237	[1726759938]	2000000 OPS in 1.647358 seconds, throughput 1214065.188016
+542237	[1726759938]	2000000 OPS in 1.632153 seconds, throughput 1225375.317142
+542237	[1726759939]	2000000 OPS in 1.641399 seconds, throughput 1218472.778404
+542237	[1726759939]	2000000 OPS in 1.641910 seconds, throughput 1218093.561766
+542237	[1726759939]	2000000 OPS in 1.647905 seconds, throughput 1213662.195333
+542237	[1726759939]	2000000 OPS in 1.631446 seconds, throughput 1225906.343207
+542237	[1726759941]	2000000 OPS in 1.641416 seconds, throughput 1218460.158790
+542237	[1726759941]	2000000 OPS in 1.643460 seconds, throughput 1216944.738539
+542237	[1726759941]	2000000 OPS in 1.647998 seconds, throughput 1213593.705818
+542237	[1726759941]	2000000 OPS in 1.629220 seconds, throughput 1227581.296571
+542237	[1726759942]	2000000 OPS in 1.640537 seconds, throughput 1219113.009947
+542237	[1726759942]	2000000 OPS in 1.641531 seconds, throughput 1218374.797674
+542237	[1726759942]	2000000 OPS in 1.648707 seconds, throughput 1213071.819311
+542237	[1726759942]	2000000 OPS in 1.630563 seconds, throughput 1226570.209185
+542237	[1726759944]	2000000 OPS in 1.639800 seconds, throughput 1219660.934260
+542237	[1726759944]	2000000 OPS in 1.643907 seconds, throughput 1216613.835211
+542237	[1726759944]	2000000 OPS in 1.630077 seconds, throughput 1226935.905482
+542237	[1726759944]	2000000 OPS in 1.648138 seconds, throughput 1213490.617897
+542237	[1726759945]	2000000 OPS in 1.640956 seconds, throughput 1218801.722898
+542237	[1726759946]	2000000 OPS in 1.642457 seconds, throughput 1217687.890764
+542237	[1726759946]	2000000 OPS in 1.628832 seconds, throughput 1227873.715644
+542237	[1726759946]	2000000 OPS in 1.646609 seconds, throughput 1214617.434983
+542237	[1726759947]	2000000 OPS in 1.641746 seconds, throughput 1218215.241578
+542237	[1726759947]	2000000 OPS in 1.643824 seconds, throughput 1216675.264505
+542237	[1726759947]	2000000 OPS in 1.632255 seconds, throughput 1225298.743150
+542237	[1726759947]	2000000 OPS in 1.648487 seconds, throughput 1213233.710669
+542237	[1726759949]	2000000 OPS in 1.643557 seconds, throughput 1216872.916485
+542237	[1726759949]	2000000 OPS in 1.642937 seconds, throughput 1217332.131421
+542237	[1726759949]	2000000 OPS in 1.630834 seconds, throughput 1226366.386769
+542237	[1726759949]	2000000 OPS in 1.645870 seconds, throughput 1215162.801436
+542237	[1726759950]	2000000 OPS in 1.646156 seconds, throughput 1214951.681372
+542237	[1726759950]	2000000 OPS in 1.644054 seconds, throughput 1216505.053970
+542237	[1726759951]	2000000 OPS in 1.634258 seconds, throughput 1223796.976977
+542237	[1726759951]	2000000 OPS in 1.651187 seconds, throughput 1211249.846323
+542237	[1726759952]	2000000 OPS in 1.642366 seconds, throughput 1217755.360255
+542237	[1726759952]	2000000 OPS in 1.645203 seconds, throughput 1215655.454069
+542237	[1726759952]	2000000 OPS in 1.628417 seconds, throughput 1228186.637698
+542237	[1726759952]	2000000 OPS in 1.645689 seconds, throughput 1215296.450301
+542237	[1726759954]	2000000 OPS in 1.641854 seconds, throughput 1218135.108237
+542237	[1726759954]	2000000 OPS in 1.643363 seconds, throughput 1217016.569072
+542237	[1726759954]	2000000 OPS in 1.629734 seconds, throughput 1227194.131067
+542237	[1726759954]	2000000 OPS in 1.649179 seconds, throughput 1212724.634500
+542237	[1726759955]	2000000 OPS in 1.642262 seconds, throughput 1217832.477400
+542237	[1726759955]	2000000 OPS in 1.643169 seconds, throughput 1217160.255579
+542237	[1726759956]	2000000 OPS in 1.629788 seconds, throughput 1227153.470267
+542237	[1726759956]	2000000 OPS in 1.646855 seconds, throughput 1214436.000741
+542237	[1726759957]	2000000 OPS in 1.643613 seconds, throughput 1216831.456067
+542237	[1726759957]	2000000 OPS in 1.641320 seconds, throughput 1218531.425925
+542237	[1726759957]	2000000 OPS in 1.631326 seconds, throughput 1225996.520622
+542237	[1726759957]	2000000 OPS in 1.648724 seconds, throughput 1213059.311322
+542237	[1726759959]	2000000 OPS in 1.640573 seconds, throughput 1219086.258277
+542237	[1726759959]	2000000 OPS in 1.642265 seconds, throughput 1217830.252730
+542237	[1726759959]	2000000 OPS in 1.630663 seconds, throughput 1226494.990075
+542237	[1726759959]	2000000 OPS in 1.647858 seconds, throughput 1213696.811254
+542237	[1726759960]	2000000 OPS in 1.642769 seconds, throughput 1217456.623542
+542237	[1726759960]	2000000 OPS in 1.642126 seconds, throughput 1217933.337637
+542237	[1726759960]	2000000 OPS in 1.632018 seconds, throughput 1225476.679792
+542237	[1726759961]	2000000 OPS in 1.647772 seconds, throughput 1213760.156138
+542237	[1726759962]	2000000 OPS in 1.641238 seconds, throughput 1218592.306539
+542237	[1726759962]	2000000 OPS in 1.641572 seconds, throughput 1218344.367472
+542237	[1726759962]	2000000 OPS in 1.631243 seconds, throughput 1226058.901096
+542237	[1726759962]	2000000 OPS in 1.646869 seconds, throughput 1214425.676845
+542237	[1726759964]	2000000 OPS in 1.643638 seconds, throughput 1216812.947863
+542237	[1726759964]	2000000 OPS in 1.642662 seconds, throughput 1217535.926441
+542237	[1726759964]	2000000 OPS in 1.630320 seconds, throughput 1226753.030080
+542237	[1726759964]	2000000 OPS in 1.648664 seconds, throughput 1213103.458315
+542237	[1726759965]	2000000 OPS in 1.642934 seconds, throughput 1217334.354271
+542237	[1726759965]	2000000 OPS in 1.644255 seconds, throughput 1216356.343754
+542237	[1726759965]	2000000 OPS in 1.631649 seconds, throughput 1225753.823279
+542237	[1726759966]	2000000 OPS in 1.647195 seconds, throughput 1214185.327177
+542237	[1726759967]	2000000 OPS in 1.643855 seconds, throughput 1216652.320308
+542237	[1726759967]	2000000 OPS in 1.649281 seconds, throughput 1212649.633386
+542237	[1726759967]	2000000 OPS in 1.630366 seconds, throughput 1226718.417828
+542237	[1726759967]	2000000 OPS in 1.648198 seconds, throughput 1213446.442721
+542237	[1726759968]	2000000 OPS in 1.640230 seconds, throughput 1219341.189955
+542237	[1726759969]	2000000 OPS in 1.643282 seconds, throughput 1217076.557767
+542237	[1726759969]	2000000 OPS in 1.628598 seconds, throughput 1228050.138831
+542237	[1726759969]	2000000 OPS in 1.648371 seconds, throughput 1213319.088967
+542237	[1726759970]	2000000 OPS in 1.643014 seconds, throughput 1217275.081040
+542237	[1726759970]	2000000 OPS in 1.645524 seconds, throughput 1215418.310520
+542237	[1726759970]	2000000 OPS in 1.631503 seconds, throughput 1225863.513582
+542237	[1726759970]	2000000 OPS in 1.647873 seconds, throughput 1213685.763405
+542237	[1726759972]	2000000 OPS in 1.640421 seconds, throughput 1219199.217762
+542237	[1726759972]	2000000 OPS in 1.641916 seconds, throughput 1218089.110527
+542237	[1726759972]	2000000 OPS in 1.628331 seconds, throughput 1228251.504147
+542237	[1726759972]	2000000 OPS in 1.645832 seconds, throughput 1215190.857876
+542237	[1726759973]	2000000 OPS in 1.644756 seconds, throughput 1215985.836197
+542237	[1726759973]	2000000 OPS in 1.643607 seconds, throughput 1216835.898119
+542237	[1726759973]	2000000 OPS in 1.632098 seconds, throughput 1225416.611012
+542237	[1726759974]	2000000 OPS in 1.648658 seconds, throughput 1213107.873191
+542237	[1726759975]	2000000 OPS in 1.640375 seconds, throughput 1219233.406995
+542237	[1726759975]	2000000 OPS in 1.642647 seconds, throughput 1217547.044496
+542237	[1726759975]	2000000 OPS in 1.629298 seconds, throughput 1227522.528107
+542237	[1726759975]	2000000 OPS in 1.644883 seconds, throughput 1215891.950978
+542237	[1726759977]	2000000 OPS in 1.643456 seconds, throughput 1216947.700456
+542237	[1726759977]	2000000 OPS in 1.642040 seconds, throughput 1217997.125527
+542237	[1726759977]	2000000 OPS in 1.630290 seconds, throughput 1226775.604340
+542237	[1726759977]	2000000 OPS in 1.650685 seconds, throughput 1211618.206987
+542237	[1726759978]	2000000 OPS in 1.643304 seconds, throughput 1217060.263956
+542237	[1726759978]	2000000 OPS in 1.629300 seconds, throughput 1227521.021297
+542237	[1726759978]	2000000 OPS in 1.640999 seconds, throughput 1218769.785966
+542237	[1726759979]	2000000 OPS in 1.643123 seconds, throughput 1217194.330552
+542237	[1726759980]	2000000 OPS in 1.641282 seconds, throughput 1218559.638137
+542237	[1726759980]	2000000 OPS in 1.630160 seconds, throughput 1226873.435736
+542237	[1726759980]	2000000 OPS in 1.644376 seconds, throughput 1216266.839214
+542237	[1726759980]	2000000 OPS in 1.645441 seconds, throughput 1215479.619142
+542237	[1726759982]	2000000 OPS in 1.641120 seconds, throughput 1218679.925904
+542237	[1726759982]	2000000 OPS in 1.628410 seconds, throughput 1228191.917269
+542237	[1726759982]	2000000 OPS in 1.641445 seconds, throughput 1218438.631815
+542237	[1726759982]	2000000 OPS in 1.646368 seconds, throughput 1214795.234115
+542237	[1726759983]	2000000 OPS in 1.630337 seconds, throughput 1226740.238368
+542237	[1726759983]	2000000 OPS in 1.639522 seconds, throughput 1219867.741939
+542237	[1726759983]	2000000 OPS in 1.641496 seconds, throughput 1218400.775878
+542237	[1726759984]	2000000 OPS in 1.645536 seconds, throughput 1215409.447135
+542237	[1726759985]	2000000 OPS in 1.629639 seconds, throughput 1227265.670495
+542237	[1726759985]	2000000 OPS in 1.642564 seconds, throughput 1217608.568068
+542237	[1726759985]	2000000 OPS in 1.642515 seconds, throughput 1217644.892132
+542237	[1726759985]	2000000 OPS in 1.647101 seconds, throughput 1214254.620694
+542237	[1726759987]	2000000 OPS in 1.630369 seconds, throughput 1226716.160575
+542237	[1726759987]	2000000 OPS in 1.640825 seconds, throughput 1218899.029452
+542237	[1726759987]	2000000 OPS in 1.642397 seconds, throughput 1217732.375303
+542237	[1726759987]	2000000 OPS in 1.647249 seconds, throughput 1214145.523840
+542237	[1726759988]	2000000 OPS in 1.631062 seconds, throughput 1226194.957641
+542237	[1726759988]	2000000 OPS in 1.641390 seconds, throughput 1218479.459483
+542237	[1726759988]	2000000 OPS in 1.641491 seconds, throughput 1218404.487140
+542237	[1726759989]	2000000 OPS in 1.647245 seconds, throughput 1214148.472146
+542237	[1726759990]	2000000 OPS in 1.631645 seconds, throughput 1225756.828232
+542237	[1726759990]	2000000 OPS in 1.643217 seconds, throughput 1217124.701120
+542237	[1726759990]	2000000 OPS in 1.641758 seconds, throughput 1218206.337353
+542237	[1726759990]	2000000 OPS in 1.649371 seconds, throughput 1212583.463636
+542237	[1726759991]	2000000 OPS in 1.631768 seconds, throughput 1225664.432689
+542237	[1726759991]	2000000 OPS in 1.641288 seconds, throughput 1218555.183490
+542237	[1726759992]	2000000 OPS in 1.644375 seconds, throughput 1216267.578867
+542237	[1726759992]	2000000 OPS in 1.647050 seconds, throughput 1214292.219423
+542237	[1726759993]	2000000 OPS in 1.630623 seconds, throughput 1226525.076612
+542237	[1726759993]	2000000 OPS in 1.643200 seconds, throughput 1217137.293087
+542237	[1726759993]	2000000 OPS in 1.642828 seconds, throughput 1217412.900194
+542237	[1726759994]	2000000 OPS in 1.646413 seconds, throughput 1214762.031155
+542237	[1726759995]	2000000 OPS in 1.628804 seconds, throughput 1227894.823441
+542237	[1726759995]	2000000 OPS in 1.640728 seconds, throughput 1218971.090882
+542237	[1726759995]	2000000 OPS in 1.642457 seconds, throughput 1217687.890764
+542237	[1726759995]	2000000 OPS in 1.647525 seconds, throughput 1213942.125309
+542237	[1726759996]	2000000 OPS in 1.629531 seconds, throughput 1227347.009661
+542237	[1726759996]	2000000 OPS in 1.643177 seconds, throughput 1217154.329692
+542237	[1726759996]	2000000 OPS in 1.642826 seconds, throughput 1217414.382290
+542237	[1726759997]	2000000 OPS in 1.646919 seconds, throughput 1214388.807221
+542237	[1726759998]	2000000 OPS in 1.629398 seconds, throughput 1227447.192153
+542237	[1726759998]	2000000 OPS in 1.640789 seconds, throughput 1218925.772906
+542237	[1726759998]	2000000 OPS in 1.643016 seconds, throughput 1217273.599283
+542237	[1726759998]	2000000 OPS in 1.648301 seconds, throughput 1213370.616168
+542237	[1726760000]	2000000 OPS in 1.634194 seconds, throughput 1223844.904583
+542237	[1726760000]	2000000 OPS in 1.649119 seconds, throughput 1212768.757136
+542237	[1726760000]	2000000 OPS in 1.638278 seconds, throughput 1220794.028852
+542237	[1726760000]	2000000 OPS in 1.643577 seconds, throughput 1216858.108869
+542237	[1726760001]	2000000 OPS in 1.642585 seconds, throughput 1217593.001275
+542237	[1726760001]	2000000 OPS in 1.656229 seconds, throughput 1207562.480792
+542237	[1726760001]	2000000 OPS in 1.634611 seconds, throughput 1223532.693711
+542237	[1726760002]	2000000 OPS in 1.638349 seconds, throughput 1220741.124144
+542237	[1726760003]	2000000 OPS in 1.643347 seconds, throughput 1217028.418222
+542237	[1726760003]	2000000 OPS in 1.634477 seconds, throughput 1223633.003095
+542237	[1726760003]	2000000 OPS in 1.659673 seconds, throughput 1205056.658751
+542237	[1726760003]	2000000 OPS in 1.641113 seconds, throughput 1218685.124059
+542237	[1726760004]	2000000 OPS in 1.642587 seconds, throughput 1217591.518745
+542237	[1726760005]	2000000 OPS in 1.634544 seconds, throughput 1223582.846347
+542237	[1726760005]	2000000 OPS in 1.653650 seconds, throughput 1209445.771475
+542237	[1726760005]	2000000 OPS in 1.637880 seconds, throughput 1221090.678194
+542237	[1726760006]	2000000 OPS in 1.642177 seconds, throughput 1217895.513090
+542237	[1726760006]	2000000 OPS in 1.634940 seconds, throughput 1223286.481461
+542237	[1726760006]	2000000 OPS in 1.654666 seconds, throughput 1208703.146133
+542237	[1726760007]	2000000 OPS in 1.640969 seconds, throughput 1218792.067370
+542237	[1726760008]	2000000 OPS in 1.642382 seconds, throughput 1217743.496945
+542237	[1726760008]	2000000 OPS in 1.632832 seconds, throughput 1224865.754713
+542237	[1726760008]	2000000 OPS in 1.656474 seconds, throughput 1207383.876837
+542237	[1726760008]	2000000 OPS in 1.637105 seconds, throughput 1221668.738413
+542237	[1726760009]	2000000 OPS in 1.641303 seconds, throughput 1218544.047016
+542237	[1726760010]	2000000 OPS in 1.633316 seconds, throughput 1224502.790642
+542237	[1726760010]	2000000 OPS in 1.655381 seconds, throughput 1208181.077347
+542237	[1726760010]	2000000 OPS in 1.638719 seconds, throughput 1220465.497745
+542237	[1726760011]	2000000 OPS in 1.643464 seconds, throughput 1216941.776638
+542237	[1726760011]	2000000 OPS in 1.633241 seconds, throughput 1224559.020990
+542237	[1726760011]	2000000 OPS in 1.656570 seconds, throughput 1207313.907653
+542237	[1726760012]	2000000 OPS in 1.637143 seconds, throughput 1221640.382056
+542237	[1726760013]	2000000 OPS in 1.643563 seconds, throughput 1216868.474163
+542237	[1726760013]	2000000 OPS in 1.630657 seconds, throughput 1226499.502961
+542237	[1726760013]	2000000 OPS in 1.655106 seconds, throughput 1208381.819654
+542237	[1726760013]	2000000 OPS in 1.639386 seconds, throughput 1219968.939591
+542237	[1726760014]	2000000 OPS in 1.642909 seconds, throughput 1217352.878340
+542237	[1726760014]	2000000 OPS in 1.636742 seconds, throughput 1221939.682613
+542237	[1726760015]	2000000 OPS in 1.656580 seconds, throughput 1207306.619662
+542237	[1726760015]	2000000 OPS in 1.638348 seconds, throughput 1220741.869249
+542237	[1726760016]	2000000 OPS in 1.643838 seconds, throughput 1216664.902503
+542237	[1726760016]	2000000 OPS in 1.634762 seconds, throughput 1223419.678216
+542237	[1726760016]	2000000 OPS in 1.657201 seconds, throughput 1206854.207788
+542237	[1726760017]	2000000 OPS in 1.637461 seconds, throughput 1221403.135708
+542237	[1726760018]	2000000 OPS in 1.643166 seconds, throughput 1217162.477802
+542237	[1726760018]	2000000 OPS in 1.634035 seconds, throughput 1223963.990979
+542237	[1726760018]	2000000 OPS in 1.654922 seconds, throughput 1208516.171759
+542237	[1726760018]	2000000 OPS in 1.640091 seconds, throughput 1219444.530822
+542237	[1726760019]	2000000 OPS in 1.642420 seconds, throughput 1217715.322512
+542237	[1726760019]	2000000 OPS in 1.633836 seconds, throughput 1224113.068876
+542237	[1726760020]	2000000 OPS in 1.656201 seconds, throughput 1207582.896037
+542237	[1726760020]	2000000 OPS in 1.636980 seconds, throughput 1221762.025193
+542237	[1726760021]	2000000 OPS in 1.643656 seconds, throughput 1216799.622305
+542237	[1726760021]	2000000 OPS in 1.634683 seconds, throughput 1223478.802924
+542237	[1726760021]	2000000 OPS in 1.654629 seconds, throughput 1208730.174559
+542237	[1726760021]	2000000 OPS in 1.640403 seconds, throughput 1219212.595929
+542237	[1726760023]	2000000 OPS in 1.641466 seconds, throughput 1218423.043791
+542237	[1726760023]	2000000 OPS in 1.634309 seconds, throughput 1223758.787353
+542237	[1726760023]	2000000 OPS in 1.656362 seconds, throughput 1207465.517803
+542237	[1726760023]	2000000 OPS in 1.639794 seconds, throughput 1219665.396995
+542237	[1726760024]	2000000 OPS in 1.641933 seconds, throughput 1218076.498858
+542237	[1726760024]	2000000 OPS in 1.635744 seconds, throughput 1222685.212356
+542237	[1726760025]	2000000 OPS in 1.655788 seconds, throughput 1207884.101105
+542237	[1726760025]	2000000 OPS in 1.638459 seconds, throughput 1220659.168157
+542237	[1726760026]	2000000 OPS in 1.640859 seconds, throughput 1218873.772823
+542237	[1726760026]	2000000 OPS in 1.636542 seconds, throughput 1222089.014520
+542237	[1726760026]	2000000 OPS in 1.655482 seconds, throughput 1208107.366918
+542237	[1726760026]	2000000 OPS in 1.638897 seconds, throughput 1220332.943437
+542237	[1726760027]	2000000 OPS in 1.641447 seconds, throughput 1218437.147224
+542237	[1726760028]	2000000 OPS in 1.635543 seconds, throughput 1222835.474213
+542237	[1726760028]	2000000 OPS in 1.653486 seconds, throughput 1209565.729616
+542237	[1726760028]	2000000 OPS in 1.640269 seconds, throughput 1219312.198182
+542237	[1726760029]	2000000 OPS in 1.643303 seconds, throughput 1217061.004574
+542237	[1726760029]	2000000 OPS in 1.634403 seconds, throughput 1223688.404879
+542237	[1726760029]	2000000 OPS in 1.657423 seconds, throughput 1206692.558267
+542237	[1726760030]	2000000 OPS in 1.640554 seconds, throughput 1219100.377068
+542237	[1726760031]	2000000 OPS in 1.632982 seconds, throughput 1224753.242840
+542237	[1726760031]	2000000 OPS in 1.645381 seconds, throughput 1215523.942479
+542237	[1726760031]	2000000 OPS in 1.656436 seconds, throughput 1207411.575213
+542237	[1726760031]	2000000 OPS in 1.639213 seconds, throughput 1220097.693222
+542237	[1726760032]	2000000 OPS in 1.636668 seconds, throughput 1221994.931165
+542237	[1726760032]	2000000 OPS in 1.643339 seconds, throughput 1217034.342884
+542237	[1726760033]	2000000 OPS in 1.654777 seconds, throughput 1208622.068109
+542237	[1726760033]	2000000 OPS in 1.638074 seconds, throughput 1220946.062266
+542237	[1726760034]	2000000 OPS in 1.633815 seconds, throughput 1224128.802833
+542237	[1726760034]	2000000 OPS in 1.640695 seconds, throughput 1218995.608568
+542237	[1726760034]	2000000 OPS in 1.656043 seconds, throughput 1207698.109288
+542237	[1726760035]	2000000 OPS in 1.639969 seconds, throughput 1219535.247313
+542237	[1726760036]	2000000 OPS in 1.637340 seconds, throughput 1221493.397828
+542237	[1726760036]	2000000 OPS in 1.643112 seconds, throughput 1217202.479198
+542237	[1726760036]	2000000 OPS in 1.655591 seconds, throughput 1208027.828129
+542237	[1726760036]	2000000 OPS in 1.640839 seconds, throughput 1218888.629536
+542237	[1726760037]	2000000 OPS in 1.634449 seconds, throughput 1223653.965342
+542237	[1726760037]	2000000 OPS in 1.642982 seconds, throughput 1217298.789640
+542237	[1726760038]	2000000 OPS in 1.658181 seconds, throughput 1206140.946013
+542237	[1726760038]	2000000 OPS in 1.640273 seconds, throughput 1219309.224745
+542237	[1726760039]	2000000 OPS in 1.633325 seconds, throughput 1224496.043347
+542237	[1726760039]	2000000 OPS in 1.645254 seconds, throughput 1215617.770873
+542237	[1726760039]	2000000 OPS in 1.657192 seconds, throughput 1206860.762060
+542237	[1726760039]	2000000 OPS in 1.638956 seconds, throughput 1220289.013250
+542237	[1726760041]	2000000 OPS in 1.634903 seconds, throughput 1223314.166039
+542237	[1726760041]	2000000 OPS in 1.643447 seconds, throughput 1216954.364820
+542237	[1726760041]	2000000 OPS in 1.658429 seconds, throughput 1205960.580766
+542237	[1726760041]	2000000 OPS in 1.638557 seconds, throughput 1220586.162093
+542237	[1726760042]	2000000 OPS in 1.635145 seconds, throughput 1223133.116635
+542237	[1726760042]	2000000 OPS in 1.642842 seconds, throughput 1217402.525623
+542237	[1726760043]	2000000 OPS in 1.659575 seconds, throughput 1205127.818869
+542237	[1726760043]	2000000 OPS in 1.640593 seconds, throughput 1219071.396745
+542237	[1726760044]	2000000 OPS in 1.633433 seconds, throughput 1224415.081610
+542237	[1726760044]	2000000 OPS in 1.642753 seconds, throughput 1217468.481263
+542237	[1726760044]	2000000 OPS in 1.639517 seconds, throughput 1219871.462144
+542237	[1726760044]	2000000 OPS in 1.654838 seconds, throughput 1208577.516349
+542237	[1726760045]	2000000 OPS in 1.632203 seconds, throughput 1225337.779676
+542237	[1726760046]	2000000 OPS in 1.644240 seconds, throughput 1216367.440276
+542237	[1726760046]	2000000 OPS in 1.639327 seconds, throughput 1220012.846735
+542237	[1726760046]	2000000 OPS in 1.655591 seconds, throughput 1208027.828129
+542237	[1726760047]	2000000 OPS in 1.635337 seconds, throughput 1222989.512253
+542237	[1726760047]	2000000 OPS in 1.641955 seconds, throughput 1218060.178263
+542237	[1726760048]	2000000 OPS in 1.640190 seconds, throughput 1219370.926539
+542237	[1726760048]	2000000 OPS in 1.655091 seconds, throughput 1208392.771153
+542237	[1726760049]	2000000 OPS in 1.636680 seconds, throughput 1221985.971601
+542237	[1726760049]	2000000 OPS in 1.643041 seconds, throughput 1217255.077627
+542237	[1726760049]	2000000 OPS in 1.638972 seconds, throughput 1220277.100524
+542237	[1726760049]	2000000 OPS in 1.656574 seconds, throughput 1207310.992446
+542237	[1726760050]	2000000 OPS in 1.634505 seconds, throughput 1223612.041566
+542237	[1726760050]	2000000 OPS in 1.643659 seconds, throughput 1216797.401407
+542237	[1726760051]	2000000 OPS in 1.636387 seconds, throughput 1222204.771854
+542237	[1726760051]	2000000 OPS in 1.660646 seconds, throughput 1204350.596093
+542237	[1726760052]	2000000 OPS in 1.633513 seconds, throughput 1224355.116856
+542237	[1726760052]	2000000 OPS in 1.644148 seconds, throughput 1216435.503373
+542237	[1726760053]	2000000 OPS in 1.639158 seconds, throughput 1220138.632151
+542237	[1726760053]	2000000 OPS in 1.656514 seconds, throughput 1207354.722025
+542237	[1726760054]	2000000 OPS in 1.634556 seconds, throughput 1223573.863483
+542237	[1726760054]	2000000 OPS in 1.644634 seconds, throughput 1216076.038803
+542237	[1726760054]	2000000 OPS in 1.638855 seconds, throughput 1220364.217701
+542237	[1726760054]	2000000 OPS in 1.653997 seconds, throughput 1209192.036019
+542237	[1726760055]	2000000 OPS in 1.633986 seconds, throughput 1224000.695232
+542237	[1726760055]	2000000 OPS in 1.643886 seconds, throughput 1216629.376976
+542237	[1726760056]	2000000 OPS in 1.639277 seconds, throughput 1220050.058654
+542237	[1726760056]	2000000 OPS in 1.657665 seconds, throughput 1206516.395050
+542237	[1726760057]	2000000 OPS in 1.637219 seconds, throughput 1221583.673290
+542237	[1726760057]	2000000 OPS in 1.644160 seconds, throughput 1216426.625146
+542237	[1726760058]	2000000 OPS in 1.637725 seconds, throughput 1221206.246470
+542237	[1726760058]	2000000 OPS in 1.656409 seconds, throughput 1207431.256411
+542237	[1726760059]	2000000 OPS in 1.633433 seconds, throughput 1224415.081610
+542237	[1726760059]	2000000 OPS in 1.643684 seconds, throughput 1216778.894240
+542237	[1726760059]	2000000 OPS in 1.638632 seconds, throughput 1220530.296003
+542237	[1726760059]	2000000 OPS in 1.659209 seconds, throughput 1205393.654446
+542237	[1726760060]	2000000 OPS in 1.639226 seconds, throughput 1220088.017150
+542237	[1726760060]	2000000 OPS in 1.645187 seconds, throughput 1215667.276729
+542237	[1726760061]	2000000 OPS in 1.639541 seconds, throughput 1219853.605369
+542237	[1726760061]	2000000 OPS in 1.659482 seconds, throughput 1205195.356141
+542237	[1726760062]	2000000 OPS in 1.635511 seconds, throughput 1222859.399906
+542237	[1726760062]	2000000 OPS in 1.645075 seconds, throughput 1215750.041791
+542237	[1726760062]	2000000 OPS in 1.639633 seconds, throughput 1219785.159240
+542237	[1726760063]	2000000 OPS in 1.656114 seconds, throughput 1207646.333525
+542237	[1726760063]	2000000 OPS in 1.635765 seconds, throughput 1222669.515487
+542237	[1726760064]	2000000 OPS in 1.643131 seconds, throughput 1217188.404333
+542237	[1726760064]	2000000 OPS in 1.640432 seconds, throughput 1219191.042360
+542237	[1726760064]	2000000 OPS in 1.655629 seconds, throughput 1208000.101472
+542237	[1726760065]	2000000 OPS in 1.634440 seconds, throughput 1223660.703360
+542237	[1726760065]	2000000 OPS in 1.642866 seconds, throughput 1217384.741056
+542237	[1726760066]	2000000 OPS in 1.638788 seconds, throughput 1220414.110916
+542237	[1726760066]	2000000 OPS in 1.656081 seconds, throughput 1207670.397764
+542237	[1726760067]	2000000 OPS in 1.634192 seconds, throughput 1223846.402381
+542237	[1726760067]	2000000 OPS in 1.643931 seconds, throughput 1216596.073679
+542237	[1726760067]	2000000 OPS in 1.641492 seconds, throughput 1218403.744886
+542237	[1726760068]	2000000 OPS in 1.657925 seconds, throughput 1206327.186091
+542237	[1726760068]	2000000 OPS in 1.633616 seconds, throughput 1224277.920882
+542237	[1726760069]	2000000 OPS in 1.640822 seconds, throughput 1218901.258028
+542237	[1726760069]	2000000 OPS in 1.636733 seconds, throughput 1221946.401765
+542237	[1726760069]	2000000 OPS in 1.656440 seconds, throughput 1207408.659535
+542237	[1726760070]	2000000 OPS in 1.634582 seconds, throughput 1223554.401064
+542237	[1726760070]	2000000 OPS in 1.643258 seconds, throughput 1217094.333330
+542237	[1726760071]	2000000 OPS in 1.639466 seconds, throughput 1219909.409527
+542237	[1726760071]	2000000 OPS in 1.652369 seconds, throughput 1210383.394992
+542237	[1726760072]	2000000 OPS in 1.633269 seconds, throughput 1224538.027722
+542237	[1726760072]	2000000 OPS in 1.642385 seconds, throughput 1217741.272601
+542237	[1726760072]	2000000 OPS in 1.639275 seconds, throughput 1220051.547178
+542237	[1726760073]	2000000 OPS in 1.659631 seconds, throughput 1205087.154916
+542237	[1726760073]	2000000 OPS in 1.634493 seconds, throughput 1223621.024991
+542237	[1726760074]	2000000 OPS in 1.642203 seconds, throughput 1217876.230892
+542237	[1726760074]	2000000 OPS in 1.639023 seconds, throughput 1220239.130262
+542237	[1726760074]	2000000 OPS in 1.659518 seconds, throughput 1205169.211783
+542237	[1726760075]	2000000 OPS in 1.633626 seconds, throughput 1224270.426646
+542237	[1726760075]	2000000 OPS in 1.644422 seconds, throughput 1216232.816151
+542237	[1726760076]	2000000 OPS in 1.639875 seconds, throughput 1219605.152832
+542237	[1726760076]	2000000 OPS in 1.655539 seconds, throughput 1208065.771933
+542237	[1726760077]	2000000 OPS in 1.639452 seconds, throughput 1219919.826869
+542237	[1726760077]	2000000 OPS in 1.644146 seconds, throughput 1216436.983090
+542237	[1726760077]	2000000 OPS in 1.640862 seconds, throughput 1218871.544347
+542237	[1726760078]	2000000 OPS in 1.655727 seconds, throughput 1207928.601756
+542237	[1726760078]	2000000 OPS in 1.635221 seconds, throughput 1223076.269202
+542237	[1726760078]	2000000 OPS in 1.644476 seconds, throughput 1216192.878461
+542237	[1726760079]	2000000 OPS in 1.638864 seconds, throughput 1220357.515938
+542237	[1726760079]	2000000 OPS in 1.654414 seconds, throughput 1208887.255548
+542237	[1726760080]	2000000 OPS in 1.636435 seconds, throughput 1222168.922078
+542237	[1726760080]	2000000 OPS in 1.644593 seconds, throughput 1216106.355797
+542237	[1726760080]	2000000 OPS in 1.638167 seconds, throughput 1220876.748219
+542237	[1726760081]	2000000 OPS in 1.657097 seconds, throughput 1206929.950389
+542237	[1726760081]	2000000 OPS in 1.635661 seconds, throughput 1222747.256308
+542237	[1726760082]	2000000 OPS in 1.642732 seconds, throughput 1217484.044872
+542237	[1726760082]	2000000 OPS in 1.641183 seconds, throughput 1218633.144506
+542237	[1726760083]	2000000 OPS in 1.655614 seconds, throughput 1208011.046053
+542237	[1726760083]	2000000 OPS in 1.635262 seconds, throughput 1223045.603701
+542237	[1726760083]	2000000 OPS in 1.640564 seconds, throughput 1219092.946084
+542237	[1726760084]	2000000 OPS in 1.639031 seconds, throughput 1220233.174357
+542237	[1726760084]	2000000 OPS in 1.655189 seconds, throughput 1208321.224948
+542237	[1726760085]	2000000 OPS in 1.633280 seconds, throughput 1224529.780564
+542237	[1726760085]	2000000 OPS in 1.645937 seconds, throughput 1215113.336659
+542237	[1726760085]	2000000 OPS in 1.638389 seconds, throughput 1220711.320694
+542237	[1726760086]	2000000 OPS in 1.655727 seconds, throughput 1207928.601756
+542237	[1726760086]	2000000 OPS in 1.631429 seconds, throughput 1225919.117534
+542237	[1726760087]	2000000 OPS in 1.643531 seconds, throughput 1216892.166926
+542237	[1726760087]	2000000 OPS in 1.639622 seconds, throughput 1219793.342612
+542237	[1726760087]	2000000 OPS in 1.654678 seconds, throughput 1208694.380417
+542237	[1726760088]	2000000 OPS in 1.634435 seconds, throughput 1223664.446735
+542237	[1726760088]	2000000 OPS in 1.642832 seconds, throughput 1217409.936013
+542237	[1726760089]	2000000 OPS in 1.639576 seconds, throughput 1219827.565175
+542237	[1726760089]	2000000 OPS in 1.657185 seconds, throughput 1206865.859877
+542237	[1726760090]	2000000 OPS in 1.634312 seconds, throughput 1223756.540979
+542237	[1726760090]	2000000 OPS in 1.642460 seconds, throughput 1217685.666622
+542237	[1726760090]	2000000 OPS in 1.640795 seconds, throughput 1218921.315582
+542237	[1726760091]	2000000 OPS in 1.655468 seconds, throughput 1208117.583668
+542237	[1726760091]	2000000 OPS in 1.633642 seconds, throughput 1224258.436059
+542237	[1726760092]	2000000 OPS in 1.643017 seconds, throughput 1217272.858406
+542237	[1726760092]	2000000 OPS in 1.638977 seconds, throughput 1220273.377845
+542237	[1726760092]	2000000 OPS in 1.655560 seconds, throughput 1208050.448187
+542237	[1726760093]	2000000 OPS in 1.633704 seconds, throughput 1224211.974752
+542237	[1726760093]	2000000 OPS in 1.645214 seconds, throughput 1215647.326123
+542237	[1726760094]	2000000 OPS in 1.640770 seconds, throughput 1218939.887979
+542237	[1726760094]	2000000 OPS in 1.656400 seconds, throughput 1207437.816952
+542237	[1726760095]	2000000 OPS in 1.636051 seconds, throughput 1222455.779190
+542237	[1726760095]	2000000 OPS in 1.643311 seconds, throughput 1217055.079653
+542237	[1726760095]	2000000 OPS in 1.640040 seconds, throughput 1219482.451648
+542237	[1726760096]	2000000 OPS in 1.656828 seconds, throughput 1207125.905646
+542237	[1726760096]	2000000 OPS in 1.633362 seconds, throughput 1224468.305250
+542237	[1726760097]	2000000 OPS in 1.643859 seconds, throughput 1216649.359830
+542237	[1726760097]	2000000 OPS in 1.640262 seconds, throughput 1219317.401732
+542237	[1726760097]	2000000 OPS in 1.654670 seconds, throughput 1208700.224214
+542237	[1726760098]	2000000 OPS in 1.633670 seconds, throughput 1224237.453096
+542237	[1726760098]	2000000 OPS in 1.644084 seconds, throughput 1216482.856107
+542237	[1726760098]	2000000 OPS in 1.638259 seconds, throughput 1220808.187228
+542237	[1726760099]	2000000 OPS in 1.654416 seconds, throughput 1208885.794141
+542237	[1726760099]	2000000 OPS in 1.632881 seconds, throughput 1224828.998561
+542237	[1726760100]	2000000 OPS in 1.642254 seconds, throughput 1217838.409893
+542237	[1726760100]	2000000 OPS in 1.639120 seconds, throughput 1220166.918834
+542237	[1726760101]	2000000 OPS in 1.655197 seconds, throughput 1208315.384815
+542237	[1726760101]	2000000 OPS in 1.634909 seconds, throughput 1223309.676563
+542237	[1726760101]	2000000 OPS in 1.642887 seconds, throughput 1217369.179986
+542237	[1726760102]	2000000 OPS in 1.638227 seconds, throughput 1220832.033656
+542237	[1726760102]	2000000 OPS in 1.657411 seconds, throughput 1206701.294971
+542237	[1726760103]	2000000 OPS in 1.633938 seconds, throughput 1224036.652554
+542237	[1726760103]	2000000 OPS in 1.642980 seconds, throughput 1217300.271458
+542237	[1726760103]	2000000 OPS in 1.636789 seconds, throughput 1221904.594911
+542237	[1726760104]	2000000 OPS in 1.654945 seconds, throughput 1208499.376112
+542237	[1726760104]	2000000 OPS in 1.634947 seconds, throughput 1223281.243979
+542237	[1726760105]	2000000 OPS in 1.643959 seconds, throughput 1216575.352548
+542237	[1726760105]	2000000 OPS in 1.639441 seconds, throughput 1219928.012048
+542237	[1726760106]	2000000 OPS in 1.654970 seconds, throughput 1208481.120504
+542237	[1726760106]	2000000 OPS in 1.635557 seconds, throughput 1222825.007016
+542237	[1726760106]	2000000 OPS in 1.643165 seconds, throughput 1217163.218545
+542237	[1726760107]	2000000 OPS in 1.636089 seconds, throughput 1222427.386285
+542237	[1726760107]	2000000 OPS in 1.652563 seconds, throughput 1210241.303962
+542237	[1726760108]	2000000 OPS in 1.633578 seconds, throughput 1224306.399817
+542237	[1726760108]	2000000 OPS in 1.640484 seconds, throughput 1219152.396488
+542237	[1726760108]	2000000 OPS in 1.638059 seconds, throughput 1220957.242688
+542237	[1726760109]	2000000 OPS in 1.655866 seconds, throughput 1207827.203409
+542237	[1726760109]	2000000 OPS in 1.634315 seconds, throughput 1223754.294613
+542237	[1726760110]	2000000 OPS in 1.643660 seconds, throughput 1216796.661110
+542237	[1726760110]	2000000 OPS in 1.639750 seconds, throughput 1219698.124714
+542237	[1726760111]	2000000 OPS in 1.658639 seconds, throughput 1205807.894304
+542237	[1726760111]	2000000 OPS in 1.634499 seconds, throughput 1223616.533262
+542237	[1726760111]	2000000 OPS in 1.641506 seconds, throughput 1218393.353421
+542237	[1726760112]	2000000 OPS in 1.636963 seconds, throughput 1221774.713295
+542237	[1726760112]	2000000 OPS in 1.653943 seconds, throughput 1209231.515234
+542237	[1726760113]	2000000 OPS in 1.634217 seconds, throughput 1223827.680167
+542237	[1726760113]	2000000 OPS in 1.639726 seconds, throughput 1219715.976938
+542237	[1726760113]	2000000 OPS in 1.638661 seconds, throughput 1220508.695819
+542237	[1726760114]	2000000 OPS in 1.656250 seconds, throughput 1207547.169811
+542237	[1726760114]	2000000 OPS in 1.634353 seconds, throughput 1223725.841357
+542237	[1726760115]	2000000 OPS in 1.641872 seconds, throughput 1218121.753706
+542237	[1726760115]	2000000 OPS in 1.639411 seconds, throughput 1219950.335822
+542237	[1726760116]	2000000 OPS in 1.657414 seconds, throughput 1206699.110783
+542237	[1726760116]	2000000 OPS in 1.634841 seconds, throughput 1223360.559223
+542237	[1726760116]	2000000 OPS in 1.642513 seconds, throughput 1217646.374793
+542237	[1726760117]	2000000 OPS in 1.639772 seconds, throughput 1219681.760635
+542237	[1726760117]	2000000 OPS in 1.655715 seconds, throughput 1207937.356369
+542237	[1726760117]	2000000 OPS in 1.633240 seconds, throughput 1224559.770762
+542237	[1726760118]	2000000 OPS in 1.640470 seconds, throughput 1219162.800905
+542237	[1726760118]	2000000 OPS in 1.638214 seconds, throughput 1220841.721533
+542237	[1726760119]	2000000 OPS in 1.655209 seconds, throughput 1208306.624722
+542237	[1726760119]	2000000 OPS in 1.635878 seconds, throughput 1222585.058299
+542237	[1726760120]	2000000 OPS in 1.641787 seconds, throughput 1218184.819346
+542237	[1726760120]	2000000 OPS in 1.640770 seconds, throughput 1218939.887979
+542237	[1726760121]	2000000 OPS in 1.654387 seconds, throughput 1208906.984883
+542237	[1726760121]	2000000 OPS in 1.632420 seconds, throughput 1225174.893716
+542237	[1726760121]	2000000 OPS in 1.643660 seconds, throughput 1216796.661110
+542237	[1726760121]	2000000 OPS in 1.638741 seconds, throughput 1220449.113069
+542237	[1726760122]	2000000 OPS in 1.654262 seconds, throughput 1208998.332791
+542237	[1726760122]	2000000 OPS in 1.633981 seconds, throughput 1224004.440688
+542237	[1726760123]	2000000 OPS in 1.643179 seconds, throughput 1217152.848229
+542237	[1726760123]	2000000 OPS in 1.638328 seconds, throughput 1220756.771538
+542237	[1726760124]	2000000 OPS in 1.655828 seconds, throughput 1207854.922130
+542237	[1726760124]	2000000 OPS in 1.634591 seconds, throughput 1223547.664217
+542237	[1726760124]	2000000 OPS in 1.644874 seconds, throughput 1215898.603784
+542237	[1726760125]	2000000 OPS in 1.639513 seconds, throughput 1219874.438324
+542237	[1726760126]	2000000 OPS in 1.656727 seconds, throughput 1207199.496356
+542237	[1726760126]	2000000 OPS in 1.634440 seconds, throughput 1223660.703360
+542237	[1726760126]	2000000 OPS in 1.644213 seconds, throughput 1216387.414526
+542237	[1726760126]	2000000 OPS in 1.639013 seconds, throughput 1220246.575225
+542237	[1726760127]	2000000 OPS in 1.660351 seconds, throughput 1204564.577008
+542237	[1726760127]	2000000 OPS in 1.634171 seconds, throughput 1223862.129483
+542237	[1726760128]	2000000 OPS in 1.639507 seconds, throughput 1219878.902621
+542237	[1726760128]	2000000 OPS in 1.637654 seconds, throughput 1221259.191502
+542237	[1726760129]	2000000 OPS in 1.633202 seconds, throughput 1224588.262811
+542237	[1726760129]	2000000 OPS in 1.656715 seconds, throughput 1207208.240403
+542237	[1726760129]	2000000 OPS in 1.643685 seconds, throughput 1216778.153965
+542237	[1726760130]	2000000 OPS in 1.638794 seconds, throughput 1220409.642701
+542237	[1726760130]	2000000 OPS in 1.635770 seconds, throughput 1222665.778196
+542237	[1726760131]	2000000 OPS in 1.655255 seconds, throughput 1208273.045543
+542237	[1726760131]	2000000 OPS in 1.643320 seconds, throughput 1217048.414186
+542237	[1726760131]	2000000 OPS in 1.637669 seconds, throughput 1221248.005549
+542237	[1726760132]	2000000 OPS in 1.632794 seconds, throughput 1224894.261003
+542237	[1726760132]	2000000 OPS in 1.655743 seconds, throughput 1207916.929137
+542237	[1726760133]	2000000 OPS in 1.632766 seconds, throughput 1224915.266486
+542237	[1726760134]	2000000 OPS in 1.606349 seconds, throughput 1245059.448476
+542237	[1726760134]	2000000 OPS in 1.660767 seconds, throughput 1204262.849635
+542237	[1726760134]	2000000 OPS in 1.594186 seconds, throughput 1254558.752868
+542237	[1726760135]	2000000 OPS in 1.592406 seconds, throughput 1255961.105396
+542237	[1726760135]	2000000 OPS in 1.662176 seconds, throughput 1203242.015286
+542237	[1726760136]	2000000 OPS in 1.595182 seconds, throughput 1253775.431267
+542237	[1726760137]	2000000 OPS in 1.591832 seconds, throughput 1256413.993436
+542237	[1726760137]	2000000 OPS in 1.666473 seconds, throughput 1200139.456205
+542237	[1726760138]	2000000 OPS in 1.595481 seconds, throughput 1253540.468360
+542237	[1726760138]	2000000 OPS in 1.592106 seconds, throughput 1256197.765727
+542237	[1726760139]	2000000 OPS in 1.596390 seconds, throughput 1252826.690220
+542237	[1726760140]	2000000 OPS in 1.594588 seconds, throughput 1254242.475172
+542237	[1726760142]	2000000 OPS in 1.531690 seconds, throughput 1305747.246505
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     204756 ms       818997 ms            4 CompactionCPUUsage=0.306465 CompactionThroughput=3.75793G Lat_Get_Avg=603.904 Lat_Get_P50=537.843 Lat_Get_P95=1079.62 Lat_Get_P99=2.36494k Lat_Put_Avg=1018.68 Lat_Put_P50=1029.52 Lat_Put_P95=1.57191k Lat_Put_P99=1.86532k items_per_second=4.88387M/s
+3647.21user 18.22system 14:13.51elapsed 429%CPU (0avgtext+0avgdata 10634116maxresident)k
+310961inputs+20858336outputs (22118major+2137553minor)pagefaults 0swaps

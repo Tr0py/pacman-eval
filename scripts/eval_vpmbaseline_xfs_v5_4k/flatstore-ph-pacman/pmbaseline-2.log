@@ -1,0 +1,515 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 82%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-09-19T10:36:05-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2999.42 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.21, 4.27, 4.61
+[1726760165]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1726760165]	Setup starts!
+[1726760165]	Setup starts!
+[1726760165]	Setup starts!
+Using MADVISE_HUGE
+idx_start_addr_ = 0x7f0604c00000, is aligned to 2MB = 1
+idx_pool_size_ = 42949672960, is aligned to 2MB = 1
+DB index type: CCEH
+Using MADVISE_HUGE
+pool_start_ 0x7f0409000000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1726760167]	Initializing log segments...
+Log: pool_start 0x7f0409000000 total segments: 2028  cleaners: 2
+[1726760169]Initialized 2026 free log segments...
+[1726760169]	DB init finished in 3.524209 seconds
+[1726760169]	DB init finished in 3.524326 seconds
+[1726760169]	DB init finished in 3.524093 seconds
+[1726760169]	DB init finished in 3.524259 seconds
+[1726760173]	DB load finished in 4.207488 seconds
+[1726760173]	DB load finished in 4.212260 seconds
+[1726760173]	DB load finished in 4.217707 seconds
+[1726760174]	DB load finished in 4.585215 seconds
+[1726760174]	DB warmup finished in 0.000016 seconds
+[1726760174]	DB warmup finished in 0.373092 seconds
+[1726760174]	DB warmup finished in 0.377861 seconds
+[1726760174]	DB warmup finished in 0.367643 seconds
+[1726760174]	ETC init!
+[1726760174]	ETC starts!
+[1726760174]	ETC init!
+[1726760174]	ETC starts!
+[1726760174]	ETC init!
+[1726760174]	ETC init!
+[1726760174]	ETC starts!
+[1726760174]	ETC starts!
+552827	[1726760175]	2000000 OPS in 1.618377 seconds, throughput 1235805.995760
+552827	[1726760175]	2000000 OPS in 1.634409 seconds, throughput 1223683.912656
+552827	[1726760175]	2000000 OPS in 1.666002 seconds, throughput 1200478.750926
+552827	[1726760175]	2000000 OPS in 1.852945 seconds, throughput 1079362.852108
+552827	[1726760177]	2000000 OPS in 1.533584 seconds, throughput 1304134.628426
+552827	[1726760177]	2000000 OPS in 1.548941 seconds, throughput 1291204.765062
+552827	[1726760177]	2000000 OPS in 1.552208 seconds, throughput 1288487.109975
+552827	[1726760177]	2000000 OPS in 1.798879 seconds, throughput 1111803.517635
+552827	[1726760178]	2000000 OPS in 1.544405 seconds, throughput 1294997.102444
+552827	[1726760178]	2000000 OPS in 1.566033 seconds, throughput 1277112.295846
+552827	[1726760178]	2000000 OPS in 1.544423 seconds, throughput 1294982.009462
+552827	[1726760179]	2000000 OPS in 1.655278 seconds, throughput 1208256.256653
+552827	[1726760180]	2000000 OPS in 1.562482 seconds, throughput 1280014.745770
+552827	[1726760180]	2000000 OPS in 1.545900 seconds, throughput 1293744.744162
+552827	[1726760180]	2000000 OPS in 1.569426 seconds, throughput 1274351.259633
+552827	[1726760180]	2000000 OPS in 1.558785 seconds, throughput 1283050.581062
+552827	[1726760181]	2000000 OPS in 1.558205 seconds, throughput 1283528.162212
+552827	[1726760181]	2000000 OPS in 1.555333 seconds, throughput 1285898.261015
+552827	[1726760181]	2000000 OPS in 1.562285 seconds, throughput 1280176.152239
+552827	[1726760182]	2000000 OPS in 1.656179 seconds, throughput 1207598.937071
+552827	[1726760183]	2000000 OPS in 1.520554 seconds, throughput 1315310.077774
+552827	[1726760183]	2000000 OPS in 1.536442 seconds, throughput 1301708.753080
+552827	[1726760183]	2000000 OPS in 1.531433 seconds, throughput 1305966.372672
+552827	[1726760184]	2000000 OPS in 1.549344 seconds, throughput 1290868.909680
+552827	[1726760184]	2000000 OPS in 1.532408 seconds, throughput 1305135.446957
+552827	[1726760185]	2000000 OPS in 1.550289 seconds, throughput 1290082.042768
+552827	[1726760185]	2000000 OPS in 1.544053 seconds, throughput 1295292.324810
+552827	[1726760185]	2000000 OPS in 1.560094 seconds, throughput 1281974.034898
+552827	[1726760186]	2000000 OPS in 1.541346 seconds, throughput 1297567.191273
+552827	[1726760186]	2000000 OPS in 1.542692 seconds, throughput 1296435.062864
+552827	[1726760186]	2000000 OPS in 1.565671 seconds, throughput 1277407.577965
+552827	[1726760187]	2000000 OPS in 1.575801 seconds, throughput 1269195.793124
+552827	[1726760188]	2000000 OPS in 1.547494 seconds, throughput 1292412.119207
+552827	[1726760188]	2000000 OPS in 1.558904 seconds, throughput 1282952.638520
+552827	[1726760188]	2000000 OPS in 1.580881 seconds, throughput 1265117.361775
+552827	[1726760188]	2000000 OPS in 1.583203 seconds, throughput 1263261.881136
+552827	[1726760189]	2000000 OPS in 1.552433 seconds, throughput 1288300.364653
+552827	[1726760189]	2000000 OPS in 1.562571 seconds, throughput 1279941.839443
+552827	[1726760189]	2000000 OPS in 1.580817 seconds, throughput 1265168.580550
+552827	[1726760190]	2000000 OPS in 1.590983 seconds, throughput 1257084.456591
+552827	[1726760191]	2000000 OPS in 1.540948 seconds, throughput 1297902.330254
+552827	[1726760191]	2000000 OPS in 1.549916 seconds, throughput 1290392.511594
+552827	[1726760191]	2000000 OPS in 1.559878 seconds, throughput 1282151.552878
+552827	[1726760192]	2000000 OPS in 1.597782 seconds, throughput 1251735.217946
+552827	[1726760192]	2000000 OPS in 1.545574 seconds, throughput 1294017.627108
+552827	[1726760192]	2000000 OPS in 1.560506 seconds, throughput 1281635.572052
+552827	[1726760192]	2000000 OPS in 1.565817 seconds, throughput 1277288.469853
+552827	[1726760193]	2000000 OPS in 1.579051 seconds, throughput 1266583.536567
+552827	[1726760194]	2000000 OPS in 1.553910 seconds, throughput 1287075.828072
+552827	[1726760194]	2000000 OPS in 1.567049 seconds, throughput 1276284.277007
+552827	[1726760194]	2000000 OPS in 1.575741 seconds, throughput 1269244.120703
+552827	[1726760195]	2000000 OPS in 1.579854 seconds, throughput 1265939.764054
+552827	[1726760195]	2000000 OPS in 1.551558 seconds, throughput 1289026.900702
+552827	[1726760195]	2000000 OPS in 1.563692 seconds, throughput 1279024.257974
+552827	[1726760196]	2000000 OPS in 1.574342 seconds, throughput 1270372.003034
+552827	[1726760196]	2000000 OPS in 1.576341 seconds, throughput 1268761.010467
+552827	[1726760197]	2000000 OPS in 1.550938 seconds, throughput 1289542.199624
+552827	[1726760197]	2000000 OPS in 1.566021 seconds, throughput 1277122.082016
+552827	[1726760197]	2000000 OPS in 1.572355 seconds, throughput 1271977.384242
+552827	[1726760198]	2000000 OPS in 1.576265 seconds, throughput 1268822.184087
+552827	[1726760198]	2000000 OPS in 1.554849 seconds, throughput 1286298.540887
+552827	[1726760199]	2000000 OPS in 1.563900 seconds, throughput 1278854.146685
+552827	[1726760199]	2000000 OPS in 1.572257 seconds, throughput 1272056.667580
+552827	[1726760199]	2000000 OPS in 1.576666 seconds, throughput 1268499.479281
+552827	[1726760200]	2000000 OPS in 1.552674 seconds, throughput 1288100.399698
+552827	[1726760200]	2000000 OPS in 1.562575 seconds, throughput 1279938.562949
+552827	[1726760200]	2000000 OPS in 1.574980 seconds, throughput 1269857.395015
+552827	[1726760201]	2000000 OPS in 1.574209 seconds, throughput 1270479.332795
+552827	[1726760201]	2000000 OPS in 1.552833 seconds, throughput 1287968.506594
+552827	[1726760202]	2000000 OPS in 1.561666 seconds, throughput 1280683.577666
+552827	[1726760202]	2000000 OPS in 1.566714 seconds, throughput 1276557.176358
+552827	[1726760203]	2000000 OPS in 1.569412 seconds, throughput 1274362.627532
+552827	[1726760203]	2000000 OPS in 1.553074 seconds, throughput 1287768.644636
+552827	[1726760203]	2000000 OPS in 1.563351 seconds, throughput 1279303.240283
+552827	[1726760203]	2000000 OPS in 1.568320 seconds, throughput 1275249.948990
+552827	[1726760204]	2000000 OPS in 1.621170 seconds, throughput 1233676.912353
+552827	[1726760205]	2000000 OPS in 1.548985 seconds, throughput 1291168.087490
+552827	[1726760205]	2000000 OPS in 1.561680 seconds, throughput 1280672.096716
+552827	[1726760205]	2000000 OPS in 1.854538 seconds, throughput 1078435.707438
+552827	[1726760206]	2000000 OPS in 1.577369 seconds, throughput 1267934.135893
+552827	[1726760206]	2000000 OPS in 1.545626 seconds, throughput 1293974.092051
+552827	[1726760206]	2000000 OPS in 1.557216 seconds, throughput 1284343.340937
+552827	[1726760207]	2000000 OPS in 1.944384 seconds, throughput 1028603.403443
+552827	[1726760207]	2000000 OPS in 1.577666 seconds, throughput 1267695.443776
+552827	[1726760208]	2000000 OPS in 1.549286 seconds, throughput 1290917.235423
+552827	[1726760208]	2000000 OPS in 1.563336 seconds, throughput 1279315.515027
+552827	[1726760209]	2000000 OPS in 1.575856 seconds, throughput 1269151.496076
+552827	[1726760209]	2000000 OPS in 1.777680 seconds, throughput 1125061.878403
+552827	[1726760209]	2000000 OPS in 1.548178 seconds, throughput 1291841.119044
+552827	[1726760209]	2000000 OPS in 1.559717 seconds, throughput 1282283.901503
+552827	[1726760211]	2000000 OPS in 1.579621 seconds, throughput 1266126.494900
+552827	[1726760211]	2000000 OPS in 1.769531 seconds, throughput 1130242.985288
+552827	[1726760211]	2000000 OPS in 1.554136 seconds, throughput 1286888.663540
+552827	[1726760211]	2000000 OPS in 1.566937 seconds, throughput 1276375.502014
+552827	[1726760212]	2000000 OPS in 1.579085 seconds, throughput 1266556.265179
+552827	[1726760212]	2000000 OPS in 1.579153 seconds, throughput 1266501.725925
+552827	[1726760212]	2000000 OPS in 1.558846 seconds, throughput 1283000.373353
+552827	[1726760213]	2000000 OPS in 1.569434 seconds, throughput 1274344.763781
+552827	[1726760214]	2000000 OPS in 1.580634 seconds, throughput 1265315.057123
+552827	[1726760214]	2000000 OPS in 1.556090 seconds, throughput 1285272.702736
+552827	[1726760214]	2000000 OPS in 1.688926 seconds, throughput 1184184.505419
+552827	[1726760214]	2000000 OPS in 1.568003 seconds, throughput 1275507.763697
+552827	[1726760215]	2000000 OPS in 1.579804 seconds, throughput 1265979.830409
+552827	[1726760215]	2000000 OPS in 1.560439 seconds, throughput 1281690.601171
+552827	[1726760216]	2000000 OPS in 1.580921 seconds, throughput 1265085.352146
+552827	[1726760216]	2000000 OPS in 1.570138 seconds, throughput 1273773.388072
+552827	[1726760217]	2000000 OPS in 1.582637 seconds, throughput 1263713.662703
+552827	[1726760217]	2000000 OPS in 1.556957 seconds, throughput 1284556.991619
+552827	[1726760217]	2000000 OPS in 1.568879 seconds, throughput 1274795.570595
+552827	[1726760217]	2000000 OPS in 1.788592 seconds, throughput 1118198.001557
+552827	[1726760219]	2000000 OPS in 1.657887 seconds, throughput 1206354.836005
+552827	[1726760219]	2000000 OPS in 1.558049 seconds, throughput 1283656.675753
+552827	[1726760219]	2000000 OPS in 1.570739 seconds, throughput 1273286.013781
+552827	[1726760219]	2000000 OPS in 1.591078 seconds, throughput 1257009.398659
+552827	[1726760220]	2000000 OPS in 1.553872 seconds, throughput 1287107.303562
+552827	[1726760220]	2000000 OPS in 1.568615 seconds, throughput 1275010.120393
+552827	[1726760220]	2000000 OPS in 1.992113 seconds, throughput 1003959.112761
+552827	[1726760221]	2000000 OPS in 1.585860 seconds, throughput 1261145.372227
+552827	[1726760222]	2000000 OPS in 1.563413 seconds, throughput 1279252.507175
+552827	[1726760222]	2000000 OPS in 1.572340 seconds, throughput 1271989.518806
+552827	[1726760222]	2000000 OPS in 1.583983 seconds, throughput 1262639.813685
+552827	[1726760222]	2000000 OPS in 1.705367 seconds, throughput 1172768.090388
+552827	[1726760223]	2000000 OPS in 1.562201 seconds, throughput 1280244.987681
+552827	[1726760224]	2000000 OPS in 1.578849 seconds, throughput 1266745.584917
+552827	[1726760224]	2000000 OPS in 1.586419 seconds, throughput 1260700.987570
+552827	[1726760224]	2000000 OPS in 1.585681 seconds, throughput 1261287.736941
+552827	[1726760225]	2000000 OPS in 1.566567 seconds, throughput 1276676.963066
+552827	[1726760225]	2000000 OPS in 1.577063 seconds, throughput 1268180.155136
+552827	[1726760225]	2000000 OPS in 1.584264 seconds, throughput 1262415.859983
+552827	[1726760225]	2000000 OPS in 1.586203 seconds, throughput 1260872.662578
+552827	[1726760226]	2000000 OPS in 1.566814 seconds, throughput 1276475.701647
+552827	[1726760227]	2000000 OPS in 1.578349 seconds, throughput 1267146.873093
+552827	[1726760227]	2000000 OPS in 1.587511 seconds, throughput 1259833.790128
+552827	[1726760227]	2000000 OPS in 1.588377 seconds, throughput 1259146.915373
+552827	[1726760228]	2000000 OPS in 1.566759 seconds, throughput 1276520.511451
+552827	[1726760228]	2000000 OPS in 1.578016 seconds, throughput 1267414.272099
+552827	[1726760228]	2000000 OPS in 1.585810 seconds, throughput 1261185.135672
+552827	[1726760229]	2000000 OPS in 1.588910 seconds, throughput 1258724.53Command terminated by signal 2
+320.52user 11.43system 1:29.29elapsed 371%CPU (0avgtext+0avgdata 10633164maxresident)k
+308075inputs+20858048outputs (22094major+1661134minor)pagefaults 0swaps

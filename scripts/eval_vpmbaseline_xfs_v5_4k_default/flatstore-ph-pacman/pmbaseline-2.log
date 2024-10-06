@@ -1,0 +1,571 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-05T21:54:17-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 2.89, 4.01, 4.40
+[1728183257]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728183257]	Setup starts!
+[1728183257]	Setup starts!
+[1728183257]	Setup starts!
+Using MADVISE_HUGE
+idx_start_addr_ = 0x7f44b5000000, is aligned to 2MB = 1
+idx_pool_size_ = 42949672960, is aligned to 2MB = 1
+DB index type: CCEH
+Using MADVISE_HUGE
+pool_start_ 0x7f42b9c00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728183258]	Initializing log segments...
+Log: pool_start 0x7f42b9c00000 total segments: 2028  cleaners: 2
+[1728183260]Initialized 2026 free log segments...
+[1728183260]	DB init finished in 3.477242 seconds
+[1728183260]	DB init finished in 3.477029 seconds
+[1728183260]	DB init finished in 3.477313 seconds
+[1728183260]	DB init finished in 3.477209 seconds
+[1728183264]	DB load finished in 4.214184 seconds
+[1728183264]	DB load finished in 4.216121 seconds
+[1728183264]	DB load finished in 4.223398 seconds
+[1728183264]	DB load finished in 4.247298 seconds
+[1728183264]	DB warmup finished in 0.000013 seconds
+[1728183264]	DB warmup finished in 0.031369 seconds
+[1728183264]	DB warmup finished in 0.024103 seconds
+[1728183264]	DB warmup finished in 0.033307 seconds
+[1728183264]	ETC init!
+[1728183264]	ETC starts!
+[1728183264]	ETC init!
+[1728183264]	ETC starts!
+[1728183264]	ETC init!
+[1728183264]	ETC init!
+[1728183264]	ETC starts!
+[1728183264]	ETC starts!
+41879	[1728183266]	2000000 OPS in 1.638543 seconds, throughput 1220596.590996
+41879	[1728183266]	2000000 OPS in 1.639897 seconds, throughput 1219588.791247
+41879	[1728183266]	2000000 OPS in 1.648425 seconds, throughput 1213279.342403
+41879	[1728183266]	2000000 OPS in 1.655389 seconds, throughput 1208175.238569
+41879	[1728183267]	2000000 OPS in 1.544773 seconds, throughput 1294688.604734
+41879	[1728183267]	2000000 OPS in 1.546588 seconds, throughput 1293169.221538
+41879	[1728183267]	2000000 OPS in 1.566137 seconds, throughput 1277027.488655
+41879	[1728183267]	2000000 OPS in 1.564617 seconds, throughput 1278268.100117
+41879	[1728183269]	2000000 OPS in 1.537613 seconds, throughput 1300717.410688
+41879	[1728183269]	2000000 OPS in 1.544950 seconds, throughput 1294540.276384
+41879	[1728183269]	2000000 OPS in 1.556432 seconds, throughput 1284990.285473
+41879	[1728183269]	2000000 OPS in 1.552678 seconds, throughput 1288097.081301
+41879	[1728183271]	2000000 OPS in 1.539342 seconds, throughput 1299256.435542
+41879	[1728183271]	2000000 OPS in 1.541067 seconds, throughput 1297802.107241
+41879	[1728183271]	2000000 OPS in 1.553161 seconds, throughput 1287696.510536
+41879	[1728183271]	2000000 OPS in 1.557100 seconds, throughput 1284439.021257
+41879	[1728183272]	2000000 OPS in 1.542324 seconds, throughput 1296744.393526
+41879	[1728183272]	2000000 OPS in 1.547636 seconds, throughput 1292293.536723
+41879	[1728183272]	2000000 OPS in 1.554270 seconds, throughput 1286777.715584
+41879	[1728183272]	2000000 OPS in 1.558590 seconds, throughput 1283211.107475
+41879	[1728183274]	2000000 OPS in 1.526498 seconds, throughput 1310188.418196
+41879	[1728183274]	2000000 OPS in 1.528957 seconds, throughput 1308081.260624
+41879	[1728183274]	2000000 OPS in 1.536118 seconds, throughput 1301983.311178
+41879	[1728183274]	2000000 OPS in 1.546635 seconds, throughput 1293129.923996
+41879	[1728183275]	2000000 OPS in 1.542914 seconds, throughput 1296248.527138
+41879	[1728183275]	2000000 OPS in 1.546487 seconds, throughput 1293253.677528
+41879	[1728183275]	2000000 OPS in 1.554743 seconds, throughput 1286386.238755
+41879	[1728183275]	2000000 OPS in 1.564453 seconds, throughput 1278402.099648
+41879	[1728183277]	2000000 OPS in 1.559195 seconds, throughput 1282713.194950
+41879	[1728183277]	2000000 OPS in 1.560777 seconds, throughput 1281413.039787
+41879	[1728183277]	2000000 OPS in 1.569229 seconds, throughput 1274511.240871
+41879	[1728183277]	2000000 OPS in 1.579520 seconds, throughput 1266207.455429
+41879	[1728183278]	2000000 OPS in 1.575536 seconds, throughput 1269409.267703
+41879	[1728183278]	2000000 OPS in 1.574122 seconds, throughput 1270549.550797
+41879	[1728183278]	2000000 OPS in 1.585156 seconds, throughput 1261705.472521
+41879	[1728183278]	2000000 OPS in 1.594555 seconds, throughput 1254268.432259
+41879	[1728183280]	2000000 OPS in 1.574989 seconds, throughput 1269850.138636
+41879	[1728183280]	2000000 OPS in 1.577994 seconds, throughput 1267431.942073
+41879	[1728183280]	2000000 OPS in 1.586788 seconds, throughput 1260407.817553
+41879	[1728183280]	2000000 OPS in 1.596763 seconds, throughput 1252534.032915
+41879	[1728183281]	2000000 OPS in 1.576899 seconds, throughput 1268312.047886
+41879	[1728183281]	2000000 OPS in 1.580617 seconds, throughput 1265328.665958
+41879	[1728183282]	2000000 OPS in 1.588714 seconds, throughput 1258879.823555
+41879	[1728183282]	2000000 OPS in 1.602207 seconds, throughput 1248278.156318
+41879	[1728183283]	2000000 OPS in 1.576778 seconds, throughput 1268409.376589
+41879	[1728183283]	2000000 OPS in 1.580761 seconds, throughput 1265213.400381
+41879	[1728183283]	2000000 OPS in 1.585832 seconds, throughput 1261167.639447
+41879	[1728183283]	2000000 OPS in 1.597958 seconds, throughput 1251597.351119
+41879	[1728183285]	2000000 OPS in 1.582174 seconds, throughput 1264083.469960
+41879	[1728183285]	2000000 OPS in 1.581896 seconds, throughput 1264305.618068
+41879	[1728183285]	2000000 OPS in 1.589120 seconds, throughput 1258558.195731
+41879	[1728183285]	2000000 OPS in 1.601732 seconds, throughput 1248648.338174
+41879	[1728183286]	2000000 OPS in 1.578105 seconds, throughput 1267342.794047
+41879	[1728183286]	2000000 OPS in 1.579015 seconds, throughput 1266612.413435
+41879	[1728183286]	2000000 OPS in 1.585021 seconds, throughput 1261812.934971
+41879	[1728183286]	2000000 OPS in 1.597083 seconds, throughput 1252283.068569
+41879	[1728183288]	2000000 OPS in 1.578874 seconds, throughput 1266725.527179
+41879	[1728183288]	2000000 OPS in 1.580673 seconds, throughput 1265283.837960
+41879	[1728183288]	2000000 OPS in 1.589735 seconds, throughput 1258071.313772
+41879	[1728183288]	2000000 OPS in 1.597585 seconds, throughput 1251889.570821
+41879	[1728183289]	2000000 OPS in 1.580603 seconds, throughput 1265339.873453
+41879	[1728183289]	2000000 OPS in 1.583118 seconds, throughput 1263329.707577
+41879	[1728183290]	2000000 OPS in 1.590690 seconds, throughput 1257316.007519
+41879	[1728183290]	2000000 OPS in 1.602803 seconds, throughput 1247813.985873
+41879	[1728183291]	2000000 OPS in 1.580553 seconds, throughput 1265379.901844
+41879	[1728183291]	2000000 OPS in 1.582552 seconds, throughput 1263781.537668
+41879	[1728183291]	2000000 OPS in 1.593115 seconds, throughput 1255402.152387
+41879	[1728183291]	2000000 OPS in 1.601372 seconds, throughput 1248929.043345
+41879	[1728183292]	2000000 OPS in 1.579470 seconds, throughput 1266247.538731
+41879	[1728183293]	2000000 OPS in 1.584029 seconds, throughput 1262603.146786
+41879	[1728183293]	2000000 OPS in 1.590715 seconds, throughput 1257296.247285
+41879	[1728183293]	2000000 OPS in 1.599444 seconds, throughput 1250434.525998
+41879	[1728183294]	2000000 OPS in 1.583820 seconds, throughput 1262769.759190
+41879	[1728183294]	2000000 OPS in 1.585115 seconds, throughput 1261738.107330
+41879	[1728183294]	2000000 OPS in 1.590586 seconds, throughput 1257398.216758
+41879	[1728183294]	2000000 OPS in 1.602333 seconds, throughput 1248179.997541
+41879	[1728183296]	2000000 OPS in 1.583853 seconds, throughput 1262743.449045
+41879	[1728183296]	2000000 OPS in 1.587010 seconds, throughput 1260231.504527
+41879	[1728183296]	2000000 OPS in 1.593008 seconds, throughput 1255486.475900
+41879	[1728183296]	2000000 OPS in 1.603443 seconds, throughput 1247315.932029
+41879	[1728183297]	2000000 OPS in 1.584568 seconds, throughput 1262173.664999
+41879	[1728183297]	2000000 OPS in 1.585307 seconds, throughput 1261585.295466
+41879	[1728183297]	2000000 OPS in 1.596686 seconds, throughput 1252594.436226
+41879	[1728183298]	2000000 OPS in 1.606228 seconds, throughput 1245153.241009
+41879	[1728183299]	2000000 OPS in 1.586488 seconds, throughput 1260646.156794
+41879	[1728183299]	2000000 OPS in 1.588339 seconds, throughput 1259177.039662
+41879	[1728183299]	2000000 OPS in 1.597743 seconds, throughput 1251765.772092
+41879	[1728183299]	2000000 OPS in 1.606527 seconds, throughput 1244921.498363
+41879	[1728183300]	2000000 OPS in 1.587332 seconds, throughput 1259975.858863
+41879	[1728183300]	2000000 OPS in 1.589946 seconds, throughput 1257904.356500
+41879	[1728183301]	2000000 OPS in 1.598257 seconds, throughput 1251363.203790
+41879	[1728183301]	2000000 OPS in 1.609000 seconds, throughput 1243008.079553
+41879	[1728183302]	2000000 OPS in 1.591632 seconds, throughput 1256571.870885
+41879	[1728183302]	2000000 OPS in 1.592147 seconds, throughput 1256165.416887
+41879	[1728183302]	2000000 OPS in 1.601211 seconds, throughput 1249054.621783
+41879	[1728183302]	2000000 OPS in 1.610255 seconds, throughput 1242039.304334
+41879	[1728183304]	2000000 OPS in 1.593350 seconds, throughput 1255216.995638
+41879	[1728183304]	2000000 OPS in 1.593908 seconds, throughput 1254777.565581
+41879	[1728183304]	2000000 OPS in 1.600525 seconds, throughput 1249589.978288
+41879	[1728183304]	2000000 OPS in 1.611315 seconds, throughput 1241222.231531
+41879	[1728183305]	2000000 OPS in 1.594195 seconds, throughput 1254551.670279
+41879	[1728183305]	2000000 OPS in 1.595116 seconds, throughput 1253827.307857
+41879	[1728183305]	2000000 OPS in 1.605024 seconds, throughput 1246087.285922
+41879	[1728183306]	2000000 OPS in 1.613453 seconds, throughput 1239577.477621
+41879	[1728183307]	2000000 OPS in 1.590873 seconds, throughput 1257171.376974
+41879	[1728183307]	2000000 OPS in 1.590381 seconds, throughput 1257560.295300
+41879	[1728183307]	2000000 OPS in 1.612533 seconds, throughput 1240284.694949
+41879	[1728183307]	2000000 OPS in 1.623302 seconds, throughput 1232056.635179
+41879	[1728183308]	2000000 OPS in 1.584238 seconds, throughput 1262436.578342
+41879	[1728183308]	2000000 OPS in 1.584496 seconds, throughput 1262231.018570
+41879	[1728183309]	2000000 OPS in 1.619997 seconds, throughput 1234570.187476
+41879	[1728183309]	2000000 OPS in 1.627895 seconds, throughput 1228580.467413
+41879	[1728183310]	2000000 OPS in 1.583107 seconds, throughput 1263338.485649
+41879	[1728183310]	2000000 OPS in 1.587158 seconds, throughput 1260113.989912
+41879	[1728183310]	2000000 OPS in 1.624254 seconds, throughput 1231334.508026
+41879	[1728183311]	2000000 OPS in 1.631294 seconds, throughput 1226020.570173
+41879	[1728183312]	2000000 OPS in 1.588683 seconds, throughput 1258904.388100
+41879	[1728183312]	2000000 OPS in 1.591093 seconds, throughput 1256997.548226
+41879	[1728183312]	2000000 OPS in 1.624539 seconds, throughput 1231118.489615
+41879	[1728183312]	2000000 OPS in 1.634209 seconds, throughput 1223833.671213
+41879	[1728183313]	2000000 OPS in 1.588683 seconds, throughput 1258904.388100
+41879	[1728183313]	2000000 OPS in 1.591422 seconds, throughput 1256737.684913
+41879	[1728183314]	2000000 OPS in 1.624575 seconds, throughput 1231091.208470
+41879	[1728183314]	2000000 OPS in 1.636101 seconds, throughput 1222418.420379
+41879	[1728183315]	2000000 OPS in 1.588960 seconds, throughput 1258684.925989
+41879	[1728183315]	2000000 OPS in 1.589859 seconds, throughput 1257973.191333
+41879	[1728183315]	2000000 OPS in 1.627914 seconds, throughput 1228566.128186
+41879	[1728183315]	2000000 OPS in 1.638590 seconds, throughput 1220561.580383
+41879	[1728183316]	2000000 OPS in 1.591637 seconds, throughput 1256567.923465
+41879	[1728183316]	2000000 OPS in 1.591983 seconds, throughput 1256294.822244
+41879	[1728183317]	2000000 OPS in 1.627165 seconds, throughput 1229131.649218
+41879	[1728183317]	2000000 OPS in 1.638342 seconds, throughput 1220746.339897
+41879	[1728183318]	2000000 OPS in 1.592727 seconds, throughput 1255707.977576
+41879	[1728183318]	2000000 OPS in 1.594308 seconds, throughput 1254462.751238
+41879	[1728183318]	2000000 OPS in 1.628057 seconds, throughput 1228458.217372
+41879	[1728183319]	2000000 OPS in 1.640029 seconds, throughput 1219490.630958
+41879	[1728183320]	2000000 OPS in 1.594682 seconds, throughput 1254168.542694
+41879	[1728183320]	2000000 OPS in 1.594134 seconds, throughput 1254599.676062
+41879	[1728183320]	2000000 OPS in 1.626286 seconds, throughput 1229795.989143
+41879	[1728183320]	2000000 OPS in 1.641055 seconds, throughput 1218728.196191
+41879	[1728183321]	2000000 OPS in 1.594601 seconds, throughput 1254232.249948
+41879	[1728183321]	2000000 OPS in 1.595177 seconds, throughput 1253779.361162
+41879	[1728183322]	2000000 OPS in 1.625805 seconds, throughput 1230159.828516
+41879	[1728183322]	2000000 OPS in 1.637386 seconds, throughput 1221459.081731
+41879	[1728183323]	2000000 OPS in 1.595380 seconds, throughput 1253619.827251
+41879	[1728183323]	2000000 OPS in 1.599706 seconds, throughput 1250229.729713
+41879	[1728183323]	2000000 OPS in 1.629421 seconds, throughput 1227429.866192
+41879	[1728183324]	2000000 OPS in 1.642559 seconds, throughput 1217612.274506
+41879	[1728183324]	2000000 OPS in 1.595591 seconds, throughput 1253454.049315
+41879	[1728183324]	2000000 OPS in 1.599628 seconds, throughput 1250290.692586
+41879	[1728183325]	2000000 OPS in 1.631383 seconds, throughput 1225953.684696
+41879	[1728183325]	2000000 OPS in 1.641557 seconds, throughput 1218355.500296
+41879	[1728183326]	2000000 OPS in 1.594925 seconds, throughput 1253977.459755
+41879	[1728183326]	2000000 OPS in 1.599654 seconds, throughput 1250270.370968
+41879	[1728183327]	2000000 OPS in 1.628829 seconds, throughput 1227875.977159
+41879	[1728183327]	2000000 OPS in 1.642192 seconds, throughput 1217884.388671
+41879	[1728183327]	2000000 OPS in 1.596517 seconds, throughput 1252727.030154
+41879	[1728183328]	2000000 OPS in 1.599871 seconds, throughput 1250100.789376
+41879	[1728183328]	2000000 OPS in 1.634688 seconds, throughput 1223475.060684
+41879	[1728183329]	2000000 OPS in 1.643533 seconds, throughput 1216890.686101
+41879	[1728183329]	2000000 OPS in 1.597727 seconds, throughput 1251778.307558
+41879	[1728183329]	2000000 OPS in 1.598684 seconds, throughput 1251028.971329
+41879	[1728183330]	2000000 OPS in 1.630209 seconds, throughput 1226836.558993
+41879	[1728183330]	2000000 OPS in 1.644513 seconds, throughput 1216165.515262
+41879	[1728183331]	2000000 OPS in 1.598565 seconds, throughput 1251122.100134
+41879	[1728183331]	2000000 OPS in 1.598626 seconds, throughput 1251074.360107
+41879	[1728183332]	2000000 OPS in 1.632818 seconds, throughput 1224876.256876
+41879	[1728183332]	2000000 OPS in 1.640832 seconds, throughput 1218893.829472
+41879	[1728183332]	2000000 OPS in 1.600079 seconds, throughput 1249938.284297
+41879	[1728183332]	2000000 OPS in 1.600175 seconds, throughput 1249863.296202
+41879	[1728183333]	2000000 OPS in 1.632067 seconds, throughput 1225439.886965
+41879	[1728183334]	2000000 OPS in 1.646692 seconds, throughput 1214556.213305
+41879	[1728183334]	2000000 OPS in 1.600271 seconds, throughput 1249788.317104
+41879	[1728183334]	2000000 OPS in 1.601708 seconds, throughput 1248667.047926
+41879	[1728183335]	2000000 OPS in 1.631875 seconds, throughput 1225584.067407
+41879	[1728183335]	2000000 OPS in 1.645526 seconds, throughput 1215416.833280
+41879	[1728183335]	2000000 OPS in 1.600216 seconds, throughput 1249831.272778
+41879	[1728183336]	2000000 OPS in 1.602755 seconds, throughput 1247851.355946
+41879	[1728183336]	2000000 OPS in 1.634933 seconds, throughput 1223291.718988
+41879	[1728183337]	2000000 OPS in 1.645050 seconds, throughput 1215768.517674
+41879	[1728183337]	2000000 OPS in 1.600210 seconds, throughput 1249835.959030
+41879	[1728183337]	2000000 OPS in 1.603397 seconds, throughput 1247351.716387
+41879	[1728183338]	2000000 OPS in 1.631169 seconds, throughput 1226114.522775
+41879	[1728183338]	2000000 OPS in 1.643907 seconds, throughput 1216613.835211
+41879	[1728183339]	2000000 OPS in 1.602918 seconds, throughput 1247724.462511
+41879	[1728183339]	2000000 OPS in 1.603949 seconds, throughput 1246922.439554
+41879	[1728183340]	2000000 OPS in 1.634634 seconds, throughput 1223515.478083
+41879	[1728183340]	2000000 OPS in 1.643414 seconds, throughput 1216978.801446
+41879	[1728183340]	2000000 OPS in 1.601589 seconds, throughput 1248759.825398
+41879	[1728183340]	2000000 OPS in 1.601924 seconds, throughput 1248498.680337
+41879	[1728183341]	2000000 OPS in 1.634761 seconds, throughput 1223420.426594
+41879	[1728183342]	2000000 OPS in 1.645512 seconds, throughput 1215427.174035
+41879	[1728183342./eval_etc.sh: line 118: 41879 Segmentation fault      (core dumped) numactl --cpunodebind=${NUMA_AFFINITY} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+Command exited with non-zero status 139
+444.24user 10.95system 1:57.78elapsed 386%CPU (0avgtext+0avgdata 10633160maxresident)k
+578715inputs+20858088outputs (23020major+1719926minor)pagefaults 0swaps

@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 83%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T01:30:10-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2999.78 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.27, 4.17, 4.66
+[1728196210]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728196210]	Setup starts!
+[1728196210]	Setup starts!
+[1728196210]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7fda3c800000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728196210]	Initializing log segments...
+Log: pool_start 0x7fda3c800000 total segments: 2028  cleaners: 2
+[1728196211]Initialized 2026 free log segments...
+[1728196211]	DB init finished in 1.542956 seconds
+[1728196211]	DB init finished in 1.543005 seconds
+[1728196211]	DB init finished in 1.543060 seconds
+[1728196211]	DB init finished in 1.542824 seconds
+[1728196215]	DB load finished in 4.178663 seconds
+[1728196215]	DB load finished in 4.190223 seconds
+[1728196215]	DB load finished in 4.199357 seconds
+[1728196215]	DB load finished in 4.321020 seconds
+[1728196215]	DB warmup finished in 0.000013 seconds
+[1728196215]	DB warmup finished in 0.130992 seconds
+[1728196215]	DB warmup finished in 0.121869 seconds
+[1728196215]	DB warmup finished in 0.142555 seconds
+[1728196215]	ETC init!
+[1728196215]	ETC starts!
+[1728196215]	ETC init!
+[1728196215]	ETC starts!
+[1728196215]	ETC init!
+[1728196215]	ETC starts!
+[1728196215]	ETC init!
+[1728196215]	ETC starts!
+168870	[1728196217]	2000000 OPS in 2.009726 seconds, throughput 995160.534322
+168870	[1728196217]	2000000 OPS in 2.012825 seconds, throughput 993628.358153
+168870	[1728196217]	2000000 OPS in 2.020395 seconds, throughput 989905.439283
+168870	[1728196217]	2000000 OPS in 2.031536 seconds, throughput 984476.770286
+168870	[1728196219]	2000000 OPS in 1.941907 seconds, throughput 1029915.438793
+168870	[1728196219]	2000000 OPS in 1.950143 seconds, throughput 1025565.817481
+168870	[1728196219]	2000000 OPS in 1.951406 seconds, throughput 1024902.044987
+168870	[1728196219]	2000000 OPS in 1.955221 seconds, throughput 1022902.270383
+168870	[1728196221]	2000000 OPS in 1.936658 seconds, throughput 1032706.858929
+168870	[1728196221]	2000000 OPS in 1.942788 seconds, throughput 1029448.400958
+168870	[1728196221]	2000000 OPS in 1.965467 seconds, throughput 1017569.870163
+168870	[1728196221]	2000000 OPS in 1.954046 seconds, throughput 1023517.358343
+168870	[1728196223]	2000000 OPS in 1.938122 seconds, throughput 1031926.782731
+168870	[1728196223]	2000000 OPS in 1.947169 seconds, throughput 1027132.210917
+168870	[1728196223]	2000000 OPS in 1.958921 seconds, throughput 1020970.217788
+168870	[1728196223]	2000000 OPS in 1.967125 seconds, throughput 1016712.206901
+168870	[1728196225]	2000000 OPS in 1.938597 seconds, throughput 1031673.937389
+168870	[1728196225]	2000000 OPS in 1.945239 seconds, throughput 1028151.296576
+168870	[1728196225]	2000000 OPS in 1.950198 seconds, throughput 1025536.894203
+168870	[1728196225]	2000000 OPS in 1.963250 seconds, throughput 1018718.960907
+168870	[1728196227]	2000000 OPS in 1.920361 seconds, throughput 1041470.848450
+168870	[1728196227]	2000000 OPS in 1.925144 seconds, throughput 1038883.325092
+168870	[1728196227]	2000000 OPS in 1.934734 seconds, throughput 1033733.836279
+168870	[1728196227]	2000000 OPS in 1.947516 seconds, throughput 1026949.200931
+168870	[1728196229]	2000000 OPS in 1.942500 seconds, throughput 1029601.029601
+168870	[1728196229]	2000000 OPS in 1.948496 seconds, throughput 1026432.694755
+168870	[1728196229]	2000000 OPS in 1.960688 seconds, throughput 1020050.104861
+168870	[1728196229]	2000000 OPS in 1.971744 seconds, throughput 1014330.460749
+168870	[1728196231]	2000000 OPS in 1.960137 seconds, throughput 1020336.843802
+168870	[1728196231]	2000000 OPS in 1.961607 seconds, throughput 1019572.218084
+168870	[1728196231]	2000000 OPS in 1.974583 seconds, throughput 1012872.084891
+168870	[1728196231]	2000000 OPS in 1.989731 seconds, throughput 1005160.999150
+168870	[1728196233]	2000000 OPS in 1.978940 seconds, throughput 1010642.060901
+168870	[1728196233]	2000000 OPS in 1.988785 seconds, throughput 1005639.121373
+168870	[1728196233]	2000000 OPS in 1.997037 seconds, throughput 1001483.698099
+168870	[1728196233]	2000000 OPS in 2.011476 seconds, throughput 994294.736800
+168870	[1728196235]	2000000 OPS in 1.988825 seconds, throughput 1005618.895579
+168870	[1728196235]	2000000 OPS in 1.997015 seconds, throughput 1001494.730886
+168870	[1728196235]	2000000 OPS in 2.007136 seconds, throughput 996444.685363
+168870	[1728196235]	2000000 OPS in 2.020600 seconds, throughput 989805.008413
+168870	[1728196237]	2000000 OPS in 1.991701 seconds, throughput 1004166.790096
+168870	[1728196237]	2000000 OPS in 2.000726 seconds, throughput 999637.131721
+168870	[1728196237]	2000000 OPS in 2.006552 seconds, throughput 996734.697132
+168870	[1728196237]	2000000 OPS in 2.016367 seconds, throughput 991882.926074
+168870	[1728196239]	2000000 OPS in 1.991140 seconds, throughput 1004449.712225
+168870	[1728196239]	2000000 OPS in 1.998195 seconds, throughput 1000903.315242
+168870	[1728196239]	2000000 OPS in 2.004449 seconds, throughput 997780.437417
+168870	[1728196239]	2000000 OPS in 2.020982 seconds, throughput 989617.918418
+168870	[1728196241]	2000000 OPS in 1.991659 seconds, throughput 1004187.965912
+168870	[1728196241]	2000000 OPS in 1.997914 seconds, throughput 1001044.088985
+168870	[1728196241]	2000000 OPS in 2.012125 seconds, throughput 993974.032428
+168870	[1728196241]	2000000 OPS in 2.025733 seconds, throughput 987296.943872
+168870	[1728196243]	2000000 OPS in 1.997511 seconds, throughput 1001246.050710
+168870	[1728196243]	2000000 OPS in 2.003952 seconds, throughput 998027.896876
+168870	[1728196243]	2000000 OPS in 2.001665 seconds, throughput 999168.192480
+168870	[1728196243]	2000000 OPS in 2.016567 seconds, throughput 991784.552658
+168870	[1728196245]	2000000 OPS in 1.993157 seconds, throughput 1003433.246854
+168870	[1728196245]	2000000 OPS in 1.994152 seconds, throughput 1002932.574849
+168870	[1728196245]	2000000 OPS in 1.995200 seconds, throughput 1002405.773857
+168870	[1728196245]	2000000 OPS in 2.009154 seconds, throughput 995443.853483
+168870	[1728196247]	2000000 OPS in 1.982114 seconds, throughput 1009023.698940
+168870	[1728196247]	2000000 OPS in 1.992272 seconds, throughput 1003878.988411
+168870	[1728196247]	2000000 OPS in 1.997780 seconds, throughput 1001111.233469
+168870	[1728196247]	2000000 OPS in 2.014838 seconds, throughput 992635.636215
+168870	[1728196249]	2000000 OPS in 1.993228 seconds, throughput 1003397.503948
+168870	[1728196249]	2000000 OPS in 1.993095 seconds, throughput 1003464.461052
+168870	[1728196249]	2000000 OPS in 1.998962 seconds, throughput 1000519.269501
+168870	[1728196249]	2000000 OPS in 2.008340 seconds, throughput 995847.316689
+168870	[1728196251]	2000000 OPS in 1.979107 seconds, throughput 1010556.781417
+168870	[1728196251]	2000000 OPS in 1.982516 seconds, throughput 1008819.096542
+168870	[1728196251]	2000000 OPS in 1.995198 seconds, throughput 1002406.778676
+168870	[1728196251]	2000000 OPS in 2.009137 seconds, throughput 995452.276276
+168870	[1728196253]	2000000 OPS in 1.973917 seconds, throughput 1013213.828140
+168870	[1728196253]	2000000 OPS in 1.982051 seconds, throughput 1009055.771017
+168870	[1728196253]	2000000 OPS in 1.993794 seconds, throughput 1003112.658580
+168870	[1728196253]	2000000 OPS in 2.002541 seconds, throughput 998731.112122
+168870	[1728196255]	2000000 OPS in 1.981420 seconds, throughput 1009377.113383
+168870	[1728196255]	2000000 OPS in 1.991313 seconds, throughput 1004362.448294
+168870	[1728196255]	2000000 OPS in 1.992514 seconds, throughput 1003757.062686
+168870	[1728196255]	2000000 OPS in 2.003246 seconds, throughput 998379.629861
+168870	[1728196257]	2000000 OPS in 1.979649 seconds, throughput 1010280.105211
+168870	[1728196257]	2000000 OPS in 1.985417 seconds, throughput 1007345.056479
+168870	[1728196257]	2000000 OPS in 1.991133 seconds, throughput 1004453.243455
+168870	[1728196257]	2000000 OPS in 2.006488 seconds, throughput 996766.489508
+168870	[1728196259]	2000000 OPS in 1.980600 seconds, throughput 1009795.011613
+168870	[1728196259]	2000000 OPS in 1.988417 seconds, throughput 1005825.236859
+168870	[1728196259]	2000000 OPS in 1.990219 seconds, throughput 1004914.534531
+168870	[1728196259]	2000000 OPS in 2.003143 seconds, throughput 998430.965737
+168870	[1728196261]	2000000 OPS in 1.978380 seconds, throughput 1010928.133119
+168870	[1728196261]	2000000 OPS in 1.985556 seconds, throughput 1007274.536704
+168870	[1728196261]	2000000 OPS in 1.988750 seconds, throughput 1005656.819610
+168870	[1728196261]	2000000 OPS in 2.004662 seconds, throughput 997674.420925
+168870	[1728196263]	2000000 OPS in 1.983020 seconds, throughput 1008562.697300
+168870	[1728196263]	2000000 OPS in 1.985993 seconds, throughput 1007052.894950
+168870	[1728196263]	2000000 OPS in 1.988855 seconds, throughput 1005603.726767
+168870	[1728196263]	2000000 OPS in 2.004488 seconds, throughput 997761.024262
+168870	[1728196265]	2000000 OPS in 1.980708 seconds, throughput 1009739.951573
+168870	[1728196265]	2000000 OPS in 1.985704 seconds, throughput 1007199.461753
+168870	[1728196265]	2000000 OPS in 1.991530 seconds, throughput 1004253.011504
+168870	[1728196265]	2000000 OPS in 2.008676 seconds, throughput 995680.736963
+168870	[1728196267]	2000000 OPS in 1.982757 seconds, throughput 1008696.476674
+168870	[1728196267]	2000000 OPS in 1.993131 seconds, throughput 1003446.336443
+168870	[1728196267]	2000000 OPS in 1.997567 seconds, throughput 1001217.981675
+168870	[1728196267]	2000000 OPS in 2.012361 seconds, throughput 993857.463944
+168870	[1728196269]	2000000 OPS in 1.984616 seconds, throughput 1007751.625503
+168870	[1728196269]	2000000 OPS in 1.985161 seconds, throughput 1007474.960469
+168870	[1728196269]	2000000 OPS in 1.993634 seconds, throughput 1003193.163841
+168870	[1728196269]	2000000 OPS in 2.009465 seconds, throughput 995289.791064
+168870	[1728196271]	2000000 OPS in 1.990568 seconds, throughput 1004738.346040
+168870	[1728196271]	2000000 OPS in 1.991795 seconds, throughput 1004119.399838
+168870	[1728196271]	2000000 OPS in 1.993736 seconds, throughput 1003141.840244
+168870	[1728196271]	2000000 OPS in 2.012869 seconds, throughput 993606.638087
+168870	[1728196273]	2000000 OPS in 1.988010 seconds, throughput 1006031.156785
+168870	[1728196273]	2000000 OPS in 1.991289 seconds, throughput 1004374.553367
+168870	[1728196273]	2000000 OPS in 2.000171 seconds, throughput 999914.507310
+168870	[1728196273]	2000000 OPS in 2.014395 seconds, throughput 992853.933811
+168870	[1728196275]	2000000 OPS in 1.984374 seconds, throughput 1007874.523653
+168870	[1728196275]	2000000 OPS in 1.992093 seconds, throughput 1003969.192201
+168870	[1728196275]	2000000 OPS in 1.997016 seconds, throughput 1001494.229390
+168870	[1728196275]	2000000 OPS in 2.008547 seconds, throughput 995744.685088
+168870	[1728196277]	2000000 OPS in 1.979299 seconds, throughput 1010458.753326
+168870	[1728196277]	2000000 OPS in 1.993546 seconds, throughput 1003237.447242
+168870	[1728196277]	2000000 OPS in 1.995473 seconds, throughput 1002268.635055
+168870	[1728196277]	2000000 OPS in 2.008449 seconds, throughput 995793.271325
+168870	[1728196279]	2000000 OPS in 1.984388 seconds, throughput 1007867.413026
+168870	[1728196279]	2000000 OPS in 1.990219 seconds, throughput 1004914.534531
+168870	[1728196279]	2000000 OPS in 1.998712 seconds, throughput 1000644.415003
+168870	[1728196279]	2000000 OPS in 2.009507 seconds, throughput 995268.988861
+168870	[1728196281]	2000000 OPS in 1.986450 seconds, throughput 1006821.213723
+168870	[1728196281]	2000000 OPS in 1.989934 seconds, throughput 1005058.459225
+168870	[1728196281]	2000000 OPS in 1.999507 seconds, throughput 1000246.560777
+168870	[1728196281]	2000000 OPS in 2.014850 seconds, throughput 992629.724297
+168870	[1728196283]	2000000 OPS in 1.985738 seconds, throughput 1007182.216385
+168870	[1728196283]	2000000 OPS in 1.994941 seconds, throughput 1002535.914596
+168870	[1728196283]	2000000 OPS in 1.997949 seconds, throughput 1001026.552730
+168870	[1728196283]	2000000 OPS in 2.010358 seconds, throughput 994847.683845
+168870	[1728196285]	2000000 OPS in 1.986401 seconds, throughput 1006846.049715
+168870	[1728196285]	2000000 OPS in 1.991401 seconds, throughput 1004318.065523
+168870	[1728196285]	2000000 OPS in 2.001728 seconds, throughput 999136.745852
+168870	[1728196286]	2000000 OPS in 2.013848 seconds, throughput 993123.612110
+168870	[1728196287]	2000000 OPS in 1.984434 seconds, throughput 1007844.050243
+168870	[1728196287]	2000000 OPS in 1.995333 seconds, throughput 1002338.957958
+168870	[1728196287]	2000000 OPS in 2.001174 seconds, throughput 999413.344367
+168870	[1728196288]	2000000 OPS in 2.010596 seconds, throughput 994729.920879
+168870	[1728196289]	2000000 OPS in 1.987926 seconds, throughput 1006073.666726
+168870	[1728196289]	2000000 OPS in 1.995971 seconds, throughput 1002018.566402
+168870	[1728196289]	2000000 OPS in 1.999503 seconds, throughput 1000248.561768
+168870	[1728196290]	2000000 OPS in 2.019324 seconds, throughput 990430.460887
+168870	[1728196291]	2000000 OPS in 1.990754 seconds, throughput 1004644.471391
+168870	[1728196291]	2000000 OPS in 1.996266 seconds, throughput 1001870.492209
+168870	[1728196291]	2000000 OPS in 2.003294 seconds, throughput 998355.708149
+168870	[1728196292]	2000000 OPS in 2.017524 seconds, throughput 991314.105805
+168870	[1728196293]	2000000 OPS in 1.990294 seconds, throughput 1004876.666462
+168870	[1728196293]	2000000 OPS in 1.992203 seconds, throughput 1003913.757785
+168870	[1728196293]	2000000 OPS in 2.005821 seconds, throughput 997097.946427
+168870	[1728196294]	2000000 OPS in 2.011761 seconds, throughput 994153.878120
+168870	[1728196295]	2000000 OPS in 1.982530 seconds, throughput 1008811.972580
+168870	[1728196295]	2000000 OPS in 1.992301 seconds, throughput 1003864.375915
+168870	[1728196295]	2000000 OPS in 2.002654 seconds, throughput 998674.758595
+168870	[1728196296]	2000000 OPS in 2.013610 seconds, throughput 993240.995029
+168870	[1728196297]	2000000 OPS in 1.984949 seconds, throughput 1007582.562575
+168870	[1728196297]	2000000 OPS in 1.993147 seconds, throughput 1003438.281271
+168870	[1728196297]	2000000 OPS in 2.002319 seconds, throughput 998841.842883
+168870	[1728196298]	2000000 OPS in 2.014137 seconds, throughput 992981.113003
+168870	[1728196299]	2000000 OPS in 1.986701 seconds, throughput 1006694.011832
+168870	[1728196299]	2000000 OPS in 1.991702 seconds, throughput 1004166.285920
+168870	[1728196299]	2000000 OPS in 1.999453 seconds, throughput 1000273.574823
+168870	[1728196300]	2000000 OPS in 2.014350 seconds, throughput 992876.113883
+168870	[1728196301]	2000000 OPS in 1.989841 seconds, throughput 1005105.433047
+168870	[1728196301]	2000000 OPS in 1.990995 seconds, throughput 1004522.864196
+168870	[1728196301]	2000000 OPS in 1.999613 seconds, throughput 1000193.537449
+168870	[1728196302]	2000000 OPS in 2.012837 seconds, throughput 993622.434405
+168870	[1728196303]	2000000 OPS in 1.985866 seconds, throughput 1007117.297945
+168870	[1728196303]	2000000 OPS in 1.992464 seconds, throughput 1003782.251524
+168870	[1728196303]	2000000 OPS in 2.000719 seconds, throughput 999640.629194
+168870	[1728196304]	2000000 OPS in 2.013178 seconds, throughput 993454.130733
+168870	[1728196304]	2000000 OPS in 1.988193 seconds, throughput 1005938.558279
+168870	[1728196305]	2000000 OPS in 1.993526 seconds, throughput 1003247.512197
+168870	[1728196305]	2000000 OPS in 1.999022 seconds, throughput 1000489.239238
+168870	[1728196306]	2000000 OPS in 2.013056 seconds, throughput 993514.338399
+168870	[1728196306]	2000000 OPS in 1.990790 seconds, throughput 1004626.304131
+168870	[1728196307]	2000000 OPS in 1.991528 seconds, throughput 1004254.020029
+168870	[1728196307]	2000000 OPS in 1.997415 seconds, throughput 1001294.172718
+168870	[1728196308]	2000000 OPS in 2.012039 seconds, throughput 994016.517572
+168870	[1728196308]	2000000 OPS in 1.989272 seconds, throughput 1005392.927664
+168870	[1728196309]	2000000 OPS in 1.992258 seconds, throughput 1003886.042872
+168870	[1728196309]	2000000 OPS in 1.998013 seconds, throughput 1000994.488024
+168870	[1728196310]	2000000 OPS in 2.010227 seconds, throughput 994912.514855
+168870	[1728196310]	2000000 OPS in 1.987809 seconds, throughput 1006132.882988
+168870	[1728196311]	2000000 OPS in 1.988092 seconds, throughput 1005989.662450
+168870	[1728196311]	2000000 OPS in 1.999783 seconds, throughput 1000108.511774
+168870	[1728196312]	2000000 OPS in 2.015119 seconds, throughput 992497.217286
+168870	[1728196312]	2000000 OPS in 1.986510 seconds, throughput 1006790.803973
+168870	[1728196313]	2000000 OPS in 1.992427 seconds, throughput 1003800.892078
+168870	[1728196313]	2000000 OPS in 2.001003 seconds, throughput 999498.751376
+168870	[1728196314]	2000000 OPS in 2.013265 seconds, throughput 993411.200215
+168870	[1728196314]	2000000 OPS in 1.987942 seconds, throughput 1006065.569317
+168870	[1728196315]	2000000 OPS in 1.992828 seconds, throughput 1003598.905676
+168870	[1728196315]	2000000 OPS in 2.000000 seconds, throughput 1000000.000000
+168870	[1728196316]	2000000 OPS in 2.010694 seconds, throughput 994681.438349
+168870	[1728196316]	2000000 OPS in 1.989324 seconds, throughput 1005366.647163
+168870	[1728196317]	2000000 OPS in 1.989310 seconds, throughput 1005373.722547
+168870	[1728196317]	2000000 OPS in 1.997634 seconds, throughput 1001184.401147
+168870	[1728196318]	2000000 OPS in 2.012815 seconds, throughput 993633.294664
+168870	[1728196318]	2000000 OPS in 1.986058 seconds, throughput 1007019.935974
+168870	[1728196319]	2000000 OPS in 1.996000 seconds, throughput 1002004.008016
+168870	[1728196319]	2000000 OPS in 2.002358 seconds, throughput 998822.388404
+168870	[1728196320]	2000000 OPS in 2.018258 seconds, throughput 990953.584725
+168870	[1728196320]	2000000 OPS in 1.982254 seconds, throughput 1008952.434955
+168870	[1728196321]	2000000 OPS in 1.990116 seconds, throughput 1004966.544664
+168870	[1728196321]	2000000 OPS in 2.000689 seconds, throughput 999655.618639
+168870	[1728196322]	2000000 OPS in 2.013161 seconds, throughput 993462.519888
+168870	[1728196322]	2000000 OPS in 1.989650 seconds, throughput 1005201.919936
+168870	[1728196323]	2000000 OPS in 1.993070 seconds, throughput 1003477.047971
+168870	[1728196323]	2000000 OPS in 2.000634 seconds, throughput 999683.100457
+168870	[1728196324]	2000000 OPS in 2.014125 seconds, throughput 992987.029107
+168870	[1728196324]	2000000 OPS in 1.985435 seconds, throughput 1007335.923866
+168870	[1728196325]	2000000 OPS in 1.992215 seconds, throughput 1003907.710764
+168870	[1728196325]	2000000 OPS in 1.999036 seconds, throughput 1000482.232436
+168870	[1728196326]	2000000 OPS in 2.017179 seconds, throughput 991483.651178
+168870	[1728196326]	2000000 OPS in 1.984243 seconds, throughput 1007941.063670
+168870	[1728196327]	2000000 OPS in 1.992838 seconds, throughput 1003593.869647
+168870	[1728196327]	2000000 OPS in 2.000436 seconds, throughput 999782.047514
+168870	[1728196328]	2000000 OPS in 2.014001 seconds, throughput 993048.166312
+168870	[1728196328]	2000000 OPS in 1.988334 seconds, throughput 1005867.223515
+168870	[1728196329]	2000000 OPS in 1.991788 seconds, throughput 1004122.928745
+168870	[1728196329]	2000000 OPS in 2.000923 seconds, throughput 999538.712884
+168870	[1728196330]	2000000 OPS in 2.016197 seconds, throughput 991966.558823
+168870	[1728196330]	2000000 OPS in 1.988449 seconds, throughput 1005809.050169
+168870	[1728196331]	2000000 OPS in 1.995355 seconds, throughput 1002327.906563
+168870	[1728196331]	2000000 OPS in 2.004380 seconds, throughput 997814.785619
+168870	[1728196332]	2000000 OPS in 2.015114 seconds, throughput 992499.679919
+168870	[1728196332]	2000000 OPS in 1.988376 seconds, throughput 1005845.976817
+168870	[1728196333]	2000000 OPS in 1.993331 seconds, throughput 1003345.656090
+168870	[1728196333]	2000000 OPS in 2.000746 seconds, throughput 999627.139077
+168870	[1728196334]	2000000 OPS in 2.015527 seconds, throughput 992296.307616
+168870	[1728196334]	2000000 OPS in 1.986652 seconds, throughput 1006718.841548
+168870	[1728196335]	2000000 OPS in 1.996789 seconds, throughput 1001608.081775
+168870	[1728196335]	2000000 OPS in 2.003167 seconds, throughput 998419.003508
+168870	[1728196336]	2000000 OPS in 2.011044 seconds, throughput 994508.325029
+168870	[1728196336]	2000000 OPS in 1.987708 seconds, throughput 1006184.006906
+168870	[1728196337]	2000000 OPS in 1.996522 seconds, throughput 1001742.029389
+168870	[1728196337]	2000000 OPS in 2.003013 seconds, throughput 998495.766128
+168870	[1728196338]	2000000 OPS in 2.014586 seconds, throughput 992759.802758
+168870	[1728196338]	2000000 OPS in 1.984412 seconds, throughput 1007855.223613
+168870	[1728196339]	2000000 OPS in 1.995497 seconds, throughput 1002256.580691
+168870	[1728196339]	2000000 OPS in 2.007833 seconds, throughput 996098.779132
+168870	[1728196340]	2000000 OPS in 2.019871 seconds, throughput 990162.243034
+168870	[1728196340]	2000000 OPS in 1.992068 seconds, throughput 1003981.791786
+168870	[1728196341]	2000000 OPS in 2.000101 seconds, throughput 999949.502550
+168870	[1728196341]	2000000 OPS in 2.003592 seconds, throughput 998207.219833
+168870	[1728196342]	2000000 OPS in 2.014713 seconds, throughput 992697.222880
+168870	[1728196342]	2000000 OPS in 1.984220 seconds, throughput 1007952.747175
+168870	[1728196343]	2000000 OPS in 1.993056 seconds, throughput 1003484.096784
+168870	[1728196343]	2000000 OPS in 1.998663 seconds, throughput 1000668.947191
+168870	[1728196344]	2000000 OPS in 2.014803 seconds, throughput 992652.879711
+168870	[1728196344]	2000000 OPS in 1.983666 seconds, throughput 1008234.249113
+168870	[1728196345]	2000000 OPS in 1.991956 seconds, throughput 1004038.241809
+168870	[1728196345]	2000000 OPS in 2.000575 seconds, throughput 999712.582632
+168870	[1728196346]	2000000 OPS in 2.013667 seconds, throughput 993212.879786
+168870	[1728196346]	2000000 OPS in 1.987940 seconds, throughput 1006066.581486
+168870	[1728196347]	2000000 OPS in 1.990515 seconds, throughput 1004765.098480
+168870	[1728196347]	2000000 OPS in 2.001052 seconds, throughput 999474.276531
+168870	[1728196348]	2000000 OPS in 2.013698 seconds, throughput 993197.589708
+168870	[1728196348]	2000000 OPS in 1.984048 seconds, throughput 1008040.128061
+168870	[1728196349]	2000000 OPS in 1.996322 seconds, throughput 1001842.388152
+168870	[1728196349]	2000000 OPS in 2.002676 seconds, throughput 998663.787852
+168870	[1728196350]	2000000 OPS in 2.013931 seconds, throughput 993082.682575
+168870	[1728196350]	2000000 OPS in 1.984072 seconds, throughput 1008027.934470
+168870	[1728196351]	2000000 OPS in 1.995202 seconds, throughput 1002404.769041
+168870	[1728196351]	2000000 OPS in 1.997287 seconds, throughput 1001358.342592
+168870	[1728196352]	2000000 OPS in 2.012843 seconds, throughput 993619.472557
+168870	[1728196352]	2000000 OPS in 1.986766 seconds, throughput 1006661.076342
+168870	[1728196353]	2000000 OPS in 1.999999 seconds, throughput 1000000.500000
+168870	[1728196353]	2000000 OPS in 2.001227 seconds, throughput 999386.876151
+168870	[1728196354]	2000000 OPS in 2.014282 seconds, throughput 992909.632316
+168870	[1728196354]	2000000 OPS in 1.985144 seconds, throughput 1007483.588092
+168870	[1728196355]	2000000 OPS in 1.994288 seconds, throughput 1002864.180098
+168870	[1728196355]	2000000 OPS in 2.003233 seconds, throughput 998386.108855
+168870	[1728196356]	2000000 OPS in 2.015587 seconds, throughput 992266.768936
+168870	[1728196356]	2000000 OPS in 1.986824 seconds, throughput 1006631.689571
+168870	[1728196357]	2000000 OPS in 1.994778 seconds, throughput 1002617.835168
+168870	[1728196357]	2000000 OPS in 1.997531 seconds, throughput 1001236.025874
+168870	[1728196358]	2000000 OPS in 2.015758 seconds, throughput 992182.593347
+168870	[1728196358]	2000000 OPS in 1.988929 seconds, throughput 1005566.312322
+168870	[1728196359]	2000000 OPS in 1.993392 seconds, throughput 1003314.952603
+168870	[1728196359]	2000000 OPS in 2.000754 seconds, throughput 999623.142075
+168870	[1728196360]	2000000 OPS in 2.014471 seconds, throughput 992816.476385
+168870	[1728196360]	2000000 OPS in 1.981163 seconds, throughput 1009508.051584
+168870	[1728196361]	2000000 OPS in 1.997680 seconds, throughput 1001161.347163
+168870	[1728196361]	2000000 OPS in 2.001728 seconds, throughput 999136.745852
+168870	[1728196362]	2000000 OPS in 2.015685 seconds, throughput 992218.526208
+168870	[1728196362]	2000000 OPS in 1.987294 seconds, throughput 1006393.618659
+168870	[1728196363]	2000000 OPS in 1.996127 seconds, throughput 1001940.257308
+168870	[1728196363]	2000000 OPS in 2.001059 seconds, throughput 999470.780222
+168870	[1728196364]	2000000 OPS in 2.014224 seconds, throughput 992938.223355
+168870	[1728196364]	2000000 OPS in 1.993490 seconds, throughput 1003265.629624
+168870	[1728196365]	2000000 OPS in 1.995579 seconds, throughput 1002215.397135
+168870	[1728196365]	2000000 OPS in 2.002505 seconds, throughput 998749.066794
+168870	[1728196366]	2000000 OPS in 2.011366 seconds, throughput 994349.113985
+168870	[1728196366]	2000000 OPS in 1.988912 seconds, throughput 1005574.907286
+168870	[1728196367]	2000000 OPS in 1.993430 seconds, throughput 1003295.826791
+168870	[1728196367]	2000000 OPS in 2.002613 seconds, throughput 998695.204715
+168870	[1728196368]	2000000 OPS in 1.988092 seconds, throughput 1005989.662450
+168870	[1728196368]	2000000 OPS in 2.016487 seconds, throughput 991823.899683
+168870	[1728196369]	2000000 OPS in 1.994192 seconds, throughput 1002912.457777
+168870	[1728196369]	2000000 OPS in 2.003246 seconds, throughput 998379.629861
+168870	[1728196370]	2000000 OPS in 1.991281 seconds, throughput 1004378.588456
+168870	[1728196370]	2000000 OPS in 2.012620 seconds, throughput 993729.566436
+168870	[1728196371]	2000000 OPS in 1.994556 seconds, throughput 1002729.429507
+168870	[1728196371]	2000000 OPS in 2.000950 seconds, throughput 999525.225518
+168870	[1728196372]	2000000 OPS in 1.983236 seconds, throughput 1008452.851804
+168870	[1728196372]	2000000 OPS in 2.014677 seconds, throughput 992714.961257
+168870	[1728196373]	2000000 OPS in 1.992057 seconds, throughput 1003987.335704
+168870	[1728196373]	2000000 OPS in 2.001784 seconds, throughput 999108.794955
+168870	[1728196374]	2000000 OPS in 1.986494 seconds, throughput 1006798.913060
+168870	[1728196374]	2000000 OPS in 2.017920 seconds, throughput 991119.568665
+168870	[1728196375]	2000000 OPS in 1.991692 seconds, throughput 1004171.327695
+168870	[1728196375]	2000000 OPS in 2.003707 seconds, throughput 998149.929106
+168870	[1728196376]	2000000 OPS in 1.986781 seconds, throughput 1006653.476151
+168870	[1728196376]	2000000 OPS in 2.016093 seconds, throughput 992017.729341
+168870	[1728196377]	2000000 OPS in 1.995324 seconds, throughput 1002343.479054
+168870	[1728196377]	2000000 OPS in 2.006723 seconds, throughput 996649.761826
+168870	[1728196378]	2000000 OPS in 1.986625 seconds, throughput 1006732.523753
+168870	[1728196378]	2000000 OPS in 2.019599 seconds, throughput 990295.598285
+168870	[1728196379]	2000000 OPS in 1.992974 seconds, throughput 1003525.384676
+168870	[1728196379]	2000000 OPS in 2.005376 seconds, throughput 997319.205974
+168870	[1728196380]	2000000 OPS in 1.988009 seconds, throughput 1006031.662835
+168870	[1728196380]	2000000 OPS in 2.015071 seconds, throughput 992520.859067
+168870	[1728196381]	2000000 OPS in 1.995633 seconds, throughput 1002188.278105
+168870	[1728196381]	2000000 OPS in 2.002749 seconds, throughput 998627.386657
+168870	[1728196382]	2000000 OPS in 1.987589 seconds, throughput 1006244.248685
+168870	[1728196382]	2000000 OPS in 2.016617 seconds, throughput 991759.962353
+168870	[1728196383]	2000000 OPS in 1.999031 seconds, throughput 1000484.734854
+168870	[1728196383]	2000000 OPS in 2.001500 seconds, throughput 999250.562078
+168870	[1728196384]	2000000 OPS in 1.985135 seconds, throughput 1007488.155717
+168870	[1728196384]	2000000 OPS in 2.016738 seconds, throughput 991700.458860
+168870	[1728196385]	2000000 OPS in 1.998813 seconds, throughput 1000593.852451
+168870	[1728196385]	2000000 OPS in 2.005913 seconds, throughput 997052.215126
+168870	[1728196386]	2000000 OPS in 1.987667 seconds, throughput 1006204.761663
+168870	[1728196386]	2000000 OPS in 2.015096 seconds, throughput 992508.545499
+168870	[1728196387]	2000000 OPS in 1.995025 seconds, throughput 1002493.703086
+168870	[1728196387]	2000000 OPS in 1.997272 seconds, throughput 1001365.863037
+168870	[1728196388]	2000000 OPS in 1.988703 seconds, throughput 1005680.586795
+168870	[1728196388]	2000000 OPS in 2.016973 seconds, throughput 991584.914622
+168870	[1728196389]	2000000 OPS in 1.996158 seconds, throughput 1001924.697344
+168870	[1728196389]	2000000 OPS in 2.002923 seconds, throughput 998540.632865
+168870	[1728196390]	2000000 OPS in 1.990415 seconds, throughput 1004815.578661
+168870	[1728196390]	2000000 OPS in 2.017221 seconds, throughput 991463.007772
+168870	[1728196391]	2000000 OPS in 1.997693 seconds, throughput 1001154.832099
+168870	[1728196391]	2000000 OPS in 2.002385 seconds, throughput 998808.920362
+168870	[1728196392]	2000000 OPS in 1.993135 seconds, throughput 1003444.322637
+168870	[1728196392]	2000000 OPS in 2.017328 seconds, throughput 991410.420120
+168870	[1728196393]	2000000 OPS in 1.996139 seconds, throughput 1001934.234039
+168870	[1728196393]	2000000 OPS in 1.999606 seconds, throughput 1000197.038817
+168870	[1728196394]	2000000 OPS in 1.983078 seconds, throughput 1008533.199400
+168870	[1728196394]	2000000 OPS in 2.022059 seconds, throughput 989090.822770
+168870	[1728196395]	2000000 OPS in 2.001079 seconds, throughput 999460.790903
+168870	[1728196395]	2000000 OPS in 2.004731 seconds, throughput 997640.082385
+168870	[1728196396]	2000000 OPS in 1.996479 seconds, throughput 1001763.604826
+168870	[1728196396]	2000000 OPS in 2.017482 seconds, throughput 991334.743011
+168870	[1728196397]	2000000 OPS in 1.995473 seconds, throughput 1002268.635055
+168870	[1728196397]	2000000 OPS in 2.002211 seconds, throughput 998895.720781
+168870	[1728196398]	2000000 OPS in 1.994480 seconds, throughput 1002767.638683
+168870	[1728196398]	2000000 OPS in 2.014496 seconds, throughput 992804.155481
+168870	[1728196399]	2000000 OPS in 1.994782 seconds, throughput 1002615.824687
+168870	[1728196399]	2000000 OPS in 2.000486 seconds, throughput 999757.059035
+168870	[1728196400]	2000000 OPS in 1.991706 seconds, throughput 1004164.269224
+168870	[1728196400]	2000000 OPS in 2.020489 seconds, throughput 989859.385525
+168870	[1728196401]	2000000 OPS in 1.993136 seconds, throughput 1003443.819187
+168870	[1728196401]	2000000 OPS in 2.002526 seconds, throughput 998738.593157
+168870	[1728196402]	2000000 OPS in 1.985819 seconds, throughput 1007141.134212
+168870	[1728196402]	2000000 OPS in 2.018521 seconds, throughput 990824.469996
+168870	[1728196403]	2000000 OPS in 1.996808 seconds, throughput 1001598.551288
+168870	[1728196403]	2000000 OPS in 1.996587 seconds, throughput 1001709.417120
+168870	[1728196404]	2000000 OPS in 1.986602 seconds, throughput 1006744.179257
+168870	[1728196404]	2000000 OPS in 2.017408 seconds, throughput 991371.105894
+168870	[1728196405]	2000000 OPS in 1.997495 seconds, throughput 1001254.070724
+168870	[1728196405]	2000000 OPS in 2.001857 seconds, throughput 999072.361313
+168870	[1728196406]	2000000 OPS in 1.987406 seconds, throughput 1006336.903481
+168870	[1728196406]	2000000 OPS in 2.018878 seconds, throughput 990649.261620
+168870	[1728196406]	2000000 OPS in 1.996037 seconds, throughput 1001985.434138
+168870	[1728196407]	2000000 OPS in 2.005104 seconds, throughput 997454.496126
+168870	[1728196408]	2000000 OPS in 1.989024 seconds, throughput 1005518.284344
+168870	[1728196408]	2000000 OPS in 2.016446 seconds, throughput 991844.066243
+168870	[1728196408]	2000000 OPS in 1.992430 seconds, throughput 1003799.380656
+168870	[1728196409]	2000000 OPS in 2.004264 seconds, throughput 997872.535754
+168870	[1728196410]	2000000 OPS in 1.986965 seconds, throughput 1006560.256472
+168870	[1728196410]	2000000 OPS in 2.014836 seconds, throughput 992636.621541
+168870	[1728196410]	2000000 OPS in 1.996385 seconds, throughput 1001810.772972
+168870	[1728196411]	2000000 OPS in 2.002456 seconds, throughput 998773.506134
+168870	[1728196412]	2000000 OPS in 1.988157 seconds, throughput 1005956.773032
+168870	[1728196412]	2000000 OPS in 2.015115 seconds, throughput 992499.187391
+168870	[1728196412]	2000000 OPS in 1.994876 seconds, throughput 1002568.580704
+168870	[1728196413]	2000000 OPS in 1.999782 seconds, throughput 1000109.011882
+168870	[1728196414]	2000000 OPS in 1.988348 seconds, throughput 1005860.141183
+168870	[1728196414]	2000000 OPS in 1.996783 seconds, throughput 1001611.091441
+168870	[1728196414]	2000000 OPS in 2.016604 seconds, throughput 991766.355715
+168870	[1728196415]	2000000 OPS in 2.000738 seconds, throughput 999631.136111
+168870	[1728196416]	2000000 OPS in 1.988428 seconds, throughput 1005819.672626
+168870	[1728196416]	2000000 OPS in 1.992512 seconds, throughput 1003758.070215
+168870	[1728196417]	2000000 OPS in 2.020322 seconds, throughput 989941.207392
+168870	[1728196417]	2000000 OPS in 2.000505 seconds, throughput 999747.563740
+168870	[1728196418]	2000000 OPS in 1.985311 seconds, throughput 1007398.840786
+168870	[1728196418]	2000000 OPS in 1.996278 seconds, throughput 1001864.469778
+168870	[1728196419]	2000000 OPS in 2.012584 seconds, throughput 993747.341726
+168870	[1728196419]	2000000 OPS in 2.003309 seconds, throughput 998348.232849
+168870	[1728196420]	2000000 OPS in 1.992242 seconds, throughput 1003894.105234
+168870	[1728196420]	2000000 OPS in 2.000422 seconds, throughput 999789.044512
+168870	[1728196421]	2000000 OPS in 2.015182 seconds, throughput 992466.189158
+168870	[1728196421]	2000000 OPS in 2.002012 seconds, throughput 998995.011019
+168870	[1728196422]	2000000 OPS in 1.987715 seconds, throughput 1006180.463497
+168870	[1728196422]	2000000 OPS in 1.994984 seconds, throughput 1002514.305879
+168870	[1728196423]	2000000 OPS in 2.013199 seconds, throughput 993443.767854
+168870	[1728196423]	2000000 OPS in 2.000275 seconds, throughput 999862.518904
+168870	[1728196424]	2000000 OPS in 1.989229 seconds, throughput 1005414.660655
+168870	[1728196424]	2000000 OPS in 1.993484 seconds, throughput 1003268.649259
+168870	[1728196425]	2000000 OPS in 2.015656 seconds, throughput 992232.801629
+168870	[1728196425]	2000000 OPS in 2.003717 seconds, throughput 998144.947615
+168870	[1728196426]	2000000 OPS in 1.988976 seconds, throughput 1005542.550539
+168870	[1728196426]	2000000 OPS in 1.991065 seconds, throughput 1004487.548121
+168870	[1728196427]	2000000 OPS in 2.014944 seconds, throughput 992583.416710
+168870	[1728196427]	2000000 OPS in 2.004389 seconds, throughput 997810.305285
+168870	[1728196428]	2000000 OPS in 1.987316 seconds, throughput 1006382.477673
+168870	[1728196428]	2000000 OPS in 1.997880 seconds, throughput 1001061.124792
+168870	[1728196429]	2000000 OPS in 2.017181 seconds, throughput 991482.668139
+168870	[1728196429]	2000000 OPS in 2.002540 seconds, throughput 998731.610854
+168870	[1728196430]	2000000 OPS in 1.991224 seconds, throughput 1004407.339405
+168870	[1728196430]	2000000 OPS in 1.994156 seconds, throughput 1002930.563105
+168870	[1728196431]	2000000 OPS in 2.018804 seconds, throughput 990685.574231
+168870	[1728196431]	2000000 OPS in 2.001040 seconds, throughput 999480.270259
+168870	[1728196432]	2000000 OPS in 1.992703 seconds, throughput 1003661.860297
+168870	[1728196432]	2000000 OPS in 1.992001 seconds, throughput 1004015.560233
+168870	[1728196433]	2000000 OPS in 2.020098 seconds, throughput 990050.977725
+168870	[1728196433]	2000000 OPS in 2.001698 seconds, throughput 999151.720190
+168870	[1728196434]	2000000 OPS in 1.989037 seconds, throughput 1005511.712452
+168870	[1728196434]	2000000 OPS in 1.995227 seconds, throughput 1002392.209007
+168870	[1728196435]	2000000 OPS in 2.017042 seconds, throughput 991550.993980
+168870	[1728196435]	2000000 OPS in 2.002333 seconds, throughput 998834.859137
+168870	[1728196436]	2000000 OPS in 1.989099 seconds, throughput 1005480.370761
+168870	[1728196436]	2000000 OPS in 1.998677 seconds, throughput 1000661.937872
+168870	[1728196437]	2000000 OPS in 2.013632 seconds, throughput 993230.143343
+168870	[1728196437]	2000000 OPS in 2.004378 seconds, throughput 997815.781255
+168870	[1728196438]	2000000 OPS in 1.987321 seconds, throughput 1006379.945666
+168870	[1728196438]	2000000 OPS in 1.999567 seconds, throughput 1000216.546882
+168870	[1728196439]	2000000 OPS in 2.014259 seconds, throughput 992920.969945
+168870	[1728196439]	2000000 OPS in 2.002505 seconds, throughput 998749.066794
+168870	[1728196440]	2000000 OPS in 1.990785 seconds, throughput 1004628.827322
+168870	[1728196440]	2000000 OPS in 1.993874 seconds, throughput 1003072.410794
+168870	[1728196441]	2000000 OPS in 2.016905 seconds, throughput 991618.345931
+168870	[1728196441]	2000000 OPS in 2.005274 seconds, throughput 997369.935480
+168870	[1728196442]	2000000 OPS in 1.986611 seconds, throughput 1006739.618375
+168870	[1728196442]	2000000 OPS in 1.992702 seconds, throughput 1003662.363966
+168870	[1728196443]	2000000 OPS in 2.016825 seconds, throughput 991657.679769
+168870	[1728196443]	2000000 OPS in 2.004446 seconds, throughput 997781.930768
+168870	[1728196444]	2000000 OPS in 1.987525 seconds, throughput 1006276.650608
+168870	[1728196444]	2000000 OPS in 1.995741 seconds, throughput 1002134.044448
+168870	[1728196445]	2000000 OPS in 2.014454 seconds, throughput 992824.854775
+168870	[1728196445]	2000000 OPS in 2.003950 seconds, throughput 998028.892936
+168870	[1728196446]	2000000 OPS in 1.989243 seconds, throughput 1005407.584694
+168870	[1728196446]	2000000 OPS in 1.995138 seconds, throughput 1002436.924163
+168870	[1728196447]	2000000 OPS in 2.018701 seconds, throughput 990736.121892
+168870	[1728196447]	2000000 OPS in 2.005814 seconds, throughput 997101.426154
+168870	[1728196448]	2000000 OPS in 1.993591 seconds, throughput 1003214.801832
+168870	[1728196448]	2000000 OPS in 1.999477 seconds, throughput 1000261.568400
+168870	[1728196449]	2000000 OPS in 2.017139 seconds, throughput 991503.312365
+168870	[1728196449]	2000000 OPS in 2.002350 seconds, throughput 998826.379005
+168870	[1728196450]	2000000 OPS in 1.995013 seconds, throughput 1002499.733084
+168870	[1728196450]	2000000 OPS in 2.006877 seconds, throughput 996573.282767
+168870	[1728196451]	2000000 OPS in 2.017282 seconds, throughput 991433.027212
+168870	[1728196451]	2000000 OPS in 2.007711 seconds, throughput 996159.307789
+168870	[1728196452]	2000000 OPS in 1.988290 seconds, throughput 1005889.482923
+168870	[1728196452]	2000000 OPS in 1.998030 seconds, throughput 1000985.971182
+168870	[1728196453]	2000000 OPS in 2.017762 seconds, throughput 991197.177863
+168870	[1728196453]	2000000 OPS in 2.003924 seconds, throughput 998041.841906
+168870	[1728196454]	2000000 OPS in 1.987464 seconds, throughput 1006307.535633
+168870	[1728196454]	2000000 OPS in 1.994826 seconds, throughput 1002593.709928
+168870	[1728196455]	2000000 OPS in 2.015405 seconds, throughput 992356.375021
+168870	[1728196455]	2000000 OPS in 2.004729 seconds, throughput 997641.077672
+168870	[1728196456]	2000000 OPS in 1.992092 seconds, throughput 1003969.696179
+168870	[1728196456]	2000000 OPS in 1.999307 seconds, throughput 1000346.620104
+168870	[1728196457]	2000000 OPS in 2.015096 seconds, throughput 992508.545499
+168870	[1728196457]	2000000 OPS in 2.004538 seconds, throughput 997736.136706
+168870	[1728196458]	2000000 OPS in 1.986723 seconds, throughput 1006682.864194
+168870	[1728196458]	2000000 OPS in 1.994083 seconds, throughput 1002967.278694
+168870	[1728196459]	2000000 OPS in 2.016477 seconds, throughput 991828.818281
+168870	[1728196459]	2000000 OPS in 2.006019 seconds, throughput 996999.529915
+168870	[1728196460]	2000000 OPS in 1.988787 seconds, throughput 1005638.110064
+168870	[1728196460]	2000000 OPS in 1.998882 seconds, throughput 1000559.312656
+168870	[1728196461]	2000000 OPS in 2.014295 seconds, throughput 992903.224205
+168870	[1728196461]	2000000 OPS in 2.002691 seconds, throughput 998656.307938
+168870	[1728196462]	2000000 OPS in 1.984839 seconds, throughput 1007638.402913
+168870	[1728196462]	2000000 OPS in 1.997552 seconds, throughput 1001225.500012
+168870	[1728196463]	2000000 OPS in 2.018041 seconds, throughput 991060.141989
+168870	[1728196463]	2000000 OPS in 2.006002 seconds, throughput 997007.979055
+168870	[1728196464]	2000000 OPS in 1.990090 seconds, throughput 1004979.674286
+168870	[1728196464]	2000000 OPS in 1.998371 seconds, throughput 1000815.163951
+168870	[1728196465]	2000000 OPS in 2.018493 seconds, throughput 990838.214450
+168870	[1728196465]	2000000 OPS in 2.000343 seconds, throughput 999828.529407
+168870	[1728196466]	2000000 OPS in 1.986190 seconds, throughput 1006953.010538
+168870	[1728196466]	2000000 OPS in 1.996201 seconds, throughput 1001903.114967
+168870	[1728196467]	2000000 OPS in 2.016681 seconds, throughput 991728.488541
+168870	[1728196467]	2000000 OPS in 2.004054 seconds, throughput 997977.100417
+168870	[1728196468]	2000000 OPS in 1.992149 seconds, throughput 1003940.970279
+168870	[1728196468]	2000000 OPS in 1.999499 seconds, throughput 1000250.562766
+168870	[1728196469]	2000000 OPS in 2.016922 seconds, throughput 991609.987892
+168870	[1728196469]	2000000 OPS in 2.005137 seconds, throughput 997438.080291
+168870	[1728196470]	2000000 OPS in 1.988535 seconds, throughput 1005765.551021
+168870	[1728196470]	2000000 OPS in 1.996810 seconds, throughput 1001597.548089
+168870	[1728196471]	2000000 OPS in 2.015556 seconds, throughput 992282.030368
+168870	[1728196471]	2000000 OPS in 2.003053 seconds, throughput 998475.826651
+168870	[1728196472]	2000000 OPS in 1.994993 seconds, throughput 1002509.783242
+168870	[1728196472]	2000000 OPS in 1.996460 seconds, throughput 1001773.138455
+168870	[1728196473]	2000000 OPS in 2.016344 seconds, throughput 991894.240269
+168870	[1728196473]	2000000 OPS in 2.005876 seconds, throughput 997070.606558
+168870	[1728196473]	2000000 OPS in 1.982221 seconds, throughput 1008969.231988
+168870	[1728196474]	2000000 OPS in 1.996671 seconds, throughput 1001667.275180
+168870	[1728196475]	2000000 OPS in 2.013245 seconds, throughput 993421.068971
+168870	[1728196475]	2000000 OPS in 2.001649 seconds, throughput 999176.179240
+168870	[1728196475]	2000000 OPS in 1.992103 seconds, throughput 1003964.152456
+168870	[1728196476]	2000000 OPS in 1.995016 seconds, throughput 1002498.225578
+168870	[1728196477]	2000000 OPS in 2.014014 seconds, throughput 993041.756413
+168870	[1728196477]	2000000 OPS in 2.005658 seconds, throughput 997178.980664
+168870	[1728196477]	2000000 OPS in 1.991221 seconds, throughput 1004408.852659
+168870	[1728196478]	2000000 OPS in 1.991662 seconds, throughput 1004186.453324
+168870	[1728196479]	2000000 OPS in 2.020066 seconds, throughput 990066.661188
+168870	[1728196479]	2000000 OPS in 2.006124 seconds, throughput 996947.347223
+168870	[1728196479]	2000000 OPS in 1.990080 seconds, throughput 1004984.724232
+168870	[1728196480]	2000000 OPS in 1.997229 seconds, throughput 1001387.422274
+168870	[1728196481]	2000000 OPS in 2.017358 seconds, throughput 991395.676920
+168870	[1728196481]	2000000 OPS in 2.004404 seconds, throughput 997802.838150
+168870	[1728196481]	2000000 OPS in 1.991797 seconds, throughput 1004118.391583
+168870	[1728196482]	2000000 OPS in 1.997261 seconds, throughput 1001371.378102
+168870	[1728196483]	2000000 OPS in 2.015810 seconds, throughput 992156.998924
+168870	[1728196483]	2000000 OPS in 2.001632 seconds, throughput 999184.665313
+168870	[1728196483]	2000000 OPS in 1.990391 seconds, throughput 1004827.694659
+168870	[1728196484]	2000000 OPS in 2.000325 seconds, throughput 999837.526402
+168870	[1728196485]	2000000 OPS in 2.016983 seconds, throughput 991579.998443
+168870	[1728196485]	2000000 OPS in 2.002574 seconds, throughput 998714.654240
+168870	[1728196485]	2000000 OPS in 1.988851 seconds, throughput 1005605.749249
+168870	[1728196486]	2000000 OPS in 1.995565 seconds, throughput 1002222.428235
+168870	[1728196487]	2000000 OPS in 2.016241 seconds, throughput 991944.911347
+168870	[1728196487]	2000000 OPS in 2.005192 seconds, throughput 997410.721766
+168870	[1728196487]	2000000 OPS in 1.991126 seconds, throughput 1004456.774709
+168870	[1728196488]	2000000 OPS in 1.994549 seconds, throughput 1002732.948652
+168870	[1728196489]	2000000 OPS in 2.015898 seconds, throughput 992113.688292
+168870	[1728196489]	2000000 OPS in 2.009257 seconds, throughput 995392.824313
+168870	[1728196489]	2000000 OPS in 1.996055 seconds, throughput 1001976.398446
+168870	[1728196490]	2000000 OPS in 1.998579 seconds, throughput 1000711.005169
+168870	[1728196491]	2000000 OPS in 2.013796 seconds, throughput 993149.256429
+168870	[1728196491]	2000000 OPS in 2.001095 seconds, throughput 999452.799592
+168870	[1728196491]	2000000 OPS in 1.986607 seconds, throughput 1006741.645429
+168870	[1728196492]	2000000 OPS in 1.995938 seconds, throughput 1002035.133356
+168870	[1728196493]	2000000 OPS in 2.017236 seconds, throughput 991455.635335
+168870	[1728196493]	2000000 OPS in 2.003220 seconds, throughput 998392.587933
+168870	[1728196493]	2000000 OPS in 1.987954 seconds, throughput 1006059.496346
+168870	[1728196494]	2000000 OPS in 1.999339 seconds, throughput 1000330.609266
+168870	[1728196495]	2000000 OPS in 2.017600 seconds, throughput 991276.764473
+168870	[1728196495]	2000000 OPS in 2.003384 seconds, throughput 998310.858028
+168870	[1728196495]	2000000 OPS in 1.989903 seconds, throughput 1005074.116678
+168870	[1728196496]	2000000 OPS in 1.998999 seconds, throughput 1000500.750626
+168870	[1728196497]	2000000 OPS in 2.016508 seconds, throughput 991813.570787
+168870	[1728196497]	2000000 OPS in 2.007607 seconds, throughput 996210.911797
+168870	[1728196497]	2000000 OPS in 1.986814 seconds, throughput 1006636.756133
+168870	[1728196498]	2000000 OPS in 1.998126 seconds, throughput 1000937.878792
+168870	[1728196499]	2000000 OPS in 2.013940 seconds, throughput 993078.244635
+168870	[1728196499]	2000000 OPS in 2.003958 seconds, throughput 998024.908706
+168870	[1728196499]	2000000 OPS in 1.989721 seconds, throughput 1005166.050919
+168870	[1728196500]	2000000 OPS in 1.992623 seconds, throughput 1003702.155400
+168870	[1728196501]	2000000 OPS in 2.017934 seconds, throughput 991112.692486
+168870	[1728196501]	2000000 OPS in 2.005411 seconds, throughput 997301.799980
+168870	[1728196501]	2000000 OPS in 1.992971 seconds, throughput 1003526.895273
+168870	[1728196502]	2000000 OPS in 1.997214 seconds, throughput 1001394.943156
+168870	[1728196503]	2000000 OPS in 2.017910 seconds, throughput 991124.480279
+168870	[1728196503]	2000000 OPS in 1.990228 seconds, throughput 1004909.990212
+168870	[1728196503]	2000000 OPS in 2.004200 seconds, throughput 997904.400758
+168870	[1728196504]	2000000 OPS in 1.997237 seconds, throughput 1001383.411183
+168870	[1728196505]	2000000 OPS in 2.021321 seconds, throughput 989451.947514
+168870	[1728196505]	2000000 OPS in 1.994269 seconds, throughput 1002873.734687
+168870	[1728196505]	2000000 OPS in 2.006611 seconds, throughput 996705.390332
+168870	[1728196506]	2000000 OPS in 2.005551 seconds, throughput 997232.182079
+168870	[1728196507]	2000000 OPS in 2.021022 seconds, throughput 989598.331933
+168870	[1728196507]	2000000 OPS in 1.993631 seconds, throughput 1003194.673438
+168870	[1728196507]	2000000 OPS in 2.004071 seconds, throughput 997968.634844
+168870	[1728196508]	2000000 OPS in 1.995374 seconds, throughput 1002318.362372
+168870	[1728196509]	2000000 OPS in 2.016985 seconds, throughput 991579.015213
+168870	[1728196509]	2000000 OPS in 1.987530 seconds, throughput 1006274.119133
+168870	[1728196509]	2000000 OPS in 2.002984 seconds, throughput 998510.222748
+168870	[1728196510]	2000000 OPS in 1.997942 seconds, throughput 1001030.059932
+168870	[1728196511]	2000000 OPS in 2.019791 seconds, throughput 990201.461438
+168870	[1728196511]	2000000 OPS in 1.994575 seconds, throughput 1002719.877668
+168870	[1728196511]	2000000 OPS in 2.006225 seconds, throughput 996897.157597
+168870	[1728196512]	2000000 OPS in 1.996164 seconds, throughput 1001921.685793
+168870	[1728196513]	2000000 OPS in 1.985128 seconds, throughput 1007491.708343
+168870	[1728196513]	2000000 OPS in 2.014314 seconds, throughput 992893.858654
+168870	[1728196513]	2000000 OPS in 2.003059 seconds, throughput 998472.835798
+168870	[1728196514]	2000000 OPS in 1.998545 seconds, throughput 1000728.029642
+168870	[1728196515]	2000000 OPS in 1.987032 seconds, throughput 1006526.316637
+168870	[1728196515]	2000000 OPS in 2.016951 seconds, throughput 991595.730387
+168870	[1728196515]	2000000 OPS in 2.007161 seconds, throughput 996432.274242
+168870	[1728196516]	2000000 OPS in 1.995991 seconds, throughput 1002008.526091
+168870	[1728196517]	2000000 OPS in 1.986463 seconds, throughput 1006814.624788
+168870	[1728196517]	2000000 OPS in 2.017741 seconds, throughput 991207.493925
+168870	[1728196517]	2000000 OPS in 2.004151 seconds, throughput 997928.798778
+168870	[1728196518]	2000000 OPS in 1.997345 seconds, throughput 1001329.264599
+168870	[1728196519]	2000000 OPS in 1.986187 seconds, throughput 1006954.531472
+168870	[1728196519]	2000000 OPS in 2.015551 seconds, throughput 992284.491933
+168870	[1728196519]	2000000 OPS in 2.004866 seconds, throughput 997572.905122
+168870	[1728196520]	2000000 OPS in 1.993292 seconds, throughput 1003365.287173
+168870	[1728196521]	2000000 OPS in 1.986232 seconds, throughput 1006931.717946
+168870	[1728196521]	2000000 OPS in 2.020253 seconds, throughput 989975.017980
+168870	[1728196521]	2000000 OPS in 2.006504 seconds, throughput 996758.541224
+168870	[1728196522]	2000000 OPS in 1.998797 seconds, throughput 1000601.862020
+168870	[1728196523]	2000000 OPS in 1.992356 seconds, throughput 1003836.663729
+168870	[1728196523]	2000000 OPS in 2.015381 seconds, throughput 992368.192416
+168870	[1728196523]	2000000 OPS in 2.001804 seconds, throughput 999098.812871
+168870	[1728196524]	2000000 OPS in 1.995187 seconds, throughput 1002412.305212
+168870	[1728196525]	2000000 OPS in 1.986756 seconds, throughput 1006666.143200
+168870	[1728196525]	2000000 OPS in 2.014823 seconds, throughput 992643.026211
+168870	[1728196525]	2000000 OPS in 2.003648 seconds, throughput 998179.320919
+168870	[1728196526]	2000000 OPS in 1.998811 seconds, throughput 1000594.853640
+168870	[1728196527]	2000000 OPS in 1.991906 seconds, throughput 1004063.444761
+168870	[1728196527]	2000000 OPS in 2.006776 seconds, throughput 996623.439786
+168870	[1728196527]	2000000 OPS in 2.015190 seconds, throughput 992462.249217
+168870	[1728196528]	2000000 OPS in 1.995322 seconds, throughput 1002344.483747
+168870	[1728196529]	2000000 OPS in 1.991565 seconds, throughput 1004235.362642
+168870	[1728196529]	2000000 OPS in 2.008233 seconds, throughput 995900.376102
+168870	[1728196529]	2000000 OPS in 2.016548 seconds, throughput 991793.897294
+168870	[1728196530]	2000000 OPS in 1.997143 seconds, throughput 1001430.543531
+168870	[1728196531]	2000000 OPS in 1.987975 seconds, throughput 1006048.868824
+168870	[1728196531]	2000000 OPS in 2.005560 seconds, throughput 997227.706975
+168870	[1728196531]	2000000 OPS in 2.013630 seconds, throughput 993231.129850
+168870	[1728196532]	2000000 OPS in 1.992231 seconds, throughput 1003899.648183
+168870	[1728196533]	2000000 OPS in 1.986821 seconds, throughput 1006633.209534
+168870	[1728196533]	2000000 OPS in 2.004884 seconds, throughput 997563.948837
+168870	[1728196533]	2000000 OPS in 2.014680 seconds, throughput 992713.483035
+168870	[1728196534]	2000000 OPS in 1.994980 seconds, throughput 1002516.315953
+168870	[1728196535]	2000000 OPS in 1.987387 seconds, throughput 1006346.524356
+168870	[1728196535]	2000000 OPS in 2.003984 seconds, throughput 998011.960175
+168870	[1728196535]	2000000 OPS in 2.015461 seconds, throughput 992328.802195
+168870	[1728196536]	2000000 OPS in 2.002725 seconds, throughput 998639.353880
+168870	[1728196537]	2000000 OPS in 1.989255 seconds, throughput 1005401.519664
+168870	[1728196537]	2000000 OPS in 2.000519 seconds, throughput 999740.567323
+168870	[1728196537]	2000000 OPS in 2.016740 seconds, throughput 991699.475391
+168870	[1728196538]	2000000 OPS in 1.998944 seconds, throughput 1000528.278931
+168870	[1728196539]	2000000 OPS in 1.992129 seconds, throughput 1003951.049355
+168870	[1728196539]	2000000 OPS in 2.003031 seconds, throughput 998486.793265
+168870	[1728196540]	2000000 OPS in 2.016714 seconds, throughput 991712.260638
+168870	[1728196540]	2000000 OPS in 1.999600 seconds, throughput 1000200.040008
+168870	[1728196541]	2000000 OPS in 1.989506 seconds, throughput 1005274.676226
+168870	[1728196541]	2000000 OPS in 2.002288 seconds, throughput 998857.307241
+168870	[1728196542]	2000000 OPS in 2.016701 seconds, throughput 991718.653385
+168870	[1728196542]	2000000 OPS in 1.997275 seconds, throughput 1001364.358939
+168870	[1728196543]	2000000 OPS in 1.989747 seconds, throughput 1005152.916426
+168870	[1728196543]	2000000 OPS in 2.003140 seconds, throughput 998432.461036
+168870	[1728196544]	2000000 OPS in 2.016616 seconds, throughput 991760.454147
+168870	[1728196544]	2000000 OPS in 1.995798 seconds, throughput 1002105.423495
+168870	[1728196545]	2000000 OPS in 1.993916 seconds, throughput 1003051.282000
+168870	[1728196545]	2000000 OPS in 2.002295 seconds, throughput 998853.815247
+168870	[1728196546]	2000000 OPS in 2.016562 seconds, throughput 991787.011756
+168870	[1728196546]	2000000 OPS in 1.998396 seconds, throughput 1000802.643720
+168870	[1728196547]	2000000 OPS in 1.987285 seconds, throughput 1006398.176407
+168870	[1728196547]	2000000 OPS in 2.003616 seconds, throughput 998195.262965
+168870	[1728196548]	2000000 OPS in 2.016579 seconds, throughput 991778.650874
+168870	[1728196548]	2000000 OPS in 2.002243 seconds, throughput 998879.756353
+168870	[1728196549]	2000000 OPS in 1.989014 seconds, throughput 1005523.339705
+168870	[1728196549]	2000000 OPS in 2.005155 seconds, throughput 997429.126427
+168870	[1728196550]	2000000 OPS in 2.017388 seconds, throughput 991380.934158
+168870	[1728196550]	2000000 OPS in 1.996241 seconds, throughput 1001883.039172
+168870	[1728196551]	2000000 OPS in 1.988633 seconds, throughput 1005715.986811
+168870	[1728196551]	2000000 OPS in 2.001271 seconds, throughput 999364.903604
+168870	[1728196552]	2000000 OPS in 2.013136 seconds, throughput 993474.857138
+168870	[1728196552]	2000000 OPS in 2.000283 seconds, throughput 999858.520019
+168870	[1728196553]	2000000 OPS in 1.988498 seconds, throughput 1005784.265310
+168870	[1728196553]	2000000 OPS in 2.002623 seconds, throughput 998690.217779
+168870	[1728196554]	2000000 OPS in 2.014111 seconds, throughput 992993.931318
+168870	[1728196554]	2000000 OPS in 1.995824 seconds, throughput 1002092.368866
+168870	[1728196555]	2000000 OPS in 1.988342 seconds, throughput 1005863.176456
+168870	[1728196555]	2000000 OPS in 2.001533 seconds, throughput 999234.087072
+168870	[1728196556]	2000000 OPS in 2.016436 seconds, throughput 991848.985041
+168870	[1728196556]	2000000 OPS in 1.996947 seconds, throughput 1001528.833765
+168870	[1728196557]	2000000 OPS in 1.993776 seconds, throughput 1003121.714776
+168870	[1728196557]	2000000 OPS in 2.004784 seconds, throughput 997613.708010
+168870	[1728196558]	2000000 OPS in 2.014937 seconds, throughput 992586.864999
+168870	[1728196558]	2000000 OPS in 1.997645 seconds, throughput 1001178.888141
+168870	[1728196559]	2000000 OPS in 1.988842 seconds, throughput 1005610.299863
+168870	[1728196559]	2000000 OPS in 2.006103 seconds, throughput 996957.783324
+168870	[1728196560]	2000000 OPS in 2.015017 seconds, throughput 992547.457416
+168870	[1728196560]	2000000 OPS in 1.999596 seconds, throughput 1000202.040812
+168870	[1728196561]	2000000 OPS in 1.999254 seconds, throughput 1000373.139181
+168870	[1728196561]	2000000 OPS in 2.011615 seconds, throughput 994226.032317
+168870	[1728196562]	2000000 OPS in 2.021900 seconds, throughput 989168.603789
+168870	[1728196562]	2000000 OPS in 1.994542 seconds, throughput 1002736.467821
+168870	[1728196563]	2000000 OPS in 1.990987 seconds, throughput 1004526.900477
+168870	[1728196563]	2000000 OPS in 2.003775 seconds, throughput 998116.055944
+168870	[1728196564]	2000000 OPS in 2.018521 seconds, throughput 990824.469996
+168870	[1728196564]	2000000 OPS in 1.997335 seconds, throughput 1001334.277925
+168870	[1728196565]	2000000 OPS in 1.988697 seconds, throughput 1005683.620984
+168870	[1728196565]	2000000 OPS in 2.006162 seconds, throughput 996928.463404
+168870	[1728196566]	2000000 OPS in 2.014807 seconds, throughput 992650.908995
+168870	[1728196566]	2000000 OPS in 1.993202 seconds, throughput 1003410.592604
+168870	[1728196567]	2000000 OPS in 1.988490 seconds, throughput 1005788.311734
+168870	[1728196567]	2000000 OPS in 2.006818 seconds, throughput 996602.581799
+168870	[1728196568]	2000000 OPS in 2.016951 seconds, throughput 991595.730387
+168870	[1728196568]	2000000 OPS in 1.996474 seconds, throughput 1001766.113658
+168870	[1728196569]	2000000 OPS in 1.985923 seconds, throughput 1007088.391645
+168870	[1728196570]	2000000 OPS in 2.010151 seconds, throughput 994950.130612
+168870	[1728196570]	2000000 OPS in 2.017550 seconds, throughput 991301.330822
+168870	[1728196570]	2000000 OPS in 1.995966 seconds, throughput 1002021.076511
+168870	[1728196571]	2000000 OPS in 1.991802 seconds, throughput 1004115.870955
+168870	[1728196572]	2000000 OPS in 2.001285 seconds, throughput 999357.912541
+168870	[1728196572]	2000000 OPS in 2.018409 seconds, throughput 990879.450102
+168870	[1728196572]	2000000 OPS in 1.997895 seconds, throughput 1001053.608923
+168870	[1728196573]	2000000 OPS in 1.988222 seconds, throughput 1005923.885763
+168870	[1728196574]	2000000 OPS in 2.000215 seconds, throughput 999892.511555
+168870	[1728196574]	2000000 OPS in 2.015418 seconds, throughput 992349.974050
+168870	[1728196574]	2000000 OPS in 1.994321 seconds, throughput 1002847.585720
+168870	[1728196575]	2000000 OPS in 1.988931 seconds, throughput 1005565.301159
+168870	[1728196576]	2000000 OPS in 2.002951 seconds, throughput 998526.673893
+168870	[1728196576]	2000000 OPS in 2.016793 seconds, throughput 991673.414178
+168870	[1728196576]	2000000 OPS in 1.994917 seconds, throughput 1002547.975680
+168870	[1728196577]	2000000 OPS in 1.991277 seconds, throughput 1004380.606013
+168870	[1728196578]	2000000 OPS in 2.005359 seconds, throughput 997327.660534
+168870	[1728196578]	2000000 OPS in 2.020305 seconds, throughput 989949.537322
+168870	[1728196578]	2000000 OPS in 1.996162 seconds, throughput 1001922.689641
+168870	[1728196579]	2000000 OPS in 1.990636 seconds, throughput 1004704.024241
+168870	[1728196580]	2000000 OPS in 2.001200 seconds, throughput 999400.359784
+168870	[1728196580]	2000000 OPS in 2.018335 seconds, throughput 990915.779591
+168870	[1728196580]	2000000 OPS in 1.999105 seconds, throughput 1000447.700346
+168870	[1728196581]	2000000 OPS in 1.992264 seconds, throughput 1003883.019520
+168870	[1728196582]	2000000 OPS in 2.004773 seconds, throughput 997619.181823
+168870	[1728196582]	2000000 OPS in 2.015308 seconds, throughput 992404.138722
+168870	[1728196582]	2000000 OPS in 1.995563 seconds, throughput 1002223.432685
+168870	[1728196583]	2000000 OPS in 1.986685 seconds, throughput 1006702.119360
+168870	[1728196584]	2000000 OPS in 2.006768 seconds, throughput 996627.412835
+168870	[1728196584]	2000000 OPS in 2.013410 seconds, throughput 993339.657596
+168870	[1728196584]	2000000 OPS in 1.996182 seconds, throughput 1001912.651251
+168870	[1728196585]	2000000 OPS in 1.988835 seconds, throughput 1005613.839258
+168870	[1728196586]	2000000 OPS in 2.003094 seconds, throughput 998455.389512
+168870	[1728196586]	2000000 OPS in 2.018946 seconds, throughput 990615.895621
+168870	[1728196586]	2000000 OPS in 1.998459 seconds, throughput 1000771.094128
+168870	[1728196587]	2000000 OPS in 1.991358 seconds, throughput 1004339.752069
+168870	[1728196588]	2000000 OPS in 2.006989 seconds, throughput 996517.669006
+168870	[1728196588]	2000000 OPS in 2.018309 seconds, throughput 990928.544638
+168870	[1728196588]	2000000 OPS in 1.998207 seconds, throughput 1000897.304433
+168870	[1728196589]	2000000 OPS in 1.994639 seconds, throughput 1002687.704392
+168870	[1728196590]	2000000 OPS in 2.005075 seconds, throughput 997468.922609
+168870	[1728196590]	2000000 OPS in 2.020001 seconds, throughput 990098.519753
+168870	[1728196590]	2000000 OPS in 1.995488 seconds, throughput 1002261.101044
+168870	[1728196591]	2000000 OPS in 1.988571 seconds, throughput 1005747.343193
+168870	[1728196592]	2000000 OPS in 2.002272 seconds, throughput 998865.289032
+168870	[1728196592]	2000000 OPS in 2.016707 seconds, throughput 991715.702876
+168870	[1728196592]	2000000 OPS in 1.998708 seconds, throughput 1000646.417586
+168870	[1728196593]	2000000 OPS in 1.994635 seconds, throughput 1002689.715161
+168870	[1728196594]	2000000 OPS in 2.004034 seconds, throughput 997987.060100
+168870	[1728196594]	2000000 OPS in 2.017907 seconds, throughput 991125.953773
+168870	[1728196594]	2000000 OPS in 1.997904 seconds, throughput 1001049.099456
+168870	[1728196595]	2000000 OPS in 1.993227 seconds, throughput 1003398.007352
+168870	[1728196596]	2000000 OPS in 2.002145 seconds, throughput 998928.649024
+168870	[1728196596]	2000000 OPS in 2.017327 seconds, throughput 991410.911568
+168870	[1728196596]	2000000 OPS in 1.996446 seconds, throughput 1001780.163350
+168870	[1728196597]	2000000 OPS in 1.984553 seconds, throughput 1007783.616764
+168870	[1728196598]	2000000 OPS in 2.005297 seconds, throughput 997358.496023
+168870	[1728196598]	2000000 OPS in 2.018117 seconds, throughput 991022.819787
+168870	[1728196598]	2000000 OPS in 1.998507 seconds, throughput 1000747.057679
+168870	[1728196599]	2000000 OPS in 1.992774 seconds, throughput 1003626.101103
+168870	[1728196600]	2000000 OPS in 2.005654 seconds, throughput 997180.969400
+168870	[1728196600]	2000000 OPS in 2.016933 seconds, throughput 991604.579825
+168870	[1728196600]	2000000 OPS in 1.995059 seconds, throughput 1002476.618486
+168870	[1728196601]	2000000 OPS in 1.990252 seconds, throughput 1004897.872229
+168870	[1728196602]	2000000 OPS in 2.006186 seconds, throughput 996916.537151
+168870	[1728196602]	2000000 OPS in 2.017813 seconds, throughput 991172.125465
+168870	[1728196602]	2000000 OPS in 1.995383 seconds, throughput 1002313.841503
+168870	[1728196603]	2000000 OPS in 1.987780 seconds, throughput 1006147.561601
+168870	[1728196604]	2000000 OPS in 2.007262 seconds, throughput 996382.136463
+168870	[1728196604]	2000000 OPS in 2.017481 seconds, throughput 991335.234384
+168870	[1728196604]	2000000 OPS in 1.996103 seconds, throughput 1001952.304064
+168870	[1728196605]	2000000 OPS in 1.989742 seconds, throughput 1005155.442263
+168870	[1728196606]	2000000 OPS in 2.005542 seconds, throughput 997236.657223
+168870	[1728196606]	2000000 OPS in 2.017915 seconds, throughput 991122.024466
+168870	[1728196606]	2000000 OPS in 1.995601 seconds, throughput 1002204.348464
+168870	[1728196607]	2000000 OPS in 1.985420 seconds, throughput 1007343.534366
+168870	[1728196608]	2000000 OPS in 2.006735 seconds, throughput 996643.801997
+168870	[1728196608]	2000000 OPS in 2.016491 seconds, throughput 991821.932258
+168870	[1728196608]	2000000 OPS in 1.999063 seconds, throughput 1000468.719595
+168870	[1728196609]	2000000 OPS in 1.990029 seconds, throughput 1005010.479747
+168870	[1728196610]	2000000 OPS in 2.002340 seconds, throughput 998831.367300
+168870	[1728196610]	2000000 OPS in 2.013220 seconds, throughput 993433.405192
+168870	[1728196610]	2000000 OPS in 1.992380 seconds, throughput 1003824.571618
+168870	[1728196611]	2000000 OPS in 1.991372 seconds, throughput 1004332.691230
+168870	[1728196612]	2000000 OPS in 2.003953 seconds, throughput 998027.398846
+168870	[1728196612]	2000000 OPS in 2.017263 seconds, throughput 991442.365225
+168870	[1728196612]	2000000 OPS in 1.999383 seconds, throughput 1000308.595202
+168870	[1728196613]	2000000 OPS in 1.992700 seconds, throughput 1003663.371305
+168870	[1728196614]	2000000 OPS in 2.003391 seconds, throughput 998307.369854
+168870	[1728196614]	2000000 OPS in 2.018769 seconds, throughput 990702.750042
+168870	[1728196614]	2000000 OPS in 1.997527 seconds, throughput 1001238.030825
+168870	[1728196615]	2000000 OPS in 1.986479 seconds, throughput 1006806.515448
+168870	[1728196616]	2000000 OPS in 2.011899 seconds, throughput 994085.687204
+168870	[1728196616]	2000000 OPS in 2.020969 seconds, throughput 989624.284192
+168870	[1728196616]	2000000 OPS in 2.003273 seconds, throughput 998366.173757
+168870	[1728196617]	2000000 OPS in 1.993541 seconds, throughput 1003239.963462
+168870	[1728196618]	2000000 OPS in 2.005996 seconds, throughput 997010.961139
+168870	[1728196618]	2000000 OPS in 1.997439 seconds, throughput 1001282.141783
+168870	[1728196618]	2000000 OPS in 2.015678 seconds, throughput 992221.971962
+168870	[1728196619]	2000000 OPS in 1.990000 seconds, throughput 1005025.125628
+168870	[1728196620]	2000000 OPS in 2.009023 seconds, throughput 995508.762219
+168870	[1728196620]	2000000 OPS in 1.996951 seconds, throughput 1001526.827649
+168870	[1728196620]	2000000 OPS in 2.016664 seconds, throughput 991736.848578
+168870	[1728196621]	2000000 OPS in 1.989142 seconds, throughput 1005458.634929
+168870	[1728196622]	2000000 OPS in 2.004800 seconds, throughput 997605.746209
+168870	[1728196622]	2000000 OPS in 1.992905 seconds, throughput 1003560.129560
+168870	[1728196622]	2000000 OPS in 2.014104 seconds, throughput 992997.382459
+168870	[1728196623]	2000000 OPS in 1.988406 seconds, throughput 1005830.801154
+168870	[1728196624]	2000000 OPS in 2.005289 seconds, throughput 997362.474935
+168870	[1728196624]	2000000 OPS in 1.996932 seconds, throughput 1001536.356771
+168870	[1728196624]	2000000 OPS in 2.016186 seconds, throughput 991971.970840
+168870	[1728196625]	2000000 OPS in 1.987969 seconds, throughput 1006051.905236
+168870	[1728196626]	2000000 OPS in 1.998754 seconds, throughput 1000623.388371
+168870	[1728196626]	2000000 OPS in 1.998042 seconds, throughput 1000979.959380
+168870	[1728196626]	2000000 OPS in 2.016922 seconds, throughput 991609.987892
+168870	[1728196627]	2000000 OPS in 1.990093 seconds, throughput 1004978.159312
+168870	[1728196628]	2000000 OPS in 2.003905 seconds, throughput 998051.304827
+168870	[1728196628]	2000000 OPS in 1.993998 seconds, throughput 1003010.033109
+168870	[1728196628]	2000000 OPS in 2.021700 seconds, throughput 989266.458921
+168870	[1728196629]	2000000 OPS in 1.987475 seconds, throughput 1006301.966062
+168870	[1728196630]	2000000 OPS in 2.006173 seconds, throughput 996922.997169
+168870	[1728196630]	2000000 OPS in 1.997756 seconds, throughput 1001123.260298
+168870	[1728196630]	2000000 OPS in 2.015668 seconds, throughput 992226.894508
+168870	[1728196631]	2000000 OPS in 1.991865 seconds, throughput 1004084.112126
+168870	[1728196632]	2000000 OPS in 2.004305 seconds, throughput 997852.123305
+168870	[1728196632]	2000000 OPS in 1.995631 seconds, throughput 1002189.282488
+168870	[1728196632]	2000000 OPS in 2.016718 seconds, throughput 991710.293655
+168870	[1728196633]	2000000 OPS in 1.987231 seconds, throughput 1006425.523756
+168870	[1728196634]	2000000 OPS in 2.006518 seconds, throughput 996751.586579
+168870	[1728196634]	2000000 OPS in 1.998957 seconds, throughput 1000521.772104
+168870	[1728196634]	2000000 OPS in 2.016552 seconds, throughput 991791.929987
+168870	[1728196635]	2000000 OPS in 1.991820 seconds, throughput 1004106.796799
+168870	[1728196636]	2000000 OPS in 2.003265 seconds, throughput 998370.160713
+168870	[1728196636]	2000000 OPS in 1.995761 seconds, throughput 1002124.001822
+168870	[1728196636]	2000000 OPS in 2.015103 seconds, throughput 992505.097754
+168870	[1728196637]	2000000 OPS in 1.988520 seconds, throughput 1005773.137811
+168870	[1728196638]	2000000 OPS in 2.005397 seconds, throughput 997308.762305
+168870	[1728196638]	2000000 OPS in 1.997966 seconds, throughput 1001018.035342
+168870	[1728196638]	2000000 OPS in 2.019111 seconds, throughput 990534.943349
+168870	[1728196639]	2000000 OPS in 1.988796 seconds, throughput 1005633.559199
+168870	[1728196640]	2000000 OPS in 2.001444 seconds, throughput 999278.520908
+168870	[1728196640]	2000000 OPS in 1.992686 seconds, throughput 1003670.422736
+168870	[1728196640]	2000000 OPS in 2.014756 seconds, throughput 992676.036205
+168870	[1728196641]	2000000 OPS in 1.990162 seconds, throughput 1004943.316172
+168870	[1728196642]	2000000 OPS in 2.003648 seconds, throughput 998179.320919
+168870	[1728196642]	2000000 OPS in 1.995510 seconds, throughput 1002250.051365
+168870	[1728196642]	2000000 OPS in 2.019318 seconds, throughput 990433.403753
+168870	[1728196643]	2000000 OPS in 1.987475 seconds, throughput 1006301.966062
+168870	[1728196644]	2000000 OPS in 2.006536 seconds, throughput 996742.645036
+168870	[1728196644]	2000000 OPS in 1.994473 seconds, throughput 1002771.158095
+168870	[1728196644]	2000000 OPS in 2.015529 seconds, throughput 992295.322965
+168870	[1728196645]	2000000 OPS in 1.992290 seconds, throughput 1003869.918536
+168870	[1728196646]	2000000 OPS in 2.003484 seconds, throughput 998261.029287
+168870	[1728196646]	2000000 OPS in 1.996886 seconds, throughput 1001559.428029
+168870	[1728196646]	2000000 OPS in 2.014860 seconds, throughput 992624.797753
+168870	[1728196647]	2000000 OPS in 1.987836 seconds, throughput 1006119.217078
+168870	[1728196648]	2000000 OPS in 2.007783 seconds, throughput 996123.585069
+168870	[1728196648]	2000000 OPS in 1.993647 seconds, throughput 1003186.622306
+168870	[1728196648]	2000000 OPS in 2.016787 seconds, throughput 991676.364435
+168870	[1728196649]	2000000 OPS in 1.989342 seconds, throughput 1005357.550386
+168870	[1728196650]	2000000 OPS in 2.001528 seconds, throughput 999236.583250
+168870	[1728196650]	2000000 OPS in 1.998945 seconds, throughput 1000527.778403
+168870	[1728196650]	2000000 OPS in 2.014921 seconds, throughput 992594.746891
+168870	[1728196651]	2000000 OPS in 1.989330 seconds, throughput 1005363.614885
+168870	[1728196652]	2000000 OPS in 2.009691 seconds, throughput 995177.865652
+168870	[1728196652]	2000000 OPS in 1.998169 seconds, throughput 1000916.338908
+168870	[1728196652]	2000000 OPS in 2.016154 seconds, throughput 991987.715224
+168870	[1728196653]	2000000 OPS in 1.991741 seconds, throughput 1004146.623482
+168870	[1728196654]	2000000 OPS in 2.003188 seconds, throughput 998408.536792
+168870	[1728196654]	2000000 OPS in 1.995725 seconds, throughput 1002142.078693
+168870	[1728196654]	2000000 OPS in 2.016165 seconds, throughput 991982.303036
+168870	[1728196655]	2000000 OPS in 1.988543 seconds, throughput 1005761.504780
+168870	[1728196656]	2000000 OPS in 2.002448 seconds, throughput 998777.496344
+168870	[1728196656]	2000000 OPS in 1.996451 seconds, throughput 1001777.654448
+168870	[1728196656]	2000000 OPS in 2.014871 seconds, throughput 992619.378610
+168870	[1728196657]	2000000 OPS in 1.987904 seconds, throughput 1006084.800876
+168870	[1728196658]	2000000 OPS in 2.005989 seconds, throughput 997014.440259
+168870	[1728196658]	2000000 OPS in 1.993758 seconds, throughput 1003130.771137
+168870	[1728196659]	2000000 OPS in 2.016821 seconds, throughput 991659.646543
+168870	[1728196659]	2000000 OPS in 1.989611 seconds, throughput 1005221.623724
+168870	[1728196660]	2000000 OPS in 2.005586 seconds, throughput 997214.779122
+168870	[1728196660]	2000000 OPS in 1.996689 seconds, throughput 1001658.245225
+168870	[1728196661]	2000000 OPS in 2.015885 seconds, throughput 992120.086215
+168870	[1728196661]	2000000 OPS in 1.988471 seconds, throughput 1005797.922122
+168870	[1728196662]	2000000 OPS in 2.004770 seconds, throughput 997620.674691
+168870	[1728196662]	2000000 OPS in 2.001304 seconds, throughput 999348.424827
+168870	[1728196663]	2000000 OPS in 1.986552 seconds, throughput 1006769.518241
+168870	[1728196663]	2000000 OPS in 2.016435 seconds, throughput 991849.476923
+168870	[1728196664]	2000000 OPS in 2.002294 seconds, throughput 998854.314102
+168870	[1728196664]	2000000 OPS in 1.996948 seconds, throughput 1001528.332235
+168870	[1728196665]	2000000 OPS in 1.988962 seconds, throughput 1005549.628399
+168870	[1728196665]	2000000 OPS in 2.017622 seconds, throughput 991265.955665
+168870	[1728196666]	2000000 OPS in 2.003839 seconds, throughput 998084.177421
+168870	[1728196666]	2000000 OPS in 2.001260 seconds, throughput 999370.396650
+168870	[1728196666]	2000000 OPS in 1.984643 seconds, throughput 1007737.915585
+168870	[1728196667]	2000000 OPS in 2.015637 seconds, throughput 992242.154713
+168870	[1728196668]	2000000 OPS in 2.004792 seconds, throughput 997609.727094
+168870	[1728196668]	2000000 OPS in 1.999827 seconds, throughput 1000086.507483
+168870	[1728196668]	2000000 OPS in 1.989806 seconds, throughput 1005123.112504
+168870	[1728196669]	2000000 OPS in 2.011822 seconds, throughput 994123.734605
+168870	[1728196670]	2000000 OPS in 2.003342 seconds, throughput 998331.787583
+168870	[1728196670]	2000000 OPS in 1.997722 seconds, throughput 1001140.298800
+168870	[1728196670]	2000000 OPS in 1.990217 seconds, throughput 1004915.544385
+168870	[1728196671]	2000000 OPS in 2.022254 seconds, throughput 988995.447654
+168870	[1728196672]	2000000 OPS in 2.007478 seconds, throughput 996274.928044
+168870	[1728196672]	2000000 OPS in 2.002735 seconds, throughput 998634.367502
+168870	[1728196672]	2000000 OPS in 1.990737 seconds, throughput 1004653.050604
+168870	[1728196673]	2000000 OPS in 2.018478 seconds, throughput 990845.577708
+168870	[1728196674]	2000000 OPS in 2.007774 seconds, throughput 996128.050269
+168870	[1728196674]	2000000 OPS in 1.998190 seconds, throughput 1000905.819767
+168870	[1728196674]	2000000 OPS in 1.990574 seconds, throughput 1004735.317552
+168870	[1728196675]	2000000 OPS in 2.018167 seconds, throughput 990998.267240
+168870	[1728196676]	2000000 OPS in 2.006232 seconds, throughput 996893.679295
+168870	[1728196676]	2000000 OPS in 2.000515 seconds, throughput 999742.566289
+168870	[1728196676]	2000000 OPS in 1.993643 seconds, throughput 1003188.635077
+168870	[1728196677]	2000000 OPS in 2.017772 seconds, throughput 991192.265529
+168870	[1728196678]	2000000 OPS in 2.003033 seconds, throughput 998485.796290
+168870	[1728196678]	2000000 OPS in 2.000315 seconds, throughput 999842.524802
+168870	[1728196678]	2000000 OPS in 1.990053 seconds, throughput 1004998.359340
+168870	[1728196679]	2000000 OPS in 2.014520 seconds, throughput 992792.327701
+168870	[1728196680]	2000000 OPS in 1.999985 seconds, throughput 1000007.500056
+168870	[1728196680]	2000000 OPS in 1.995931 seconds, throughput 1002038.647629
+168870	[1728196680]	2000000 OPS in 1.990267 seconds, throughput 1004890.298638
+168870	[1728196681]	2000000 OPS in 2.013493 seconds, throughput 993298.710251
+168870	[1728196682]	2000000 OPS in 2.005762 seconds, throughput 997127.276317
+168870	[1728196682]	2000000 OPS in 1.996188 seconds, throughput 1001909.639773
+168870	[1728196682]	2000000 OPS in 1.989044 seconds, throughput 1005508.173776
+168870	[1728196683]	2000000 OPS in 2.012953 seconds, throughput 993565.175143
+168870	[1728196684]	2000000 OPS in 2.002681 seconds, throughput 998661.294535
+168870	[1728196684]	2000000 OPS in 1.993268 seconds, throughput 1003377.368221
+168870	[1728196684]	2000000 OPS in 1.991049 seconds, throughput 1004495.620148
+168870	[1728196685]	2000000 OPS in 2.017375 seconds, throughput 991387.322635
+168870	[1728196686]	2000000 OPS in 2.004186 seconds, throughput 997911.371499
+168870	[1728196686]	2000000 OPS in 1.998639 seconds, throughput 1000680.963396
+168870	[1728196686]	2000000 OPS in 1.991911 seconds, throughput 1004060.924409
+168870	[1728196687]	2000000 OPS in 2.016056 seconds, throughput 992035.935510
+168870	[1728196688]	2000000 OPS in 2.006432 seconds, throughput 996794.309501
+168870	[1728196688]	2000000 OPS in 1.995751 seconds, throughput 1002129.023110
+168870	[1728196688]	2000000 OPS in 1.988954 seconds, throughput 1005553.672936
+168870	[1728196689]	2000000 OPS in 2.015021 seconds, throughput 992545.487119
+168870	[1728196690]	2000000 OPS in 2.006804 seconds, throughput 996609.534364
+168870	[1728196690]	2000000 OPS in 1.999311 seconds, throughput 1000344.618721
+168870	[1728196690]	2000000 OPS in 1.983673 seconds, throughput 1008230.691248
+168870	[1728196691]	2000000 OPS in 2.014037 seconds, throughput 993030.416025
+168870	[1728196692]	2000000 OPS in 2.004373 seconds, throughput 997818.270352
+168870	[1728196692]	2000000 OPS in 2.000736 seconds, throughput 999632.135374
+168870	[1728196692]	2000000 OPS in 1.989424 seconds, throughput 1005316.111598
+168870	[1728196693]	2000000 OPS in 2.016330 seconds, throughput 991901.127296
+168870	[1728196694]	2000000 OPS in 2.006041 seconds, throughput 996988.595946
+168870	[1728196694]	2000000 OPS in 1.998794 seconds, throughput 1000603.363828
+168870	[1728196694]	2000000 OPS in 1.984780 seconds, throughput 1007668.356191
+168870	[1728196695]	2000000 OPS in 2.015131 seconds, throughput 992491.307017
+168870	[1728196696]	2000000 OPS in 2.000641 seconds, throughput 999679.602687
+168870	[1728196696]	2000000 OPS in 1.999783 seconds, throughput 1000108.511774
+168870	[1728196696]	2000000 OPS in 1.992938 seconds, throughput 1003543.512141
+168870	[1728196697]	2000000 OPS in 2.013166 seconds, throughput 993460.052475
+168870	[1728196698]	2000000 OPS in 2.004394 seconds, throughput 997807.816228
+168870	[1728196698]	2000000 OPS in 1.999272 seconds, throughput 1000364.132544
+168870	[1728196698]	2000000 OPS in 1.988116 seconds, throughput 1005977.518414
+168870	[1728196699]	2000000 OPS in 2.017712 seconds, throughput 991221.740268
+168870	[1728196700]	2000000 OPS in 2.004491 seconds, throughput 997759.530973
+168870	[1728196700]	2000000 OPS in 1.998048 seconds, throughput 1000976.953507
+168870	[1728196700]	2000000 OPS in 1.992382 seconds, throughput 1003823.563955
+168870	[1728196701]	2000000 OPS in 2.015038 seconds, throughput 992537.113444
+168870	[1728196702]	2000000 OPS in 2.004496 seconds, throughput 997757.042169
+168870	[1728196702]	2000000 OPS in 1.996133 seconds, throughput 1001937.245664
+168870	[1728196702]	2000000 OPS in 1.991450 seconds, throughput 1004293.354089
+168870	[1728196703]	2000000 OPS in 2.018729 seconds, throughput 990722.380270
+168870	[1728196704]	2000000 OPS in 2.007372 seconds, throughput 996327.536700
+168870	[1728196704]	2000000 OPS in 1.998553 seconds, throughput 1000724.023831
+168870	[1728196704]	2000000 OPS in 1.987997 seconds, throughput 1006037.735469
+168870	[1728196705]	2000000 OPS in 2.015770 seconds, throughput 992176.686824
+168870	[1728196706]	2000000 OPS in 2.002539 seconds, throughput 998732.109587
+168870	[1728196706]	2000000 OPS in 1.999713 seconds, throughput 1000143.520595
+168870	[1728196706]	2000000 OPS in 1.992571 seconds, throughput 1003728.348952
+168870	[1728196707]	2000000 OPS in 2.015943 seconds, throughput 992091.542271
+168870	[1728196708]	2000000 OPS in 2.006590 seconds, throughput 996715.821369
+168870	[1728196708]	2000000 OPS in 1.997537 seconds, throughput 1001233.018462
+168870	[1728196708]	2000000 OPS in 1.993854 seconds, throughput 1003082.472438
+168870	[1728196709]	2000000 OPS in 2.019280 seconds, throughput 990452.042312
+168870	[1728196710]	2000000 OPS in 2.007215 seconds, throughput 996405.467277
+168870	[1728196710]	2000000 OPS in 1.994456 seconds, throughput 1002779.705343
+168870	[1728196710]	2000000 OPS in 1.988239 seconds, throughput 1005915.284832
+168870	[1728196711]	2000000 OPS in 2.014763 seconds, throughput 992672.587297
+168870	[1728196712]	2000000 OPS in 2.001096 seconds, throughput 999452.300140
+168870	[1728196712]	2000000 OPS in 1.996173 seconds, throughput 1001917.168502
+168870	[1728196712]	2000000 OPS in 1.992112 seconds, throughput 1003959.616728
+168870	[1728196713]	2000000 OPS in 2.017439 seconds, throughput 991355.872470
+168870	[1728196714]	2000000 OPS in 2.008122 seconds, throughput 995955.425019
+168870	[1728196714]	2000000 OPS in 1.999134 seconds, throughput 1000433.187570
+168870	[1728196714]	2000000 OPS in 1.991145 seconds, throughput 1004447.189933
+168870	[1728196715]	2000000 OPS in 2.016147 seconds, throughput 991991.159375
+168870	[1728196716]	2000000 OPS in 2.001515 seconds, throughput 999243.073372
+168870	[1728196716]	2000000 OPS in 2.000171 seconds, throughput 999914.507310
+168870	[1728196716]	2000000 OPS in 1.993225 seconds, throughput 1003399.014160
+168870	[1728196717]	2000000 OPS in 2.012553 seconds, throughput 993762.648735
+168870	[1728196718]	2000000 OPS in 2.006863 seconds, throughput 996580.234924
+168870	[1728196718]	2000000 OPS in 1.995933 seconds, throughput 1002037.643548
+168870	[1728196718]	2000000 OPS in 1.990389 seconds, throughput 1004828.704339
+168870	[1728196719]	2000000 OPS in 2.016416 seconds, throughput 991858.822783
+168870	[1728196720]	2000000 OPS in 2.004144 seconds, throughput 997932.284307
+168870	[1728196720]	2000000 OPS in 1.996673 seconds, throughput 1001666.271843
+168870	[1728196720]	2000000 OPS in 1.990656 seconds, throughput 1004693.930041
+168870	[1728196721]	2000000 OPS in 2.017149 seconds, throughput 991498.396995
+168870	[1728196722]	2000000 OPS in 2.004638 seconds, throughput 997686.365319
+168870	[1728196722]	2000000 OPS in 1.996295 seconds, throughput 1001855.938125
+168870	[1728196722]	2000000 OPS in 1.989394 seconds, throughput 1005331.271734
+168870	[1728196723]	2000000 OPS in 2.017761 seconds, throughput 991197.669100
+168870	[1728196724]	2000000 OPS in 2.009251 seconds, throughput 995395.796742
+168870	[1728196724]	2000000 OPS in 1.997417 seconds, throughput 1001293.170129
+168870	[1728196724]	2000000 OPS in 1.994528 seconds, throughput 1002743.506233
+168870	[1728196725]	2000000 OPS in 2.021006 seconds, throughput 989606.166434
+168870	[1728196726]	2000000 OPS in 2.010816 seconds, throughput 994621.089150
+168870	[1728196726]	2000000 OPS in 2.001219 seconds, throughput 999390.871264
+168870	[1728196726]	2000000 OPS in 1.993510 seconds, throughput 1003255.564306
+168870	[1728196727]	2000000 OPS in 2.019232 seconds, throughput 990475.586758
+168870	[1728196728]	2000000 OPS in 2.006644 seconds, throughput 996688.999145
+168870	[1728196728]	2000000 OPS in 1.997304 seconds, throughput 1001349.819557
+168870	[1728196728]	2000000 OPS in 1.985260 seconds, throughput 1007424.720188
+168870	[1728196729]	2000000 OPS in 2.012754 seconds, throughput 993663.408444
+168870	[1728196730]	2000000 OPS in 2.001867 seconds, throughput 999067.370610
+168870	[1728196730]	2000000 OPS in 1.997800 seconds, throughput 1001101.211332
+168870	[1728196730]	2000000 OPS in 1.985588 seconds, throughput 1007258.303334
+168870	[1728196731]	2000000 OPS in 2.018659 seconds, throughput 990756.735040
+168870	[1728196732]	2000000 OPS in 2.004730 seconds, throughput 997640.580028
+168870	[1728196732]	2000000 OPS in 1.999511 seconds, throughput 1000244.559795
+168870	[1728196732]	2000000 OPS in 1.986372 seconds, throughput 1006860.749145
+168870	[1728196733]	2000000 OPS in 2.016902 seconds, throughput 991619.820894
+168870	[1728196734]	2000000 OPS in 2.003739 seconds, throughput 998133.988508
+168870	[1728196734]	2000000 OPS in 1.996392 seconds, throughput 1001807.260298
+168870	[1728196734]	2000000 OPS in 1.990806 seconds, throughput 1004618.230003
+168870	[1728196735]	2000000 OPS in 2.017026 seconds, throughput 991558.859430
+168870	[1728196736]	2000000 OPS in 2.003112 seconds, throughput 998446.417375
+168870	[1728196736]	2000000 OPS in 1.997880 seconds, throughput 1001061.124792
+168870	[1728196736]	2000000 OPS in 1.987428 seconds, throughput 1006325.763751
+168870	[1728196737]	2000000 OPS in 2.016094 seconds, throughput 992017.237292
+168870	[1728196738]	2000000 OPS in 2.000730 seconds, throughput 999635.133176
+168870	[1728196738]	2000000 OPS in 1.995720 seconds, throughput 1002144.589421
+168870	[1728196738]	2000000 OPS in 1.994728 seconds, throughput 1002642.966861
+168870	[1728196739]	2000000 OPS in 2.016027 seconds, throughput 992050.205677
+168870	[1728196740]	2000000 OPS in 2.003991 seconds, throughput 998008.474090
+168870	[1728196740]	2000000 OPS in 1.995953 seconds, throughput 1002027.602854
+168870	[1728196740]	2000000 OPS in 1.991531 seconds, throughput 1004252.507242
+168870	[1728196741]	2000000 OPS in 2.015559 seconds, throughput 992280.553435
+168870	[1728196742]	2000000 OPS in 2.006563 seconds, throughput 996729.233022
+168870	[1728196742]	2000000 OPS in 1.993008 seconds, throughput 1003508.264894
+168870	[1728196742]	2000000 OPS in 1.987668 seconds, throughput 1006204.255439
+168870	[1728196743]	2000000 OPS in 2.015263 seconds, throughput 992426.298701
+168870	[1728196744]	2000000 OPS in 2.005681 seconds, throughput 997167.545587
+168870	[1728196744]	2000000 OPS in 1.997623 seconds, throughput 1001189.914213
+168870	[1728196744]	2000000 OPS in 1.990122 seconds, throughput 1004963.514800
+168870	[1728196745]	2000000 OPS in 2.015945 seconds, throughput 992090.558026
+168870	[1728196746]	2000000 OPS in 2.002879 seconds, throughput 998562.569182
+168870	[1728196746]	2000000 OPS in 1.997784 seconds, throughput 1001109.229026
+168870	[1728196746]	2000000 OPS in 1.995755 seconds, throughput 1002127.014588
+168870	[1728196747]	2000000 OPS in 2.013432 seconds, throughput 993328.803754
+168870	[1728196748]	2000000 OPS in 2.003376 seconds, throughput 998314.844542
+168870	[1728196748]	2000000 OPS in 1.995610 seconds, throughput 1002199.828624
+168870	[1728196748]	2000000 OPS in 1.995193 seconds, throughput 1002409.290730
+168870	[1728196749]	2000000 OPS in 2.020418 seconds, throughput 989894.170414
+168870	[1728196750]	2000000 OPS in 2.003747 seconds, throughput 998130.003439
+168870	[1728196750]	2000000 OPS in 1.996340 seconds, throughput 1001833.355040
+168870	[1728196750]	2000000 OPS in 1.987128 seconds, throughput 1006477.690416
+168870	[1728196751]	2000000 OPS in 2.017263 seconds, throughput 991442.365225
+168870	[1728196752]	2000000 OPS in 2.006304 seconds, throughput 996857.903887
+168870	[1728196752]	2000000 OPS in 1.996212 seconds, throughput 1001897.594043
+168870	[1728196752]	2000000 OPS in 1.989586 seconds, throughput 1005234.254765
+168870	[1728196753]	2000000 OPS in 2.017759 seconds, throughput 991198.651573
+168870	[1728196754]	2000000 OPS in 2.002634 seconds, throughput 998684.732208
+168870	[1728196754]	2000000 OPS in 1.997753 seconds, throughput 1001124.763672
+168870	[1728196754]	2000000 OPS in 1.983965 seconds, throughput 1008082.299839
+168870	[1728196755]	2000000 OPS in 2.015768 seconds, throughput 992177.671240
+168870	[1728196756]	2000000 OPS in 2.001223 seconds, throughput 999388.873704
+168870	[1728196756]	2000000 OPS in 1.993177 seconds, throughput 1003423.178172
+168870	[1728196756]	2000000 OPS in 1.988900 seconds, throughput 1005580.974408
+168870	[1728196757]	2000000 OPS in 2.016100 seconds, throughput 992014.285006
+168870	[1728196758]	2000000 OPS in 2.003959 seconds, throughput 998024.410679
+168870	[1728196758]	2000000 OPS in 1.998336 seconds, throughput 1000832.692800
+168870	[1728196758]	2000000 OPS in 1.992116 seconds, throughput 1003957.600863
+168870	[1728196759]	2000000 OPS in 2.019190 seconds, throughput 990496.189066
+168870	[1728196760]	2000000 OPS in 2.002791 seconds, throughput 998606.444706
+168870	[1728196760]	2000000 OPS in 1.998641 seconds, throughput 1000679.962034
+168870	[1728196760]	2000000 OPS in 1.992450 seconds, throughput 1003789.304625
+168870	[1728196761]	2000000 OPS in 2.016840 seconds, throughput 991650.304437
+168870	[1728196762]	2000000 OPS in 2.004176 seconds, throughput 997916.350660
+168870	[1728196762]	2000000 OPS in 1.993841 seconds, throughput 1003089.012614
+168870	[1728196762]	2000000 OPS in 1.987200 seconds, throughput 1006441.223833
+168870	[1728196763]	2000000 OPS in 2.016120 seconds, throughput 992004.444180
+168870	[1728196764]	2000000 OPS in 2.003239 seconds, throughput 998383.118540
+168870	[1728196764]	2000000 OPS in 1.997706 seconds, throughput 1001148.317120
+168870	[1728196764]	2000000 OPS in 1.989324 seconds, throughput 1005366.647163
+168870	[1728196765]	2000000 OPS in 2.013555 seconds, throughput 993268.125281
+168870	[1728196766]	2000000 OPS in 2.004377 seconds, throughput 997816.279073
+168870	[1728196766]	2000000 OPS in 1.996389 seconds, throughput 1001808.765727
+168870	[1728196766]	2000000 OPS in 1.989166 seconds, throughput 1005446.503711
+168870	[1728196767]	2000000 OPS in 2.015661 seconds, throughput 992230.340320
+168870	[1728196768]	2000000 OPS in 1.996513 seconds, throughput 1001746.545101
+168870	[1728196768]	2000000 OPS in 2.003557 seconds, throughput 998224.657447
+168870	[1728196768]	2000000 OPS in 1.992910 seconds, throughput 1003557.611734
+168870	[1728196769]	2000000 OPS in 2.018870 seconds, throughput 990653.187179
+168870	[1728196770]	2000000 OPS in 1.996389 seconds, throughput 1001808.765727
+168870	[1728196770]	2000000 OPS in 2.001658 seconds, throughput 999171.686672
+168870	[1728196770]	2000000 OPS in 1.984631 seconds, throughput 1007744.008836
+168870	[1728196771]	2000000 OPS in 2.021953 seconds, throughput 989142.675423
+168870	[1728196772]	2000000 OPS in 1.994793 seconds, throughput 1002610.295905
+168870	[1728196772]	2000000 OPS in 1.986829 seconds, throughput 1006629.156309
+168870	[1728196772]	2000000 OPS in 2.002527 seconds, throughput 998738.094418
+168870	[1728196773]	2000000 OPS in 2.017290 seconds, throughput 991429.095470
+168870	[1728196774]	2000000 OPS in 1.997533 seconds, throughput 1001235.023401
+168870	[1728196774]	2000000 OPS in 1.990342 seconds, throughput 1004852.432396
+168870	[1728196774]	2000000 OPS in 2.000738 seconds, throughput 999631.136111
+168870	[1728196775]	2000000 OPS in 2.016605 seconds, throughput 991765.863915
+168870	[1728196776]	2000000 OPS in 1.993348 seconds, throughput 1003337.099192
+168870	[1728196776]	2000000 OPS in 1.988727 seconds, throughput 1005668.450220
+168870	[1728196776]	2000000 OPS in 2.004584 seconds, throughput 997713.241251
+168870	[1728196777]	2000000 OPS in 2.016141 seconds, throughput 991994.111523
+168870	[1728196778]	2000000 OPS in 1.992525 seconds, throughput 1003751.521311
+168870	[1728196778]	2000000 OPS in 1.997665 seconds, throughput 1001168.864649
+168870	[1728196778]	2000000 OPS in 2.003523 seconds, throughput 998241.597426
+168870	[1728196779]	2000000 OPS in 2.017439 seconds, throughput 991355.872470
+168870	[1728196780]	2000000 OPS in 1.995039 seconds, throughput 1002486.668180
+168870	[1728196780]	2000000 OPS in 1.995326 seconds, throughput 1002342.474363
+168870	[1728196780]	2000000 OPS in 2.003118 seconds, throughput 998443.426698
+168870	[1728196782]	2000000 OPS in 2.022667 seconds, throughput 988793.508768
+168870	[1728196782]	2000000 OPS in 1.994573 seconds, throughput 1002720.883116
+168870	[1728196782]	2000000 OPS in 2.001727 seconds, throughput 999137.244989
+168870	[1728196782]	2000000 OPS in 2.008643 seconds, throughput 995697.095004
+168870	[1728196784]	2000000 OPS in 2.018087 seconds, throughput 991037.551899
+168870	[1728196784]	2000000 OPS in 1.992919 seconds, throughput 1003553.079679
+168870	[1728196784]	2000000 OPS in 1.997114 seconds, throughput 1001445.085258
+168870	[1728196784]	2000000 OPS in 2.004663 seconds, throughput 997673.923248
+168870	[1728196786]	2000000 OPS in 2.015971 seconds, throughput 992077.763023
+168870	[1728196786]	2000000 OPS in 1.988546 seconds, throughput 1005759.987448
+168870	[1728196786]	2000000 OPS in 1.997479 seconds, throughput 1001262.090866
+168870	[1728196786]	2000000 OPS in 2.001660 seconds, throughput 999170.688329
+168870	[1728196788]	2000000 OPS in 2.013820 seconds, throughput 993137.420425
+168870	[1728196788]	2000000 OPS in 1.987324 seconds, throughput 1006378.426467
+168870	[1728196788]	2000000 OPS in 1.997283 seconds, throughput 1001360.348033
+168870	[1728196788]	2000000 OPS in 2.002672 seconds, throughput 998665.782515
+168870	[1728196790]	2000000 OPS in 2.015315 seconds, throughput 992400.691703
+168870	[1728196790]	2000000 OPS in 1.985553 seconds, throughput 1007276.058609
+168870	[1728196790]	2000000 OPS in 1.996473 seconds, throughput 1001766.615426
+168870	[1728196790]	2000000 OPS in 2.004978 seconds, throughput 997517.179740
+168870	[1728196792]	2000000 OPS in 2.015022 seconds, throughput 992544.994546
+168870	[1728196792]	2000000 OPS in 1.991555 seconds, throughput 1004240.405111
+168870	[1728196792]	2000000 OPS in 1.996552 seconds, throughput 1001726.977309
+168870	[1728196792]	2000000 OPS in 2.002613 seconds, throughput 998695.204715
+168870	[1728196794]	2000000 OPS in 2.019820 seconds, throughput 990187.244408
+168870	[1728196794]	2000000 OPS in 1.986830 seconds, throughput 1006628.649658
+168870	[1728196794]	2000000 OPS in 2.004298 seconds, throughput 997855.608298
+168870	[1728196794]	2000000 OPS in 2.004850 seconds, throughput 997580.866399
+168870	[1728196796]	2000000 OPS in 2.014896 seconds, throughput 992607.062598
+168870	[1728196796]	2000000 OPS in 1.988778 seconds, throughput 1005642.660971
+168870	[1728196796]	2000000 OPS in 1.999366 seconds, throughput 1000317.100521
+168870	[1728196796]	2000000 OPS in 2.002663 seconds, throughput 998670.270535
+168870	[1728196798]	2000000 OPS in 2.016039 seconds, throughput 992044.300730
+168870	[1728196798]	2000000 OPS in 1.991500 seconds, throughput 1004268.139593
+168870	[1728196798]	2000000 OPS in 1.998829 seconds, throughput 1000585.843011
+168870	[1728196798]	2000000 OPS in 2.001538 seconds, throughput 999231.590907
+168870	[1728196800]	2000000 OPS in 2.018907 seconds, throughput 990635.031728
+168870	[1728196800]	2000000 OPS in 1.990663 seconds, throughput 1004690.397119
+168870	[1728196800]	2000000 OPS in 2.006608 seconds, throughput 996706.880467
+168870	[1728196800]	2000000 OPS in 2.004127 seconds, throughput 997940.749264
+168870	[1728196802]	2000000 OPS in 2.016265 seconds, throughput 991933.104031
+168870	[1728196802]	2000000 OPS in 1.995455 seconds, throughput 1002277.676019
+168870	[1728196802]	2000000 OPS in 1.996854 seconds, throughput 1001575.478227
+168870	[1728196802]	2000000 OPS in 1.998895 seconds, throughput 1000552.805425
+168870	[1728196804]	2000000 OPS in 2.017312 seconds, throughput 991418.283339
+168870	[1728196804]	2000000 OPS in 1.988450 seconds, throughput 1005808.544344
+168870	[1728196804]	2000000 OPS in 1.997905 seconds, throughput 1001048.598407
+168870	[1728196804]	2000000 OPS in 2.004812 seconds, throughput 997599.774941
+168870	[1728196806]	2000000 OPS in 2.017829 seconds, throughput 991164.266149
+168870	[1728196806]	2000000 OPS in 1.993165 seconds, throughput 1003429.219357
+168870	[1728196806]	2000000 OPS in 2.000339 seconds, throughput 999830.528725
+168870	[1728196806]	2000000 OPS in 2.006202 seconds, throughput 996908.586473
+168870	[1728196808]	2000000 OPS in 2.015717 seconds, throughput 992202.774497
+168870	[1728196808]	2000000 OPS in 1.985002 seconds, throughput 1007555.659894
+168870	[1728196808]	2000000 OPS in 1.994664 seconds, throughput 1002675.137266
+168870	[1728196808]	2000000 OPS in 2.004986 seconds, throughput 997513.199593
+168870	[1728196810]	2000000 OPS in 2.015901 seconds, throughput 992112.211860
+168870	[1728196810]	2000000 OPS in 1.990085 seconds, throughput 1004982.199253
+168870	[1728196810]	2000000 OPS in 1.995956 seconds, throughput 1002026.096768
+168870	[1728196810]	2000000 OPS in 2.005606 seconds, throughput 997204.834848
+168870	[1728196812]	2000000 OPS in 2.014395 seconds, throughput 992853.933811
+168870	[1728196812]	2000000 OPS in 1.985943 seconds, throughput 1007078.249476
+168870	[1728196812]	2000000 OPS in 1.998226 seconds, throughput 1000887.787467
+168870	[1728196812]	2000000 OPS in 2.002752 seconds, throughput 998625.890774
+168870	[1728196814]	2000000 OPS in 1.990522 seconds, throughput 1004761.565057
+168870	[1728196814]	2000000 OPS in 2.012866 seconds, throughput 993608.118971
+168870	[1728196814]	2000000 OPS in 1.997806 seconds, throughput 1001098.204731
+168870	[1728196814]	2000000 OPS in 2.000316 seconds, throughput 999842.024960
+168870	[1728196816]	2000000 OPS in 1.989823 seconds, throughput 1005114.525262
+168870	[1728196816]	2000000 OPS in 2.019131 seconds, throughput 990525.131851
+168870	[1728196816]	2000000 OPS in 1.999565 seconds, throughput 1000217.547317
+168870	[1728196816]	2000000 OPS in 2.005106 seconds, throughput 997453.501211
+168870	[1728196818]	2000000 OPS in 1.990144 seconds, throughput 1004952.405454
+168870	[1728196818]	2000000 OPS in 2.018178 seconds, throughput 990992.865842
+168870	[1728196818]	2000000 OPS in 2.000323 seconds, throughput 999838.526078
+168870	[1728196818]	2000000 OPS in 2.004792 seconds, throughput 997609.727094
+168870	[1728196820]	2000000 OPS in 1.998272 seconds, throughput 1000864.747142
+168870	[1728196820]	2000000 OPS in 2.017112 seconds, throughput 991516.584106
+168870	[1728196820]	2000000 OPS in 2.001069 seconds, throughput 999465.785538
+168870	[1728196820]	2000000 OPS in 2.002790 seconds, throughput 998606.943314
+168870	[1728196822]	2000000 OPS in 1.989340 seconds, throughput 1005358.561131
+168870	[1728196822]	2000000 OPS in 2.014649 seconds, throughput 992728.758210
+168870	[1728196822]	2000000 OPS in 1.998485 seconds, throughput 1000758.074241
+168870	[1728196822]	2000000 OPS in 2.003446 seconds, throughput 998279.963623
+168870	[1728196824]	2000000 OPS in 1.991857 seconds, throughput 1004088.144882
+168870	[1728196824]	2000000 OPS in 2.019407 seconds, throughput 990389.753031
+168870	[1728196824]	2000000 OPS in 1.993531 seconds, throughput 1003244.995939
+168870	[1728196824]	2000000 OPS in 2.003850 seconds, throughput 998078.698505
+168870	[1728196826]	2000000 OPS in 1.986591 seconds, throughput 1006749.753724
+168870	[1728196826]	2000000 OPS in 2.015116 seconds, throughput 992498.694864
+168870	[1728196826]	2000000 OPS in 1.997104 seconds, throughput 1001450.099744
+168870	[1728196826]	2000000 OPS in 2.004107 seconds, throughput 997950.708221
+168870	[1728196828]	2000000 OPS in 1.993533 seconds, throughput 1003243.989440
+168870	[1728196828]	2000000 OPS in 1.995052 seconds, throughput 1002480.135856
+168870	[1728196828]	2000000 OPS in 2.015415 seconds, throughput 992351.451190
+168870	[1728196828]	2000000 OPS in 2.004061 seconds, throughput 997973.614576
+168870	[1728196830]	2000000 OPS in 1.987415 seconds, throughput 1006332.346289
+168870	[1728196830]	2000000 OPS in 1.995677 seconds, throughput 1002166.182203
+168870	[1728196830]	2000000 OPS in 2.015355 seconds, throughput 992380.994912
+168870	[1728196830]	2000000 OPS in 2.002151 seconds, throughput 998925.655458
+168870	[1728196832]	2000000 OPS in 1.988040 seconds, throughput 1006015.975534
+168870	[1728196832]	2000000 OPS in 1.995361 seconds, throughput 1002324.892588
+168870	[1728196832]	2000000 OPS in 2.015976 seconds, throughput 992075.302484
+168870	[1728196832]	2000000 OPS in 2.004410 seconds, throughput 997799.851328
+168870	[1728196834]	2000000 OPS in 1.986316 seconds, throughput 1006889.135465
+168870	[1728196834]	2000000 OPS in 1.999465 seconds, throughput 1000267.571575
+168870	[1728196834]	2000000 OPS in 2.014577 seconds, throughput 992764.237852
+168870	[1728196834]	2000000 OPS in 2.005128 seconds, throughput 997442.557283
+168870	[1728196836]	2000000 OPS in 1.990536 seconds, throughput 1004754.498286
+168870	[1728196836]	2000000 OPS in 2.004981 seconds, throughput 997515.687181
+168870	[1728196836]	2000000 OPS in 2.020866 seconds, throughput 989674.723609
+168870	[1728196836]	2000000 OPS in 2.004322 seconds, throughput 997843.659851
+168870	[1728196838]	2000000 OPS in 1.998647 seconds, throughput 1000676.957962
+168870	[1728196838]	2000000 OPS in 1.996852 seconds, throughput 1001576.481382
+168870	[1728196838]	2000000 OPS in 2.016420 seconds, throughput 991856.855219
+168870	[1728196838]	2000000 OPS in 2.005546 seconds, throughput 997234.668265
+168870	[1728196840]	2000000 OPS in 1.997107 seconds, throughput 1001448.595393
+168870	[1728196840]	2000000 OPS in 1.996143 seconds, throughput 1001932.226298
+168870	[1728196840]	2000000 OPS in 2.015813 seconds, throughput 992155.522362
+168870	[1728196840]	2000000 OPS in 2.002129 seconds, throughput 998936.631955
+168870	[1728196842]	2000000 OPS in 1.986380 seconds, throughput 1006856.694087
+168870	[1728196842]	2000000 OPS in 1.998533 seconds, throughput 1000734.038417
+168870	[1728196842]	2000000 OPS in 2.016185 seconds, throughput 991972.462844
+168870	[1728196842]	2000000 OPS in 2.005162 seconds, throughput 997425.644412
+168870	[1728196844]	2000000 OPS in 1.990385 seconds, throughput 1004830.723704
+168870	[1728196844]	2000000 OPS in 1.995931 seconds, throughput 1002038.647629
+168870	[1728196844]	2000000 OPS in 2.018024 seconds, throughput 991068.490761
+168870	[1728196844]	2000000 OPS in 2.005484 seconds, throughput 997265.498004
+168870	[1728196846]	2000000 OPS in 1.989323 seconds, throughput 1005367.152544
+168870	[1728196846]	2000000 OPS in 2.001924 seconds, throughput 999038.924555
+168870	[1728196846]	2000000 OPS in 2.014365 seconds, throughput 992868.720416
+168870	[1728196846]	2000000 OPS in 2.002822 seconds, throughput 998590.988116
+168870	[1728196848]	2000000 OPS in 1.991390 seconds, throughput 1004323.613155
+168870	[1728196848]	2000000 OPS in 1.999390 seconds, throughput 1000305.093053
+168870	[1728196848]	2000000 OPS in 2.013118 seconds, throughput 993483.740148
+168870	[1728196848]	2000000 OPS in 2.001241 seconds, throughput 999379.884781
+168870	[1728196850]	2000000 OPS in 1.990302 seconds, throughput 1004872.627370
+168870	[1728196850]	2000000 OPS in 1.993818 seconds, throughput 1003100.583905
+168870	[1728196850]	2000000 OPS in 2.017170 seconds, throughput 991488.074877
+168870	[1728196850]	2000000 OPS in 2.004315 seconds, throughput 997847.144785
+168870	[1728196852]	2000000 OPS in 1.994299 seconds, throughput 1002858.648578
+168870	[1728196852]	2000000 OPS in 1.999758 seconds, throughput 1000121.014643
+168870	[1728196852]	2000000 OPS in 2.017996 seconds, throughput 991082.241987
+168870	[1728196852]	2000000 OPS in 2.001298 seconds, throughput 999351.420928
+168870	[1728196854]	2000000 OPS in 1.988316 seconds, throughput 1005876.329517
+168870	[1728196854]	2000000 OPS in 1.994605 seconds, throughput 1002704.796188
+168870	[1728196854]	2000000 OPS in 2.019609 seconds, throughput 990290.694882
+168870	[1728196854]	2000000 OPS in 2.004770 seconds, throughput 997620.674691
+168870	[1728196856]	2000000 OPS in 1.989590 seconds, throughput 1005232.233777
+168870	[1728196856]	2000000 OPS in 1.997163 seconds, throughput 1001420.515001
+168870	[1728196856]	2000000 OPS in 2.009813 seconds, throughput 995117.456201
+168870	[1728196856]	2000000 OPS in 2.017930 seconds, throughput 991114.657099
+168870	[1728196858]	2000000 OPS in 1.991006 seconds, throughput 1004517.314363
+168870	[1728196858]	2000000 OPS in 2.001007 seconds, throughput 999496.753385
+168870	[1728196858]	2000000 OPS in 2.008076 seconds, throughput 995978.239867
+168870	[1728196858]	2000000 OPS in 2.016647 seconds, throughput 991745.208755
+168870	[1728196860]	2000000 OPS in 1.990542 seconds, throughput 1004751.469700
+168870	[1728196860]	2000000 OPS in 1.996038 seconds, throughput 1001984.932151
+168870	[1728196860]	2000000 OPS in 2.004610 seconds, throughput 997700.300807
+168870	[1728196860]	2000000 OPS in 2.016906 seconds, throughput 991617.854278
+168870	[1728196862]	2000000 OPS in 1.992222 seconds, throughput 1003904.183369
+168870	[1728196862]	2000000 OPS in 1.998228 seconds, throughput 1000886.785692
+168870	[1728196862]	2000000 OPS in 2.005868 seconds, throughput 997074.583173
+168870	[1728196862]	2000000 OPS in 2.013346 seconds, throughput 993371.233757
+168870	[1728196864]	2000000 OPS in 1.989673 seconds, throughput 1005190.300115
+168870	[1728196864]	2000000 OPS in 2.000288 seconds, throughput 999856.020733
+168870	[1728196864]	2000000 OPS in 2.003551 seconds, throughput 998227.646813
+168870	[1728196864]	2000000 OPS in 2.014970 seconds, throughput 992570.608992
+168870	[1728196866]	2000000 OPS in 1.992097 seconds, throughput 1003967.176297
+168870	[1728196866]	2000000 OPS in 1.994008 seconds, throughput 1003005.002989
+168870	[1728196866]	2000000 OPS in 2.004685 seconds, throughput 997662.974482
+168870	[1728196866]	2000000 OPS in 2.019519 seconds, throughput 990334.827253
+168870	[1728196867]	2000000 OPS in 1.981547 seconds, throughput 1009312.421053
+168870	[1728196868]	2000000 OPS in 1.997134 seconds, throughput 1001435.056436
+168870	[1728196868]	2000000 OPS in 2.006835 seconds, throughput 996594.139528
+168870	[1728196868]	2000000 OPS in 2.016772 seconds, throughput 991683.740155
+168870	[1728196869]	2000000 OPS in 1.989527 seconds, throughput 1005264.065278
+168870	[1728196870]	2000000 OPS in 1.994966 seconds, throughput 1002523.351275
+168870	[1728196870]	2000000 OPS in 2.006530 seconds, throughput 996745.625533
+168870	[1728196870]	2000000 OPS in 2.017315 seconds, throughput 991416.808976
+168870	[1728196871]	2000000 OPS in 1.984638 seconds, throughput 1007740.454430
+168870	[1728196872]	2000000 OPS in 1.999376 seconds, throughput 1000312.097374
+168870	[1728196872]	2000000 OPS in 2.002370 seconds, throughput 998816.402563
+168870	[1728196872]	2000000 OPS in 2.015695 seconds, throughput 992213.603745
+168870	[1728196873]	2000000 OPS in 1.985362 seconds, throughput 1007372.962714
+168870	[1728196874]	2000000 OPS in 1.996165 seconds, throughput 1001921.183870
+168870	[1728196874]	2000000 OPS in 2.004774 seconds, throughput 997618.684201
+168870	[1728196874]	2000000 OPS in 2.014865 seconds, throughput 992622.334499
+168870	[1728196875]	2000000 OPS in 1.981713 seconds, throughput 1009227.875076
+168870	[1728196876]	2000000 OPS in 1.998552 seconds, throughput 1000724.524556
+168870	[1728196876]	2000000 OPS in 2.006821 seconds, throughput 996601.091976
+168870	[1728196876]	2000000 OPS in 2.018789 seconds, throughput 990692.935220
+168870	[1728196877]	2000000 OPS in 1.985397 seconds, throughput 1007355.204022
+168870	[1728196878]	2000000 OPS in 1.998228 seconds, throughput 1000886.785692
+168870	[1728196878]	2000000 OPS in 2.005002 seconds, throughput 997505.239396
+168870	[1728196878]	2000000 OPS in 2.014160 seconds, throughput 992969.774000
+168870	[1728196879]	2000000 OPS in 1.984644 seconds, throughput 1007737.407817
+168870	[1728196880]	2000000 OPS in 2.000725 seconds, throughput 999637.631359
+168870	[1728196880]	2000000 OPS in 2.006222 seconds, throughput 996898.648305
+168870	[1728196880]	2000000 OPS in 2.023100 seconds, throughput 988581.879294
+168870	[1728196881]	2000000 OPS in 1.983850 seconds, throughput 1008140.736447
+168870	[1728196882]	2000000 OPS in 1.994276 seconds, throughput 1002870.214554
+168870	[1728196882]	2000000 OPS in 2.003350 seconds, throughput 998327.800933
+168870	[1728196882]	2000000 OPS in 2.014360 seconds, throughput 992871.184892
+168870	[1728196883]	2000000 OPS in 1.983894 seconds, throughput 1008118.377292
+168870	[1728196884]	2000000 OPS in 1.996568 seconds, throughput 1001718.949718
+168870	[1728196884]	2000000 OPS in 2.003971 seconds, throughput 998018.434399
+168870	[1728196884]	2000000 OPS in 2.018548 seconds, throughput 990811.216776
+168870	[1728196885]	2000000 OPS in 1.989652 seconds, throughput 1005200.909506
+168870	[1728196886]	2000000 OPS in 1.995980 seconds, throughput 1002014.048237
+168870	[1728196886]	2000000 OPS in 2.005297 seconds, throughput 997358.496023
+168870	[1728196886]	2000000 OPS in 2.019147 seconds, throughput 990517.282793
+168870	[1728196887]	2000000 OPS in 1.983756 seconds, throughput 1008188.507054
+168870	[1728196888]	2000000 OPS in 1.999561 seconds, throughput 1000219.548191
+168870	[1728196888]	2000000 OPS in 2.003976 seconds, throughput 998015.944303
+168870	[1728196888]	2000000 OPS in 2.014549 seconds, throughput 992778.036176
+168870	[1728196889]	2000000 OPS in 1.983446 seconds, throughput 1008346.080508
+168870	[1728196890]	2000000 OPS in 1.996678 seconds, throughput 1001663.763511
+168870	[1728196890]	2000000 OPS in 2.004427 seconds, throughput 997791.388761
+168870	[1728196890]	2000000 OPS in 2.020789 seconds, throughput 989712.434104
+168870	[1728196891]	2000000 OPS in 1.986523 seconds, throughput 1006784.215436
+168870	[1728196892]	2000000 OPS in 2.006866 seconds, throughput 996578.745168
+168870	[1728196892]	2000000 OPS in 2.009899 seconds, throughput 995074.876897
+168870	[1728196892]	2000000 OPS in 2.022940 seconds, throughput 988660.069008
+168870	[1728196893]	2000000 OPS in 1.983413 seconds, throughput 1008362.857357
+168870	[1728196894]	2000000 OPS in 1.998814 seconds, throughput 1000593.351858
+168870	[1728196894]	2000000 OPS in 2.001457 seconds, throughput 999272.030326
+168870	[1728196894]	2000000 OPS in 2.015162 seconds, throughput 992476.039147
+168870	[1728196895]	2000000 OPS in 1.983945 seconds, throughput 1008092.462241
+168870	[1728196896]	2000000 OPS in 1.997113 seconds, throughput 1001445.586704
+168870	[1728196896]	2000000 OPS in 2.006609 seconds, throughput 996706.383755
+168870	[1728196896]	2000000 OPS in 2.017054 seconds, throughput 991545.094975
+168870	[1728196897]	2000000 OPS in 1.981502 seconds, throughput 1009335.342584
+168870	[1728196898]	2000000 OPS in 1.994230 seconds, throughput 1002893.347307
+168870	[1728196898]	2000000 OPS in 2.005845 seconds, throughput 997086.016118
+168870	[1728196898]	2000000 OPS in 2.018350 seconds, throughput 990908.415290
+168870	[1728196899]	2000000 OPS in 1.984985 seconds, throughput 1007564.288899
+168870	[1728196900]	2000000 OPS in 1.995044 seconds, throughput 1002484.155738
+168870	[1728196900]	2000000 OPS in 2.003203 seconds, throughput 998401.060701
+168870	[1728196901]	2000000 OPS in 2.012188 seconds, throughput 993942.911895
+168870	[1728196901]	2000000 OPS in 1.987679 seconds, throughput 1006198.687011
+168870	[1728196902]	2000000 OPS in 1.994177 seconds, throughput 1002920.001585
+168870	[1728196902]	2000000 OPS in 2.006025 seconds, throughput 996996.547899
+168870	[1728196903]	2000000 OPS in 2.012521 seconds, throughput 993778.450014
+168870	[1728196903]	2000000 OPS in 1.986334 seconds, throughput 1006880.011116
+168870	[1728196904]	2000000 OPS in 1.996701 seconds, throughput 1001652.225346
+168870	[1728196904]	2000000 OPS in 2.007076 seconds, throughput 996474.473313
+168870	[1728196905]	2000000 OPS in 2.015904 seconds, throughput 992110.735432
+168870	[1728196905]	2000000 OPS in 1.983069 seconds, throughput 1008537.776547
+168870	[1728196906]	2000000 OPS in 1.996176 seconds, throughput 1001915.662747
+168870	[1728196906]	2000000 OPS in 2.004145 seconds, throughput 997931.786373
+168870	[1728196907]	2000000 OPS in 2.014418 seconds, throughput 992842.597713
+168870	[1728196907]	2000000 OPS in 1.985110 seconds, throughput 1007500.843782
+168870	[1728196908]	2000000 OPS in 1.995261 seconds, throughput 1002375.127865
+168870	[1728196908]	2000000 OPS in 2.005990 seconds, throughput 997013.943240
+168870	[1728196909]	2000000 OPS in 2.019079 seconds, throughput 990550.642149
+168870	[1728196909]	2000000 OPS in 1.981559 seconds, throughput 1009306.308820
+168870	[1728196910]	2000000 OPS in 1.994192 seconds, throughput 1002912.457777
+168870	[1728196910]	2000000 OPS in 2.000156 seconds, throughput 999922.006084
+168870	[1728196911]	2000000 OPS in 2.019148 seconds, throughput 990516.792231
+168870	[1728196911]	2000000 OPS in 1.985590 seconds, throughput 1007257.288766
+168870	[1728196912]	2000000 OPS in 1.995296 seconds, throughput 1002357.544946
+168870	[1728196912]	2000000 OPS in 2.009102 seconds, throughput 995469.617770
+168870	[1728196913]	2000000 OPS in 2.014342 seconds, throughput 992880.057110
+168870	[1728196913]	2000000 OPS in 1.987002 seconds, throughput 1006541.513295
+168870	[1728196914]	2000000 OPS in 1.997731 seconds, throughput 1001135.788552
+168870	[1728196914]	2000000 OPS in 2.006064 seconds, throughput 996977.165235
+168870	[1728196915]	2000000 OPS in 2.016000 seconds, throughput 992063.492063
+168870	[1728196915]	2000000 OPS in 1.985709 seconds, throughput 1007196.925632
+168870	[1728196916]	2000000 OPS in 1.995221 seconds, throughput 1002395.223386
+168870	[1728196916]	2000000 OPS in 2.004646 seconds, throughput 997682.383822
+168870	[1728196917]	2000000 OPS in 2.020446 seconds, throughput 989880.452138
+168870	[1728196917]	2000000 OPS in 1.984963 seconds, throughput 1007575.456066
+168870	[1728196918]	2000000 OPS in 1.992148 seconds, throughput 1003941.474228
+168870	[1728196918]	2000000 OPS in 2.001119 seconds, throughput 999440.812865
+168870	[1728196919]	2000000 OPS in 2.017954 seconds, throughput 991102.869540
+168870	[1728196919]	2000000 OPS in 1.988382 seconds, throughput 1005842.941648
+168870	[1728196920]	2000000 OPS in 1.995439 seconds, throughput 1002285.712568
+168870	[1728196920]	2000000 OPS in 2.007688 seconds, throughput 996170.719753
+168870	[1728196921]	2000000 OPS in 2.018909 seconds, throughput 990634.050371
+168870	[1728196921]	2000000 OPS in 1.983805 seconds, throughput 1008163.604790
+168870	[1728196922]	2000000 OPS in 1.994347 seconds, throughput 1002834.511747
+168870	[1728196922]	2000000 OPS in 2.007406 seconds, throughput 996310.661620
+168870	[1728196923]	2000000 OPS in 2.019234 seconds, throughput 990474.605717
+168870	[1728196923]	2000000 OPS in 1.987982 seconds, throughput 1006045.326366
+168870	[1728196924]	2000000 OPS in 1.994255 seconds, throughput 1002880.775026
+168870	[1728196924]	2000000 OPS in 2.002936 seconds, throughput 998534.151865
+168870	[1728196925]	2000000 OPS in 2.015301 seconds, throughput 992407.585765
+168870	[1728196925]	2000000 OPS in 1.985801 seconds, throughput 1007150.263294
+168870	[1728196926]	2000000 OPS in 2.000539 seconds, throughput 999730.572611
+168870	[1728196926]	2000000 OPS in 2.006147 seconds, throughput 996935.917458
+168870	[1728196927]	2000000 OPS in 2.021454 seconds, throughput 989386.847289
+168870	[1728196927]	2000000 OPS in 1.984338 seconds, throughput 1007892.808584
+168870	[1728196928]	2000000 OPS in 1.997577 seconds, throughput 1001212.969513
+168870	[1728196928]	2000000 OPS in 2.005101 seconds, throughput 997455.988501
+168870	[1728196929]	2000000 OPS in 2.017191 seconds, throughput 991477.752974
+168870	[1728196929]	2000000 OPS in 1.984865 seconds, throughput 1007625.203729
+168870	[1728196930]	2000000 OPS in 1.999045 seconds, throughput 1000477.728115
+168870	[1728196930]	2000000 OPS in 2.005796 seconds, throughput 997110.374136
+168870	[1728196931]	2000000 OPS in 2.019373 seconds, throughput 990406.428134
+168870	[1728196931]	2000000 OPS in 1.985116 seconds, throughput 1007497.798617
+168870	[1728196932]	2000000 OPS in 1.996200 seconds, throughput 1001903.616872
+168870	[1728196932]	2000000 OPS in 2.002362 seconds, throughput 998820.393116
+168870	[1728196933]	2000000 OPS in 2.019892 seconds, throughput 990151.948718
+168870	[1728196933]	2000000 OPS in 1.983147 seconds, throughput 1008498.109318
+168870	[1728196934]	2000000 OPS in 1.996460 seconds, throughput 1001773.138455
+168870	[1728196934]	2000000 OPS in 2.002695 seconds, throughput 998654.313313
+168870	[1728196935]	2000000 OPS in 2.014992 seconds, throughput 992559.771949
+168870	[1728196935]	2000000 OPS in 1.985344 seconds, throughput 1007382.095999
+168870	[1728196936]	2000000 OPS in 1.995583 seconds, throughput 1002213.388268
+168870	[1728196936]	2000000 OPS in 2.003764 seconds, throughput 998121.535271
+168870	[1728196937]	2000000 OPS in 2.017112 seconds, throughput 991516.584106
+168870	[1728196937]	2000000 OPS in 1.981550 seconds, throughput 1009310.892988
+168870	[1728196938]	2000000 OPS in 1.999252 seconds, throughput 1000374.139928
+168870	[1728196938]	2000000 OPS in 2.001829 seconds, throughput 999086.335546
+168870	[1728196939]	2000000 OPS in 2.016545 seconds, throughput 991795.372779
+168870	[1728196939]	2000000 OPS in 1.982901 seconds, throughput 1008623.224256
+168870	[1728196940]	2000000 OPS in 1.998207 seconds, throughput 1000897.304433
+168870	[1728196940]	2000000 OPS in 2.005076 seconds, throughput 997468.425137
+168870	[1728196941]	2000000 OPS in 2.014481 seconds, throughput 992811.547987
+168870	[1728196941]	2000000 OPS in 1.987270 seconds, throughput 1006405.772744
+168870	[1728196942]	2000000 OPS in 1.997092 seconds, throughput 1001456.117194
+168870	[1728196942]	2000000 OPS in 2.004963 seconds, throughput 997524.642599
+168870	[1728196943]	2000000 OPS in 2.020852 seconds, throughput 989681.579848
+168870	[1728196943]	2000000 OPS in 1.985618 seconds, throughput 1007243.085024
+168870	[1728196944]	2000000 OPS in 1.997194 seconds, throughput 1001404.971175
+168870	[1728196944]	2000000 OPS in 2.004135 seconds, throughput 997936.765737
+168870	[1728196945]	2000000 OPS in 2.018854 seconds, throughput 990661.038391
+168870	[1728196945]	2000000 OPS in 1.986972 seconds, throughput 1006556.710412
+168870	[1728196946]	2000000 OPS in 1.996595 seconds, throughput 1001705.403449
+168870	[1728196946]	2000000 OPS in 2.007268 seconds, throughput 996379.158139
+168870	[1728196947]	2000000 OPS in 1.987229 seconds, throughput 1006426.536650
+168870	[1728196947]	2000000 OPS in 2.018235 seconds, throughput 990964.877727
+168870	[1728196948]	2000000 OPS in 1.998878 seconds, throughput 1000561.314898
+168870	[1728196948]	2000000 OPS in 2.007793 seconds, throughput 996118.623782
+168870	[1728196949]	2000000 OPS in 1.983122 seconds, throughput 1008510.822834
+168870	[1728196949]	2000000 OPS in 2.022164 seconds, throughput 989039.464653
+168870	[1728196950]	2000000 OPS in 1.994048 seconds, throughput 1002984.883012
+168870	[1728196950]	2000000 OPS in 2.007647 seconds, throughput 996191.063469
+168870	[1728196951]	2000000 OPS in 1.984576 seconds, throughput 1007771.937180
+168870	[1728196951]	2000000 OPS in 2.018762 seconds, throughput 990706.185276
+168870	[1728196952]	2000000 OPS in 1.997152 seconds, throughput 1001426.030668
+168870	[1728196952]	2000000 OPS in 2.005257 seconds, throughput 997378.390900
+168870	[1728196953]	2000000 OPS in 1.985275 seconds, throughput 1007417.108461
+168870	[1728196953]	2000000 OPS in 2.019614 seconds, throughput 990288.243199
+168870	[1728196954]	2000000 OPS in 2.001965 seconds, throughput 999018.464359
+168870	[1728196954]	2000000 OPS in 2.003190 seconds, throughput 998407.539974
+168870	[1728196955]	2000000 OPS in 1.982971 seconds, throughput 1008587.619284
+168870	[1728196955]	2000000 OPS in 2.018690 seconds, throughput 990741.520491
+168870	[1728196956]	2000000 OPS in 1.993916 seconds, throughput 1003051.282000
+168870	[1728196956]	2000000 OPS in 2.008181 seconds, throughput 995926.164026
+168870	[1728196957]	2000000 OPS in 1.983286 seconds, throughput 1008427.428016
+168870	[1728196957]	2000000 OPS in 2.019467 seconds, throughput 990360.327750
+168870	[1728196958]	2000000 OPS in 1.995206 seconds, throughput 1002402.759414
+168870	[1728196958]	2000000 OPS in 2.007090 seconds, throughput 996467.522632
+168870	[1728196959]	2000000 OPS in 1.986646 seconds, throughput 1006721.882006
+168870	[1728196959]	2000000 OPS in 2.017662 seconds, throughput 991246.303890
+168870	[1728196960]	2000000 OPS in 2.000025 seconds, throughput 999987.500156
+168870	[1728196960]	2000000 OPS in 1.998880 seconds, throughput 1000560.313776
+168870	[1728196961]	2000000 OPS in 1.985970 seconds, throughput 1007064.557873
+168870	[1728196961]	2000000 OPS in 2.012387 seconds, throughput 993844.623325
+168870	[1728196962]	2000000 OPS in 2.001979 seconds, throughput 999011.478142
+168870	[1728196962]	2000000 OPS in 2.004171 seconds, throughput 997918.840259
+168870	[1728196963]	2000000 OPS in 1.981768 seconds, throughput 1009199.865978
+168870	[1728196963]	2000000 OPS in 2.012822 seconds, throughput 993629.839102
+168870	[1728196964]	2000000 OPS in 1.994277 seconds, throughput 1002869.711680
+168870	[1728196964]	2000000 OPS in 2.005653 seconds, throughput 997181.466585
+168870	[1728196965]	2000000 OPS in 1.982584 seconds, throughput 1008784.495386
+168870	[1728196965]	2000000 OPS in 2.018504 seconds, throughput 990832.814797
+168870	[1728196966]	2000000 OPS in 1.998153 seconds, throughput 1000924.353641
+168870	[1728196966]	2000000 OPS in 2.005610 seconds, throughput 997202.846017
+168870	[1728196967]	2000000 OPS in 1.980817 seconds, throughput 1009684.387806
+168870	[1728196967]	2000000 OPS in 2.014697 seconds, throughput 992705.106525
+168870	[1728196968]	2000000 OPS in 1.994944 seconds, throughput 1002534.406981
+168870	[1728196968]	2000000 OPS in 2.004964 seconds, throughput 997524.145072
+168870	[1728196969]	2000000 OPS in 1.982103 seconds, throughput 1009029.298679
+168870	[1728196969]	2000000 OPS in 2.012865 seconds, throughput 993608.612599
+168870	[1728196970]	2000000 OPS in 1.995739 seconds, throughput 1002135.048721
+168870	[1728196970]	2000000 OPS in 2.005641 seconds, throughput 997187.432846
+168870	[1728196971]	2000000 OPS in 1.984295 seconds, throughput 1007914.649787
+168870	[1728196971]	2000000 OPS in 2.017871 seconds, throughput 991143.636040
+168870	[1728196972]	2000000 OPS in 1.997162 seconds, throughput 1001421.016422
+168870	[1728196972]	2000000 OPS in 2.004340 seconds, throughput 997834.698704
+168870	[1728196973]	2000000 OPS in 1.985110 seconds, throughput 1007500.843782
+168870	[1728196973]	2000000 OPS in 2.014451 seconds, throughput 992826.333329
+168870	[1728196974]	2000000 OPS in 1.992692 seconds, throughput 1003667.400682
+168870	[1728196974]	2000000 OPS in 2.004957 seconds, throughput 997527.627775
+168870	[1728196975]	2000000 OPS in 1.983764 seconds, throughput 1008184.441294
+168870	[1728196975]	2000000 OPS in 2.014338 seconds, throughput 992882.028736
+168870	[1728196976]	2000000 OPS in 1.993664 seconds, throughput 1003178.068120
+168870	[1728196976]	2000000 OPS in 2.003412 seconds, throughput 998296.905479
+168870	[1728196977]	2000000 OPS in 1.985628 seconds, throughput 1007238.012357
+168870	[1728196977]	2000000 OPS in 2.017708 seconds, throughput 991223.705313
+168870	[1728196978]	2000000 OPS in 1.998662 seconds, throughput 1000669.447861
+168870	[1728196978]	2000000 OPS in 2.001719 seconds, throughput 999141.238106
+168870	[1728196979]	2000000 OPS in 1.985143 seconds, throughput 1007484.095604
+168870	[1728196979]	2000000 OPS in 2.016621 seconds, throughput 991757.995181
+168870	[1728196980]	2000000 OPS in 1.996823 seconds, throughput 1001591.027347
+168870	[1728196980]	2000000 OPS in 2.008894 seconds, throughput 995572.688255
+168870	[1728196981]	2000000 OPS in 1.985760 seconds, throughput 1007171.057932
+168870	[1728196981]	2000000 OPS in 2.015667 seconds, throughput 992227.386766
+168870	[1728196982]	2000000 OPS in 1.998522 seconds, throughput 1000739.546525
+168870	[1728196982]	2000000 OPS in 2.000994 seconds, throughput 999503.246886
+168870	[1728196983]	2000000 OPS in 1.985023 seconds, throughput 1007545.000738
+168870	[1728196983]	2000000 OPS in 2.017985 seconds, throughput 991087.644358
+168870	[1728196984]	2000000 OPS in 1.997439 seconds, throughput 1001282.141783
+168870	[1728196984]	2000000 OPS in 1.999834 seconds, throughput 1000083.006890
+168870	[1728196985]	2000000 OPS in 1.980043 seconds, throughput 1010079.074040
+168870	[1728196985]	2000000 OPS in 2.014194 seconds, throughput 992953.012470
+168870	[1728196986]	2000000 OPS in 2.000457 seconds, throughput 999771.552200
+168870	[1728196986]	2000000 OPS in 2.005398 seconds, throughput 997308.264993
+168870	[1728196987]	2000000 OPS in 1.986111 seconds, throughput 1006993.063328
+168870	[1728196987]	2000000 OPS in 2.017070 seconds, throughput 991537.229744
+168870	[1728196988]	2000000 OPS in 1.998385 seconds, throughput 1000808.152583
+168870	[1728196988]	2000000 OPS in 2.004101 seconds, throughput 997953.695946
+168870	[1728196989]	2000000 OPS in 1.981934 seconds, throughput 1009115.338856
+168870	[1728196989]	2000000 OPS in 2.016849 seconds, throughput 991645.879290
+168870	[1728196990]	2000000 OPS in 1.995885 seconds, throughput 1002061.742034
+168870	[1728196990]	2000000 OPS in 2.002039 seconds, throughput 998981.538322
+168870	[1728196991]	2000000 OPS in 1.986251 seconds, throughput 1006922.085879
+168870	[1728196991]	2000000 OPS in 2.021351 seconds, throughput 989437.262504
+168870	[1728196992]	2000000 OPS in 1.998855 seconds, throughput 1000572.827944
+168870	[1728196992]	2000000 OPS in 2.004914 seconds, throughput 997549.022053
+168870	[1728196993]	2000000 OPS in 1.983210 seconds, throughput 1008466.072680
+168870	[1728196993]	2000000 OPS in 2.020150 seconds, throughput 990025.493156
+168870	[1728196994]	2000000 OPS in 1.999179 seconds, throughput 1000410.668579
+168870	[1728196994]	2000000 OPS in 2.005599 seconds, throughput 997208.315321
+168870	[1728196995]	2000000 OPS in 1.982448 seconds, throughput 1008853.700072
+168870	[1728196995]	2000000 OPS in 2.016246 seconds, throughput 991942.451467
+168870	[1728196996]	2000000 OPS in 2.000997 seconds, throughput 999501.748378
+168870	[1728196996]	2000000 OPS in 2.007269 seconds, throughput 996378.661754
+168870	[1728196996]	2000000 OPS in 1.983410 seconds, throughput 1008364.382553
+168870	[1728196997]	2000000 OPS in 2.017949 seconds, throughput 991105.325258
+168870	[1728196998]	2000000 OPS in 1.996257 seconds, throughput 1001875.009079
+168870	[1728196998]	2000000 OPS in 2.012218 seconds, throughput 993928.093278
+168870	[1728196998]	2000000 OPS in 1.983213 seconds, throughput 1008464.547177
+168870	[1728196999]	2000000 OPS in 2.015961 seconds, throughput 992082.684139
+168870	[1728197000]	2000000 OPS in 1.999993 seconds, throughput 1000003.500012
+168870	[1728197000]	2000000 OPS in 1.983236 seconds, throughput 1008452.851804
+168870	[1728197000]	2000000 OPS in 2.001980 seconds, throughput 999010.979131
+168870	[1728197001]	2000000 OPS in 2.014185 seconds, throughput 992957.449291
+168870	[1728197002]	2000000 OPS in 2.001465 seconds, throughput 999268.036164
+168870	[1728197002]	2000000 OPS in 1.991330 seconds, throughput 1004353.874044
+168870	[1728197002]	2000000 OPS in 2.006491 seconds, throughput 996764.999195
+168870	[1728197003]	2000000 OPS in 2.021999 seconds, throughput 989120.172661
+168870	[1728197004]	2000000 OPS in 1.994750 seconds, throughput 1002631.908760
+168870	[1728197004]	2000000 OPS in 1.983880 seconds, throughput 1008125.491461
+168870	[1728197004]	2000000 OPS in 2.006400 seconds, throughput 996810.207337
+168870	[1728197005]	2000000 OPS in 2.020353 seconds, throughput 989926.017879
+168870	[1728197006]	2000000 OPS in 2.004165 seconds, throughput 997921.827794
+168870	[1728197006]	2000000 OPS in 1.986569 seconds, throughput 1006760.902843
+168870	[1728197006]	2000000 OPS in 2.003321 seconds, throughput 998342.252689
+168870	[1728197007]	2000000 OPS in 2.018540 seconds, throughput 990815.143619
+168870	[1728197008]	2000000 OPS in 1.993966 seconds, throughput 1003026.129834
+168870	[1728197008]	2000000 OPS in 1.985435 seconds, throughput 1007335.923866
+168870	[1728197009]	2000000 OPS in 2.005471 seconds, throughput 997271.962546
+168870	[1728197009]	2000000 OPS in 2.015290 seconds, throughput 992413.002595
+168870	[1728197010]	2000000 OPS in 2.001421 seconds, throughput 999290.004452
+168870	[1728197010]	2000000 OPS in 1.985762 seconds, throughput 1007170.043540
+168870	[1728197011]	2000000 OPS in 2.007909 seconds, throughput 996061.076473
+168870	[1728197011]	2000000 OPS in 2.013508 seconds, throughput 993291.310489
+168870	[1728197012]	2000000 OPS in 1.994566 seconds, throughput 1002724.402201
+168870	[1728197012]	2000000 OPS in 1.983189 seconds, throughput 1008476.751333
+168870	[1728197013]	2000000 OPS in 2.004686 seconds, throughput 997662.476817
+168870	[1728197013]	2000000 OPS in 2.017950 seconds, throughput 991104.834114
+168870	[1728197014]	2000000 OPS in 1.999907 seconds, throughput 1000046.502162
+168870	[1728197014]	2000000 OPS in 1.985243 seconds, throughput 1007433.346950
+168870	[1728197015]	2000000 OPS in 2.002656 seconds, throughput 998673.761245
+168870	[1728197015]	2000000 OPS in 2.014506 seconds, throughput 992799.227205
+168870	[1728197016]	2000000 OPS in 2.004323 seconds, throughput 997843.162005
+168870	[1728197016]	2000000 OPS in 1.984152 seconds, throughput 1007987.291296
+168870	[1728197017]	2000000 OPS in 2.000521 seconds, throughput 999739.567843
+168870	[1728197017]	2000000 OPS in 2.014335 seconds, throughput 992883.507460
+168870	[1728197018]	2000000 OPS in 1.995217 seconds, throughput 1002397.232983
+168870	[1728197018]	2000000 OPS in 1.985565 seconds, throughput 1007269.971016
+168870	[1728197019]	2000000 OPS in 2.003465 seconds, throughput 998270.496365
+168870	[1728197020]	2000000 OPS in 2.013507 seconds, throughput 993291.803803
+168870	[1728197020]	2000000 OPS in 1.998800 seconds, throughput 1000600.360216
+168870	[1728197020]	2000000 OPS in 1.987244 seconds, throughput 1006418.939999
+168870	[1728197021]	2000000 OPS in 2.000043 seconds, throughput 999978.500462
+168870	[1728197022]	2000000 OPS in 2.018162 seconds, throughput 991000.722440
+168870	[1728197022]	2000000 OPS in 1.997501 seconds, throughput 1001251.063203
+168870	[1728197022]	2000000 OPS in 1.989649 seconds, throughput 1005202.425151
+168870	[1728197023]	2000000 OPS in 2.004049 seconds, throughput 997979.590319
+168870	[1728197024]	2000000 OPS in 2.017288 seconds, throughput 991430.078402
+168870	[1728197024]	2000000 OPS in 2.005724 seconds, throughput 997146.167668
+168870	[1728197024]	2000000 OPS in 1.986345 seconds, throughput 1006874.435206
+168870	[1728197025]	2000000 OPS in 2.003694 seconds, throughput 998156.405120
+168870	[1728197026]	2000000 OPS in 2.019323 seconds, throughput 990430.951363
+168870	[1728197026]	2000000 OPS in 1.996176 seconds, throughput 1001915.662747
+168870	[1728197026]	2000000 OPS in 1.989381 seconds, throughput 1005337.841268
+168870	[1728197027]	2000000 OPS in 2.005945 seconds, throughput 997036.309570
+168870	[1728197028]	2000000 OPS in 2.018149 seconds, throughput 991007.106016
+168870	[1728197028]	2000000 OPS in 2.000930 seconds, throughput 999535.216125
+168870	[1728197028]	2000000 OPS in 1.985145 seconds, throughput 1007483.080581
+168870	[1728197029]	2000000 OPS in 1.999128 seconds, throughput 1000436.190179
+168870	[1728197030]	2000000 OPS in 2.019583 seconds, throughput 990303.443830
+168870	[1728197030]	2000000 OPS in 1.998860 seconds, throughput 1000570.325085
+168870	[1728197030]	2000000 OPS in 1.985003 seconds, throughput 1007555.152310
+168870	[1728197031]	2000000 OPS in 2.006166 seconds, throughput 996926.475675
+168870	[1728197032]	2000000 OPS in 2.014567 seconds, throughput 992769.165781
+168870	[1728197032]	2000000 OPS in 1.995334 seconds, throughput 1002338.455617
+168870	[1728197032]	2000000 OPS in 1.984359 seconds, throughput 1007882.142294
+168870	[1728197033]	2000000 OPS in 1.998616 seconds, throughput 1000692.479196
+168870	[1728197034]	2000000 OPS in 2.012481 seconds, throughput 993798.202318
+168870	[1728197034]	2000000 OPS in 1.996551 seconds, throughput 1001727.479038
+168870	[1728197034]	2000000 OPS in 1.985341 seconds, throughput 1007383.618230
+168870	[1728197035]	2000000 OPS in 2.005580 seconds, throughput 997217.762443
+168870	[1728197036]	2000000 OPS in 1.994318 seconds, throughput 1002849.094277
+168870	[1728197036]	2000000 OPS in 2.014867 seconds, throughput 992621.349201
+168870	[1728197036]	2000000 OPS in 1.984173 seconds, throughput 1007976.623006
+168870	[1728197037]	2000000 OPS in 2.004154 seconds, throughput 997927.304988
+168870	[1728197038]	2000000 OPS in 1.994911 seconds, throughput 1002550.990997
+168870	[1728197038]	2000000 OPS in 2.014079 seconds, throughput 993009.708159
+168870	[1728197038]	2000000 OPS in 1.987181 seconds, throughput 1006450.846702
+168870	[1728197039]	2000000 OPS in 2.005525 seconds, throughput 997245.110383
+168870	[1728197040]	2000000 OPS in 1.996708 seconds, throughput 1001648.713783
+168870	[1728197040]	2000000 OPS in 2.016882 seconds, throughput 991629.654090
+168870	[1728197040]	2000000 OPS in 1.982356 seconds, throughput 1008900.520391
+168870	[1728197041]	2000000 OPS in 2.004386 seconds, throughput 997811.798725
+168870	[1728197042]	2000000 OPS in 1.994886 seconds, throughput 1002563.555010
+168870	[1728197042]	2000000 OPS in 2.017445 seconds, throughput 991352.924119
+168870	[1728197042]	2000000 OPS in 1.985973 seconds, throughput 1007063.036607
+168870	[1728197043]	2000000 OPS in 2.004383 seconds, throughput 997813.292170
+168870	[1728197044]	2000000 OPS in 1.996650 seconds, throughput 1001677.810332
+168870	[1728197044]	2000000 OPS in 2.018066 seconds, throughput 991047.864639
+168870	[1728197044]	2000000 OPS in 1.987513 seconds, throughput 1006282.726201
+168870	[1728197045]	2000000 OPS in 2.002582 seconds, throughput 998710.664532
+168870	[1728197046]	2000000 OPS in 1.994077 seconds, throughput 1002970.296533
+168870	[1728197046]	2000000 OPS in 2.014154 seconds, throughput 992972.731976
+168870	[1728197046]	2000000 OPS in 1.981552 seconds, throughput 1009309.874280
+168870	[1728197047]	2000000 OPS in 2.000949 seconds, throughput 999525.725043
+168870	[1728197048]	2000000 OPS in 2.000515 seconds, throughput 999742.566289
+168870	[1728197048]	2000000 OPS in 2.019933 seconds, throughput 990131.850908
+168870	[1728197048]	2000000 OPS in 1.981980 seconds, throughput 1009091.918183
+168870	[1728197049]	2000000 OPS in 2.001675 seconds, throughput 999163.200819
+168870	[1728197050]	2000000 OPS in 1.996013 seconds, throughput 1001997.481980
+168870	[1728197050]	2000000 OPS in 2.017365 seconds, throughput 991392.236903
+168870	[1728197050]	2000000 OPS in 1.987384 seconds, throughput 1006348.043458
+168870	[1728197051]	2000000 OPS in 2.004242 seconds, throughput 997883.489120
+168870	[1728197052]	2000000 OPS in 1.994787 seconds, throughput 1002613.311597
+168870	[1728197052]	2000000 OPS in 2.015987 seconds, throughput 992069.889340
+168870	[1728197052]	2000000 OPS in 1.983720 seconds, throughput 1008206.803380
+168870	[1728197053]	2000000 OPS in 2.000607 seconds, throughput 999696.592084
+168870	[1728197054]	2000000 OPS in 1.996645 seconds, throughput 1001680.318735
+168870	[1728197054]	2000000 OPS in 2.016700 seconds, throughput 991719.145138
+168870	[1728197054]	2000000 OPS in 1.984481 seconds, throughput 1007820.180692
+168870	[1728197055]	2000000 OPS in 2.002131 seconds, throughput 998935.634082
+168870	[1728197056]	2000000 OPS in 1.996222 seconds, throughput 1001892.575074
+168870	[1728197056]	2000000 OPS in 2.018288 seconds, throughput 990938.855109
+168870	[1728197056]	2000000 OPS in 1.982905 seconds, throughput 1008621.189618
+168870	[1728197057]	2000000 OPS in 2.005331 seconds, throughput 997341.586003
+168870	[1728197058]	2000000 OPS in 2.003069 seconds, throughput 998467.851083
+168870	[1728197058]	2000000 OPS in 2.020222 seconds, throughput 989990.208997
+168870	[1728197058]	2000000 OPS in 1.987136 seconds, throughput 1006473.638442
+168870	[1728197059]	2000000 OPS in 2.008126 seconds, throughput 995953.441169
+168870	[1728197060]	2000000 OPS in 1.998258 seconds, throughput 1000871.759302
+168870	[1728197060]	2000000 OPS in 2.013167 seconds, throughput 993459.558993
+168870	[1728197060]	2000000 OPS in 1.983984 seconds, throughput 1008072.645747
+168870	[1728197061]	2000000 OPS in 2.004856 seconds, throughput 997577.880905
+168870	[1728197062]	2000000 OPS in 1.995471 seconds, throughput 1002269.639599
+168870	[1728197062]	2000000 OPS in 2.018293 seconds, throughput 990936.400215
+168870	[1728197062]	2000000 OPS in 1.984764 seconds, throughput 1007676.479420
+168870	[1728197063]	2000000 OPS in 2.002846 seconds, throughput 998579.022052
+168870	[1728197064]	2000000 OPS in 1.996027 seconds, throughput 1001990.454037
+168870	[1728197064]	2000000 OPS in 2.017441 seconds, throughput 991354.889685
+168870	[1728197064]	2000000 OPS in 1.983623 seconds, throughput 1008256.105117
+168870	[1728197065]	2000000 OPS in 2.007383 seconds, throughput 996322.077053
+168870	[1728197066]	2000000 OPS in 1.995669 seconds, throughput 1002170.199567
+168870	[1728197066]	2000000 OPS in 2.017717 seconds, throughput 991219.283973
+168870	[1728197066]	2000000 OPS in 1.984076 seconds, throughput 1008025.902234
+168870	[1728197067]	2000000 OPS in 2.003070 seconds, throughput 998467.352614
+168870	[1728197068]	2000000 OPS in 1.997070 seconds, throughput 1001467.149374
+168870	[1728197068]	2000000 OPS in 2.016415 seconds, throughput 991859.314675
+168870	[1728197068]	2000000 OPS in 1.986327 seconds, throughput 1006883.559454
+168870	[1728197069]	2000000 OPS in 2.003244 seconds, throughput 998380.626624
+168870	[1728197070]	2000000 OPS in 1.996227 seconds, throughput 1001890.065609
+168870	[1728197070]	2000000 OPS in 2.014080 seconds, throughput 993009.215126
+168870	[1728197070]	2000000 OPS in 1.980803 seconds, throughput 1009691.524094
+168870	[1728197071]	2000000 OPS in 2.001187 seconds, throughput 999406.852033
+168870	[1728197072]	2000000 OPS in 1.993040 seconds, throughput 1003492.152691
+168870	[1728197072]	2000000 OPS in 1.983405 seconds, throughput 1008366.924557
+168870	[1728197072]	2000000 OPS in 2.017946 seconds, throughput 991106.798695
+168870	[1728197073]	2000000 OPS in 2.004074 seconds, throughput 997967.140934
+168870	[1728197074]	2000000 OPS in 1.995244 seconds, throughput 1002383.668363
+168870	[1728197074]	2000000 OPS in 1.987333 seconds, throughput 1006373.868899
+168870	[1728197074]	2000000 OPS in 2.014482 seconds, throughput 992811.055150
+168870	[1728197075]	2000000 OPS in 2.001576 seconds, throughput 999212.620455
+168870	[1728197076]	2000000 OPS in 1.995524 seconds, throughput 1002243.019878
+168870	[1728197076]	2000000 OPS in 1.985305 seconds, throughput 1007401.885353
+168870	[1728197076]	2000000 OPS in 2.017526 seconds, throughput 991313.123102
+168870	[1728197077]	2000000 OPS in 2.003172 seconds, throughput 998416.511413
+168870	[1728197078]	2000000 OPS in 1.995820 seconds, throughput 1002094.377248
+168870	[1728197078]	2000000 OPS in 1.986116 seconds, throughput 1006990.528247
+168870	[1728197078]	2000000 OPS in 2.017173 seconds, throughput 991486.600306
+168870	[1728197079]	2000000 OPS in 2.006399 seconds, throughput 996810.704152
+168870	[1728197080]	2000000 OPS in 1.994994 seconds, throughput 1002509.280730
+168870	[1728197080]	2000000 OPS in 1.985554 seconds, throughput 1007275.551307
+168870	[1728197080]	2000000 OPS in 2.018496 seconds, throughput 990836.741812
+168870	[1728197081]	2000000 OPS in 2.004801 seconds, throughput 997605.248601
+168870	[1728197082]	2000000 OPS in 1.999054 seconds, throughput 1000473.223835
+168870	[1728197082]	2000000 OPS in 1.987343 seconds, throughput 1006368.804982
+168870	[1728197082]	2000000 OPS in 2.017591 seconds, throughput 991281.186326
+168870	[1728197083]	2000000 OPS in 2.002362 seconds, throughput 998820.393116
+168870	[1728197084]	2000000 OPS in 1.998496 seconds, throughput 1000752.565930
+168870	[1728197084]	2000000 OPS in 1.984653 seconds, throughput 1007732.837932
+168870	[1728197084]	2000000 OPS in 2.017811 seconds, throughput 991173.107888
+168870	[1728197085]	2000000 OPS in 2.007795 seconds, throughput 996117.631531
+168870	[1728197086]	2000000 OPS in 1.996963 seconds, throughput 1001520.809349
+168870	[1728197086]	2000000 OPS in 1.983919 seconds, throughput 1008105.673669
+168870	[1728197086]	2000000 OPS in 2.017370 seconds, throughput 991389.779763
+168870	[1728197087]	2000000 OPS in 2.003528 seconds, throughput 998239.106217
+168870	[1728197088]	2000000 OPS in 2.002286 seconds, throughput 998858.304957
+168870	[1728197088]	2000000 OPS in 1.983485 seconds, throughput 1008326.254043
+168870	[1728197088]	2000000 OPS in 2.016871 seconds, throughput 991635.062431
+168870	[1728197089]	2000000 OPS in 2.003920 seconds, throughput 998043.834085
+168870	[1728197090]	2000000 OPS in 1.998960 seconds, throughput 1000520.270541
+168870	[1728197090]	2000000 OPS in 1.982733 seconds, throughput 1008708.686444
+168870	[1728197090]	2000000 OPS in 2.018018 seconds, throughput 991071.437420
+168870	[1728197091]	2000000 OPS in 2.004708 seconds, throughput 997651.528302
+168870	[1728197092]	2000000 OPS in 1.997077 seconds, throughput 1001463.639109
+168870	[1728197092]	2000000 OPS in 1.986030 seconds, throughput 1007034.133422
+168870	[1728197092]	2000000 OPS in 2.015596 seconds, throughput 992262.338286
+168870	[1728197093]	2000000 OPS in 2.005482 seconds, throughput 997266.492544
+168870	[1728197094]	2000000 OPS in 1.997748 seconds, throughput 1001127.269305
+168870	[1728197094]	2000000 OPS in 1.987049 seconds, throughput 1006517.705401
+168870	[1728197094]	2000000 OPS in 2.014858 seconds, throughput 992625.783058
+168870	[1728197095]	2000000 OPS in 2.004188 seconds, throughput 997910.375673
+168870	[1728197096]	2000000 OPS in 1.994845 seconds, throughput 1002584.160674
+168870	[1728197096]	2000000 OPS in 1.984242 seconds, throughput 1007941.571643
+168870	[1728197096]	2000000 OPS in 2.018362 seconds, throughput 990902.523928
+168870	[1728197097]	2000000 OPS in 2.000751 seconds, throughput 999624.640947
+168870	[1728197098]	2000000 OPS in 1.996421 seconds, throughput 1001792.708051
+168870	[1728197098]	2000000 OPS in 1.986872 seconds, throughput 1006607.370782
+168870	[1728197098]	2000000 OPS in 2.015176 seconds, throughput 992469.144134
+168870	[1728197099]	2000000 OPS in 2.006785 seconds, throughput 996618.970144
+168870	[1728197100]	2000000 OPS in 1.996174 seconds, throughput 1001916.666583
+168870	[1728197100]	2000000 OPS in 1.982314 seconds, throughput 1008921.896329
+168870	[1728197100]	2000000 OPS in 2.018186 seconds, throughput 990988.937590
+168870	[1728197101]	2000000 OPS in 2.002105 seconds, throughput 998948.606592
+168870	[1728197102]	2000000 OPS in 1.995759 seconds, throughput 1002125.006075
+168870	[1728197102]	2000000 OPS in 1.986683 seconds, throughput 1006703.132810
+168870	[1728197102]	2000000 OPS in 2.015603 seconds, throughput 992258.892252
+168870	[1728197103]	2000000 OPS in 2.003875 seconds, throughput 998066.246647
+168870	[1728197104]	2000000 OPS in 1.994382 seconds, throughput 1002816.912708
+168870	[1728197104]	2000000 OPS in 1.988573 seconds, throughput 1005746.331666
+168870	[1728197104]	2000000 OPS in 2.013624 seconds, throughput 993234.089383
+168870	[1728197105]	2000000 OPS in 2.001674 seconds, throughput 999163.699983
+168870	[1728197106]	2000000 OPS in 2.000891 seconds, throughput 999554.698382
+168870	[1728197106]	2000000 OPS in 1.984864 seconds, throughput 1007625.711384
+168870	[1728197106]	2000000 OPS in 2.016444 seconds, throughput 991845.049999
+168870	[1728197107]	2000000 OPS in 2.001417 seconds, throughput 999292.001617
+168870	[1728197108]	2000000 OPS in 1.996335 seconds, throughput 1001835.864221
+168870	[1728197108]	2000000 OPS in 1.983001 seconds, throughput 1008572.360780
+168870	[1728197108]	2000000 OPS in 2.018881 seconds, throughput 990647.789543
+168870	[1728197109]	2000000 OPS in 2.005825 seconds, throughput 997095.958022
+168870	[1728197110]	2000000 OPS in 1.997380 seconds, throughput 1001311.718351
+168870	[1728197110]	2000000 OPS in 1.985676 seconds, throughput 1007213.664263
+168870	[1728197110]	2000000 OPS in 2.018060 seconds, throughput 991050.811175
+168870	[1728197111]	2000000 OPS in 2.003084 seconds, throughput 998460.374103
+168870	[1728197112]	2000000 OPS in 1.997093 seconds, throughput 1001455.615737
+168870	[1728197112]	2000000 OPS in 1.986784 seconds, throughput 1006651.956126
+168870	[1728197112]	2000000 OPS in 2.021492 seconds, throughput 989368.248798
+168870	[1728197113]	2000000 OPS in 2.010694 seconds, throughput 994681.438349
+168870	[1728197114]	2000000 OPS in 2.001260 seconds, throughput 999370.396650
+168870	[1728197114]	2000000 OPS in 1.984337 seconds, throughput 1007893.316508
+168870	[1728197114]	2000000 OPS in 2.016846 seconds, throughput 991647.354334
+168870	[1728197115]	2000000 OPS in 2.005227 seconds, throughput 997393.312578
+168870	[1728197116]	2000000 OPS in 1.995655 seconds, throughput 1002177.230032
+168870	[1728197116]	2000000 OPS in 1.983413 seconds, throughput 1008362.857357
+168870	[1728197116]	2000000 OPS in 2.019322 seconds, throughput 990431.441840
+168870	[1728197117]	2000000 OPS in 2.011249 seconds, throughput 994406.958064
+168870	[1728197118]	2000000 OPS in 1.998870 seconds, throughput 1000565.319405
+168870	[1728197118]	2000000 OPS in 1.985197 seconds, throughput 1007456.690696
+168870	[1728197118]	2000000 OPS in 2.019020 seconds, throughput 990579.588117
+168870	[1728197119]	2000000 OPS in 2.010924 seconds, throughput 994567.671379
+168870	[1728197120]	2000000 OPS in 1.995239 seconds, throughput 1002386.180302
+168870	[1728197120]	2000000 OPS in 1.985666 seconds, throughput 1007218.736686
+168870	[1728197120]	2000000 OPS in 2.013472 seconds, throughput 993309.070104
+168870	[1728197121]	2000000 OPS in 2.003149 seconds, throughput 998427.975153
+168870	[1728197121]	2000000 OPS in 1.994843 seconds, throughput 1002585.165850
+168870	[1728197122]	2000000 OPS in 1.982335 seconds, throughput 1008911.208247
+168870	[1728197122]	2000000 OPS in 2.012715 seconds, throughput 993682.662473
+168870	[1728197123]	2000000 OPS in 2.005714 seconds, throughput 997151.139195
+168870	[1728197123]	2000000 OPS in 1.997632 seconds, throughput 1001185.403518
+168870	[1728197124]	2000000 OPS in 1.983312 seconds, throughput 1008414.208153
+168870	[1728197124]	2000000 OPS in 2.016819 seconds, throughput 991660.629933
+168870	[1728197125]	2000000 OPS in 2.004278 seconds, throughput 997865.565555
+168870	[1728197125]	2000000 OPS in 1.999384 seconds, throughput 1000308.094893
+168870	[1728197126]	2000000 OPS in 1.986821 seconds, throughput 1006633.209534
+168870	[1728197126]	2000000 OPS in 2.014037 seconds, throughput 993030.416025
+168870	[1728197127]	2000000 OPS in 2.004999 seconds, throughput 997506.731924
+168870	[1728197127]	2000000 OPS in 1.993845 seconds, throughput 1003087.000243
+168870	[1728197128]	2000000 OPS in 1.984700 seconds, throughput 1007708.973648
+168870	[1728197128]	2000000 OPS in 2.013278 seconds, throughput 993404.785628
+168870	[1728197129]	2000000 OPS in 2.007578 seconds, throughput 996225.302329
+168870	[1728197129]	2000000 OPS in 1.995920 seconds, throughput 1002044.170107
+168870	[1728197130]	2000000 OPS in 1.986779 seconds, throughput 1006654.489503
+168870	[1728197130]	2000000 OPS in 2.014497 seconds, throughput 992803.662651
+168870	[1728197131]	2000000 OPS in 2.003991 seconds, throughput 998008.474090
+168870	[1728197131]	2000000 OPS in 1.996571 seconds, throughput 1001717.444559
+168870	[1728197131]	2000000 OPS in 1.982995 seconds, throughput 1008575.412444
+168870	[1728197132]	2000000 OPS in 2.018222 seconds, throughput 990971.260842
+168870	[1728197133]	2000000 OPS in 2.002882 seconds, throughput 998561.073493
+168870	[1728197133]	2000000 OPS in 1.984635 seconds, throughput 1007741.977744
+168870	[1728197133]	2000000 OPS in 1.998664 seconds, throughput 1000668.446522
+168870	[1728197134]	2000000 OPS in 2.017489 seconds, throughput 991331.303417
+168870	[1728197135]	2000000 OPS in 2.003230 seconds, throughput 998387.604020
+168870	[1728197135]	2000000 OPS in 1.987575 seconds, throughput 1006251.336428
+168870	[1728197135]	2000000 OPS in 1.999961 seconds, throughput 1000019.500380
+168870	[1728197136]	2000000 OPS in 2.015952 seconds, throughput 992087.113185
+168870	[1728197137]	2000000 OPS in 2.009803 seconds, throughput 995122.407520
+168870	[1728197137]	2000000 OPS in 1.982876 seconds, throughput 1008635.940926
+168870	[1728197137]	2000000 OPS in 1.996516 seconds, throughput 1001745.039859
+168870	[1728197139]	2000000 OPS in 2.018778 seconds, throughput 990698.333348
+168870	[1728197139]	2000000 OPS in 2.005017 seconds, throughput 997497.776827
+168870	[1728197139]	2000000 OPS in 1.987971 seconds, throughput 1006050.893097
+168870	[1728197139]	2000000 OPS in 1.999563 seconds, throughput 1000218.547753
+168870	[1728197141]	2000000 OPS in 2.018698 seconds, throughput 990737.594232
+168870	[1728197141]	2000000 OPS in 2.007159 seconds, throughput 996433.267120
+168870	[1728197141]	2000000 OPS in 1.984727 seconds, throughput 1007695.264890
+168870	[1728197141]	2000000 OPS in 2.000252 seconds, throughput 999874.015874
+168870	[1728197143]	2000000 OPS in 2.018527 seconds, throughput 990821.524805
+168870	[1728197143]	2000000 OPS in 2.002556 seconds, throughput 998723.631199
+168870	[1728197143]	2000000 OPS in 1.988309 seconds, throughput 1005879.870785
+168870	[1728197143]	2000000 OPS in 1.999270 seconds, throughput 1000365.133274
+168870	[1728197145]	2000000 OPS in 2.017066 seconds, throughput 991539.196040
+168870	[1728197145]	2000000 OPS in 2.005746 seconds, throughput 997135.230483
+168870	[1728197145]	2000000 OPS in 1.990893 seconds, throughput 1004574.329208
+168870	[1728197145]	2000000 OPS in 2.002617 seconds, throughput 998693.209935
+168870	[1728197147]	2000000 OPS in 2.014104 seconds, throughput 992997.382459
+168870	[1728197147]	2000000 OPS in 2.002806 seconds, throughput 998598.965651
+168870	[1728197147]	2000000 OPS in 1.989921 seconds, throughput 1005065.025194
+168870	[1728197147]	2000000 OPS in 2.001859 seconds, throughput 999071.363168
+168870	[1728197149]	2000000 OPS in 2.013528 seconds, throughput 993281.444311
+168870	[1728197149]	2000000 OPS in 2.001364 seconds, throughput 999318.464807
+168870	[1728197149]	2000000 OPS in 1.993891 seconds, throughput 1003063.858556
+168870	[1728197149]	2000000 OPS in 1.997762 seconds, throughput 1001120.253564
+168870	[1728197151]	2000000 OPS in 2.016541 seconds, throughput 991797.340099
+168870	[1728197151]	2000000 OPS in 2.006023 seconds, throughput 996997.541903
+168870	[1728197151]	2000000 OPS in 1.987682 seconds, throughput 1006197.168360
+168870	[1728197151]	2000000 OPS in 1.996450 seconds, throughput 1001778.156227
+168870	[1728197153]	2000000 OPS in 2.016738 seconds, throughput 991700.458860
+168870	[1728197153]	2000000 OPS in 2.002840 seconds, throughput 998582.013541
+168870	[1728197153]	2000000 OPS in 1.980210 seconds, throughput 1009993.889537
+168870	[1728197153]	2000000 OPS in 1.996958 seconds, throughput 1001523.316965
+168870	[1728197155]	2000000 OPS in 2.017736 seconds, throughput 991209.950162
+168870	[1728197155]	2000000 OPS in 2.005868 seconds, throughput 997074.583173
+168870	[1728197155]	2000000 OPS in 1.985393 seconds, throughput 1007357.233555
+168870	[1728197155]	2000000 OPS in 1.993592 seconds, throughput 1003214.298613
+168870	[1728197157]	2000000 OPS in 2.016040 seconds, throughput 992043.808655
+168870	[1728197157]	2000000 OPS in 2.006088 seconds, throughput 996965.237816
+168870	[1728197157]	2000000 OPS in 1.984526 seconds, throughput 1007797.327926
+168870	[1728197157]	2000000 OPS in 1.997801 seconds, throughput 1001100.710231
+168870	[1728197159]	2000000 OPS in 2.019864 seconds, throughput 990165.674521
+168870	[1728197159]	2000000 OPS in 2.004384 seconds, throughput 997812.794355
+168870	[1728197159]	2000000 OPS in 1.980743 seconds, throughput 1009722.109330
+168870	[1728197159]	2000000 OPS in 1.996532 seconds, throughput 1001737.011979
+168870	[1728197161]	2000000 OPS in 2.016791 seconds, throughput 991674.397595
+168870	[1728197161]	2000000 OPS in 2.000809 seconds, throughput 999595.663554
+168870	[1728197161]	2000000 OPS in 1.988016 seconds, throughput 1006028.120498
+168870	[1728197161]	2000000 OPS in 1.997967 seconds, throughput 1001017.534324
+168870	[1728197163]	2000000 OPS in 2.015968 seconds, throughput 992079.239353
+168870	[1728197163]	2000000 OPS in 2.007029 seconds, throughput 996497.808452
+168870	[1728197163]	2000000 OPS in 1.982356 seconds, throughput 1008900.520391
+168870	[1728197163]	2000000 OPS in 1.997783 seconds, throughput 1001109.730136
+168870	[1728197165]	2000000 OPS in 2.016234 seconds, throughput 991948.355201
+168870	[1728197165]	2000000 OPS in 2.006056 seconds, throughput 996981.141105
+168870	[1728197165]	2000000 OPS in 1.981078 seconds, throughput 1009551.365469
+168870	[1728197165]	2000000 OPS in 1.996426 seconds, throughput 1001790.199086
+168870	[1728197167]	2000000 OPS in 2.016808 seconds, throughput 991666.038612
+168870	[1728197167]	2000000 OPS in 2.003653 seconds, throughput 998176.830020
+168870	[1728197167]	2000000 OPS in 1.986565 seconds, throughput 1006762.929982
+168870	[1728197167]	2000000 OPS in 2.000216 seconds, throughput 999892.011663
+168870	[1728197169]	2000000 OPS in 2.026243 seconds, throughput 987048.443844
+168870	[1728197169]	2000000 OPS in 2.008253 seconds, throughput 995890.458025
+168870	[1728197169]	2000000 OPS in 1.986386 seconds, throughput 1006853.652815
+168870	[1728197169]	2000000 OPS in 1.997779 seconds, throughput 1001111.734581
+168870	[1728197171]	2000000 OPS in 2.017387 seconds, throughput 991381.425577
+168870	[1728197171]	2000000 OPS in 2.005324 seconds, throughput 997345.067431
+168870	[1728197171]	2000000 OPS in 1.983602 seconds, throughput 1008266.779324
+168870	[1728197171]	2000000 OPS in 1.999247 seconds, throughput 1000376.641806
+168870	[1728197173]	2000000 OPS in 2.015072 seconds, throughput 992520.366518
+168870	[1728197173]	2000000 OPS in 2.004905 seconds, throughput 997553.500041
+168870	[1728197173]	2000000 OPS in 1.983688 seconds, throughput 1008223.067337
+168870	[1728197173]	2000000 OPS in 1.993071 seconds, throughput 1003476.544488
+168870	[1728197175]	2000000 OPS in 2.014664 seconds, throughput 992721.366938
+168870	[1728197175]	2000000 OPS in 2.002842 seconds, throughput 998581.016376
+168870	[1728197175]	2000000 OPS in 1.983932 seconds, throughput 1008099.067912
+168870	[1728197175]	2000000 OPS in 1.995291 seconds, throughput 1002360.056754
+168870	[1728197177]	2000000 OPS in 2.016346 seconds, throughput 991893.256415
+168870	[1728197177]	2000000 OPS in 2.006684 seconds, throughput 996669.131762
+168870	[1728197177]	2000000 OPS in 1.985047 seconds, throughput 1007532.819122
+168870	[1728197177]	2000000 OPS in 2.000097 seconds, throughput 999951.502352
+168870	[1728197179]	2000000 OPS in 2.022184 seconds, throughput 989029.682759
+168870	[1728197179]	2000000 OPS in 2.005624 seconds, throughput 997195.885171
+168870	[1728197179]	2000000 OPS in 1.987197 seconds, throughput 1006442.743221
+168870	[1728197179]	2000000 OPS in 1.997441 seconds, throughput 1001281.139218
+168870	[1728197181]	2000000 OPS in 2.018806 seconds, throughput 990684.592774
+168870	[1728197181]	2000000 OPS in 2.003601 seconds, throughput 998202.735974
+168870	[1728197181]	2000000 OPS in 1.984322 seconds, throughput 1007900.935433
+168870	[1728197181]	2000000 OPS in 1.998003 seconds, throughput 1000999.497999
+168870	[1728197183]	2000000 OPS in 2.012597 seconds, throughput 993740.922798
+168870	[1728197183]	2000000 OPS in 2.002664 seconds, throughput 998669.771864
+168870	[1728197183]	2000000 OPS in 1.984425 seconds, throughput 1007848.621137
+168870	[1728197183]	2000000 OPS in 1.995556 seconds, throughput 1002226.948279
+168870	[1728197185]	2000000 OPS in 2.005330 seconds, throughput 997342.083348
+168870	[1728197185]	2000000 OPS in 2.017528 seconds, throughput 991312.140402
+168870	[1728197185]	2000000 OPS in 1.985045 seconds, throughput 1007533.834246
+168870	[1728197185]	2000000 OPS in 1.995979 seconds, throughput 1002014.550253
+168870	[1728197187]	2000000 OPS in 2.000374 seconds, throughput 999813.034962
+168870	[1728197187]	2000000 OPS in 2.018898 seconds, throughput 990639.447857
+168870	[1728197187]	2000000 OPS in 1.986070 seconds, throughput 1007013.851476
+168870	[1728197187]	2000000 OPS in 1.998545 seconds, throughput 1000728.029642
+168870	[1728197189]	2000000 OPS in 2.000034 seconds, throughput 999983.000289
+168870	[1728197189]	2000000 OPS in 2.015957 seconds, throughput 992084.652599
+168870	[1728197189]	2000000 OPS in 1.983622 seconds, throughput 1008256.613407
+168870	[1728197189]	2000000 OPS in 1.997096 seconds, throughput 1001454.111370
+168870	[1728197191]	2000000 OPS in 2.000081 seconds, throughput 999959.501640
+168870	[1728197191]	2000000 OPS in 2.013975 seconds, throughput 993060.986358
+168870	[1728197191]	2000000 OPS in 1.985869 seconds, throughput 1007115.776519
+168870	[1728197191]	2000000 OPS in 1.995412 seconds, throughput 1002299.274536
+168870	[1728197193]	2000000 OPS in 1.997241 seconds, throughput 1001381.405649
+168870	[1728197193]	2000000 OPS in 2.016367 seconds, throughput 991882.926074
+168870	[1728197193]	2000000 OPS in 1.986529 seconds, throughput 1006781.174602
+168870	[1728197193]	2000000 OPS in 1.993784 seconds, throughput 1003117.689780
+168870	[1728197195]	2000000 OPS in 2.007842 seconds, throughput 996094.314194
+168870	[1728197195]	2000000 OPS in 2.020176 seconds, throughput 990012.751364
+168870	[1728197195]	2000000 OPS in 1.986647 seconds, throughput 1006721.375262
+168870	[1728197195]	2000000 OPS in 1.995741 seconds, throughput 1002134.044448
+168870	[1728197197]	2000000 OPS in 2.003090 seconds, throughput 998457.383343
+168870	[1728197197]	2000000 OPS in 2.018235 seconds, throughput 990964.877727
+168870	[1728197197]	2000000 OPS in 1.984717 seconds, throughput 1007700.342165
+168870	[1728197197]	2000000 OPS in 1.998870 seconds, throughput 1000565.319405
+168870	[1728197199]	2000000 OPS in 2.004896 seconds, throughput 997557.978070
+168870	[1728197199]	2000000 OPS in 1.982449 seconds, throughput 1008853.191179
+168870	[1728197199]	2000000 OPS in 2.013403 seconds, throughput 993343.111141
+168870	[1728197199]	2000000 OPS in 1.995269 seconds, throughput 1002371.108858
+168870	[1728197201]	2000000 OPS in 2.002242 seconds, throughput 998880.255234
+168870	[1728197201]	2000000 OPS in 1.983379 seconds, throughput 1008380.143180
+168870	[1728197201]	2000000 OPS in 2.017962 seconds, throughput 991098.940416
+168870	[1728197201]	2000000 OPS in 1.996589 seconds, throughput 1001708.413700
+168870	[1728197203]	2000000 OPS in 2.001628 seconds, throughput 999186.662057
+168870	[1728197203]	2000000 OPS in 1.984704 seconds, throughput 1007706.942698
+168870	[1728197203]	2000000 OPS in 2.012283 seconds, throughput 993895.987791
+168870	[1728197203]	2000000 OPS in 1.993575 seconds, throughput 1003222.853417
+168870	[1728197205]	2000000 OPS in 2.003608 seconds, throughput 998199.248556
+168870	[1728197205]	2000000 OPS in 1.983048 seconds, throughput 1008548.456719
+168870	[1728197205]	2000000 OPS in 2.014894 seconds, throughput 992608.047868
+168870	[1728197205]	2000000 OPS in 1.997133 seconds, throughput 1001435.557872
+168870	[1728197207]	2000000 OPS in 2.005547 seconds, throughput 997234.171027
+168870	[1728197207]	2000000 OPS in 1.986543 seconds, throughput 1006774.079393
+168870	[1728197207]	2000000 OPS in 2.018225 seconds, throughput 990969.787809
+168870	[1728197207]	2000000 OPS in 1.998249 seconds, throughput 1000876.267172
+168870	[1728197209]	2000000 OPS in 2.002869 seconds, throughput 998567.554843
+168870	[1728197209]	2000000 OPS in 2.011826 seconds, throughput 994121.758045
+168870	[1728197209]	2000000 OPS in 2.002892 seconds, throughput 998556.087897
+168870	[1728197211]	2000000 OPS in 1.939362 seconds, throughput 1031266.983678
+168870	[1728197211]	2000000 OPS in 1.952660 seconds, throughput 1024243.851976
+168870	[1728197211]	2000000 OPS in 2.019164 seconds, throughput 990508.943305
+168870	[1728197213]	2000000 OPS in 1.941756 seconds, throughput 1029995.529819
+168870	[1728197213]	2000000 OPS in 1.952044 seconds, throughput 1024567.069185
+168870	[1728197215]	2000000 OPS in 1.951680 seconds, throughput 1024758.157075
+168870	[1728197215]	2000000 OPS in 1.941566 seconds, throughput 1030096.324307
+168870	[1728197217]	2000000 OPS in 1.924408 seconds, throughput 1039280.651504
+168870	[1728197219]	2000000 OPS in 1.702852 seconds, throughput 1174500.191444
+168870	[1728197220]	2000000 OPS in 1.804735 seconds, throughput 1108195.940124
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     249961 ms       999788 ms            4 CompactionCPUUsage=0.31992 CompactionThroughput=2.94095G Lat_Get_Avg=837.91 Lat_Get_P50=778.214 Lat_Get_P95=1.29434k Lat_Get_P99=2.23878k Lat_Put_Avg=1.1726k Lat_Put_P50=1.13557k Lat_Put_P95=1.83103k Lat_Put_P99=2.37373k items_per_second=4.00063M/s
+4457.84user 26.26system 17:14.84elapsed 433%CPU (0avgtext+0avgdata 9177280maxresident)k
+324617inputs+16649936outputs (5829major+1802538minor)pagefaults 0swaps

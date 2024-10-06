@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 54%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-04T00:56:38-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 2.97, 4.09, 4.47
+[1728021398]	Setup starts!
+[1728021398]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728021398]	Setup starts!
+[1728021398]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f1db9a00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728021398]	Initializing log segments...
+Log: pool_start 0x7f1db9a00000 total segments: 2028  cleaners: 2
+[1728021402]Initialized 2026 free log segments...
+[1728021402]	DB init finished in 4.330581 seconds
+[1728021402]	DB init finished in 4.330612 seconds
+[1728021402]	DB init finished in 4.330532 seconds
+[1728021402]	DB init finished in 4.330263 seconds
+[1728021408]	DB load finished in 5.522112 seconds
+[1728021408]	DB load finished in 5.533102 seconds
+[1728021408]	DB load finished in 5.537650 seconds
+[1728021408]	DB load finished in 5.543153 seconds
+[1728021408]	DB warmup finished in 0.000018 seconds
+[1728021408]	DB warmup finished in 0.010080 seconds
+[1728021408]	DB warmup finished in 0.005528 seconds
+[1728021408]	DB warmup finished in 0.021092 seconds
+[1728021408]	ETC init!
+[1728021408]	ETC init!
+[1728021408]	ETC init!
+[1728021408]	ETC starts!
+[1728021408]	ETC starts!
+[1728021408]	ETC init!
+[1728021408]	ETC starts!
+[1728021408]	ETC starts!
+455998	[1728021410]	2000000 OPS in 2.341330 seconds, throughput 854215.339145
+455998	[1728021410]	2000000 OPS in 2.355566 seconds, throughput 849052.839105
+455998	[1728021410]	2000000 OPS in 2.366980 seconds, throughput 844958.554783
+455998	[1728021410]	2000000 OPS in 2.372792 seconds, throughput 842888.883644
+455998	[1728021413]	2000000 OPS in 2.287512 seconds, throughput 874312.353334
+455998	[1728021413]	2000000 OPS in 2.284329 seconds, throughput 875530.626280
+455998	[1728021413]	2000000 OPS in 2.290420 seconds, throughput 873202.294776
+455998	[1728021413]	2000000 OPS in 2.294703 seconds, throughput 871572.486723
+455998	[1728021415]	2000000 OPS in 2.274599 seconds, throughput 879275.863570
+455998	[1728021415]	2000000 OPS in 2.285445 seconds, throughput 875103.098084
+455998	[1728021415]	2000000 OPS in 2.286617 seconds, throughput 874654.566112
+455998	[1728021415]	2000000 OPS in 2.292193 seconds, throughput 872526.877100
+455998	[1728021417]	2000000 OPS in 2.272970 seconds, throughput 879906.026036
+455998	[1728021417]	2000000 OPS in 2.284562 seconds, throughput 875441.331861
+455998	[1728021417]	2000000 OPS in 2.290578 seconds, throughput 873142.062833
+455998	[1728021417]	2000000 OPS in 2.299531 seconds, throughput 869742.569246
+455998	[1728021419]	2000000 OPS in 2.227777 seconds, throughput 897755.924404
+455998	[1728021419]	2000000 OPS in 2.219695 seconds, throughput 901024.690329
+455998	[1728021419]	2000000 OPS in 2.221756 seconds, throughput 900188.859623
+455998	[1728021419]	2000000 OPS in 2.227904 seconds, throughput 897704.748499
+455998	[1728021421]	2000000 OPS in 1.983173 seconds, throughput 1008484.887602
+455998	[1728021421]	2000000 OPS in 1.988989 seconds, throughput 1005535.978329
+455998	[1728021421]	2000000 OPS in 1.993281 seconds, throughput 1003370.824284
+455998	[1728021421]	2000000 OPS in 2.005344 seconds, throughput 997335.120558
+455998	[1728021423]	2000000 OPS in 1.996248 seconds, throughput 1001879.525991
+455998	[1728021423]	2000000 OPS in 2.008386 seconds, throughput 995824.507839
+455998	[1728021423]	2000000 OPS in 2.011428 seconds, throughput 994318.464295
+455998	[1728021423]	2000000 OPS in 2.021056 seconds, throughput 989581.684031
+455998	[1728021425]	2000000 OPS in 2.019081 seconds, throughput 990549.660960
+455998	[1728021425]	2000000 OPS in 2.025764 seconds, throughput 987281.835396
+455998	[1728021425]	2000000 OPS in 2.036324 seconds, throughput 982161.974224
+455998	[1728021425]	2000000 OPS in 2.036452 seconds, throughput 982100.241007
+455998	[1728021427]	2000000 OPS in 2.046676 seconds, throughput 977194.240808
+455998	[1728021427]	2000000 OPS in 2.051453 seconds, throughput 974918.752708
+455998	[1728021428]	2000000 OPS in 2.063762 seconds, throughput 969103.995519
+455998	[1728021428]	2000000 OPS in 2.066753 seconds, throughput 967701.510534
+455998	[1728021429]	2000000 OPS in 2.060130 seconds, throughput 970812.521540
+455998	[1728021430]	2000000 OPS in 2.064304 seconds, throughput 968849.549291
+455998	[1728021430]	2000000 OPS in 2.069251 seconds, throughput 966533.301180
+455998	[1728021430]	2000000 OPS in 2.073506 seconds, throughput 964549.897613
+455998	[1728021432]	2000000 OPS in 2.063459 seconds, throughput 969246.299539
+455998	[1728021432]	2000000 OPS in 2.063960 seconds, throughput 969011.027345
+455998	[1728021432]	2000000 OPS in 2.070177 seconds, throughput 966100.966246
+455998	[1728021432]	2000000 OPS in 2.083925 seconds, throughput 959727.437408
+455998	[1728021434]	2000000 OPS in 2.070235 seconds, throughput 966073.899823
+455998	[1728021434]	2000000 OPS in 2.067481 seconds, throughput 967360.764138
+455998	[1728021434]	2000000 OPS in 2.068272 seconds, throughput 966990.801983
+455998	[1728021434]	2000000 OPS in 2.075141 seconds, throughput 963789.930419
+455998	[1728021436]	2000000 OPS in 2.065215 seconds, throughput 968422.173963
+455998	[1728021436]	2000000 OPS in 2.071534 seconds, throughput 965468.102382
+455998	[1728021436]	2000000 OPS in 2.074625 seconds, throughput 964029.643912
+455998	[1728021436]	2000000 OPS in 2.084984 seconds, throughput 959239.974983
+455998	[1728021438]	2000000 OPS in 2.056545 seconds, throughput 972504.856446
+455998	[1728021438]	2000000 OPS in 2.061839 seconds, throughput 970007.842513
+455998	[1728021438]	2000000 OPS in 2.067194 seconds, throughput 967495.068194
+455998	[1728021438]	2000000 OPS in 2.078747 seconds, throughput 962118.045149
+455998	[1728021440]	2000000 OPS in 2.067257 seconds, throughput 967465.583621
+455998	[1728021440]	2000000 OPS in 2.065617 seconds, throughput 968233.704506
+455998	[1728021440]	2000000 OPS in 2.084940 seconds, throughput 959260.218519
+455998	[1728021440]	2000000 OPS in 2.078788 seconds, throughput 962099.069265
+455998	[1728021442]	2000000 OPS in 2.053638 seconds, throughput 973881.472781
+455998	[1728021442]	2000000 OPS in 2.061809 seconds, throughput 970021.956447
+455998	[1728021442]	2000000 OPS in 2.071443 seconds, throughput 965510.516099
+455998	[1728021442]	2000000 OPS in 2.077354 seconds, throughput 962763.207426
+455998	[1728021444]	2000000 OPS in 2.063413 seconds, throughput 969267.907103
+455998	[1728021444]	2000000 OPS in 2.058926 seconds, throughput 971380.224447
+455998	[1728021444]	2000000 OPS in 2.064746 seconds, throughput 968642.147751
+455998	[1728021444]	2000000 OPS in 2.072227 seconds, throughput 965145.227815
+455998	[1728021446]	2000000 OPS in 2.057294 seconds, throughput 972150.796143
+455998	[1728021446]	2000000 OPS in 2.061296 seconds, throughput 970263.368289
+455998	[1728021446]	2000000 OPS in 2.065778 seconds, throughput 968158.243529
+455998	[1728021446]	2000000 OPS in 2.074440 seconds, throughput 964115.616745
+455998	[1728021448]	2000000 OPS in 2.051066 seconds, throughput 975102.702692
+455998	[1728021448]	2000000 OPS in 2.051981 seconds, throughput 974667.894098
+455998	[1728021448]	2000000 OPS in 2.060090 seconds, throughput 970831.371445
+455998	[1728021448]	2000000 OPS in 2.069190 seconds, throughput 966561.794712
+455998	[1728021450]	2000000 OPS in 2.056653 seconds, throughput 972453.787780
+455998	[1728021450]	2000000 OPS in 2.061116 seconds, throughput 970348.102678
+455998	[1728021450]	2000000 OPS in 2.066443 seconds, throughput 967846.681471
+455998	[1728021450]	2000000 OPS in 2.076484 seconds, throughput 963166.583513
+455998	[1728021452]	2000000 OPS in 2.052318 seconds, throughput 974507.849173
+455998	[1728021452]	2000000 OPS in 2.056815 seconds, throughput 972377.194838
+455998	[1728021452]	2000000 OPS in 2.061696 seconds, throughput 970075.122617
+455998	[1728021452]	2000000 OPS in 2.071104 seconds, throughput 965668.551652
+455998	[1728021454]	2000000 OPS in 2.056675 seconds, throughput 972443.385562
+455998	[1728021454]	2000000 OPS in 2.058803 seconds, throughput 971438.258056
+455998	[1728021454]	2000000 OPS in 2.067060 seconds, throughput 967557.787389
+455998	[1728021455]	2000000 OPS in 2.078509 seconds, throughput 962228.212627
+455998	[1728021456]	2000000 OPS in 2.051511 seconds, throughput 974891.189957
+455998	[1728021456]	2000000 OPS in 2.062021 seconds, throughput 969922.226786
+455998	[1728021456]	2000000 OPS in 2.062385 seconds, throughput 969751.040664
+455998	[1728021457]	2000000 OPS in 2.073532 seconds, throughput 964537.803130
+455998	[1728021458]	2000000 OPS in 2.060544 seconds, throughput 970617.468008
+455998	[1728021458]	2000000 OPS in 2.066915 seconds, throughput 967625.664335
+455998	[1728021459]	2000000 OPS in 2.066111 seconds, throughput 968002.203173
+455998	[1728021459]	2000000 OPS in 2.073331 seconds, throughput 964631.310678
+455998	[1728021460]	2000000 OPS in 2.065338 seconds, throughput 968364.500145
+455998	[1728021460]	2000000 OPS in 2.065042 seconds, throughput 968503.304049
+455998	[1728021461]	2000000 OPS in 2.071360 seconds, throughput 965549.204387
+455998	[1728021461]	2000000 OPS in 2.079526 seconds, throughput 961757.631306
+455998	[1728021462]	2000000 OPS in 2.059972 seconds, throughput 970886.982930
+455998	[1728021463]	2000000 OPS in 2.066027 seconds, throughput 968041.559960
+455998	[1728021463]	2000000 OPS in 2.068482 seconds, throughput 966892.629474
+455998	[1728021463]	2000000 OPS in 2.078370 seconds, throughput 962292.565809
+455998	[1728021464]	2000000 OPS in 2.067460 seconds, throughput 967370.589999
+455998	[1728021465]	2000000 OPS in 2.070429 seconds, throughput 965983.378324
+455998	[1728021465]	2000000 OPS in 2.072302 seconds, throughput 965110.297630
+455998	[1728021465]	2000000 OPS in 2.081281 seconds, throughput 960946.647762
+455998	[1728021467]	2000000 OPS in 2.060627 seconds, throughput 970578.372505
+455998	[1728021467]	2000000 OPS in 2.071636 seconds, throughput 965420.566161
+455998	[1728021467]	2000000 OPS in 2.076227 seconds, throughput 963285.806417
+455998	[1728021467]	2000000 OPS in 2.087541 seconds, throughput 958065.015250
+455998	[1728021469]	2000000 OPS in 2.069991 seconds, throughput 966187.775696
+455998	[1728021469]	2000000 OPS in 2.066107 seconds, throughput 968004.077233
+455998	[1728021469]	2000000 OPS in 2.070773 seconds, throughput 965822.907677
+455998	[1728021469]	2000000 OPS in 2.080924 seconds, throughput 961111.506235
+455998	[1728021471]	2000000 OPS in 2.067398 seconds, throughput 967399.600851
+455998	[1728021471]	2000000 OPS in 2.073152 seconds, throughput 964714.598833
+455998	[1728021471]	2000000 OPS in 2.076641 seconds, throughput 963093.765364
+455998	[1728021471]	2000000 OPS in 2.087255 seconds, throughput 958196.291301
+455998	[1728021473]	2000000 OPS in 2.061411 seconds, throughput 970209.240176
+455998	[1728021473]	2000000 OPS in 2.066765 seconds, throughput 967695.891889
+455998	[1728021473]	2000000 OPS in 2.069886 seconds, throughput 966236.787920
+455998	[1728021473]	2000000 OPS in 2.084801 seconds, throughput 959324.175305
+455998	[1728021475]	2000000 OPS in 2.065103 seconds, throughput 968474.695935
+455998	[1728021475]	2000000 OPS in 2.073385 seconds, throughput 964606.187466
+455998	[1728021475]	2000000 OPS in 2.079517 seconds, throughput 961761.793724
+455998	[1728021475]	2000000 OPS in 2.088400 seconds, throughput 957670.944264
+455998	[1728021477]	2000000 OPS in 2.064487 seconds, throughput 968763.668650
+455998	[1728021477]	2000000 OPS in 2.076434 seconds, throughput 963189.776318
+455998	[1728021477]	2000000 OPS in 2.075905 seconds, throughput 963435.224637
+455998	[1728021477]	2000000 OPS in 2.084594 seconds, throughput 959419.436111
+455998	[1728021479]	2000000 OPS in 2.064073 seconds, throughput 968957.977746
+455998	[1728021479]	2000000 OPS in 2.065909 seconds, throughput 968096.852281
+455998	[1728021479]	2000000 OPS in 2.074227 seconds, throughput 964214.620676
+455998	[1728021480]	2000000 OPS in 2.083648 seconds, throughput 959855.023497
+455998	[1728021481]	2000000 OPS in 2.072562 seconds, throughput 964989.225895
+455998	[1728021481]	2000000 OPS in 2.073480 seconds, throughput 964561.992399
+455998	[1728021481]	2000000 OPS in 2.080225 seconds, throughput 961434.460215
+455998	[1728021482]	2000000 OPS in 2.090025 seconds, throughput 956926.352556
+455998	[1728021483]	2000000 OPS in 2.067254 seconds, throughput 967466.987608
+455998	[1728021483]	2000000 OPS in 2.071461 seconds, throughput 965502.126277
+455998	[1728021483]	2000000 OPS in 2.080547 seconds, throughput 961285.661896
+455998	[1728021484]	2000000 OPS in 2.089538 seconds, throughput 957149.379432
+455998	[1728021485]	2000000 OPS in 2.068081 seconds, throughput 967080.109531
+455998	[1728021485]	2000000 OPS in 2.072034 seconds, throughput 965235.126451
+455998	[1728021485]	2000000 OPS in 2.074044 seconds, throughput 964299.696631
+455998	[1728021486]	2000000 OPS in 2.082339 seconds, throughput 960458.407589
+455998	[1728021487]	2000000 OPS in 2.070278 seconds, throughput 966053.834316
+455998	[1728021487]	2000000 OPS in 2.076411 seconds, throughput 963200.445384
+455998	[1728021488]	2000000 OPS in 2.082142 seconds, throughput 960549.280501
+455998	[1728021488]	2000000 OPS in 2.092778 seconds, throughput 955667.538554
+455998	[1728021489]	2000000 OPS in 2.065985 seconds, throughput 968061.239554
+455998	[1728021489]	2000000 OPS in 2.071476 seconds, throughput 965495.134870
+455998	[1728021490]	2000000 OPS in 2.071375 seconds, throughput 965542.212299
+455998	[1728021490]	2000000 OPS in 2.087246 seconds, throughput 958200.422950
+455998	[1728021491]	2000000 OPS in 2.072601 seconds, throughput 964971.067755
+455998	[1728021492]	2000000 OPS in 2.077065 seconds, throughput 962897.164990
+455998	[1728021492]	2000000 OPS in 2.080381 seconds, throughput 961362.365836
+455998	[1728021492]	2000000 OPS in 2.087222 seconds, throughput 958211.440853
+455998	[1728021493]	2000000 OPS in 2.072747 seconds, throughput 964903.097194
+455998	[1728021494]	2000000 OPS in 2.078359 seconds, throughput 962297.658874
+455998	[1728021494]	2000000 OPS in 2.082421 seconds, throughput 960420.587384
+455998	[1728021494]	2000000 OPS in 2.090231 seconds, throughput 956832.043922
+455998	[1728021495]	2000000 OPS in 2.068159 seconds, throughput 967043.636394
+455998	[1728021496]	2000000 OPS in 2.064827 seconds, throughput 968604.149403
+455998	[1728021496]	2000000 OPS in 2.077372 seconds, throughput 962754.865282
+455998	[1728021496]	2000000 OPS in 2.083724 seconds, throughput 959820.014551
+455998	[1728021498]	2000000 OPS in 2.069963 seconds, throughput 966200.845136
+455998	[1728021498]	2000000 OPS in 2.078449 seconds, throughput 962255.989923
+455998	[1728021498]	2000000 OPS in 2.082100 seconds, throughput 960568.656645
+455998	[1728021498]	2000000 OPS in 2.089048 seconds, throughput 957373.885138
+455998	[1728021500]	2000000 OPS in 2.064606 seconds, throughput 968707.830937
+455998	[1728021500]	2000000 OPS in 2.070351 seconds, throughput 966019.771527
+455998	[1728021500]	2000000 OPS in 2.074137 seconds, throughput 964256.459433
+455998	[1728021500]	2000000 OPS in 2.088826 seconds, throughput 957475.634639
+455998	[1728021502]	2000000 OPS in 2.067099 seconds, throughput 967539.532456
+455998	[1728021502]	2000000 OPS in 2.077668 seconds, throughput 962617.704080
+455998	[1728021502]	2000000 OPS in 2.077763 seconds, throughput 962573.691032
+455998	[1728021502]	2000000 OPS in 2.083052 seconds, throughput 960129.655909
+455998	[1728021504]	2000000 OPS in 2.070085 seconds, throughput 966143.902304
+455998	[1728021504]	2000000 OPS in 2.075447 seconds, throughput 963647.831046
+455998	[1728021504]	2000000 OPS in 2.084096 seconds, throughput 959648.691807
+455998	[1728021505]	2000000 OPS in 2.089492 seconds, throughput 957170.451000
+455998	[1728021506]	2000000 OPS in 2.067563 seconds, throughput 967322.398399
+455998	[1728021506]	2000000 OPS in 2.075189 seconds, throughput 963767.637550
+455998	[1728021506]	2000000 OPS in 2.076883 seconds, throughput 962981.544940
+455998	[1728021507]	2000000 OPS in 2.080540 seconds, throughput 961288.896152
+455998	[1728021508]	2000000 OPS in 2.070716 seconds, throughput 965849.493605
+455998	[1728021508]	2000000 OPS in 2.073745 seconds, throughput 964438.732824
+455998	[1728021508]	2000000 OPS in 2.077764 seconds, throughput 962573.227758
+455998	[1728021509]	2000000 OPS in 2.084832 seconds, throughput 959309.910823
+455998	[1728021510]	2000000 OPS in 2.066343 seconds, throughput 967893.520098
+455998	[1728021510]	2000000 OPS in 2.078229 seconds, throughput 962357.853730
+455998	[1728021510]	2000000 OPS in 2.079720 seconds, throughput 961667.916835
+455998	[1728021511]	2000000 OPS in 2.090921 seconds, throughput 956516.291146
+455998	[1728021512]	2000000 OPS in 2.073822 seconds, throughput 964402.923684
+455998	[1728021512]	2000000 OPS in 2.071194 seconds, throughput 965626.590266
+455998	[1728021513]	2000000 OPS in 2.140219 seconds, throughput 934483.807498
+455998	[1728021513]	2000000 OPS in 2.086120 seconds, throughput 958717.619312
+455998	[1728021514]	2000000 OPS in 2.068546 seconds, throughput 966862.714196
+455998	[1728021514]	2000000 OPS in 2.076522 seconds, throughput 963148.957728
+455998	[1728021515]	2000000 OPS in 2.080434 seconds, throughput 961337.874693
+455998	[1728021515]	2000000 OPS in 2.088035 seconds, throughput 957838.350411
+455998	[1728021516]	2000000 OPS in 2.067493 seconds, throughput 967355.149449
+455998	[1728021516]	2000000 OPS in 2.074475 seconds, throughput 964099.350438
+455998	[1728021517]	2000000 OPS in 2.079324 seconds, throughput 961851.063134
+455998	[1728021517]	2000000 OPS in 2.092066 seconds, throughput 955992.784166
+455998	[1728021518]	2000000 OPS in 2.067212 seconds, throughput 967486.643847
+455998	[1728021518]	2000000 OPS in 2.075207 seconds, throughput 963759.277990
+455998	[1728021519]	2000000 OPS in 2.083656 seconds, throughput 959851.338225
+455998	[1728021519]	2000000 OPS in 2.083065 seconds, throughput 960123.663928
+455998	[1728021520]	2000000 OPS in 2.068261 seconds, throughput 966995.944903
+455998	[1728021521]	2000000 OPS in 2.079018 seconds, throughput 961992.633060
+455998	[1728021521]	2000000 OPS in 2.080706 seconds, throughput 961212.203935
+455998	[1728021521]	2000000 OPS in 2.091225 seconds, throughput 956377.243004
+455998	[1728021522]	2000000 OPS in 2.067238 seconds, throughput 967474.475605
+455998	[1728021523]	2000000 OPS in 2.070890 seconds, throughput 965768.341148
+455998	[1728021523]	2000000 OPS in 2.078593 seconds, throughput 962189.327107
+455998	[1728021523]	2000000 OPS in 2.084884 seconds, throughput 959285.984256
+455998	[1728021524]	2000000 OPS in 2.074161 seconds, throughput 964245.302076
+455998	[1728021525]	2000000 OPS in 2.076135 seconds, throughput 963328.492608
+455998	[1728021525]	2000000 OPS in 2.087255 seconds, throughput 958196.291301
+455998	[1728021525]	2000000 OPS in 2.091306 seconds, throughput 956340.200812
+455998	[1728021527]	2000000 OPS in 2.068241 seconds, throughput 967005.295805
+455998	[1728021527]	2000000 OPS in 2.070948 seconds, throughput 965741.293359
+455998	[1728021527]	2000000 OPS in 2.083989 seconds, throughput 959697.963857
+455998	[1728021528]	2000000 OPS in 2.093462 seconds, throughput 955355.291856
+455998	[1728021529]	2000000 OPS in 2.077134 seconds, throughput 962865.178655
+455998	[1728021529]	2000000 OPS in 2.079697 seconds, throughput 961678.552212
+455998	[1728021529]	2000000 OPS in 2.080198 seconds, throughput 961446.939186
+455998	[1728021530]	2000000 OPS in 2.088471 seconds, throughput 957638.387126
+455998	[1728021531]	2000000 OPS in 2.075809 seconds, throughput 963479.780654
+455998	[1728021531]	2000000 OPS in 2.078152 seconds, throughput 962393.511158
+455998	[1728021531]	2000000 OPS in 2.081474 seconds, throughput 960857.546143
+455998	[1728021532]	2000000 OPS in 2.092572 seconds, throughput 955761.617760
+455998	[1728021533]	2000000 OPS in 2.072930 seconds, throughput 964817.914739
+455998	[1728021533]	2000000 OPS in 2.069953 seconds, throughput 966205.512879
+455998	[1728021533]	2000000 OPS in 2.079699 seconds, throughput 961677.627387
+455998	[1728021534]	2000000 OPS in 2.094121 seconds, throughput 955054.650615
+455998	[1728021535]	2000000 OPS in 2.072565 seconds, throughput 964987.829091
+455998	[1728021535]	2000000 OPS in 2.080141 seconds, throughput 961473.284744
+455998	[1728021535]	2000000 OPS in 2.084810 seconds, throughput 959320.033960
+455998	[1728021536]	2000000 OPS in 2.088964 seconds, throughput 957412.382406
+455998	[1728021537]	2000000 OPS in 2.065364 seconds, throughput 968352.309811
+455998	[1728021537]	2000000 OPS in 2.075882 seconds, throughput 963445.899141
+455998	[1728021538]	2000000 OPS in 2.081266 seconds, throughput 960953.573450
+455998	[1728021538]	2000000 OPS in 2.092975 seconds, throughput 955577.586928
+455998	[1728021539]	2000000 OPS in 2.074043 seconds, throughput 964300.161568
+455998	[1728021539]	2000000 OPS in 2.075289 seconds, throughput 963721.197385
+455998	[1728021540]	2000000 OPS in 2.078914 seconds, throughput 962040.757819
+455998	[1728021540]	2000000 OPS in 2.087186 seconds, throughput 958227.968183
+455998	[1728021541]	2000000 OPS in 2.072688 seconds, throughput 964930.563597
+455998	[1728021541]	2000000 OPS in 2.081272 seconds, throughput 960950.803163
+455998	[1728021542]	2000000 OPS in 2.080464 seconds, throughput 961324.012336
+455998	[1728021542]	2000000 OPS in 2.093065 seconds, throughput 955536.497911
+455998	[1728021543]	2000000 OPS in 2.065695 seconds, throughput 968197.144303
+455998	[1728021543]	2000000 OPS in 2.077843 seconds, throughput 962536.630535
+455998	[1728021544]	2000000 OPS in 2.085061 seconds, throughput 959204.550850
+455998	[1728021544]	2000000 OPS in 2.092832 seconds, throughput 955642.880078
+455998	[1728021545]	2000000 OPS in 2.073740 seconds, throughput 964441.058185
+455998	[1728021545]	2000000 OPS in 2.079110 seconds, throughput 961950.065172
+455998	[1728021546]	2000000 OPS in 2.082351 seconds, throughput 960452.872739
+455998	[1728021546]	2000000 OPS in 2.090184 seconds, throughput 956853.559304
+455998	[1728021547]	2000000 OPS in 2.071289 seconds, throughput 965582.301649
+455998	[1728021548]	2000000 OPS in 2.084305 seconds, throughput 959552.464730
+455998	[1728021548]	2000000 OPS in 2.082888 seconds, throughput 960205.253475
+455998	[1728021548]	2000000 OPS in 2.096306 seconds, throughput 954059.187924
+455998	[1728021549]	2000000 OPS in 2.068311 seconds, throughput 966972.568439
+455998	[1728021550]	2000000 OPS in 2.073551 seconds, throughput 964528.965046
+455998	[1728021550]	2000000 OPS in 2.080842 seconds, throughput 961149.380876
+455998	[1728021551]	2000000 OPS in 2.091390 seconds, throughput 956301.789719
+455998	[1728021551]	2000000 OPS in 2.074677 seconds, throughput 964005.481335
+455998	[1728021552]	2000000 OPS in 2.079162 seconds, throughput 961926.006728
+455998	[1728021552]	2000000 OPS in 2.080981 seconds, throughput 961085.180499
+455998	[1728021553]	2000000 OPS in 2.086460 seconds, throughput 958561.391064
+455998	[1728021553]	2000000 OPS in 2.068993 seconds, throughput 966653.826282
+455998	[1728021554]	2000000 OPS in 2.077126 seconds, throughput 962868.887107
+455998	[1728021554]	2000000 OPS in 2.084823 seconds, throughput 959314.052080
+455998	[1728021555]	2000000 OPS in 2.091155 seconds, throughput 956409.257085
+455998	[1728021556]	2000000 OPS in 2.072593 seconds, throughput 964974.792446
+455998	[1728021556]	2000000 OPS in 2.074472 seconds, throughput 964100.744671
+455998	[1728021556]	2000000 OPS in 2.080352 seconds, throughput 961375.767178
+455998	[1728021557]	2000000 OPS in 2.089890 seconds, throughput 956988.166841
+455998	[1728021558]	2000000 OPS in 2.068419 seconds, throughput 966922.079134
+455998	[1728021558]	2000000 OPS in 2.078099 seconds, throughput 962418.056118
+455998	[1728021558]	2000000 OPS in 2.087478 seconds, throughput 958093.929613
+455998	[1728021559]	2000000 OPS in 2.094081 seconds, throughput 955072.893551
+455998	[1728021560]	2000000 OPS in 2.071815 seconds, throughput 965337.156068
+455998	[1728021560]	2000000 OPS in 2.075575 seconds, throughput 963588.403214
+455998	[1728021560]	2000000 OPS in 2.085976 seconds, throughput 958783.801923
+455998	[1728021561]	2000000 OPS in 2.093381 seconds, throughput 955392.257788
+455998	[1728021562]	2000000 OPS in 2.074406 seconds, throughput 964131.418825
+455998	[1728021562]	2000000 OPS in 2.076685 seconds, throughput 963073.359705
+455998	[1728021563]	2000000 OPS in 2.081457 seconds, throughput 960865.393808
+455998	[1728021563]	2000000 OPS in 2.089457 seconds, throughput 957186.484335
+455998	[1728021564]	2000000 OPS in 2.072601 seconds, throughput 964971.067755
+455998	[1728021564]	2000000 OPS in 2.076399 seconds, throughput 963206.011947
+455998	[1728021565]	2000000 OPS in 2.082555 seconds, throughput 960358.790044
+455998	[1728021565]	2000000 OPS in 2.097211 seconds, throughput 953647.487067
+455998	[1728021566]	2000000 OPS in 2.070489 seconds, throughput 965955.385419
+455998	[1728021566]	2000000 OPS in 2.071663 seconds, throughput 965407.983827
+455998	[1728021567]	2000000 OPS in 2.079289 seconds, throughput 961867.253662
+455998	[1728021567]	2000000 OPS in 2.092801 seconds, throughput 955657.035714
+455998	[1728021568]	2000000 OPS in 2.078379 seconds, throughput 962288.398795
+455998	[1728021568]	2000000 OPS in 2.077801 seconds, throughput 962556.086940
+455998	[1728021569]	2000000 OPS in 2.080065 seconds, throughput 961508.414401
+455998	[1728021569]	2000000 OPS in 2.089454 seconds, throughput 957187.858646
+455998	[1728021570]	2000000 OPS in 2.067558 seconds, throughput 967324.737686
+455998	[1728021570]	2000000 OPS in 2.076822 seconds, throughput 963009.829441
+455998	[1728021571]	2000000 OPS in 2.081909 seconds, throughput 960656.781829
+455998	[1728021571]	2000000 OPS in 2.094715 seconds, throughput 954783.825007
+455998	[1728021572]	2000000 OPS in 2.073091 seconds, throughput 964742.985233
+455998	[1728021572]	2000000 OPS in 2.071367 seconds, throughput 965545.941400
+455998	[1728021573]	2000000 OPS in 2.078703 seconds, throughput 962138.410345
+455998	[1728021574]	2000000 OPS in 2.087519 seconds, throughput 958075.112131
+455998	[1728021574]	2000000 OPS in 2.077323 seconds, throughput 962777.574792
+455998	[1728021575]	2000000 OPS in 2.078981 seconds, throughput 962009.753817
+455998	[1728021575]	2000000 OPS in 2.086528 seconds, throughput 958530.151524
+455998	[1728021576]	2000000 OPS in 2.092857 seconds, throughput 955631.464548
+455998	[1728021576]	2000000 OPS in 2.072521 seconds, throughput 965008.315959
+455998	[1728021577]	2000000 OPS in 2.074747 seconds, throughput 963972.956703
+455998	[1728021577]	2000000 OPS in 2.085408 seconds, throughput 959044.944682
+455998	[1728021578]	2000000 OPS in 2.095236 seconds, throughput 954546.409092
+455998	[1728021578]	2000000 OPS in 2.074016 seconds, throughput 964312.715042
+455998	[1728021579]	2000000 OPS in 2.082995 seconds, throughput 960155.929323
+455998	[1728021579]	2000000 OPS in 2.077828 seconds, throughput 962543.579161
+455998	[1728021580]	2000000 OPS in 2.089150 seconds, throughput 957327.142618
+455998	[1728021580]	2000000 OPS in 2.074855 seconds, throughput 963922.780146
+455998	[1728021581]	2000000 OPS in 2.082549 seconds, throughput 960361.556919
+455998	[1728021581]	2000000 OPS in 2.084193 seconds, throughput 959604.028993
+455998	[1728021582]	2000000 OPS in 2.093961 seconds, throughput 955127.626541
+455998	[1728021582]	2000000 OPS in 2.074978 seconds, throughput 963865.640985
+455998	[1728021583]	2000000 OPS in 2.076073 seconds, throughput 963357.261522
+455998	[1728021583]	2000000 OPS in 2.080361 seconds, throughput 961371.608101
+455998	[1728021584]	2000000 OPS in 2.093293 seconds, throughput 955432.421548
+455998	[1728021585]	2000000 OPS in 2.079376 seconds, throughput 961827.009641
+455998	[1728021585]	2000000 OPS in 2.079644 seconds, throughput 961703.060716
+455998	[1728021585]	2000000 OPS in 2.083020 seconds, throughput 960144.405719
+455998	[1728021586]	2000000 OPS in 2.086087 seconds, throughput 958732.785354
+455998	[1728021587]	2000000 OPS in 2.073184 seconds, throughput 964699.708275
+455998	[1728021587]	2000000 OPS in 2.073802 seconds, throughput 964412.224504
+455998	[1728021588]	2000000 OPS in 2.086607 seconds, throughput 958493.861086
+455998	[1728021588]	2000000 OPS in 2.089758 seconds, throughput 957048.615199
+455998	[1728021589]	2000000 OPS in 2.077291 seconds, throughput 962792.406071
+455998	[1728021589]	2000000 OPS in 2.078519 seconds, throughput 962223.583234
+455998	[1728021590]	2000000 OPS in 2.080907 seconds, throughput 961119.358049
+455998	[1728021590]	2000000 OPS in 2.085773 seconds, throughput 958877.116541
+455998	[1728021591]	2000000 OPS in 2.079764 seconds, throughput 961647.571551
+455998	[1728021591]	2000000 OPS in 2.076880 seconds, throughput 962982.935942
+455998	[1728021592]	2000000 OPS in 2.083286 seconds, throughput 960021.811696
+455998	[1728021592]	2000000 OPS in 2.097003 seconds, throughput 953742.078576
+455998	[1728021593]	2000000 OPS in 2.070366 seconds, throughput 966012.772621
+455998	[1728021593]	2000000 OPS in 2.076699 seconds, throughput 963066.867177
+455998	[1728021594]	2000000 OPS in 2.085632 seconds, throughput 958941.941819
+455998	[1728021594]	2000000 OPS in 2.094534 seconds, throughput 954866.333036
+455998	[1728021595]	2000000 OPS in 2.078696 seconds, throughput 962141.650342
+455998	[1728021595]	2000000 OPS in 2.077934 seconds, throughput 962494.477688
+455998	[1728021596]	2000000 OPS in 2.079576 seconds, throughput 961734.507419
+455998	[1728021597]	2000000 OPS in 2.093326 seconds, throughput 955417.359742
+455998	[1728021597]	2000000 OPS in 2.070972 seconds, throughput 965730.101614
+455998	[1728021597]	2000000 OPS in 2.080764 seconds, throughput 961185.410743
+455998	[1728021598]	2000000 OPS in 2.085693 seconds, throughput 958913.895765
+455998	[1728021599]	2000000 OPS in 2.098280 seconds, throughput 953161.637150
+455998	[1728021599]	2000000 OPS in 2.079437 seconds, throughput 961798.794578
+455998	[1728021599]	2000000 OPS in 2.077343 seconds, throughput 962768.305475
+455998	[1728021600]	2000000 OPS in 2.080247 seconds, throughput 961424.292404
+455998	[1728021601]	2000000 OPS in 2.094616 seconds, throughput 954828.951942
+455998	[1728021601]	2000000 OPS in 2.077539 seconds, throughput 962677.475609
+455998	[1728021602]	2000000 OPS in 2.079417 seconds, throughput 961808.045236
+455998	[1728021602]	2000000 OPS in 2.084593 seconds, throughput 959419.896354
+455998	[1728021603]	2000000 OPS in 2.094762 seconds, throughput 954762.402602
+455998	[1728021603]	2000000 OPS in 2.071469 seconds, throughput 965498.397514
+455998	[1728021604]	2000000 OPS in 2.077034 seconds, throughput 962911.536354
+455998	[1728021604]	2000000 OPS in 2.085195 seconds, throughput 959142.909896
+455998	[1728021605]	2000000 OPS in 2.094926 seconds, throughput 954687.659612
+455998	[1728021605]	2000000 OPS in 2.078119 seconds, throughput 962408.793722
+455998	[1728021606]	2000000 OPS in 2.082351 seconds, throughput 960452.872739
+455998	[1728021606]	2000000 OPS in 2.081833 seconds, throughput 960691.851844
+455998	[1728021607]	2000000 OPS in 2.089317 seconds, throughput 957250.623050
+455998	[1728021607]	2000000 OPS in 2.074095 seconds, throughput 964275.985430
+455998	[1728021608]	2000000 OPS in 2.080408 seconds, throughput 961349.889060
+455998	[1728021608]	2000000 OPS in 2.084776 seconds, throughput 959335.679229
+455998	[1728021609]	2000000 OPS in 2.097832 seconds, throughput 953365.188442
+455998	[1728021609]	2000000 OPS in 2.067817 seconds, throughput 967203.577493
+455998	[1728021610]	2000000 OPS in 2.075152 seconds, throughput 963784.821546
+455998	[1728021610]	2000000 OPS in 2.081468 seconds, throughput 960860.315892
+455998	[1728021611]	2000000 OPS in 2.094235 seconds, throughput 955002.662070
+455998	[1728021612]	2000000 OPS in 2.078696 seconds, throughput 962141.650342
+455998	[1728021612]	2000000 OPS in 2.080250 seconds, throughput 961422.905901
+455998	[1728021613]	2000000 OPS in 2.082510 seconds, throughput 960379.541995
+455998	[1728021613]	2000000 OPS in 2.088192 seconds, throughput 957766.335663
+455998	[1728021614]	2000000 OPS in 2.070020 seconds, throughput 966174.239862
+455998	[1728021614]	2000000 OPS in 2.079922 seconds, throughput 961574.520583
+455998	[1728021615]	2000000 OPS in 2.083841 seconds, throughput 959766.124191
+455998	[1728021615]	2000000 OPS in 2.094795 seconds, throughput 954747.361914
+455998	[1728021616]	2000000 OPS in 2.079330 seconds, throughput 961848.287670
+455998	[1728021616]	2000000 OPS in 2.071669 seconds, throughput 965405.187798
+455998	[1728021617]	2000000 OPS in 2.085181 seconds, throughput 959149.349625
+455998	[1728021618]	2000000 OPS in 2.092666 seconds, throughput 955718.686116
+455998	[1728021618]	2000000 OPS in 2.077442 seconds, throughput 962722.424982
+455998	[1728021618]	2000000 OPS in 2.078751 seconds, throughput 962116.193811
+455998	[1728021619]	2000000 OPS in 2.088265 seconds, throughput 957732.854786
+455998	[1728021620]	2000000 OPS in 2.087014 seconds, throughput 958306.939963
+455998	[1728021620]	2000000 OPS in 2.072369 seconds, throughput 965079.095470
+455998	[1728021620]	2000000 OPS in 2.076066 seconds, throughput 963360.509733
+455998	[1728021621]	2000000 OPS in 2.086193 seconds, throughput 958684.071896
+455998	[1728021622]	2000000 OPS in 2.094295 seconds, throughput 954975.301951
+455998	[1728021622]	2000000 OPS in 2.079637 seconds, throughput 961706.297782
+455998	[1728021622]	2000000 OPS in 2.081002 seconds, throughput 961075.481907
+455998	[1728021623]	2000000 OPS in 2.079906 seconds, throughput 961581.917644
+455998	[1728021624]	2000000 OPS in 2.093454 seconds, throughput 955358.942685
+455998	[1728021624]	2000000 OPS in 2.080046 seconds, throughput 961517.197216
+455998	[1728021624]	2000000 OPS in 2.079099 seconds, throughput 961955.154613
+455998	[1728021625]	2000000 OPS in 2.089521 seconds, throughput 957157.166642
+455998	[1728021626]	2000000 OPS in 2.098244 seconds, throughput 953177.990739
+455998	[1728021626]	2000000 OPS in 2.068212 seconds, throughput 967018.854934
+455998	[1728021627]	2000000 OPS in 2.076269 seconds, throughput 963266.320501
+455998	[1728021627]	2000000 OPS in 2.081508 seconds, throughput 960841.851196
+455998	[1728021628]	2000000 OPS in 2.098954 seconds, throughput 952855.565201
+455998	[1728021628]	2000000 OPS in 2.073677 seconds, throughput 964470.358691
+455998	[1728021629]	2000000 OPS in 2.085450 seconds, throughput 959025.629960
+455998	[1728021629]	2000000 OPS in 2.081560 seconds, throughput 960817.848152
+455998	[1728021630]	2000000 OPS in 2.094189 seconds, throughput 955023.639223
+455998	[1728021630]	2000000 OPS in 2.071540 seconds, throughput 965465.306004
+455998	[1728021631]	2000000 OPS in 2.083732 seconds, throughput 959816.329547
+455998	[1728021631]	2000000 OPS in 2.084828 seconds, throughput 959311.751377
+455998	[1728021632]	2000000 OPS in 2.093700 seconds, throughput 955246.692458
+455998	[1728021632]	2000000 OPS in 2.077725 seconds, throughput 962591.295768
+455998	[1728021633]	2000000 OPS in 2.078175 seconds, throughput 962382.859961
+455998	[1728021633]	2000000 OPS in 2.081644 seconds, throughput 960779.076538
+455998	[1728021634]	2000000 OPS in 2.099485 seconds, throughput 952614.569764
+455998	[1728021634]	2000000 OPS in 2.078203 seconds, throughput 962369.893605
+455998	[1728021635]	2000000 OPS in 2.081485 seconds, throughput 960852.468310
+455998	[1728021635]	2000000 OPS in 2.086723 seconds, throughput 958440.578841
+455998	[1728021636]	2000000 OPS in 2.093043 seconds, throughput 955546.541567
+455998	[1728021636]	2000000 OPS in 2.069268 seconds, throughput 966525.360659
+455998	[1728021637]	2000000 OPS in 2.076954 seconds, throughput 962948.625728
+455998	[1728021638]	2000000 OPS in 2.085157 seconds, throughput 959160.389362
+455998	[1728021638]	2000000 OPS in 2.095765 seconds, throughput 954305.468409
+455998	[1728021639]	2000000 OPS in 2.078169 seconds, throughput 962385.638512
+455998	[1728021639]	2000000 OPS in 2.082156 seconds, throughput 960542.821960
+455998	[1728021640]	2000000 OPS in 2.083717 seconds, throughput 959823.238952
+455998	[1728021641]	2000000 OPS in 2.089855 seconds, throughput 957004.194071
+455998	[1728021641]	2000000 OPS in 2.071330 seconds, throughput 965563.188869
+455998	[1728021641]	2000000 OPS in 2.082636 seconds, throughput 960321.438792
+455998	[1728021642]	2000000 OPS in 2.089431 seconds, throughput 957198.395161
+455998	[1728021643]	2000000 OPS in 2.075179 seconds, throughput 963772.281813
+455998	[1728021643]	2000000 OPS in 2.093859 seconds, throughput 955174.154516
+455998	[1728021643]	2000000 OPS in 2.075514 seconds, throughput 963616.723376
+455998	[1728021644]	2000000 OPS in 2.082156 seconds, throughput 960542.821960
+455998	[1728021645]	2000000 OPS in 2.079458 seconds, throughput 961789.081578
+455998	[1728021645]	2000000 OPS in 2.096659 seconds, throughput 953898.559565
+455998	[1728021645]	2000000 OPS in 2.079873 seconds, throughput 961597.174443
+455998	[1728021646]	2000000 OPS in 2.087326 seconds, throughput 958163.698435
+455998	[1728021647]	2000000 OPS in 2.072434 seconds, throughput 965048.826645
+455998	[1728021647]	2000000 OPS in 2.092846 seconds, throughput 955636.487348
+455998	[1728021647]	2000000 OPS in 2.078328 seconds, throughput 962312.012348
+455998	[1728021648]	2000000 OPS in 2.085481 seconds, throughput 959011.374354
+455998	[1728021649]	2000000 OPS in 2.079894 seconds, throughput 961587.465515
+455998	[1728021649]	2000000 OPS in 2.096653 seconds, throughput 953901.289341
+455998	[1728021649]	2000000 OPS in 2.082197 seconds, throughput 960523.908160
+455998	[1728021650]	2000000 OPS in 2.081291 seconds, throughput 960942.030692
+455998	[1728021651]	2000000 OPS in 2.079772 seconds, throughput 961643.872501
+455998	[1728021651]	2000000 OPS in 2.096139 seconds, throughput 954135.198095
+455998	[1728021651]	2000000 OPS in 2.085402 seconds, throughput 959047.703992
+455998	[1728021652]	2000000 OPS in 2.088660 seconds, throughput 957551.731732
+455998	[1728021653]	2000000 OPS in 2.071988 seconds, throughput 965256.555540
+455998	[1728021653]	2000000 OPS in 2.092425 seconds, throughput 955828.763277
+455998	[1728021654]	2000000 OPS in 2.082838 seconds, throughput 960228.303882
+455998	[1728021654]	2000000 OPS in 2.090058 seconds, throughput 956911.243611
+455998	[1728021655]	2000000 OPS in 2.079429 seconds, throughput 961802.494819
+455998	[1728021655]	2000000 OPS in 2.094348 seconds, throughput 954951.135150
+455998	[1728021656]	2000000 OPS in 2.081375 seconds, throughput 960903.249054
+455998	[1728021656]	2000000 OPS in 2.082556 seconds, throughput 960358.328900
+455998	[1728021657]	2000000 OPS in 2.071706 seconds, throughput 965387.945973
+455998	[1728021657]	2000000 OPS in 2.089663 seconds, throughput 957092.124424
+455998	[1728021658]	2000000 OPS in 2.082458 seconds, throughput 960403.523144
+455998	[1728021658]	2000000 OPS in 2.088808 seconds, throughput 957483.885546
+455998	[1728021659]	2000000 OPS in 2.080521 seconds, throughput 961297.674957
+455998	[1728021659]	2000000 OPS in 2.093206 seconds, throughput 955472.132222
+455998	[1728021660]	2000000 OPS in 2.077401 seconds, throughput 962741.425464
+455998	[1728021660]	2000000 OPS in 2.080393 seconds, throughput 961356.820562
+455998	[1728021661]	2000000 OPS in 2.078427 seconds, throughput 962266.175334
+455998	[1728021661]	2000000 OPS in 2.095121 seconds, throughput 954598.803601
+455998	[1728021662]	2000000 OPS in 2.082518 seconds, throughput 960375.852694
+455998	[1728021663]	2000000 OPS in 2.084565 seconds, throughput 959432.783338
+455998	[1728021663]	2000000 OPS in 2.070859 seconds, throughput 965782.798346
+455998	[1728021664]	2000000 OPS in 2.093500 seconds, throughput 955337.950800
+455998	[1728021664]	2000000 OPS in 2.074615 seconds, throughput 964034.290700
+455998	[1728021665]	2000000 OPS in 2.085736 seconds, throughput 958894.126582
+455998	[1728021665]	2000000 OPS in 2.080042 seconds, throughput 961519.046250
+455998	[1728021666]	2000000 OPS in 2.094615 seconds, throughput 954829.407791
+455998	[1728021666]	2000000 OPS in 2.081999 seconds, throughput 960615.254858
+455998	[1728021667]	2000000 OPS in 2.079333 seconds, throughput 961846.899943
+455998	[1728021668]	2000000 OPS in 2.076510 seconds, throughput 963154.523696
+455998	[1728021668]	2000000 OPS in 2.096108 seconds, throughput 954149.309100
+455998	[1728021668]	2000000 OPS in 2.083576 seconds, throughput 959888.192223
+455998	[1728021669]	2000000 OPS in 2.084385 seconds, throughput 959515.636507
+455998	[1728021670]	2000000 OPS in 2.071898 seconds, throughput 965298.484771
+455998	[1728021670]	2000000 OPS in 2.095093 seconds, throughput 954611.561396
+455998	[1728021670]	2000000 OPS in 2.074388 seconds, throughput 964139.784843
+455998	[1728021671]	2000000 OPS in 2.086422 seconds, throughput 958578.849341
+455998	[1728021672]	2000000 OPS in 2.078521 seconds, throughput 962222.657361
+455998	[1728021672]	2000000 OPS in 2.096062 seconds, throughput 954170.248781
+455998	[1728021672]	2000000 OPS in 2.081003 seconds, throughput 961075.020074
+455998	[1728021673]	2000000 OPS in 2.081698 seconds, throughput 960754.153580
+455998	[1728021674]	2000000 OPS in 2.068050 seconds, throughput 967094.606030
+455998	[1728021674]	2000000 OPS in 2.090822 seconds, throughput 956561.582000
+455998	[1728021674]	2000000 OPS in 2.080309 seconds, throughput 961395.638821
+455998	[1728021675]	2000000 OPS in 2.087427 seconds, throughput 958117.337756
+455998	[1728021676]	2000000 OPS in 2.075926 seconds, throughput 963425.478558
+455998	[1728021676]	2000000 OPS in 2.099429 seconds, throughput 952639.979728
+455998	[1728021676]	2000000 OPS in 2.080082 seconds, throughput 961500.556228
+455998	[1728021677]	2000000 OPS in 2.081099 seconds, throughput 961030.686190
+455998	[1728021678]	2000000 OPS in 2.077507 seconds, throughput 962692.303805
+455998	[1728021678]	2000000 OPS in 2.097643 seconds, throughput 953451.087721
+455998	[1728021679]	2000000 OPS in 2.083740 seconds, throughput 959812.644572
+455998	[1728021679]	2000000 OPS in 2.089054 seconds, throughput 957371.135452
+455998	[1728021680]	2000000 OPS in 2.070817 seconds, throughput 965802.386208
+455998	[1728021680]	2000000 OPS in 2.086584 seconds, throughput 958504.426373
+455998	[1728021681]	2000000 OPS in 2.075085 seconds, throughput 963815.940070
+455998	[1728021681]	2000000 OPS in 2.085659 seconds, throughput 958929.527790
+455998	[1728021682]	2000000 OPS in 2.078648 seconds, throughput 962163.868053
+455998	[1728021682]	2000000 OPS in 2.091853 seconds, throughput 956090.126792
+455998	[1728021683]	2000000 OPS in 2.079903 seconds, throughput 961583.304606
+455998	[1728021683]	2000000 OPS in 2.081283 seconds, throughput 960945.724344
+455998	[1728021684]	2000000 OPS in 2.077696 seconds, throughput 962604.731395
+455998	[1728021685]	2000000 OPS in 2.095532 seconds, throughput 954411.576631
+455998	[1728021685]	2000000 OPS in 2.080602 seconds, throughput 961260.250639
+455998	[1728021686]	2000000 OPS in 2.086125 seconds, throughput 958715.321469
+455998	[1728021686]	2000000 OPS in 2.073676 seconds, throughput 964470.823793
+455998	[1728021687]	2000000 OPS in 2.093687 seconds, throughput 955252.623721
+455998	[1728021687]	2000000 OPS in 2.078055 seconds, throughput 962438.434016
+455998	[1728021688]	2000000 OPS in 2.092786 seconds, throughput 955663.885366
+455998	[1728021688]	2000000 OPS in 2.077459 seconds, throughput 962714.546954
+455998	[1728021689]	2000000 OPS in 2.097283 seconds, throughput 953614.748224
+455998	[1728021689]	2000000 OPS in 2.082689 seconds, throughput 960297.000656
+455998	[1728021690]	2000000 OPS in 2.082516 seconds, throughput 960376.775016
+455998	[1728021690]	2000000 OPS in 2.071688 seconds, throughput 965396.333811
+455998	[1728021691]	2000000 OPS in 2.091554 seconds, throughput 956226.805524
+455998	[1728021691]	2000000 OPS in 2.084045 seconds, throughput 959672.175985
+455998	[1728021692]	2000000 OPS in 2.084809 seconds, throughput 959320.494108
+455998	[1728021692]	2000000 OPS in 2.074641 seconds, throughput 964022.209144
+455998	[1728021693]	2000000 OPS in 2.093873 seconds, throughput 955167.768055
+455998	[1728021693]	2000000 OPS in 2.074740 seconds, throughput 963976.209067
+455998	[1728021694]	2000000 OPS in 2.084035 seconds, throughput 959676.780860
+455998	[1728021695]	2000000 OPS in 2.078036 seconds, throughput 962447.233830
+455998	[1728021695]	2000000 OPS in 2.095693 seconds, throughput 954338.254697
+455998	[1728021695]	2000000 OPS in 2.079608 seconds, throughput 961719.708714
+455998	[1728021696]	2000000 OPS in 2.088214 seconds, throughput 957756.245289
+455998	[1728021697]	2000000 OPS in 2.073612 seconds, throughput 964500.591239
+455998	[1728021697]	2000000 OPS in 2.092706 seconds, throughput 955700.418501
+455998	[1728021697]	2000000 OPS in 2.077990 seconds, throughput 962468.539310
+455998	[1728021698]	2000000 OPS in 2.085025 seconds, throughput 959221.112457
+455998	[1728021699]	2000000 OPS in 2.079140 seconds, throughput 961936.185153
+455998	[1728021699]	2000000 OPS in 2.097492 seconds, throughput 953519.727370
+455998	[1728021699]	2000000 OPS in 2.079886 seconds, throughput 961591.164131
+455998	[1728021700]	2000000 OPS in 2.083067 seconds, throughput 960122.742091
+455998	[1728021701]	2000000 OPS in 2.070942 seconds, throughput 965744.091336
+455998	[1728021701]	2000000 OPS in 2.097009 seconds, throughput 953739.349712
+455998	[1728021701]	2000000 OPS in 2.081626 seconds, throughput 960787.384477
+455998	[1728021702]	2000000 OPS in 2.085868 seconds, throughput 958833.444878
+455998	[1728021703]	2000000 OPS in 2.078940 seconds, throughput 962028.726178
+455998	[1728021703]	2000000 OPS in 2.091304 seconds, throughput 956341.115400
+455998	[1728021703]	2000000 OPS in 2.074572 seconds, throughput 964054.272399
+455998	[1728021704]	2000000 OPS in 2.087773 seconds, throughput 957958.552007
+455998	[1728021705]	2000000 OPS in 2.078492 seconds, throughput 962236.082698
+455998	[1728021705]	2000000 OPS in 2.095855 seconds, throughput 954264.488717
+455998	[1728021706]	2000000 OPS in 2.079519 seconds, throughput 961760.868739
+455998	[1728021706]	2000000 OPS in 2.083439 seconds, throughput 959951.311269
+455998	[1728021707]	2000000 OPS in 2.074191 seconds, throughput 964231.355743
+455998	[1728021708]	2000000 OPS in 2.092954 seconds, throughput 955587.174873
+455998	[1728021708]	2000000 OPS in 2.082603 seconds, throughput 960336.655618
+455998	[1728021708]	2000000 OPS in 2.084589 seconds, throughput 959421.737330
+455998	[1728021709]	2000000 OPS in 2.075609 seconds, throughput 963572.618928
+455998	[1728021710]	2000000 OPS in 2.095886 seconds, throughput 954250.374305
+455998	[1728021710]	2000000 OPS in 2.078183 seconds, throughput 962379.155252
+455998	[1728021711]	2000000 OPS in 2.081812 seconds, throughput 960701.542695
+455998	[1728021711]	2000000 OPS in 2.078410 seconds, throughput 962274.046026
+455998	[1728021712]	2000000 OPS in 2.092011 seconds, throughput 956017.917688
+455998	[1728021712]	2000000 OPS in 2.079668 seconds, throughput 961691.962371
+455998	[1728021713]	2000000 OPS in 2.086720 seconds, throughput 958441.956755
+455998	[1728021713]	2000000 OPS in 2.072456 seconds, throughput 965038.582243
+455998	[1728021714]	2000000 OPS in 2.090847 seconds, throughput 956550.144511
+455998	[1728021714]	2000000 OPS in 2.076052 seconds, throughput 963367.006221
+455998	[1728021715]	2000000 OPS in 2.083946 seconds, throughput 959717.766199
+455998	[1728021715]	2000000 OPS in 2.077070 seconds, throughput 962894.847068
+455998	[1728021716]	2000000 OPS in 2.080039 seconds, throughput 961520.433030
+455998	[1728021716]	2000000 OPS in 2.096455 seconds, throughput 953991.380688
+455998	[1728021717]	2000000 OPS in 2.081560 seconds, throughput 960817.848152
+455998	[1728021717]	2000000 OPS in 2.074504 seconds, throughput 964085.873057
+455998	[1728021718]	2000000 OPS in 2.079853 seconds, throughput 961606.421223
+455998	[1728021718]	2000000 OPS in 2.098338 seconds, throughput 953135.290883
+455998	[1728021719]	2000000 OPS in 2.089032 seconds, throughput 957381.217712
+455998	[1728021719]	2000000 OPS in 2.080553 seconds, throughput 961282.889693
+455998	[1728021720]	2000000 OPS in 2.078625 seconds, throughput 962174.514403
+455998	[1728021720]	2000000 OPS in 2.087372 seconds, throughput 958142.583114
+455998	[1728021721]	2000000 OPS in 2.078990 seconds, throughput 962005.589252
+455998	[1728021722]	2000000 OPS in 2.074300 seconds, throughput 964180.687461
+455998	[1728021722]	2000000 OPS in 2.081311 seconds, throughput 960932.796684
+455998	[1728021722]	2000000 OPS in 2.097196 seconds, throughput 953654.307943
+455998	[1728021723]	2000000 OPS in 2.085580 seconds, throughput 958965.851226
+455998	[1728021724]	2000000 OPS in 2.078756 seconds, throughput 962113.879647
+455998	[1728021724]	2000000 OPS in 2.079139 seconds, throughput 961936.647814
+455998	[1728021724]	2000000 OPS in 2.091825 seconds, throughput 956102.924480
+455998	[1728021725]	2000000 OPS in 2.089030 seconds, throughput 957382.134292
+455998	[1728021726]	2000000 OPS in 2.079173 seconds, throughput 961920.917596
+455998	[1728021726]	2000000 OPS in 2.082301 seconds, throughput 960475.935035
+455998	[1728021726]	2000000 OPS in 2.095592 seconds, throughput 954384.250369
+455998	[1728021727]	2000000 OPS in 2.080910 seconds, throughput 961117.972426
+455998	[1728021728]	2000000 OPS in 2.081529 seconds, throughput 960832.157515
+455998	[1728021728]	2000000 OPS in 2.078497 seconds, throughput 962233.767958
+455998	[1728021729]	2000000 OPS in 2.097743 seconds, throughput 953405.636439
+455998	[1728021729]	2000000 OPS in 2.086717 seconds, throughput 958443.334674
+455998	[1728021730]	2000000 OPS in 2.075233 seconds, throughput 963747.203326
+455998	[1728021731]	2000000 OPS in 2.077648 seconds, throughput 962626.970497
+455998	[1728021731]	2000000 OPS in 2.093667 seconds, throughput 955261.748884
+455998	[1728021731]	2000000 OPS in 2.086893 seconds, throughput 958362.503492
+455998	[1728021732]	2000000 OPS in 2.079687 seconds, throughput 961683.176363
+455998	[1728021733]	2000000 OPS in 2.079185 seconds, throughput 961915.365877
+455998	[1728021733]	2000000 OPS in 2.093196 seconds, throughput 955476.696879
+455998	[1728021733]	2000000 OPS in 2.081366 seconds, throughput 960907.404080
+455998	[1728021734]	2000000 OPS in 2.072879 seconds, throughput 964841.652600
+455998	[1728021735]	2000000 OPS in 2.079849 seconds, throughput 961608.270600
+455998	[1728021735]	2000000 OPS in 2.095873 seconds, throughput 954256.293201
+455998	[1728021736]	2000000 OPS in 2.084791 seconds, throughput 959328.776841
+455998	[1728021736]	2000000 OPS in 2.076724 seconds, throughput 963055.273594
+455998	[1728021737]	2000000 OPS in 2.076304 seconds, throughput 963250.082840
+455998	[1728021737]	2000000 OPS in 2.088908 seconds, throughput 957438.048971
+455998	[1728021738]	2000000 OPS in 2.083638 seconds, throughput 959859.630128
+455998	[1728021738]	2000000 OPS in 2.080171 seconds, throughput 961459.418480
+455998	[1728021739]	2000000 OPS in 2.078536 seconds, throughput 962215.713367
+455998	[1728021739]	2000000 OPS in 2.094880 seconds, throughput 954708.622928
+455998	[1728021740]	2000000 OPS in 2.086887 seconds, throughput 958365.258876
+455998	[1728021740]	2000000 OPS in 2.071241 seconds, throughput 965604.678548
+455998	[1728021741]	2000000 OPS in 2.074470 seconds, throughput 964101.674163
+455998	[1728021741]	2000000 OPS in 2.090696 seconds, throughput 956619.231108
+455998	[1728021742]	2000000 OPS in 2.085669 seconds, throughput 958924.930082
+455998	[1728021742]	2000000 OPS in 2.081735 seconds, throughput 960737.077486
+455998	[1728021743]	2000000 OPS in 2.080026 seconds, throughput 961526.442458
+455998	[1728021743]	2000000 OPS in 2.093509 seconds, throughput 955333.843800
+455998	[1728021744]	2000000 OPS in 2.084409 seconds, throughput 959504.588591
+455998	[1728021744]	2000000 OPS in 2.077361 seconds, throughput 962759.963242
+455998	[1728021745]	2000000 OPS in 2.079636 seconds, throughput 961706.760222
+455998	[1728021745]	2000000 OPS in 2.094234 seconds, throughput 955003.118085
+455998	[1728021746]	2000000 OPS in 2.091958 seconds, throughput 956042.138513
+455998	[1728021746]	2000000 OPS in 2.080220 seconds, throughput 961436.771111
+455998	[1728021747]	2000000 OPS in 2.075642 seconds, throughput 963557.299380
+455998	[1728021747]	2000000 OPS in 2.090420 seconds, throughput 956745.534390
+455998	[1728021748]	2000000 OPS in 2.086228 seconds, throughput 958667.988350
+455998	[1728021749]	2000000 OPS in 2.079229 seconds, throughput 961895.010122
+455998	[1728021749]	2000000 OPS in 2.078635 seconds, throughput 962169.885526
+455998	[1728021749]	2000000 OPS in 2.093664 seconds, throughput 955263.117673
+455998	[1728021750]	2000000 OPS in 2.083992 seconds, throughput 959696.582329
+455998	[1728021751]	2000000 OPS in 2.073960 seconds, throughput 964338.752917
+455998	[1728021751]	2000000 OPS in 2.082993 seconds, throughput 960156.851223
+455998	[1728021752]	2000000 OPS in 2.093049 seconds, throughput 955543.802367
+455998	[1728021752]	2000000 OPS in 2.088699 seconds, throughput 957533.852412
+455998	[1728021753]	2000000 OPS in 2.083053 seconds, throughput 960129.194984
+455998	[1728021753]	2000000 OPS in 2.077630 seconds, throughput 962635.310426
+455998	[1728021754]	2000000 OPS in 2.090373 seconds, throughput 956767.045881
+455998	[1728021754]	2000000 OPS in 2.078919 seconds, throughput 962038.444018
+455998	[1728021755]	2000000 OPS in 2.078993 seconds, throughput 962004.201072
+455998	[1728021755]	2000000 OPS in 2.081957 seconds, throughput 960634.633664
+455998	[1728021756]	2000000 OPS in 2.097700 seconds, throughput 953425.179959
+455998	[1728021756]	2000000 OPS in 2.089976 seconds, throughput 956948.787929
+455998	[1728021757]	2000000 OPS in 2.072415 seconds, throughput 965057.674259
+455998	[1728021758]	2000000 OPS in 2.079895 seconds, throughput 961587.003190
+455998	[1728021758]	2000000 OPS in 2.094937 seconds, throughput 954682.646781
+455998	[1728021758]	2000000 OPS in 2.084950 seconds, throughput 959255.617641
+455998	[1728021759]	2000000 OPS in 2.081084 seconds, throughput 961037.613090
+455998	[1728021760]	2000000 OPS in 2.082593 seconds, throughput 960341.266873
+455998	[1728021760]	2000000 OPS in 2.092858 seconds, throughput 955631.007933
+455998	[1728021761]	2000000 OPS in 2.083141 seconds, throughput 960088.635383
+455998	[1728021761]	2000000 OPS in 2.072158 seconds, throughput 965177.365819
+455998	[1728021762]	2000000 OPS in 2.080353 seconds, throughput 961375.305056
+455998	[1728021762]	2000000 OPS in 2.096800 seconds, throughput 953834.414346
+455998	[1728021763]	2000000 OPS in 2.087052 seconds, throughput 958289.491589
+455998	[1728021763]	2000000 OPS in 2.080801 seconds, throughput 961168.319315
+455998	[1728021764]	2000000 OPS in 2.078565 seconds, throughput 962202.288598
+455998	[1728021764]	2000000 OPS in 2.093832 seconds, throughput 955186.471503
+455998	[1728021765]	2000000 OPS in 2.087047 seconds, throughput 958291.787391
+455998	[1728021765]	2000000 OPS in 2.077410 seconds, throughput 962737.254562
+455998	[1728021766]	2000000 OPS in 2.079761 seconds, throughput 961648.958702
+455998	[1728021766]	2000000 OPS in 2.093011 seconds, throughput 955561.150897
+455998	[1728021767]	2000000 OPS in 2.085714 seconds, throughput 958904.240946
+455998	[1728021767]	2000000 OPS in 2.071191 seconds, throughput 965627.988920
+455998	[1728021768]	2000000 OPS in 2.079552 seconds, throughput 961745.606746
+455998	[1728021768]	2000000 OPS in 2.097482 seconds, throughput 953524.273391
+455998	[1728021769]	2000000 OPS in 2.090114 seconds, throughput 956885.605283
+455998	[1728021769]	2000000 OPS in 2.076596 seconds, throughput 963114.635683
+455998	[1728021770]	2000000 OPS in 2.079814 seconds, throughput 961624.452956
+455998	[1728021770]	2000000 OPS in 2.091884 seconds, throughput 956075.958323
+455998	[1728021771]	2000000 OPS in 2.081644 seconds, throughput 960779.076538
+455998	[1728021771]	2000000 OPS in 2.076882 seconds, throughput 962982.008607
+455998	[1728021772]	2000000 OPS in 2.081480 seconds, throughput 960854.776409
+455998	[1728021772]	2000000 OPS in 2.098418 seconds, throughput 953098.953593
+455998	[1728021773]	2000000 OPS in 2.087846 seconds, throughput 957925.057691
+455998	[1728021773]	2000000 OPS in 2.072731 seconds, throughput 964910.545556
+455998	[1728021774]	2000000 OPS in 2.078279 seconds, throughput 962334.700971
+455998	[1728021775]	2000000 OPS in 2.094002 seconds, throughput 955108.925397
+455998	[1728021775]	2000000 OPS in 2.088775 seconds, throughput 957499.012579
+455998	[1728021776]	2000000 OPS in 2.079992 seconds, throughput 961542.159778
+455998	[1728021776]	2000000 OPS in 2.083909 seconds, throughput 959734.806078
+455998	[1728021777]	2000000 OPS in 2.092901 seconds, throughput 955611.373878
+455998	[1728021777]	2000000 OPS in 2.084175 seconds, throughput 959612.316624
+455998	[1728021778]	2000000 OPS in 2.072185 seconds, throughput 965164.789823
+455998	[1728021778]	2000000 OPS in 2.081839 seconds, throughput 960689.083066
+455998	[1728021779]	2000000 OPS in 2.096798 seconds, throughput 953835.324147
+455998	[1728021779]	2000000 OPS in 2.087672 seconds, throughput 958004.897321
+455998	[1728021780]	2000000 OPS in 2.081026 seconds, throughput 961064.398042
+455998	[1728021780]	2000000 OPS in 2.074856 seconds, throughput 963922.315573
+455998	[1728021781]	2000000 OPS in 2.091627 seconds, throughput 956193.432194
+455998	[1728021781]	2000000 OPS in 2.088461 seconds, throughput 957642.972505
+455998	[1728021782]	2000000 OPS in 2.077786 seconds, throughput 962563.035847
+455998	[1728021782]	2000000 OPS in 2.083998 seconds, throughput 959693.819284
+455998	[1728021783]	2000000 OPS in 2.095656 seconds, throughput 954355.104082
+455998	[1728021784]	2000000 OPS in 2.081772 seconds, throughput 960720.001998
+455998	[1728021784]	2000000 OPS in 2.072338 seconds, throughput 965093.532040
+455998	[1728021785]	2000000 OPS in 2.073372 seconds, throughput 964612.235527
+455998	[1728021785]	2000000 OPS in 2.097265 seconds, throughput 953622.932724
+455998	[1728021786]	2000000 OPS in 2.087424 seconds, throughput 958118.714741
+455998	[1728021786]	2000000 OPS in 2.078943 seconds, throughput 962027.337931
+455998	[1728021787]	2000000 OPS in 2.079584 seconds, throughput 961730.807700
+455998	[1728021787]	2000000 OPS in 2.089493 seconds, throughput 957169.992912
+455998	[1728021788]	2000000 OPS in 2.078994 seconds, throughput 962003.738347
+455998	[1728021788]	2000000 OPS in 2.074286 seconds, throughput 964187.195016
+455998	[1728021789]	2000000 OPS in 2.076023 seconds, throughput 963380.463511
+455998	[1728021789]	2000000 OPS in 2.094204 seconds, throughput 955016.798745
+455998	[1728021790]	2000000 OPS in 2.086904 seconds, throughput 958357.451996
+455998	[1728021790]	2000000 OPS in 2.072311 seconds, throughput 965106.106178
+455998	[1728021791]	2000000 OPS in 2.073993 seconds, throughput 964323.408999
+455998	[1728021791]	2000000 OPS in 2.096466 seconds, throughput 953986.375167
+455998	[1728021792]	2000000 OPS in 2.085065 seconds, throughput 959202.710707
+455998	[1728021792]	2000000 OPS in 2.077586 seconds, throughput 962655.697526
+455998	[1728021793]	2000000 OPS in 2.079885 seconds, throughput 961591.626460
+455998	[1728021793]	2000000 OPS in 2.095521 seconds, throughput 954416.586615
+455998	[1728021794]	2000000 OPS in 2.082641 seconds, throughput 960319.133254
+455998	[1728021794]	2000000 OPS in 2.071808 seconds, throughput 965340.417645
+455998	[1728021795]	2000000 OPS in 2.078328 seconds, throughput 962312.012348
+455998	[1728021796]	2000000 OPS in 2.094217 seconds, throughput 955010.870411
+455998	[1728021796]	2000000 OPS in 2.087098 seconds, throughput 958268.370723
+455998	[1728021796]	2000000 OPS in 2.079077 seconds, throughput 961965.333655
+455998	[1728021797]	2000000 OPS in 2.073034 seconds, throughput 964769.511740
+455998	[1728021798]	2000000 OPS in 2.084928 seconds, throughput 959265.739632
+455998	[1728021798]	2000000 OPS in 2.087211 seconds, throughput 958216.490810
+455998	[1728021798]	2000000 OPS in 2.079791 seconds, throughput 961635.087372
+455998	[1728021799]	2000000 OPS in 2.079766 seconds, throughput 961646.646786
+455998	[1728021800]	2000000 OPS in 2.096345 seconds, throughput 954041.438790
+455998	[1728021800]	2000000 OPS in 2.086557 seconds, throughput 958516.829399
+455998	[1728021800]	2000000 OPS in 2.069957 seconds, throughput 966203.645776
+455998	[1728021801]	2000000 OPS in 2.077731 seconds, throughput 962588.516030
+455998	[1728021802]	2000000 OPS in 2.095596 seconds, throughput 954382.428674
+455998	[1728021802]	2000000 OPS in 2.087983 seconds, throughput 957862.204817
+455998	[1728021803]	2000000 OPS in 2.078725 seconds, throughput 962128.227640
+455998	[1728021803]	2000000 OPS in 2.081794 seconds, throughput 960709.849293
+455998	[1728021804]	2000000 OPS in 2.094030 seconds, throughput 955096.154305
+455998	[1728021804]	2000000 OPS in 2.082832 seconds, throughput 960231.070005
+455998	[1728021805]	2000000 OPS in 2.073377 seconds, throughput 964609.909341
+455998	[1728021805]	2000000 OPS in 2.080528 seconds, throughput 961294.440642
+455998	[1728021806]	2000000 OPS in 2.095799 seconds, throughput 954289.986778
+455998	[1728021806]	2000000 OPS in 2.087116 seconds, throughput 958260.106290
+455998	[1728021807]	2000000 OPS in 2.077009 seconds, throughput 962923.126477
+455998	[1728021807]	2000000 OPS in 2.075626 seconds, throughput 963564.726979
+455998	[1728021808]	2000000 OPS in 2.090388 seconds, throughput 956760.180407
+455998	[1728021809]	2000000 OPS in 2.087327 seconds, throughput 958163.239397
+455998	[1728021809]	2000000 OPS in 2.081705 seconds, throughput 960750.922921
+455998	[1728021810]	2000000 OPS in 2.076966 seconds, throughput 962943.062140
+455998	[1728021810]	2000000 OPS in 2.088055 seconds, throughput 957829.175956
+455998	[1728021811]	2000000 OPS in 2.084428 seconds, throughput 959495.842505
+455998	[1728021811]	2000000 OPS in 2.072800 seconds, throughput 964878.425318
+455998	[1728021812]	2000000 OPS in 2.078521 seconds, throughput 962222.657361
+455998	[1728021812]	2000000 OPS in 2.099332 seconds, throughput 952683.996624
+455998	[1728021813]	2000000 OPS in 2.085819 seconds, throughput 958855.969765
+455998	[1728021813]	2000000 OPS in 2.079659 seconds, throughput 961696.124220
+455998	[1728021814]	2000000 OPS in 2.075992 seconds, throughput 963394.849306
+455998	[1728021814]	2000000 OPS in 2.088198 seconds, throughput 957763.583721
+455998	[1728021815]	2000000 OPS in 2.090198 seconds, throughput 956847.150366
+455998	[1728021815]	2000000 OPS in 2.079009 seconds, throughput 961996.797513
+455998	[1728021816]	2000000 OPS in 2.079269 seconds, throughput 961876.505637
+455998	[1728021816]	2000000 OPS in 2.096904 seconds, throughput 953787.107087
+455998	[1728021817]	2000000 OPS in 2.083307 seconds, throughput 960012.134553
+455998	[1728021817]	2000000 OPS in 2.075388 seconds, throughput 963675.226030
+455998	[1728021818]	2000000 OPS in 2.073351 seconds, throughput 964622.005632
+455998	[1728021819]	2000000 OPS in 2.092505 seconds, throughput 955792.220329
+455998	[1728021819]	2000000 OPS in 2.089766 seconds, throughput 957044.951444
+455998	[1728021819]	2000000 OPS in 2.080933 seconds, throughput 961107.349444
+455998	[1728021820]	2000000 OPS in 2.081415 seconds, throughput 960884.782708
+455998	[1728021821]	2000000 OPS in 2.090247 seconds, throughput 956824.719758
+455998	[1728021821]	2000000 OPS in 2.082060 seconds, throughput 960587.110842
+455998	[1728021821]	2000000 OPS in 2.070588 seconds, throughput 965909.200672
+455998	[1728021822]	2000000 OPS in 2.079185 seconds, throughput 961915.365877
+455998	[1728021823]	2000000 OPS in 2.098020 seconds, throughput 953279.759011
+455998	[1728021823]	2000000 OPS in 2.089809 seconds, throughput 957025.259246
+455998	[1728021823]	2000000 OPS in 2.082687 seconds, throughput 960297.922828
+455998	[1728021824]	2000000 OPS in 2.074931 seconds, throughput 963887.473849
+455998	[1728021825]	2000000 OPS in 2.093344 seconds, throughput 955409.144412
+455998	[1728021825]	2000000 OPS in 2.087470 seconds, throughput 958097.601403
+455998	[1728021825]	2000000 OPS in 2.083469 seconds, throughput 959937.488871
+455998	[1728021826]	2000000 OPS in 2.080277 seconds, throughput 961410.427554
+455998	[1728021827]	2000000 OPS in 2.093650 seconds, throughput 955269.505409
+455998	[1728021827]	2000000 OPS in 2.082731 seconds, throughput 960277.635470
+455998	[1728021827]	2000000 OPS in 2.074192 seconds, throughput 964230.890872
+455998	[1728021828]	2000000 OPS in 2.078258 seconds, throughput 962344.424994
+455998	[1728021829]	2000000 OPS in 2.099792 seconds, throughput 952475.292791
+455998	[1728021829]	2000000 OPS in 2.090708 seconds, throughput 956613.740417
+455998	[1728021830]	2000000 OPS in 2.079531 seconds, throughput 961755.318868
+455998	[1728021830]	2000000 OPS in 2.076603 seconds, throughput 963111.389129
+455998	[1728021831]	2000000 OPS in 2.089524 seconds, throughput 957155.792420
+455998	[1728021832]	2000000 OPS in 2.088378 seconds, throughput 957681.032840
+455998	[1728021832]	2000000 OPS in 2.083028 seconds, throughput 960140.718224
+455998	[1728021832]	2000000 OPS in 2.076302 seconds, throughput 963251.010691
+455998	[1728021833]	2000000 OPS in 2.095836 seconds, throughput 954273.139692
+455998	[1728021834]	2000000 OPS in 2.082273 seconds, throughput 960488.850405
+455998	[1728021834]	2000000 OPS in 2.073704 seconds, throughput 964457.801113
+455998	[1728021834]	2000000 OPS in 2.074976 seconds, throughput 963866.570023
+455998	[1728021835]	2000000 OPS in 2.095842 seconds, throughput 954270.407788
+455998	[1728021836]	2000000 OPS in 2.086996 seconds, throughput 958315.205204
+455998	[1728021836]	2000000 OPS in 2.078137 seconds, throughput 962400.457718
+455998	[1728021837]	2000000 OPS in 2.080117 seconds, throughput 961484.378042
+455998	[1728021837]	2000000 OPS in 2.093093 seconds, throughput 955523.715382
+455998	[1728021838]	2000000 OPS in 2.083499 seconds, throughput 959923.666870
+455998	[1728021838]	2000000 OPS in 2.071614 seconds, throughput 965430.818676
+455998	[1728021839]	2000000 OPS in 2.085302 seconds, throughput 959093.694822
+455998	[1728021839]	2000000 OPS in 2.097386 seconds, throughput 953567.917398
+455998	[1728021840]	2000000 OPS in 2.088839 seconds, throughput 957469.675739
+455998	[1728021840]	2000000 OPS in 2.080737 seconds, throughput 961197.883250
+455998	[1728021841]	2000000 OPS in 2.073585 seconds, throughput 964513.149931
+455998	[1728021842]	2000000 OPS in 2.093399 seconds, throughput 955384.042889
+455998	[1728021842]	2000000 OPS in 2.091143 seconds, throughput 956414.745429
+455998	[1728021842]	2000000 OPS in 2.075601 seconds, throughput 963576.332831
+455998	[1728021843]	2000000 OPS in 2.081037 seconds, throughput 961059.318023
+455998	[1728021844]	2000000 OPS in 2.093075 seconds, throughput 955531.932683
+455998	[1728021844]	2000000 OPS in 2.084343 seconds, throughput 959534.970972
+455998	[1728021844]	2000000 OPS in 2.072714 seconds, throughput 964918.459566
+455998	[1728021845]	2000000 OPS in 2.080547 seconds, throughput 961285.661896
+455998	[1728021846]	2000000 OPS in 2.099106 seconds, throughput 952786.567234
+455998	[1728021846]	2000000 OPS in 2.086178 seconds, throughput 958690.965009
+455998	[1728021846]	2000000 OPS in 2.077737 seconds, throughput 962585.736308
+455998	[1728021847]	2000000 OPS in 2.081895 seconds, throughput 960663.241902
+455998	[1728021848]	2000000 OPS in 2.088699 seconds, throughput 957533.852412
+455998	[1728021848]	2000000 OPS in 2.080610 seconds, throughput 961256.554568
+455998	[1728021848]	2000000 OPS in 2.074104 seconds, throughput 964271.801221
+455998	[1728021849]	2000000 OPS in 2.081883 seconds, throughput 960668.779177
+455998	[1728021850]	2000000 OPS in 2.091300 seconds, throughput 956342.944580
+455998	[1728021850]	2000000 OPS in 2.088288 seconds, throughput 957722.306502
+455998	[1728021850]	2000000 OPS in 2.074595 seconds, throughput 964043.584410
+455998	[1728021851]	2000000 OPS in 2.077025 seconds, throughput 962915.708766
+455998	[1728021852]	2000000 OPS in 2.094965 seconds, throughput 954669.887086
+455998	[1728021852]	2000000 OPS in 2.089469 seconds, throughput 957180.987131
+455998	[1728021852]	2000000 OPS in 2.076812 seconds, throughput 963014.466403
+455998	[1728021853]	2000000 OPS in 2.081788 seconds, throughput 960712.618192
+455998	[1728021854]	2000000 OPS in 2.092968 seconds, throughput 955580.782888
+455998	[1728021854]	2000000 OPS in 2.084513 seconds, throughput 959456.717228
+455998	[1728021854]	2000000 OPS in 2.073430 seconds, throughput 964585.252456
+455998	[1728021855]	2000000 OPS in 2.077056 seconds, throughput 962901.337277
+455998	[1728021856]	2000000 OPS in 2.097024 seconds, throughput 953732.527620
+455998	[1728021857]	2000000 OPS in 2.076244 seconds, throughput 963277.919166
+455998	[1728021857]	2000000 OPS in 2.088793 seconds, throughput 957490.761411
+455998	[1728021857]	2000000 OPS in 2.074099 seconds, throughput 964274.125777
+455998	[1728021858]	2000000 OPS in 2.092912 seconds, throughput 955606.351342
+455998	[1728021859]	2000000 OPS in 2.079415 seconds, throughput 961808.970311
+455998	[1728021859]	2000000 OPS in 2.087548 seconds, throughput 958061.802651
+455998	[1728021859]	2000000 OPS in 2.077509 seconds, throughput 962691.377029
+455998	[1728021860]	2000000 OPS in 2.091288 seconds, throughput 956348.432162
+455998	[1728021861]	2000000 OPS in 2.070311 seconds, throughput 966038.435771
+455998	[1728021861]	2000000 OPS in 2.079267 seconds, throughput 961877.430845
+455998	[1728021861]	2000000 OPS in 2.073978 seconds, throughput 964330.383447
+455998	[1728021863]	2000000 OPS in 2.094350 seconds, throughput 954950.223220
+455998	[1728021863]	2000000 OPS in 2.079999 seconds, throughput 961538.923817
+455998	[1728021863]	2000000 OPS in 2.092048 seconds, throughput 956001.009537
+455998	[1728021864]	2000000 OPS in 2.078608 seconds, throughput 962182.383595
+455998	[1728021865]	2000000 OPS in 2.091472 seconds, throughput 956264.296151
+455998	[1728021865]	2000000 OPS in 2.073067 seconds, throughput 964754.154111
+455998	[1728021865]	2000000 OPS in 2.080190 seconds, throughput 961450.636721
+455998	[1728021866]	2000000 OPS in 2.080024 seconds, throughput 961527.366992
+455998	[1728021867]	2000000 OPS in 2.094163 seconds, throughput 955035.496282
+455998	[1728021867]	2000000 OPS in 2.077937 seconds, throughput 962493.088097
+455998	[1728021867]	2000000 OPS in 2.088265 seconds, throughput 957732.854786
+455998	[1728021868]	2000000 OPS in 2.074878 seconds, throughput 963912.095073
+455998	[1728021869]	2000000 OPS in 2.097042 seconds, throughput 953724.341239
+455998	[1728021869]	2000000 OPS in 2.079019 seconds, throughput 961992.170346
+455998	[1728021869]	2000000 OPS in 2.086103 seconds, throughput 958725.432062
+455998	[1728021870]	2000000 OPS in 2.082656 seconds, throughput 960312.216708
+455998	[1728021871]	2000000 OPS in 2.089931 seconds, throughput 956969.392769
+455998	[1728021871]	2000000 OPS in 2.075653 seconds, throughput 963552.192973
+455998	[1728021871]	2000000 OPS in 2.079584 seconds, throughput 961730.807700
+455998	[1728021872]	2000000 OPS in 2.084003 seconds, throughput 959691.516759
+455998	[1728021873]	2000000 OPS in 2.098119 seconds, throughput 953234.778390
+455998	[1728021873]	2000000 OPS in 2.080066 seconds, throughput 961507.952152
+455998	[1728021873]	2000000 OPS in 2.088887 seconds, throughput 957447.674288
+455998	[1728021874]	2000000 OPS in 2.074115 seconds, throughput 964266.687238
+455998	[1728021875]	2000000 OPS in 2.095495 seconds, throughput 954428.428605
+455998	[1728021875]	2000000 OPS in 2.079327 seconds, throughput 961849.675400
+455998	[1728021875]	2000000 OPS in 2.086073 seconds, throughput 958739.219577
+455998	[1728021876]	2000000 OPS in 2.080918 seconds, throughput 961114.277449
+455998	[1728021877]	2000000 OPS in 2.092154 seconds, throughput 955952.573281
+455998	[1728021877]	2000000 OPS in 2.070307 seconds, throughput 966040.302235
+455998	[1728021877]	2000000 OPS in 2.087314 seconds, throughput 958169.206933
+455998	[1728021878]	2000000 OPS in 2.076136 seconds, throughput 963328.028607
+455998	[1728021879]	2000000 OPS in 2.099438 seconds, throughput 952635.895892
+455998	[1728021879]	2000000 OPS in 2.078595 seconds, throughput 962188.401300
+455998	[1728021879]	2000000 OPS in 2.088365 seconds, throughput 957686.994371
+455998	[1728021880]	2000000 OPS in 2.081140 seconds, throughput 961011.753174
+455998	[1728021881]	2000000 OPS in 2.088868 seconds, throughput 957456.383074
+455998	[1728021881]	2000000 OPS in 2.071287 seconds, throughput 965583.233999
+455998	[1728021882]	2000000 OPS in 2.082140 seconds, throughput 960550.203156
+455998	[1728021882]	2000000 OPS in 2.083081 seconds, throughput 960116.289285
+455998	[1728021883]	2000000 OPS in 2.096753 seconds, throughput 953855.795127
+455998	[1728021884]	2000000 OPS in 2.082307 seconds, throughput 960473.167501
+455998	[1728021884]	2000000 OPS in 2.086718 seconds, throughput 958442.875367
+455998	[1728021884]	2000000 OPS in 2.073459 seconds, throughput 964571.761486
+455998	[1728021886]	2000000 OPS in 2.080655 seconds, throughput 961235.764699
+455998	[1728021886]	2000000 OPS in 2.104283 seconds, throughput 950442.502268
+455998	[1728021886]	2000000 OPS in 2.087022 seconds, throughput 958303.266568
+455998	[1728021886]	2000000 OPS in 2.083480 seconds, throughput 959932.420758
+455998	[1728021888]	2000000 OPS in 2.073400 seconds, throughput 964599.209029
+455998	[1728021888]	2000000 OPS in 2.103529 seconds, throughput 950783.183878
+455998	[1728021888]	2000000 OPS in 2.079706 seconds, throughput 961674.390515
+455998	[1728021888]	2000000 OPS in 2.082576 seconds, throughput 960349.106107
+455998	[1728021890]	2000000 OPS in 2.077485 seconds, throughput 962702.498454
+455998	[1728021890]	2000000 OPS in 2.110126 seconds, throughput 947810.699456
+455998	[1728021890]	2000000 OPS in 2.088532 seconds, throughput 957610.417269
+455998	[1728021891]	2000000 OPS in 2.079211 seconds, throughput 961903.337372
+455998	[1728021892]	2000000 OPS in 2.081217 seconds, throughput 960976.198061
+455998	[1728021892]	2000000 OPS in 2.112357 seconds, throughput 946809.653861
+455998	[1728021892]	2000000 OPS in 2.090243 seconds, throughput 956826.550789
+455998	[1728021893]	2000000 OPS in 2.079588 seconds, throughput 961728.957851
+455998	[1728021894]	2000000 OPS in 2.075749 seconds, throughput 963507.630258
+455998	[1728021894]	2000000 OPS in 2.102293 seconds, throughput 951342.177327
+455998	[1728021894]	2000000 OPS in 2.083050 seconds, throughput 960130.577759
+455998	[1728021895]	2000000 OPS in 2.073229 seconds, throughput 964678.769205
+455998	[1728021896]	2000000 OPS in 2.079375 seconds, throughput 961827.472197
+455998	[1728021896]	2000000 OPS in 2.086391 seconds, throughput 958593.092091
+455998	[1728021896]	2000000 OPS in 2.110511 seconds, throughput 947637.799566
+455998	[1728021897]	2000000 OPS in 2.080482 seconds, throughput 961315.695113
+455998	[1728021898]	2000000 OPS in 2.074393 seconds, throughput 964137.460934
+455998	[1728021898]	2000000 OPS in 2.081004 seconds, throughput 961074.558242
+455998	[1728021898]	2000000 OPS in 2.100865 seconds, throughput 951988.823651
+455998	[1728021899]	2000000 OPS in 2.076239 seconds, throughput 963280.238932
+455998	[1728021900]	2000000 OPS in 2.077450 seconds, throughput 962718.717659
+455998	[1728021900]	2000000 OPS in 2.087595 seconds, throughput 958040.232900
+455998	[1728021900]	2000000 OPS in 2.106672 seconds, throughput 949364.685153
+455998	[1728021901]	2000000 OPS in 2.077378 seconds, throughput 962752.084599
+455998	[1728021902]	2000000 OPS in 2.078215 seconds, throughput 962364.336702
+455998	[1728021902]	2000000 OPS in 2.089382 seconds, throughput 957220.843292
+455998	[1728021902]	2000000 OPS in 2.112519 seconds, throughput 946737.047099
+455998	[1728021903]	2000000 OPS in 2.081791 seconds, throughput 960711.233741
+455998	[1728021904]	2000000 OPS in 2.073787 seconds, throughput 964419.200236
+455998	[1728021905]	2000000 OPS in 2.084035 seconds, throughput 959676.780860
+455998	[1728021905]	2000000 OPS in 2.102689 seconds, throughput 951163.010792
+455998	[1728021905]	2000000 OPS in 2.078215 seconds, throughput 962364.336702
+455998	[1728021906]	2000000 OPS in 2.079516 seconds, throughput 961762.256217
+455998	[1728021907]	2000000 OPS in 2.087308 seconds, throughput 958171.961206
+455998	[1728021907]	2000000 OPS in 2.107841 seconds, throughput 948838.171380
+455998	[1728021907]	2000000 OPS in 2.082057 seconds, throughput 960588.494936
+455998	[1728021908]	2000000 OPS in 2.074949 seconds, throughput 963879.112210
+455998	[1728021909]	2000000 OPS in 2.083612 seconds, throughput 959871.607574
+455998	[1728021909]	2000000 OPS in 2.110427 seconds, throughput 947675.517798
+455998	[1728021909]	2000000 OPS in 2.078585 seconds, throughput 962193.030355
+455998	[1728021910]	2000000 OPS in 2.076786 seconds, throughput 963026.522713
+455998	[1728021911]	2000000 OPS in 2.082539 seconds, throughput 960366.168413
+455998	[1728021911]	2000000 OPS in 2.103956 seconds, throughput 950590.221469
+455998	[1728021911]	2000000 OPS in 2.076039 seconds, throughput 963373.038753
+455998	[1728021913]	2000000 OPS in 2.080441 seconds, throughput 961334.640108
+455998	[1728021913]	2000000 OPS in 2.089376 seconds, throughput 957223.592116
+455998	[1728021913]	2000000 OPS in 2.109235 seconds, throughput 948211.081269
+455998	[1728021913]	2000000 OPS in 2.080344 seconds, throughput 961379.464166
+455998	[1728021915]	2000000 OPS in 2.078172 seconds, throughput 962384.249234
+455998	[1728021915]	2000000 OPS in 2.081506 seconds, throughput 960842.774414
+455998	[1728021915]	2000000 OPS in 2.103662 seconds, throughput 950723.072433
+455998	[1728021916]	2000000 OPS in 2.078582 seconds, throughput 962194.419080
+455998	[1728021917]	2000000 OPS in 2.076930 seconds, throughput 962959.753097
+455998	[1728021917]	2000000 OPS in 2.087221 seconds, throughput 958211.899938
+455998	[1728021917]	2000000 OPS in 2.110109 seconds, throughput 947818.335451
+455998	[1728021918]	2000000 OPS in 2.075872 seconds, throughput 963450.540303
+455998	[1728021919]	2000000 OPS in 2.079292 seconds, throughput 961865.865881
+455998	[1728021919]	2000000 OPS in 2.087048 seconds, throughput 958291.328230
+455998	[1728021919]	2000000 OPS in 2.109488 seconds, throughput 948097.358222
+455998	[1728021920]	2000000 OPS in 2.078759 seconds, throughput 962112.491155
+455998	[1728021921]	2000000 OPS in 2.074554 seconds, throughput 964062.637078
+455998	[1728021921]	2000000 OPS in 2.081099 seconds, throughput 961030.686190
+455998	[1728021921]	2000000 OPS in 2.102087 seconds, throughput 951435.406812
+455998	[1728021922]	2000000 OPS in 2.079458 seconds, throughput 961789.081578
+455998	[1728021923]	2000000 OPS in 2.077789 seconds, throughput 962561.646057
+455998	[1728021923]	2000000 OPS in 2.086260 seconds, throughput 958653.283867
+455998	[1728021924]	2000000 OPS in 2.112445 seconds, throughput 946770.211769
+455998	[1728021924]	2000000 OPS in 2.087072 seconds, throughput 958280.308490
+455998	[1728021925]	2000000 OPS in 2.075054 seconds, throughput 963830.338873
+455998	[1728021925]	2000000 OPS in 2.089811 seconds, throughput 957024.343350
+455998	[1728021926]	2000000 OPS in 2.105828 seconds, throughput 949745.183367
+455998	[1728021926]	2000000 OPS in 2.082610 seconds, throughput 960333.427766
+455998	[1728021927]	2000000 OPS in 2.078407 seconds, throughput 962275.434985
+455998	[1728021927]	2000000 OPS in 2.082819 seconds, throughput 960237.063326
+455998	[1728021928]	2000000 OPS in 2.103836 seconds, throughput 950644.441867
+455998	[1728021928]	2000000 OPS in 2.079190 seconds, throughput 961913.052679
+455998	[1728021929]	2000000 OPS in 2.077590 seconds, throughput 962653.844117
+455998	[1728021930]	2000000 OPS in 2.088339 seconds, throughput 957698.917657
+455998	[1728021930]	2000000 OPS in 2.111343 seconds, throughput 947264.371540
+455998	[1728021930]	2000000 OPS in 2.083688 seconds, throughput 959836.597418
+455998	[1728021931]	2000000 OPS in 2.071500 seconds, throughput 965483.948829
+455998	[1728021932]	2000000 OPS in 2.085003 seconds, throughput 959231.233720
+455998	[1728021932]	2000000 OPS in 2.107539 seconds, throughput 948974.135235
+455998	[1728021932]	2000000 OPS in 2.083634 seconds, throughput 959861.472792
+455998	[1728021933]	2000000 OPS in 2.076862 seconds, throughput 962991.282040
+455998	[1728021934]	2000000 OPS in 2.084859 seconds, throughput 959297.487264
+455998	[1728021934]	2000000 OPS in 2.103649 seconds, throughput 950728.947652
+455998	[1728021934]	2000000 OPS in 2.082242 seconds, throughput 960503.149970
+455998	[1728021935]	2000000 OPS in 2.080271 seconds, throughput 961413.200492
+455998	[1728021936]	2000000 OPS in 2.086699 seconds, throughput 958451.602268
+455998	[1728021936]	2000000 OPS in 2.108418 seconds, throughput 948578.507677
+455998	[1728021936]	2000000 OPS in 2.080544 seconds, throughput 961287.048003
+455998	[1728021937]	2000000 OPS in 2.073552 seconds, throughput 964528.499888
+455998	[1728021938]	2000000 OPS in 2.080045 seconds, throughput 961517.659474
+455998	[1728021938]	2000000 OPS in 2.104276 seconds, throughput 950445.663972
+455998	[1728021938]	2000000 OPS in 2.080143 seconds, throughput 961472.360314
+455998	[1728021940]	2000000 OPS in 2.079776 seconds, throughput 961642.022987
+455998	[1728021940]	2000000 OPS in 2.091287 seconds, throughput 956348.889464
+455998	[1728021940]	2000000 OPS in 2.103541 seconds, throughput 950777.759977
+455998	[1728021940]	2000000 OPS in 2.083150 seconds, throughput 960084.487435
+455998	[1728021942]	2000000 OPS in 2.070971 seconds, throughput 965730.567932
+455998	[1728021942]	2000000 OPS in 2.087751 seconds, throughput 957968.646644
+455998	[1728021943]	2000000 OPS in 2.107042 seconds, throughput 949197.975171
+455998	[1728021943]	2000000 OPS in 2.081734 seconds, throughput 960737.538994
+455998	[1728021944]	2000000 OPS in 2.083840 seconds, throughput 959766.584767
+455998	[1728021944]	2000000 OPS in 2.083351 seconds, throughput 959991.859269
+455998	[1728021945]	2000000 OPS in 2.103493 seconds, throughput 950799.455953
+455998	[1728021945]	2000000 OPS in 2.077164 seconds, throughput 962851.272215
+455998	[1728021946]	2000000 OPS in 2.078089 seconds, throughput 962422.687382
+455998	[1728021946]	2000000 OPS in 2.087789 seconds, throughput 957951.210587
+455998	[1728021947]	2000000 OPS in 2.109349 seconds, throughput 948159.835096
+455998	[1728021947]	2000000 OPS in 2.084760 seconds, throughput 959343.041885
+455998	[1728021948]	2000000 OPS in 2.075610 seconds, throughput 963572.154692
+455998	[1728021948]	2000000 OPS in 2.079604 seconds, throughput 961721.558527
+455998	[1728021949]	2000000 OPS in 2.081121 seconds, throughput 961020.526918
+455998	[1728021949]	2000000 OPS in 2.110449 seconds, throughput 947665.638923
+455998	[1728021950]	2000000 OPS in 2.081293 seconds, throughput 960941.107283
+455998	[1728021950]	2000000 OPS in 2.087766 seconds, throughput 957961.763914
+455998	[1728021951]	2000000 OPS in 2.073509 seconds, throughput 964548.502080
+455998	[1728021951]	2000000 OPS in 2.101621 seconds, throughput 951646.372015
+455998	[1728021952]	2000000 OPS in 2.077909 seconds, throughput 962506.057773
+455998	[1728021952]	2000000 OPS in 2.091022 seconds, throughput 956470.089746
+455998	[1728021953]	2000000 OPS in 2.080170 seconds, throughput 961459.880683
+455998	[1728021953]	2000000 OPS in 2.108585 seconds, throughput 948503.380229
+455998	[1728021954]	2000000 OPS in 2.077280 seconds, throughput 962797.504429
+455998	[1728021955]	2000000 OPS in 2.083318 seconds, throughput 960007.065652
+455998	[1728021955]	2000000 OPS in 2.076759 seconds, throughput 963039.043047
+455998	[1728021955]	2000000 OPS in 2.101477 seconds, throughput 951711.581902
+455998	[1728021956]	2000000 OPS in 2.080070 seconds, throughput 961506.103160
+455998	[1728021957]	2000000 OPS in 2.087833 seconds, throughput 957931.022261
+455998	[1728021957]	2000000 OPS in 2.077968 seconds, throughput 962478.729220
+455998	[1728021957]	2000000 OPS in 2.106755 seconds, throughput 949327.282954
+455998	[1728021958]	2000000 OPS in 2.075146 seconds, throughput 963787.608197
+455998	[1728021959]	2000000 OPS in 2.089738 seconds, throughput 957057.774707
+455998	[1728021959]	2000000 OPS in 2.079602 seconds, throughput 961722.483437
+455998	[1728021959]	2000000 OPS in 2.109537 seconds, throughput 948075.335962
+455998	[1728021960]	2000000 OPS in 2.077446 seconds, throughput 962720.571317
+455998	[1728021961]	2000000 OPS in 2.082854 seconds, throughput 960220.927631
+455998	[1728021961]	2000000 OPS in 2.079319 seconds, throughput 961853.376033
+455998	[1728021961]	2000000 OPS in 2.103059 seconds, throughput 950995.668690
+455998	[1728021962]	2000000 OPS in 2.081387 seconds, throughput 960897.709076
+455998	[1728021963]	2000000 OPS in 2.087910 seconds, throughput 957895.694738
+455998	[1728021963]	2000000 OPS in 2.084527 seconds, throughput 959450.273371
+455998	[1728021964]	2000000 OPS in 2.106268 seconds, throughput 949546.781321
+455998	[1728021964]	2000000 OPS in 2.079193 seconds, throughput 961911.664766
+455998	[1728021965]	2000000 OPS in 2.081814 seconds, throughput 960700.619748
+455998	[1728021965]	2000000 OPS in 2.080437 seconds, throughput 961336.488440
+455998	[1728021966]	2000000 OPS in 2.103688 seconds, throughput 950711.322211
+455998	[1728021967]	2000000 OPS in 2.078346 seconds, throughput 962303.678021
+455998	[1728021967]	2000000 OPS in 2.089496 seconds, throughput 957168.618653
+455998	[1728021968]	2000000 OPS in 2.078437 seconds, throughput 962261.545575
+455998	[1728021968]	2000000 OPS in 2.099598 seconds, throughput 952563.300213
+455998	[1728021969]	2000000 OPS in 2.073918 seconds, throughput 964358.282246
+455998	[1728021969]	2000000 OPS in 2.092676 seconds, throughput 955714.119147
+455998	[1728021970]	2000000 OPS in 2.083122 seconds, throughput 960097.392279
+455998	[1728021970]	2000000 OPS in 2.107902 seconds, throughput 948810.713212
+455998	[1728021971]	2000000 OPS in 2.077959 seconds, throughput 962482.897882
+455998	[1728021971]	2000000 OPS in 2.079052 seconds, throughput 961976.901011
+455998	[1728021972]	2000000 OPS in 2.079703 seconds, throughput 961675.777743
+455998	[1728021972]	2000000 OPS in 2.101623 seconds, throughput 951645.466385
+455998	[1728021973]	2000000 OPS in 2.079307 seconds, throughput 961858.927037
+455998	[1728021973]	2000000 OPS in 2.083376 seconds, throughput 959980.339603
+455998	[1728021974]	2000000 OPS in 2.081753 seconds, throughput 960728.770416
+455998	[1728021974]	2000000 OPS in 2.107277 seconds, throughput 949092.122203
+455998	[1728021975]	2000000 OPS in 2.076359 seconds, throughput 963224.567621
+455998	[1728021975]	2000000 OPS in 2.091978 seconds, throughput 956032.998435
+455998	[1728021976]	2000000 OPS in 2.084449 seconds, throughput 959486.175963
+455998	[1728021976]	2000000 OPS in 2.107008 seconds, throughput 949213.292024
+455998	[1728021977]	2000000 OPS in 2.078664 seconds, throughput 962156.462035
+455998	[1728021978]	2000000 OPS in 2.086093 seconds, throughput 958730.027856
+455998	[1728021978]	2000000 OPS in 2.077802 seconds, throughput 962555.623683
+455998	[1728021978]	2000000 OPS in 2.102999 seconds, throughput 951022.801247
+455998	[1728021979]	2000000 OPS in 2.080200 seconds, throughput 961446.014806
+455998	[1728021980]	2000000 OPS in 2.086411 seconds, throughput 958583.903172
+455998	[1728021980]	2000000 OPS in 2.083952 seconds, throughput 959715.003033
+455998	[1728021980]	2000000 OPS in 2.104543 seconds, throughput 950325.082453
+455998	[1728021981]	2000000 OPS in 2.075614 seconds, throughput 963570.297753
+455998	[1728021982]	2000000 OPS in 2.086025 seconds, throughput 958761.280426
+455998	[1728021982]	2000000 OPS in 2.082233 seconds, throughput 960507.301536
+455998	[1728021983]	2000000 OPS in 2.107496 seconds, throughput 948993.497497
+455998	[1728021983]	2000000 OPS in 2.076462 seconds, throughput 963176.788210
+455998	[1728021984]	2000000 OPS in 2.089066 seconds, throughput 957365.636126
+455998	[1728021984]	2000000 OPS in 2.079395 seconds, throughput 961818.221165
+455998	[1728021985]	2000000 OPS in 2.101837 seconds, throughput 951548.573938
+455998	[1728021985]	2000000 OPS in 2.075578 seconds, throughput 963587.010462
+455998	[1728021986]	2000000 OPS in 2.091577 seconds, throughput 956216.290388
+455998	[1728021986]	2000000 OPS in 2.083427 seconds, throughput 959956.840340
+455998	[1728021987]	2000000 OPS in 2.104896 seconds, throughput 950165.708900
+455998	[1728021987]	2000000 OPS in 2.079098 seconds, throughput 961955.617292
+455998	[1728021988]	2000000 OPS in 2.084779 seconds, throughput 959334.298743
+455998	[1728021988]	2000000 OPS in 2.075814 seconds, throughput 963477.459927
+455998	[1728021989]	2000000 OPS in 2.102145 seconds, throughput 951409.155886
+455998	[1728021989]	2000000 OPS in 2.079003 seconds, throughput 961999.573834
+455998	[1728021990]	2000000 OPS in 2.088637 seconds, throughput 957562.276260
+455998	[1728021990]	2000000 OPS in 2.083333 seconds, throughput 960000.153600
+455998	[1728021991]	2000000 OPS in 2.102137 seconds, throughput 951412.776617
+455998	[1728021991]	2000000 OPS in 2.075000 seconds, throughput 963855.421687
+455998	[1728021992]	2000000 OPS in 2.086728 seconds, throughput 958438.282325
+455998	[1728021993]	2000000 OPS in 2.082846 seconds, throughput 960224.615742
+455998	[1728021993]	2000000 OPS in 2.108672 seconds, throughput 948464.246692
+455998	[1728021994]	2000000 OPS in 2.077999 seconds, throughput 962464.370772
+455998	[1728021994]	2000000 OPS in 2.079336 seconds, throughput 961845.512221
+455998	[1728021995]	2000000 OPS in 2.080343 seconds, throughput 961379.926291
+455998	[1728021995]	2000000 OPS in 2.101093 seconds, throughput 951885.518632
+455998	[1728021996]	2000000 OPS in 2.073817 seconds, throughput 964405.248872
+455998	[1728021996]	2000000 OPS in 2.086252 seconds, throughput 958656.959945
+455998	[1728021997]	2000000 OPS in 2.086146 seconds, throughput 958705.670648
+455998	[1728021997]	2000000 OPS in 2.106563 seconds, throughput 949413.808179
+455998	[1728021998]	2000000 OPS in 2.076075 seconds, throughput 963356.333466
+455998	[1728021998]	2000000 OPS in 2.083387 seconds, throughput 959975.271037
+455998	[1728021999]	2000000 OPS in 2.080043 seconds, throughput 961518.583991
+455998	[1728021999]	2000000 OPS in 2.105278 seconds, throughput 949993.302547
+455998	[1728022000]	2000000 OPS in 2.080801 seconds, throughput 961168.319315
+455998	[1728022000]	2000000 OPS in 2.088062 seconds, throughput 957825.964938
+455998	[1728022001]	2000000 OPS in 2.081275 seconds, throughput 960949.418025
+455998	[1728022001]	2000000 OPS in 2.102098 seconds, throughput 951430.428077
+455998	[1728022002]	2000000 OPS in 2.072874 seconds, throughput 964843.979904
+455998	[1728022003]	2000000 OPS in 2.089398 seconds, throughput 957213.513175
+455998	[1728022003]	2000000 OPS in 2.086838 seconds, throughput 958387.761772
+455998	[1728022004]	2000000 OPS in 2.104631 seconds, throughput 950285.346933
+455998	[1728022004]	2000000 OPS in 2.076941 seconds, throughput 962954.653021
+455998	[1728022005]	2000000 OPS in 2.081247 seconds, throughput 960962.346132
+455998	[1728022005]	2000000 OPS in 2.076387 seconds, throughput 963211.578574
+455998	[1728022006]	2000000 OPS in 2.105945 seconds, throughput 949692.418368
+455998	[1728022006]	2000000 OPS in 2.078262 seconds, throughput 962342.572784
+455998	[1728022007]	2000000 OPS in 2.089210 seconds, throughput 957299.649150
+455998	[1728022007]	2000000 OPS in 2.085663 seconds, throughput 958927.688701
+455998	[1728022008]	2000000 OPS in 2.101878 seconds, throughput 951530.012684
+455998	[1728022008]	2000000 OPS in 2.071777 seconds, throughput 965354.862034
+455998	[1728022009]	2000000 OPS in 2.085261 seconds, throughput 959112.552338
+455998	[1728022009]	2000000 OPS in 2.080619 seconds, throughput 961252.396522
+455998	[1728022010]	2000000 OPS in 2.106897 seconds, throughput 949263.300484
+455998	[1728022010]	2000000 OPS in 2.080027 seconds, throughput 961525.980192
+455998	[1728022011]	2000000 OPS in 2.088654 seconds, throughput 957554.482456
+455998	[1728022011]	2000000 OPS in 2.083223 seconds, throughput 960050.844293
+455998	[1728022012]	2000000 OPS in 2.101978 seconds, throughput 951484.744369
+455998	[1728022012]	2000000 OPS in 2.078348 seconds, throughput 962302.751993
+455998	[1728022013]	2000000 OPS in 2.090372 seconds, throughput 956767.503583
+455998	[1728022013]	2000000 OPS in 2.079619 seconds, throughput 961714.621765
+455998	[1728022014]	2000000 OPS in 2.106644 seconds, throughput 949377.303427
+455998	[1728022014]	2000000 OPS in 2.074684 seconds, throughput 964002.228773
+455998	[1728022015]	2000000 OPS in 2.082946 seconds, throughput 960178.516390
+455998	[1728022015]	2000000 OPS in 2.076875 seconds, throughput 962985.254288
+455998	[1728022016]	2000000 OPS in 2.109612 seconds, throughput 948041.630404
+455998	[1728022016]	2000000 OPS in 2.078819 seconds, throughput 962084.722143
+455998	[1728022017]	2000000 OPS in 2.091666 seconds, throughput 956175.603562
+455998	[1728022017]	2000000 OPS in 2.084972 seconds, throughput 959245.495863
+455998	[1728022018]	2000000 OPS in 2.102066 seconds, throughput 951444.911815
+455998	[1728022018]	2000000 OPS in 2.074712 seconds, throughput 963989.218745
+455998	[1728022019]	2000000 OPS in 2.085339 seconds, throughput 959076.677701
+455998	[1728022020]	2000000 OPS in 2.080974 seconds, throughput 961088.413406
+455998	[1728022020]	2000000 OPS in 2.106134 seconds, throughput 949607.194984
+455998	[1728022021]	2000000 OPS in 2.076600 seconds, throughput 963112.780507
+455998	[1728022021]	2000000 OPS in 2.083049 seconds, throughput 960131.038684
+455998	[1728022022]	2000000 OPS in 2.075458 seconds, throughput 963642.723678
+455998	[1728022023]	2000000 OPS in 2.109807 seconds, throughput 947954.007167
+455998	[1728022023]	2000000 OPS in 2.078451 seconds, throughput 962255.063988
+455998	[1728022023]	2000000 OPS in 2.090113 seconds, throughput 956886.063098
+455998	[1728022024]	2000000 OPS in 2.084245 seconds, throughput 959580.087754
+455998	[1728022025]	2000000 OPS in 2.101509 seconds, throughput 951697.090043
+455998	[1728022025]	2000000 OPS in 2.073046 seconds, throughput 964763.927091
+455998	[1728022026]	2000000 OPS in 2.080785 seconds, throughput 961175.710129
+455998	[1728022026]	2000000 OPS in 2.083524 seconds, throughput 959912.148840
+455998	[1728022027]	2000000 OPS in 2.105838 seconds, throughput 949740.673309
+455998	[1728022027]	2000000 OPS in 2.075541 seconds, throughput 963604.188017
+455998	[1728022028]	2000000 OPS in 2.087682 seconds, throughput 958000.308476
+455998	[1728022028]	2000000 OPS in 2.077748 seconds, throughput 962580.640193
+455998	[1728022029]	2000000 OPS in 2.103409 seconds, throughput 950837.426292
+455998	[1728022029]	2000000 OPS in 2.071592 seconds, throughput 965441.071408
+455998	[1728022030]	2000000 OPS in 2.088744 seconds, throughput 957513.223258
+455998	[1728022030]	2000000 OPS in 2.085746 seconds, throughput 958889.529214
+455998	[1728022031]	2000000 OPS in 2.109336 seconds, throughput 948165.678678
+455998	[1728022031]	2000000 OPS in 2.076638 seconds, throughput 963095.156691
+455998	[1728022032]	2000000 OPS in 2.082752 seconds, throughput 960267.953170
+455998	[1728022032]	2000000 OPS in 2.080640 seconds, throughput 961242.694556
+455998	[1728022033]	2000000 OPS in 2.076132 seconds, throughput 963329.884612
+455998	[1728022033]	2000000 OPS in 2.109347 seconds, throughput 948160.734104
+455998	[1728022034]	2000000 OPS in 2.088193 seconds, throughput 957765.877005
+455998	[1728022034]	2000000 OPS in 2.087671 seconds, throughput 958005.356208
+455998	[1728022035]	2000000 OPS in 2.071970 seconds, throughput 965264.941095
+455998	[1728022035]	2000000 OPS in 2.105037 seconds, throughput 950102.064714
+455998	[1728022036]	2000000 OPS in 2.085977 seconds, throughput 958783.342290
+455998	[1728022036]	2000000 OPS in 2.080023 seconds, throughput 961527.829260
+455998	[1728022037]	2000000 OPS in 2.078337 seconds, throughput 962307.845167
+455998	[1728022037]	2000000 OPS in 2.107792 seconds, throughput 948860.229093
+455998	[1728022038]	2000000 OPS in 2.088872 seconds, throughput 957454.549633
+455998	[1728022038]	2000000 OPS in 2.078851 seconds, throughput 962069.912658
+455998	[1728022039]	2000000 OPS in 2.078340 seconds, throughput 962306.456114
+455998	[1728022039]	2000000 OPS in 2.103405 seconds, throughput 950839.234479
+455998	[1728022040]	2000000 OPS in 2.088895 seconds, throughput 957444.007478
+455998	[1728022040]	2000000 OPS in 2.082934 seconds, throughput 960184.048078
+455998	[1728022041]	2000000 OPS in 2.071052 seconds, throughput 965692.797670
+455998	[1728022041]	2000000 OPS in 2.105811 seconds, throughput 949752.850564
+455998	[1728022042]	2000000 OPS in 2.081935 seconds, throughput 960644.784780
+455998	[1728022042]	2000000 OPS in 2.083712 seconds, throughput 959825.542109
+455998	[1728022043]	2000000 OPS in 2.075547 seconds, throughput 963601.402425
+455998	[1728022044]	2000000 OPS in 2.108974 seconds, throughput 948328.428895
+455998	[1728022044]	2000000 OPS in 2.089288 seconds, throughput 957263.910002
+455998	[1728022045]	2000000 OPS in 2.079722 seconds, throughput 961666.992031
+455998	[1728022045]	2000000 OPS in 2.075499 seconds, throughput 963623.687605
+455998	[1728022046]	2000000 OPS in 2.110647 seconds, throughput 947576.738318
+455998	[1728022046]	2000000 OPS in 2.089261 seconds, throughput 957276.280943
+455998	[1728022047]	2000000 OPS in 2.085215 seconds, throughput 959133.710433
+455998	[1728022048]	2000000 OPS in 2.078773 seconds, throughput 962106.011575
+455998	[1728022048]	2000000 OPS in 2.104000 seconds, throughput 950570.342205
+455998	[1728022048]	2000000 OPS in 2.082394 seconds, throughput 960433.040049
+455998	[1728022049]	2000000 OPS in 2.081197 seconds, throughput 960985.432902
+455998	[1728022050]	2000000 OPS in 2.075811 seconds, throughput 963478.852362
+455998	[1728022050]	2000000 OPS in 2.105725 seconds, throughput 949791.639459
+455998	[1728022051]	2000000 OPS in 2.086600 seconds, throughput 958497.076584
+455998	[1728022051]	2000000 OPS in 2.083340 seconds, throughput 959996.928010
+455998	[1728022052]	2000000 OPS in 2.076946 seconds, throughput 962952.334822
+455998	[1728022052]	2000000 OPS in 2.106119 seconds, throughput 949613.958186
+455998	[1728022053]	2000000 OPS in 2.087507 seconds, throughput 958080.619610
+455998	[1728022053]	2000000 OPS in 2.084545 seconds, throughput 959441.988539
+455998	[1728022054]	2000000 OPS in 2.083260 seconds, throughput 960033.793190
+455998	[1728022054]	2000000 OPS in 2.112288 seconds, throughput 946840.582345
+455998	[1728022055]	2000000 OPS in 2.086782 seconds, throughput 958413.480661
+455998	[1728022055]	2000000 OPS in 2.074700 seconds, throughput 963994.794428
+455998	[1728022056]	2000000 OPS in 2.079520 seconds, throughput 961760.406248
+455998	[1728022056]	2000000 OPS in 2.108642 seconds, throughput 948477.740650
+455998	[1728022057]	2000000 OPS in 2.088587 seconds, throughput 957585.199946
+455998	[1728022057]	2000000 OPS in 2.081323 seconds, throughput 960927.256365
+455998	[1728022058]	2000000 OPS in 2.071286 seconds, throughput 965583.700175
+455998	[1728022058]	2000000 OPS in 2.102776 seconds, throughput 951123.657489
+455998	[1728022059]	2000000 OPS in 2.084213 seconds, throughput 959594.820683
+455998	[1728022059]	2000000 OPS in 2.079495 seconds, throughput 961771.968675
+455998	[1728022060]	2000000 OPS in 2.079487 seconds, throughput 961775.668711
+455998	[1728022060]	2000000 OPS in 2.106554 seconds, throughput 949417.864436
+455998	[1728022061]	2000000 OPS in 2.091407 seconds, throughput 956294.016421
+455998	[1728022061]	2000000 OPS in 2.075369 seconds, throughput 963684.048475
+455998	[1728022062]	2000000 OPS in 2.073976 seconds, throughput 964331.313381
+455998	[1728022063]	2000000 OPS in 2.107434 seconds, throughput 949021.416566
+455998	[1728022063]	2000000 OPS in 2.087092 seconds, throughput 958271.125566
+455998	[1728022063]	2000000 OPS in 2.079284 seconds, throughput 961869.566639
+455998	[1728022064]	2000000 OPS in 2.081959 seconds, throughput 960633.710846
+455998	[1728022065]	2000000 OPS in 2.107147 seconds, throughput 949150.676246
+455998	[1728022065]	2000000 OPS in 2.083754 seconds, throughput 959806.195933
+455998	[1728022065]	2000000 OPS in 2.074579 seconds, throughput 964051.019508
+455998	[1728022066]	2000000 OPS in 2.081108 seconds, throughput 961026.530098
+455998	[1728022067]	2000000 OPS in 2.106084 seconds, throughput 949629.739365
+455998	[1728022067]	2000000 OPS in 2.090244 seconds, throughput 956826.093030
+455998	[1728022067]	2000000 OPS in 2.080846 seconds, throughput 961147.533263
+455998	[1728022068]	2000000 OPS in 2.073480 seconds, throughput 964561.992399
+455998	[1728022069]	2000000 OPS in 2.104397 seconds, throughput 950391.014623
+455998	[1728022069]	2000000 OPS in 2.092327 seconds, throughput 955873.532196
+455998	[1728022070]	2000000 OPS in 2.082278 seconds, throughput 960486.544064
+455998	[1728022070]	2000000 OPS in 2.076477 seconds, throughput 963169.830439
+455998	[1728022071]	2000000 OPS in 2.107934 seconds, throughput 948796.309562
+455998	[1728022071]	2000000 OPS in 2.085458 seconds, throughput 959021.951053
+455998	[1728022072]	2000000 OPS in 2.079370 seconds, throughput 961829.784983
+455998	[1728022072]	2000000 OPS in 2.075971 seconds, throughput 963404.594766
+455998	[1728022073]	2000000 OPS in 2.109489 seconds, throughput 948096.908777
+455998	[1728022074]	2000000 OPS in 2.092012 seconds, throughput 956017.460703
+455998	[1728022074]	2000000 OPS in 2.082049 seconds, throughput 960592.185871
+455998	[1728022075]	2000000 OPS in 2.081279 seconds, throughput 960947.571181
+455998	[1728022075]	2000000 OPS in 2.101840 seconds, throughput 951547.215773
+455998	[1728022076]	2000000 OPS in 2.084045 seconds, throughput 959672.175985
+455998	[1728022076]	2000000 OPS in 2.079761 seconds, throughput 961648.958702
+455998	[1728022077]	2000000 OPS in 2.079519 seconds, throughput 961760.868739
+455998	[1728022077]	2000000 OPS in 2.104513 seconds, throughput 950338.629412
+455998	[1728022078]	2000000 OPS in 2.088067 seconds, throughput 957823.671367
+455998	[1728022078]	2000000 OPS in 2.085841 seconds, throughput 958845.856420
+455998	[1728022079]	2000000 OPS in 2.073402 seconds, throughput 964598.278578
+455998	[1728022079]	2000000 OPS in 2.107194 seconds, throughput 949129.505874
+455998	[1728022080]	2000000 OPS in 2.090924 seconds, throughput 956514.918763
+455998	[1728022080]	2000000 OPS in 2.082963 seconds, throughput 960170.679940
+455998	[1728022081]	2000000 OPS in 2.080101 seconds, throughput 961491.773717
+455998	[1728022081]	2000000 OPS in 2.099912 seconds, throughput 952420.863350
+455998	[1728022082]	2000000 OPS in 2.080325 seconds, throughput 961388.244625
+455998	[1728022082]	2000000 OPS in 2.077440 seconds, throughput 962723.351818
+455998	[1728022083]	2000000 OPS in 2.076504 seconds, throughput 963157.306704
+455998	[1728022084]	2000000 OPS in 2.108158 seconds, throughput 948695.496258
+455998	[1728022084]	2000000 OPS in 2.086724 seconds, throughput 958440.119537
+455998	[1728022084]	2000000 OPS in 2.080361 seconds, throughput 961371.608101
+455998	[1728022085]	2000000 OPS in 2.078225 seconds, throughput 962359.705999
+455998	[1728022086]	2000000 OPS in 2.101840 seconds, throughput 951547.215773
+455998	[1728022086]	2000000 OPS in 2.092195 seconds, throughput 955933.839819
+455998	[1728022086]	2000000 OPS in 2.082081 seconds, throughput 960577.422300
+455998	[1728022087]	2000000 OPS in 2.080951 seconds, throughput 961099.035970
+455998	[1728022088]	2000000 OPS in 2.108493 seconds, throughput 948544.766333
+455998	[1728022088]	2000000 OPS in 2.085464 seconds, throughput 959019.191892
+455998	[1728022088]	2000000 OPS in 2.081103 seconds, throughput 961028.839034
+455998	[1728022089]	2000000 OPS in 2.078159 seconds, throughput 962390.269464
+455998	[1728022090]	2000000 OPS in 2.106092 seconds, throughput 949626.132192
+455998	[1728022090]	2000000 OPS in 2.089755 seconds, throughput 957049.989114
+455998	[1728022090]	2000000 OPS in 2.080726 seconds, throughput 961202.964734
+455998	[1728022091]	2000000 OPS in 2.080556 seconds, throughput 961281.503598
+455998	[1728022092]	2000000 OPS in 2.099889 seconds, throughput 952431.295178
+455998	[1728022092]	2000000 OPS in 2.081561 seconds, throughput 960817.386567
+455998	[1728022092]	2000000 OPS in 2.077030 seconds, throughput 962913.390755
+455998	[1728022093]	2000000 OPS in 2.081620 seconds, throughput 960790.153823
+455998	[1728022094]	2000000 OPS in 2.107084 seconds, throughput 949179.055035
+455998	[1728022094]	2000000 OPS in 2.090361 seconds, throughput 956772.538332
+455998	[1728022094]	2000000 OPS in 2.081629 seconds, throughput 960785.999811
+455998	[1728022095]	2000000 OPS in 2.074641 seconds, throughput 964022.209144
+455998	[1728022096]	2000000 OPS in 2.109043 seconds, throughput 948297.403135
+455998	[1728022096]	2000000 OPS in 2.087596 seconds, throughput 958039.773979
+455998	[1728022097]	2000000 OPS in 2.079688 seconds, throughput 961682.713946
+455998	[1728022097]	2000000 OPS in 2.079059 seconds, throughput 961973.662123
+455998	[1728022098]	2000000 OPS in 2.103798 seconds, throughput 950661.612950
+455998	[1728022099]	2000000 OPS in 2.082928 seconds, throughput 960186.813947
+455998	[1728022099]	2000000 OPS in 2.077036 seconds, throughput 962910.609157
+455998	[1728022099]	2000000 OPS in 2.078342 seconds, throughput 962305.530081
+455998	[1728022100]	2000000 OPS in 2.106237 seconds, throughput 949560.756933
+455998	[1728022101]	2000000 OPS in 2.088089 seconds, throughput 957813.579785
+455998	[1728022101]	2000000 OPS in 2.081372 seconds, throughput 960904.634059
+455998	[1728022102]	2000000 OPS in 2.074722 seconds, throughput 963984.572391
+455998	[1728022103]	2000000 OPS in 2.103857 seconds, throughput 950634.952851
+455998	[1728022103]	2000000 OPS in 2.092133 seconds, throughput 955962.168753
+455998	[1728022103]	2000000 OPS in 2.081447 seconds, throughput 960870.010142
+455998	[1728022104]	2000000 OPS in 2.077880 seconds, throughput 962519.491020
+455998	[1728022105]	2000000 OPS in 2.106577 seconds, throughput 949407.498515
+455998	[1728022105]	2000000 OPS in 2.085253 seconds, throughput 959116.231939
+455998	[1728022105]	2000000 OPS in 2.074550 seconds, throughput 964064.495915
+455998	[1728022106]	2000000 OPS in 2.072303 seconds, throughput 965109.831912
+455998	[1728022107]	2000000 OPS in 2.108645 seconds, throughput 948476.391237
+455998	[1728022107]	2000000 OPS in 2.090437 seconds, throughput 956737.753876
+455998	[1728022107]	2000000 OPS in 2.079474 seconds, throughput 961781.681329
+455998	[1728022108]	2000000 OPS in 2.078185 seconds, throughput 962378.229080
+455998	[1728022109]	2000000 OPS in 2.103810 seconds, throughput 950656.190435
+455998	[1728022109]	2000000 OPS in 2.079443 seconds, throughput 961796.019415
+455998	[1728022109]	2000000 OPS in 2.077738 seconds, throughput 962585.273023
+455998	[1728022110]	2000000 OPS in 2.081159 seconds, throughput 961002.979590
+455998	[1728022111]	2000000 OPS in 2.107545 seconds, throughput 948971.433587
+455998	[1728022111]	2000000 OPS in 2.090143 seconds, throughput 956872.328831
+455998	[1728022111]	2000000 OPS in 2.083206 seconds, throughput 960058.678786
+455998	[1728022112]	2000000 OPS in 2.072396 seconds, throughput 965066.522035
+455998	[1728022113]	2000000 OPS in 2.110125 seconds, throughput 947811.148629
+455998	[1728022113]	2000000 OPS in 2.088343 seconds, throughput 957697.083286
+455998	[1728022113]	2000000 OPS in 2.083253 seconds, throughput 960037.019027
+455998	[1728022114]	2000000 OPS in 2.081120 seconds, throughput 961020.988698
+455998	[1728022115]	2000000 OPS in 2.102916 seconds, throughput 951060.337170
+455998	[1728022115]	2000000 OPS in 2.081178 seconds, throughput 960994.206166
+455998	[1728022115]	2000000 OPS in 2.078211 seconds, throughput 962366.188996
+455998	[1728022116]	2000000 OPS in 2.076389 seconds, throughput 963210.650798
+455998	[1728022117]	2000000 OPS in 2.107074 seconds, throughput 949183.559761
+455998	[1728022117]	2000000 OPS in 2.090298 seconds, throughput 956801.374732
+455998	[1728022117]	2000000 OPS in 2.082242 seconds, throughput 960503.149970
+455998	[1728022118]	2000000 OPS in 2.079665 seconds, throughput 961693.349650
+455998	[1728022119]	2000000 OPS in 2.108138 seconds, throughput 948704.496575
+455998	[1728022119]	2000000 OPS in 2.087180 seconds, throughput 958230.722793
+455998	[1728022119]	2000000 OPS in 2.081081 seconds, throughput 961038.998482
+455998	[1728022120]	2000000 OPS in 2.081562 seconds, throughput 960816.924982
+455998	[1728022121]	2000000 OPS in 2.102218 seconds, throughput 951376.117986
+455998	[1728022122]	2000000 OPS in 2.080409 seconds, throughput 961349.426964
+455998	[1728022122]	2000000 OPS in 2.077231 seconds, throughput 962820.215951
+455998	[1728022122]	2000000 OPS in 2.077060 seconds, throughput 962899.482923
+455998	[1728022124]	2000000 OPS in 2.086252 seconds, throughput 958656.959945
+455998	[1728022124]	2000000 OPS in 2.106123 seconds, throughput 949612.154656
+455998	[1728022124]	2000000 OPS in 2.081050 seconds, throughput 961053.314433
+455998	[1728022124]	2000000 OPS in 2.079776 seconds, throughput 961642.022987
+455998	[1728022126]	2000000 OPS in 2.080942 seconds, throughput 961103.192689
+455998	[1728022126]	2000000 OPS in 2.080297 seconds, throughput 961401.184542
+455998	[1728022126]	2000000 OPS in 2.106266 seconds, throughput 949547.682961
+455998	[1728022127]	2000000 OPS in 2.079587 seconds, throughput 961729.420313
+455998	[1728022128]	2000000 OPS in 2.088568 seconds, throughput 957593.911235
+455998	[1728022128]	2000000 OPS in 2.081290 seconds, throughput 960942.492397
+455998	[1728022128]	2000000 OPS in 2.110474 seconds, throughput 947654.413179
+455998	[1728022129]	2000000 OPS in 2.069140 seconds, throughput 966585.151319
+455998	[1728022130]	2000000 OPS in 2.078681 seconds, throughput 962148.593267
+455998	[1728022130]	2000000 OPS in 2.089759 seconds, throughput 957048.157228
+455998	[1728022130]	2000000 OPS in 2.106482 seconds, throughput 949450.315740
+455998	[1728022131]	2000000 OPS in 2.084509 seconds, throughput 959458.558346
+455998	[1728022132]	2000000 OPS in 2.080203 seconds, throughput 961444.628241
+455998	[1728022132]	2000000 OPS in 2.079322 seconds, throughput 961851.988292
+455998	[1728022132]	2000000 OPS in 2.101474 seconds, throughput 951712.940536
+455998	[1728022133]	2000000 OPS in 2.076249 seconds, throughput 963275.599410
+455998	[1728022134]	2000000 OPS in 2.084805 seconds, throughput 959322.334703
+455998	[1728022134]	2000000 OPS in 2.088468 seconds, throughput 957639.762735
+455998	[1728022134]	2000000 OPS in 2.107632 seconds, throughput 948932.261419
+455998	[1728022135]	2000000 OPS in 2.075113 seconds, throughput 963802.935069
+455998	[1728022136]	2000000 OPS in 2.083796 seconds, throughput 959786.850536
+455998	[1728022136]	2000000 OPS in 2.088709 seconds, throughput 957529.268079
+455998	[1728022136]	2000000 OPS in 2.107258 seconds, throughput 949100.679651
+455998	[1728022137]	2000000 OPS in 2.077788 seconds, throughput 962562.109320
+455998	[1728022138]	2000000 OPS in 2.081738 seconds, throughput 960735.692964
+455998	[1728022138]	2000000 OPS in 2.086859 seconds, throughput 958378.117544
+455998	[1728022138]	2000000 OPS in 2.103842 seconds, throughput 950641.730700
+455998	[1728022139]	2000000 OPS in 2.075170 seconds, throughput 963776.461687
+455998	[1728022140]	2000000 OPS in 2.081386 seconds, throughput 960898.170738
+455998	[1728022140]	2000000 OPS in 2.086641 seconds, throughput 958478.243263
+455998	[1728022140]	2000000 OPS in 2.104307 seconds, throughput 950431.662300
+455998	[1728022141]	2000000 OPS in 2.077512 seconds, throughput 962689.986869
+455998	[1728022142]	2000000 OPS in 2.075499 seconds, throughput 963623.687605
+455998	[1728022142]	2000000 OPS in 2.084182 seconds, throughput 959609.093640
+455998	[1728022143]	2000000 OPS in 2.100062 seconds, throughput 952352.835297
+455998	[1728022143]	2000000 OPS in 2.079219 seconds, throughput 961899.636354
+455998	[1728022144]	2000000 OPS in 2.082761 seconds, throughput 960263.803672
+455998	[1728022144]	2000000 OPS in 2.088625 seconds, throughput 957567.777844
+455998	[1728022145]	2000000 OPS in 2.108368 seconds, throughput 948601.003240
+455998	[1728022145]	2000000 OPS in 2.072314 seconds, throughput 965104.709035
+455998	[1728022146]	2000000 OPS in 2.084828 seconds, throughput 959311.751377
+455998	[1728022147]	2000000 OPS in 2.088122 seconds, throughput 957798.442811
+455998	[1728022147]	2000000 OPS in 2.109285 seconds, throughput 948188.604195
+455998	[1728022147]	2000000 OPS in 2.080104 seconds, throughput 961490.387019
+455998	[1728022149]	2000000 OPS in 2.076266 seconds, throughput 963267.712326
+455998	[1728022149]	2000000 OPS in 2.083446 seconds, throughput 959948.086008
+455998	[1728022149]	2000000 OPS in 2.102064 seconds, throughput 951445.817064
+455998	[1728022149]	2000000 OPS in 2.075953 seconds, throughput 963412.948174
+455998	[1728022151]	2000000 OPS in 2.086616 seconds, throughput 958489.726907
+455998	[1728022151]	2000000 OPS in 2.091631 seconds, throughput 956191.603586
+455998	[1728022151]	2000000 OPS in 2.110617 seconds, throughput 947590.207034
+455998	[1728022151]	2000000 OPS in 2.078152 seconds, throughput 962393.511158
+455998	[1728022153]	2000000 OPS in 2.078152 seconds, throughput 962393.511158
+455998	[1728022153]	2000000 OPS in 2.084498 seconds, throughput 959463.621457
+455998	[1728022153]	2000000 OPS in 2.107915 seconds, throughput 948804.861676
+455998	[1728022154]	2000000 OPS in 2.080086 seconds, throughput 961498.707265
+455998	[1728022155]	2000000 OPS in 2.080940 seconds, throughput 961104.116409
+455998	[1728022155]	2000000 OPS in 2.089411 seconds, throughput 957207.557537
+455998	[1728022155]	2000000 OPS in 2.103542 seconds, throughput 950777.307988
+455998	[1728022156]	2000000 OPS in 2.073556 seconds, throughput 964526.639261
+455998	[1728022157]	2000000 OPS in 2.082904 seconds, throughput 960197.877579
+455998	[1728022157]	2000000 OPS in 2.089673 seconds, throughput 957087.544319
+455998	[1728022157]	2000000 OPS in 2.109036 seconds, throughput 948300.550583
+455998	[1728022158]	2000000 OPS in 2.079810 seconds, throughput 961626.302403
+455998	[1728022159]	2000000 OPS in 2.076341 seconds, throughput 963232.917907
+455998	[1728022159]	2000000 OPS in 2.083220 seconds, throughput 960052.226841
+455998	[1728022159]	2000000 OPS in 2.098774 seconds, throughput 952937.286244
+455998	[1728022160]	2000000 OPS in 2.078655 seconds, throughput 962160.627906
+455998	[1728022161]	2000000 OPS in 2.082463 seconds, throughput 960401.217213
+455998	[1728022161]	2000000 OPS in 2.086247 seconds, throughput 958659.257509
+455998	[1728022161]	2000000 OPS in 2.104294 seconds, throughput 950437.533919
+455998	[1728022162]	2000000 OPS in 2.075243 seconds, throughput 963742.559305
+455998	[1728022163]	2000000 OPS in 2.082499 seconds, throughput 960384.614831
+455998	[1728022163]	2000000 OPS in 2.089076 seconds, throughput 957361.053404
+455998	[1728022164]	2000000 OPS in 2.109582 seconds, throughput 948055.112340
+455998	[1728022164]	2000000 OPS in 2.079208 seconds, throughput 961904.725261
+455998	[1728022165]	2000000 OPS in 2.079013 seconds, throughput 961994.946641
+455998	[1728022165]	2000000 OPS in 2.082466 seconds, throughput 960399.833659
+455998	[1728022166]	2000000 OPS in 2.101746 seconds, throughput 951589.773455
+455998	[1728022166]	2000000 OPS in 2.073999 seconds, throughput 964320.619248
+455998	[1728022167]	2000000 OPS in 2.083461 seconds, throughput 959941.174805
+455998	[1728022167]	2000000 OPS in 2.090855 seconds, throughput 956546.484572
+455998	[1728022168]	2000000 OPS in 2.109011 seconds, throughput 948311.791641
+455998	[1728022168]	2000000 OPS in 2.076077 seconds, throughput 963355.405411
+455998	[1728022169]	2000000 OPS in 2.079631 seconds, throughput 961709.072427
+455998	[1728022169]	2000000 OPS in 2.082095 seconds, throughput 960570.963381
+455998	[1728022170]	2000000 OPS in 2.105622 seconds, throughput 949838.100096
+455998	[1728022170]	2000000 OPS in 2.078273 seconds, throughput 962337.479244
+455998	[1728022171]	2000000 OPS in 2.085655 seconds, throughput 958931.366885
+455998	[1728022172]	2000000 OPS in 2.092995 seconds, throughput 955568.455730
+455998	[1728022172]	2000000 OPS in 2.103171 seconds, throughput 950945.025393
+455998	[1728022172]	2000000 OPS in 2.074503 seconds, throughput 964086.337788
+455998	[1728022174]	2000000 OPS in 2.082625 seconds, throughput 960326.511014
+455998	[1728022174]	2000000 OPS in 2.090114 seconds, throughput 956885.605283
+455998	[1728022174]	2000000 OPS in 2.108788 seconds, throughput 948412.073665
+455998	[1728022174]	2000000 OPS in 2.073116 seconds, throughput 964731.351261
+455998	[1728022176]	2000000 OPS in 2.079220 seconds, throughput 961899.173729
+455998	[1728022176]	2000000 OPS in 2.083180 seconds, throughput 960070.661201
+455998	[1728022176]	2000000 OPS in 2.105401 seconds, throughput 949937.802822
+455998	[1728022176]	2000000 OPS in 2.077378 seconds, throughput 962752.084599
+455998	[1728022178]	2000000 OPS in 2.085406 seconds, throughput 959045.864450
+455998	[1728022178]	2000000 OPS in 2.091616 seconds, throughput 956198.460903
+455998	[1728022178]	2000000 OPS in 2.108129 seconds, throughput 948708.546773
+455998	[1728022178]	2000000 OPS in 2.075525 seconds, throughput 963611.616338
+455998	[1728022180]	2000000 OPS in 2.085651 seconds, throughput 958933.205987
+455998	[1728022180]	2000000 OPS in 2.087674 seconds, throughput 958003.979549
+455998	[1728022180]	2000000 OPS in 2.104690 seconds, throughput 950258.707933
+455998	[1728022181]	2000000 OPS in 2.079628 seconds, throughput 961710.459755
+455998	[1728022182]	2000000 OPS in 2.082375 seconds, throughput 960441.803229
+455998	[1728022182]	2000000 OPS in 2.080124 seconds, throughput 961481.142470
+455998	[1728022183]	2000000 OPS in 2.099993 seconds, throughput 952384.126995
+455998	[1728022183]	2000000 OPS in 2.073911 seconds, throughput 964361.537212
+455998	[1728022184]	2000000 OPS in 2.083628 seconds, throughput 959864.236802
+455998	[1728022184]	2000000 OPS in 2.090593 seconds, throughput 956666.362128
+455998	[1728022185]	2000000 OPS in 2.079582 seconds, throughput 961731.732627
+455998	[1728022185]	2000000 OPS in 2.106872 seconds, throughput 949274.564378
+455998	[1728022186]	2000000 OPS in 2.082087 seconds, throughput 960574.654181
+455998	[1728022186]	2000000 OPS in 2.082778 seconds, throughput 960255.965830
+455998	[1728022187]	2000000 OPS in 2.079551 seconds, throughput 961746.069224
+455998	[1728022187]	2000000 OPS in 2.106500 seconds, throughput 949442.202706
+455998	[1728022188]	2000000 OPS in 2.088952 seconds, throughput 957417.882268
+455998	[1728022188]	2000000 OPS in 2.088155 seconds, throughput 957783.306316
+455998	[1728022189]	2000000 OPS in 2.073645 seconds, throughput 964485.242170
+455998	[1728022189]	2000000 OPS in 2.103488 seconds, throughput 950801.716007
+455998	[1728022190]	2000000 OPS in 2.082630 seconds, throughput 960324.205452
+455998	[1728022190]	2000000 OPS in 2.087418 seconds, throughput 958121.468724
+455998	[1728022191]	2000000 OPS in 2.077801 seconds, throughput 962556.086940
+455998	[1728022191]	2000000 OPS in 2.104910 seconds, throughput 950159.389238
+455998	[1728022192]	2000000 OPS in 2.080918 seconds, throughput 961114.277449
+455998	[1728022192]	2000000 OPS in 2.082184 seconds, throughput 960529.905138
+455998	[1728022193]	2000000 OPS in 2.073158 seconds, throughput 964711.806818
+455998	[1728022193]	2000000 OPS in 2.107839 seconds, throughput 948839.071675
+455998	[1728022194]	2000000 OPS in 2.081112 seconds, throughput 961024.682958
+455998	[1728022195]	2000000 OPS in 2.091541 seconds, throughput 956232.748964
+455998	[1728022195]	2000000 OPS in 2.075852 seconds, throughput 963459.822762
+455998	[1728022195]	2000000 OPS in 2.107351 seconds, throughput 949058.794667
+455998	[1728022196]	2000000 OPS in 2.083084 seconds, throughput 960114.906552
+455998	[1728022197]	2000000 OPS in 2.087008 seconds, throughput 958309.695028
+455998	[1728022197]	2000000 OPS in 2.073705 seconds, throughput 964457.336024
+455998	[1728022197]	2000000 OPS in 2.107652 seconds, throughput 948923.256781
+455998	[1728022199]	2000000 OPS in 2.078671 seconds, throughput 962153.221938
+455998	[1728022199]	2000000 OPS in 2.082736 seconds, throughput 960275.330143
+455998	[1728022199]	2000000 OPS in 2.073781 seconds, throughput 964421.990557
+455998	[1728022199]	2000000 OPS in 2.102808 seconds, throughput 951109.183530
+455998	[1728022201]	2000000 OPS in 2.080126 seconds, throughput 961480.218025
+455998	[1728022201]	2000000 OPS in 2.087092 seconds, throughput 958271.125566
+455998	[1728022201]	2000000 OPS in 2.072200 seconds, throughput 965157.803301
+455998	[1728022202]	2000000 OPS in 2.108724 seconds, throughput 948440.858073
+455998	[1728022203]	2000000 OPS in 2.078480 seconds, throughput 962241.638120
+455998	[1728022203]	2000000 OPS in 2.082967 seconds, throughput 960168.836088
+455998	[1728022203]	2000000 OPS in 2.075607 seconds, throughput 963573.547401
+455998	[1728022204]	2000000 OPS in 2.107323 seconds, throughput 949071.404811
+455998	[1728022205]	2000000 OPS in 2.083768 seconds, throughput 959799.747381
+455998	[1728022205]	2000000 OPS in 2.090900 seconds, throughput 956525.897939
+455998	[1728022205]	2000000 OPS in 2.073298 seconds, throughput 964646.664397
+455998	[1728022206]	2000000 OPS in 2.102193 seconds, throughput 951387.432077
+455998	[1728022207]	2000000 OPS in 2.084891 seconds, throughput 959282.763463
+455998	[1728022207]	2000000 OPS in 2.088257 seconds, throughput 957736.523809
+455998	[1728022207]	2000000 OPS in 2.078452 seconds, throughput 962254.601020
+455998	[1728022208]	2000000 OPS in 2.107777 seconds, throughput 948866.981659
+455998	[1728022209]	2000000 OPS in 2.079471 seconds, throughput 961783.068867
+455998	[1728022209]	2000000 OPS in 2.085994 seconds, throughput 958775.528597
+455998	[1728022210]	2000000 OPS in 2.073146 seconds, throughput 964717.390864
+455998	[1728022210]	2000000 OPS in 2.108001 seconds, throughput 948766.153337
+455998	[1728022211]	2000000 OPS in 2.085757 seconds, throughput 958884.472160
+455998	[1728022211]	2000000 OPS in 2.086550 seconds, throughput 958520.045050
+455998	[1728022212]	2000000 OPS in 2.077335 seconds, throughput 962772.013180
+455998	[1728022212]	2000000 OPS in 2.101979 seconds, throughput 951484.291708
+455998	[1728022213]	2000000 OPS in 2.081413 seconds, throughput 960885.706008
+455998	[1728022213]	2000000 OPS in 2.090239 seconds, throughput 956828.381826
+455998	[1728022214]	2000000 OPS in 2.076623 seconds, throughput 963102.113383
+455998	[1728022214]	2000000 OPS in 2.107118 seconds, throughput 949163.739288
+455998	[1728022215]	2000000 OPS in 2.083560 seconds, throughput 959895.563363
+455998	[1728022215]	2000000 OPS in 2.084849 seconds, throughput 959302.088545
+455998	[1728022216]	2000000 OPS in 2.074499 seconds, throughput 964088.196716
+455998	[1728022216]	2000000 OPS in 2.101973 seconds, throughput 951487.007683
+455998	[1728022217]	2000000 OPS in 2.081857 seconds, throughput 960680.776826
+455998	[1728022218]	2000000 OPS in 2.093953 seconds, throughput 955131.275630
+455998	[1728022218]	2000000 OPS in 2.081117 seconds, throughput 961022.374042
+455998	[1728022218]	2000000 OPS in 2.107208 seconds, throughput 949123.199988
+455998	[1728022219]	2000000 OPS in 2.076444 seconds, throughput 963185.137668
+455998	[1728022220]	2000000 OPS in 2.085433 seconds, throughput 959033.447730
+455998	[1728022220]	2000000 OPS in 2.080949 seconds, throughput 961099.959682
+455998	[1728022220]	2000000 OPS in 2.108156 seconds, throughput 948696.396282
+455998	[1728022221]	2000000 OPS in 2.082031 seconds, throughput 960600.490579
+455998	[1728022222]	2000000 OPS in 2.088146 seconds, throughput 957787.434404
+455998	[1728022222]	2000000 OPS in 2.074499 seconds, throughput 964088.196716
+455998	[1728022223]	2000000 OPS in 2.104098 seconds, throughput 950526.068653
+455998	[1728022224]	2000000 OPS in 2.080420 seconds, throughput 961344.343931
+455998	[1728022224]	2000000 OPS in 2.090673 seconds, throughput 956629.755108
+455998	[1728022224]	2000000 OPS in 2.079428 seconds, throughput 961802.957352
+455998	[1728022225]	2000000 OPS in 2.104775 seconds, throughput 950220.332340
+455998	[1728022226]	2000000 OPS in 2.075532 seconds, throughput 963608.366433
+455998	[1728022226]	2000000 OPS in 2.081452 seconds, throughput 960867.701970
+455998	[1728022226]	2000000 OPS in 2.078782 seconds, throughput 962101.846177
+455998	[1728022227]	2000000 OPS in 2.107643 seconds, throughput 948927.308847
+455998	[1728022228]	2000000 OPS in 2.081320 seconds, throughput 960928.641439
+455998	[1728022228]	2000000 OPS in 2.092095 seconds, throughput 955979.532478
+455998	[1728022228]	2000000 OPS in 2.080001 seconds, throughput 961537.999261
+455998	[1728022229]	2000000 OPS in 2.104840 seconds, throughput 950190.988389
+455998	[1728022230]	2000000 OPS in 2.078435 seconds, throughput 962262.471523
+455998	[1728022230]	2000000 OPS in 2.090505 seconds, throughput 956706.633086
+455998	[1728022230]	2000000 OPS in 2.077034 seconds, throughput 962911.536354
+455998	[1728022231]	2000000 OPS in 2.106687 seconds, throughput 949357.925501
+455998	[1728022232]	2000000 OPS in 2.085075 seconds, throughput 959198.110380
+455998	[1728022232]	2000000 OPS in 2.080825 seconds, throughput 961157.233309
+455998	[1728022232]	2000000 OPS in 2.073051 seconds, throughput 964761.600173
+455998	[1728022233]	2000000 OPS in 2.101095 seconds, throughput 951884.612547
+455998	[1728022234]	2000000 OPS in 2.080398 seconds, throughput 961354.510050
+455998	[1728022234]	2000000 OPS in 2.092042 seconds, throughput 956003.751359
+455998	[1728022234]	2000000 OPS in 2.078951 seconds, throughput 962023.635959
+455998	[1728022235]	2000000 OPS in 2.106641 seconds, throughput 949378.655405
+455998	[1728022236]	2000000 OPS in 2.074836 seconds, throughput 963931.607125
+455998	[1728022236]	2000000 OPS in 2.082287 seconds, throughput 960482.392677
+455998	[1728022237]	2000000 OPS in 2.074707 seconds, throughput 963991.541938
+455998	[1728022237]	2000000 OPS in 2.105379 seconds, throughput 949947.729126
+455998	[1728022238]	2000000 OPS in 2.081819 seconds, throughput 960698.312389
+455998	[1728022238]	2000000 OPS in 2.092872 seconds, throughput 955624.615361
+455998	[1728022239]	2000000 OPS in 2.074138 seconds, throughput 964255.994538
+455998	[1728022239]	2000000 OPS in 2.102792 seconds, throughput 951116.420454
+455998	[1728022240]	2000000 OPS in 2.081988 seconds, throughput 960620.330184
+455998	[1728022240]	2000000 OPS in 2.088489 seconds, throughput 957630.133556
+455998	[1728022241]	2000000 OPS in 2.074646 seconds, throughput 964019.885802
+455998	[1728022242]	2000000 OPS in 2.105174 seconds, throughput 950040.234204
+455998	[1728022242]	2000000 OPS in 2.081900 seconds, throughput 960660.934723
+455998	[1728022243]	2000000 OPS in 2.081724 seconds, throughput 960742.154099
+455998	[1728022243]	2000000 OPS in 2.073641 seconds, throughput 964487.102637
+455998	[1728022244]	2000000 OPS in 2.110012 seconds, throughput 947861.907894
+455998	[1728022244]	2000000 OPS in 2.087397 seconds, throughput 958131.107786
+455998	[1728022245]	2000000 OPS in 2.089562 seconds, throughput 957138.385939
+455998	[1728022245]	2000000 OPS in 2.077935 seconds, throughput 962494.014490
+455998	[1728022246]	2000000 OPS in 2.103153 seconds, throughput 950953.164130
+455998	[1728022246]	2000000 OPS in 2.078880 seconds, throughput 962056.491957
+455998	[1728022247]	2000000 OPS in 2.085439 seconds, throughput 959030.688503
+455998	[1728022247]	2000000 OPS in 2.074726 seconds, throughput 963982.713862
+455998	[1728022248]	2000000 OPS in 2.107193 seconds, throughput 949129.956297
+455998	[1728022248]	2000000 OPS in 2.083119 seconds, throughput 960098.774962
+455998	[1728022249]	2000000 OPS in 2.082192 seconds, throughput 960526.214681
+455998	[1728022249]	2000000 OPS in 2.074914 seconds, throughput 963895.371085
+455998	[1728022250]	2000000 OPS in 2.102901 seconds, throughput 951067.121087
+455998	[1728022251]	2000000 OPS in 2.083607 seconds, throughput 959873.910963
+455998	[1728022251]	2000000 OPS in 2.090805 seconds, throughput 956569.359649
+455998	[1728022251]	2000000 OPS in 2.079075 seconds, throughput 961966.259033
+455998	[1728022252]	2000000 OPS in 2.104525 seconds, throughput 950333.210582
+455998	[1728022253]	2000000 OPS in 2.079109 seconds, throughput 961950.527846
+455998	[1728022253]	2000000 OPS in 2.079872 seconds, throughput 961597.636778
+455998	[1728022253]	2000000 OPS in 2.072049 seconds, throughput 965228.138910
+455998	[1728022254]	2000000 OPS in 2.108634 seconds, throughput 948481.339104
+455998	[1728022255]	2000000 OPS in 2.084385 seconds, throughput 959515.636507
+455998	[1728022255]	2000000 OPS in 2.087514 seconds, throughput 958077.406906
+455998	[1728022255]	2000000 OPS in 2.077212 seconds, throughput 962829.022748
+455998	[1728022256]	2000000 OPS in 2.101560 seconds, throughput 951673.994556
+455998	[1728022257]	2000000 OPS in 2.088242 seconds, throughput 957743.403303
+455998	[1728022257]	2000000 OPS in 2.088524 seconds, throughput 957614.085354
+455998	[1728022257]	2000000 OPS in 2.076905 seconds, throughput 962971.344380
+455998	[1728022258]	2000000 OPS in 2.112165 seconds, throughput 946895.720742
+455998	[1728022259]	2000000 OPS in 2.074425 seconds, throughput 964122.588187
+455998	[1728022259]	2000000 OPS in 2.082036 seconds, throughput 960598.183701
+455998	[1728022259]	2000000 OPS in 2.070801 seconds, throughput 965809.848460
+455998	[1728022260]	2000000 OPS in 2.106825 seconds, throughput 949295.741222
+455998	[1728022261]	2000000 OPS in 2.086642 seconds, throughput 958477.783923
+455998	[1728022261]	2000000 OPS in 2.089150 seconds, throughput 957327.142618
+455998	[1728022261]	2000000 OPS in 2.076726 seconds, throughput 963054.346120
+455998	[1728022263]	2000000 OPS in 2.102697 seconds, throughput 951159.391962
+455998	[1728022263]	2000000 OPS in 2.078821 seconds, throughput 962083.796537
+455998	[1728022263]	2000000 OPS in 2.090184 seconds, throughput 956853.559304
+455998	[1728022264]	2000000 OPS in 2.080371 seconds, throughput 961366.986946
+455998	[1728022265]	2000000 OPS in 2.106339 seconds, throughput 949514.774213
+455998	[1728022265]	2000000 OPS in 2.083256 seconds, throughput 960035.636523
+455998	[1728022265]	2000000 OPS in 2.083900 seconds, throughput 959738.951005
+455998	[1728022266]	2000000 OPS in 2.068999 seconds, throughput 966651.023031
+455998	[1728022267]	2000000 OPS in 2.109637 seconds, throughput 948030.395751
+455998	[1728022267]	2000000 OPS in 2.079877 seconds, throughput 961595.325108
+455998	[1728022268]	2000000 OPS in 2.087007 seconds, throughput 958310.154206
+455998	[1728022268]	2000000 OPS in 2.072815 seconds, throughput 964871.442941
+455998	[1728022269]	2000000 OPS in 2.100475 seconds, throughput 952165.581595
+455998	[1728022269]	2000000 OPS in 2.081276 seconds, throughput 960948.956313
+455998	[1728022270]	2000000 OPS in 2.087413 seconds, throughput 958123.763721
+455998	[1728022270]	2000000 OPS in 2.071138 seconds, throughput 965652.699144
+455998	[1728022271]	2000000 OPS in 2.110611 seconds, throughput 947592.900824
+455998	[1728022271]	2000000 OPS in 2.082584 seconds, throughput 960345.417040
+455998	[1728022272]	2000000 OPS in 2.090316 seconds, throughput 956793.135583
+455998	[1728022272]	2000000 OPS in 2.077038 seconds, throughput 962909.681961
+455998	[1728022273]	2000000 OPS in 2.102263 seconds, throughput 951355.753300
+455998	[1728022273]	2000000 OPS in 2.081256 seconds, throughput 960958.190631
+455998	[1728022274]	2000000 OPS in 2.088966 seconds, throughput 957411.465768
+455998	[1728022274]	2000000 OPS in 2.080710 seconds, throughput 961210.356080
+455998	[1728022275]	2000000 OPS in 2.105233 seconds, throughput 950013.608945
+455998	[1728022276]	2000000 OPS in 2.078956 seconds, throughput 962021.322241
+455998	[1728022276]	2000000 OPS in 2.085857 seconds, throughput 958838.501393
+455998	[1728022276]	2000000 OPS in 2.076223 seconds, throughput 963287.662260
+455998	[1728022277]	2000000 OPS in 2.106852 seconds, throughput 949283.575685
+455998	[1728022278]	2000000 OPS in 2.082409 seconds, throughput 960426.121862
+455998	[1728022278]	2000000 OPS in 2.091535 seconds, throughput 956235.492115
+455998	[1728022278]	2000000 OPS in 2.076949 seconds, throughput 962950.943909
+455998	[1728022279]	2000000 OPS in 2.101176 seconds, throughput 951847.917547
+455998	[1728022280]	2000000 OPS in 2.076097 seconds, throughput 963346.124964
+455998	[1728022280]	2000000 OPS in 2.088682 seconds, throughput 957541.645880
+455998	[1728022280]	2000000 OPS in 2.077112 seconds, throughput 962875.376966
+455998	[1728022282]	2000000 OPS in 2.105258 seconds, throughput 950002.327506
+455998	[1728022282]	2000000 OPS in 2.081219 seconds, throughput 960975.274587
+455998	[1728022282]	2000000 OPS in 2.083465 seconds, throughput 959939.331834
+455998	[1728022282]	2000000 OPS in 2.073876 seconds, throughput 964377.812367
+455998	[1728022284]	2000000 OPS in 2.107762 seconds, throughput 948873.734321
+455998	[1728022284]	2000000 OPS in 2.084565 seconds, throughput 959432.783338
+455998	[1728022284]	2000000 OPS in 2.090722 seconds, throughput 956607.334691
+455998	[1728022284]	2000000 OPS in 2.076625 seconds, throughput 963101.185818
+455998	[1728022286]	2000000 OPS in 2.103015 seconds, throughput 951015.565747
+455998	[1728022286]	2000000 OPS in 2.080546 seconds, throughput 961286.123931
+455998	[1728022286]	2000000 OPS in 2.078349 seconds, throughput 962302.288980
+455998	[1728022286]	2000000 OPS in 2.075394 seconds, throughput 963672.440028
+455998	[1728022288]	2000000 OPS in 2.105469 seconds, throughput 949907.122831
+455998	[1728022288]	2000000 OPS in 2.079329 seconds, throughput 961848.750246
+455998	[1728022288]	2000000 OPS in 2.078811 seconds, throughput 962088.424585
+455998	[1728022288]	2000000 OPS in 2.090138 seconds, throughput 956874.617848
+455998	[1728022290]	2000000 OPS in 2.100495 seconds, throughput 952156.515488
+455998	[1728022290]	2000000 OPS in 2.082262 seconds, throughput 960493.924396
+455998	[1728022291]	2000000 OPS in 2.078785 seconds, throughput 962100.457719
+455998	[1728022291]	2000000 OPS in 2.087532 seconds, throughput 958069.145766
+455998	[1728022292]	2000000 OPS in 2.109874 seconds, throughput 947923.904461
+455998	[1728022292]	2000000 OPS in 2.079449 seconds, throughput 961793.244268
+455998	[1728022293]	2000000 OPS in 2.073279 seconds, throughput 964655.504638
+455998	[1728022293]	2000000 OPS in 2.079805 seconds, throughput 961628.614221
+455998	[1728022294]	2000000 OPS in 2.104441 seconds, throughput 950371.143691
+455998	[1728022294]	2000000 OPS in 2.081248 seconds, throughput 960961.884408
+455998	[1728022295]	2000000 OPS in 2.078942 seconds, throughput 962027.800679
+455998	[1728022295]	2000000 OPS in 2.087861 seconds, throughput 957918.175587
+455998	[1728022296]	2000000 OPS in 2.100642 seconds, throughput 952089.884902
+455998	[1728022296]	2000000 OPS in 2.076683 seconds, throughput 963074.287217
+455998	[1728022297]	2000000 OPS in 2.070721 seconds, throughput 965847.161448
+455998	[1728022297]	2000000 OPS in 2.083200 seconds, throughput 960061.443932
+455998	[1728022298]	2000000 OPS in 2.109725 seconds, throughput 947990.851888
+455998	[1728022298]	2000000 OPS in 2.084925 seconds, throughput 959267.119920
+455998	[1728022299]	2000000 OPS in 2.075393 seconds, throughput 963672.904361
+455998	[1728022299]	2000000 OPS in 2.085728 seconds, throughput 958897.804508
+455998	[1728022300]	2000000 OPS in 2.106996 seconds, throughput 949218.698090
+455998	[1728022301]	2000000 OPS in 2.081560 seconds, throughput 960817.848152
+455998	[1728022301]	2000000 OPS in 2.078021 seconds, throughput 962454.181166
+455998	[1728022301]	2000000 OPS in 2.090188 seconds, throughput 956851.728170
+455998	[1728022303]	2000000 OPS in 2.101945 seconds, throughput 951499.682437
+455998	[1728022303]	2000000 OPS in 2.080524 seconds, throughput 961296.288820
+455998	[1728022303]	2000000 OPS in 2.074961 seconds, throughput 963873.537864
+455998	[1728022303]	2000000 OPS in 2.080083 seconds, throughput 961500.093987
+455998	[1728022305]	2000000 OPS in 2.110315 seconds, throughput 947725.813445
+455998	[1728022305]	2000000 OPS in 2.085152 seconds, throughput 959162.689339
+455998	[1728022305]	2000000 OPS in 2.081007 seconds, throughput 961073.172748
+455998	[1728022305]	2000000 OPS in 2.084182 seconds, throughput 959609.093640
+455998	[1728022307]	2000000 OPS in 2.080155 seconds, throughput 961466.813771
+455998	[1728022307]	2000000 OPS in 2.102035 seconds, throughput 951458.943357
+455998	[1728022307]	2000000 OPS in 2.076884 seconds, throughput 962981.081274
+455998	[1728022307]	2000000 OPS in 2.085963 seconds, throughput 958789.777192
+455998	[1728022309]	2000000 OPS in 2.082298 seconds, throughput 960477.318808
+455998	[1728022309]	2000000 OPS in 2.108472 seconds, throughput 948554.213668
+455998	[1728022309]	2000000 OPS in 2.074651 seconds, throughput 964017.562472
+455998	[1728022309]	2000000 OPS in 2.085692 seconds, throughput 958914.355523
+455998	[1728022311]	2000000 OPS in 2.086457 seconds, throughput 958562.769326
+455998	[1728022311]	2000000 OPS in 2.109377 seconds, throughput 948147.249164
+455998	[1728022311]	2000000 OPS in 2.078812 seconds, throughput 962087.961778
+455998	[1728022311]	2000000 OPS in 2.087104 seconds, throughput 958265.615896
+455998	[1728022313]	2000000 OPS in 2.078219 seconds, throughput 962362.484416
+455998	[1728022313]	2000000 OPS in 2.101584 seconds, throughput 951663.126480
+455998	[1728022313]	2000000 OPS in 2.072760 seconds, throughput 964897.045485
+455998	[1728022313]	2000000 OPS in 2.077896 seconds, throughput 962512.079527
+455998	[1728022315]	2000000 OPS in 2.082481 seconds, throughput 960392.915950
+455998	[1728022315]	2000000 OPS in 2.108477 seconds, throughput 948551.964285
+455998	[1728022315]	2000000 OPS in 2.079381 seconds, throughput 961824.696869
+455998	[1728022316]	2000000 OPS in 2.088389 seconds, throughput 957675.988525
+455998	[1728022317]	2000000 OPS in 2.083343 seconds, throughput 959995.545621
+455998	[1728022317]	2000000 OPS in 2.107742 seconds, throughput 948882.738020
+455998	[1728022318]	2000000 OPS in 2.076536 seconds, throughput 963142.464181
+455998	[1728022318]	2000000 OPS in 2.090592 seconds, throughput 956666.819733
+455998	[1728022319]	2000000 OPS in 2.076854 seconds, throughput 962994.991463
+455998	[1728022319]	2000000 OPS in 2.103357 seconds, throughput 950860.933260
+455998	[1728022320]	2000000 OPS in 2.075475 seconds, throughput 963634.830581
+455998	[1728022320]	2000000 OPS in 2.084128 seconds, throughput 959633.957223
+455998	[1728022321]	2000000 OPS in 2.083804 seconds, throughput 959783.165787
+455998	[1728022322]	2000000 OPS in 2.106849 seconds, throughput 949284.927396
+455998	[1728022322]	2000000 OPS in 2.080700 seconds, throughput 961214.975729
+455998	[1728022322]	2000000 OPS in 2.087878 seconds, throughput 957910.375989
+455998	[1728022323]	2000000 OPS in 2.074677 seconds, throughput 964005.481335
+455998	[1728022324]	2000000 OPS in 2.105528 seconds, throughput 949880.505032
+455998	[1728022324]	2000000 OPS in 2.080647 seconds, throughput 961239.460610
+455998	[1728022324]	2000000 OPS in 2.089434 seconds, throughput 957197.020820
+455998	[1728022326]	2000000 OPS in 2.082372 seconds, throughput 960443.186904
+455998	[1728022326]	2000000 OPS in 2.100968 seconds, throughput 951942.152379
+455998	[1728022326]	2000000 OPS in 2.072774 seconds, throughput 964890.528345
+455998	[1728022326]	2000000 OPS in 2.082668 seconds, throughput 960306.683542
+455998	[1728022328]	2000000 OPS in 2.080833 seconds, throughput 961153.538030
+455998	[1728022328]	2000000 OPS in 2.107790 seconds, throughput 948861.129429
+455998	[1728022328]	2000000 OPS in 2.081758 seconds, throughput 960726.462922
+455998	[1728022328]	2000000 OPS in 2.088347 seconds, throughput 957695.248922
+455998	[1728022330]	2000000 OPS in 2.077123 seconds, throughput 962870.277783
+455998	[1728022330]	2000000 OPS in 2.104105 seconds, throughput 950522.906414
+455998	[1728022330]	2000000 OPS in 2.071787 seconds, throughput 965350.202506
+455998	[1728022330]	2000000 OPS in 2.084430 seconds, throughput 959494.921873
+455998	[1728022332]	2000000 OPS in 2.084757 seconds, throughput 959344.422396
+455998	[1728022332]	2000000 OPS in 2.110290 seconds, throughput 947737.040881
+455998	[1728022332]	2000000 OPS in 2.080828 seconds, throughput 961155.847576
+455998	[1728022332]	2000000 OPS in 2.089506 seconds, throughput 957164.037816
+455998	[1728022334]	2000000 OPS in 2.080918 seconds, throughput 961114.277449
+455998	[1728022334]	2000000 OPS in 2.079220 seconds, throughput 961899.173729
+455998	[1728022334]	2000000 OPS in 2.108391 seconds, throughput 948590.655149
+455998	[1728022334]	2000000 OPS in 2.091784 seconds, throughput 956121.664570
+455998	[1728022336]	2000000 OPS in 2.078998 seconds, throughput 962001.887448
+455998	[1728022336]	2000000 OPS in 2.075058 seconds, throughput 963828.480939
+455998	[1728022336]	2000000 OPS in 2.102359 seconds, throughput 951312.311551
+455998	[1728022336]	2000000 OPS in 2.083116 seconds, throughput 960100.157648
+455998	[1728022338]	2000000 OPS in 2.078443 seconds, throughput 962258.767741
+455998	[1728022338]	2000000 OPS in 2.078426 seconds, throughput 962266.638312
+455998	[1728022338]	2000000 OPS in 2.105107 seconds, throughput 950070.471477
+455998	[1728022339]	2000000 OPS in 2.089814 seconds, throughput 957022.969508
+455998	[1728022340]	2000000 OPS in 2.076770 seconds, throughput 963033.942131
+455998	[1728022340]	2000000 OPS in 2.080113 seconds, throughput 961486.226950
+455998	[1728022340]	2000000 OPS in 2.107323 seconds, throughput 949071.404811
+455998	[1728022341]	2000000 OPS in 2.089459 seconds, throughput 957185.568130
+455998	[1728022342]	2000000 OPS in 2.083561 seconds, throughput 959895.102663
+455998	[1728022342]	2000000 OPS in 2.075263 seconds, throughput 963733.271397
+455998	[1728022343]	2000000 OPS in 2.103072 seconds, throughput 950989.790174
+455998	[1728022343]	2000000 OPS in 2.080939 seconds, throughput 961104.578270
+455998	[1728022344]	2000000 OPS in 2.079790 seconds, throughput 961635.549743
+455998	[1728022345]	2000000 OPS in 2.079836 seconds, throughput 961614.281126
+455998	[1728022345]	2000000 OPS in 2.109081 seconds, throughput 948280.317351
+455998	[1728022345]	2000000 OPS in 2.091699 seconds, throughput 956160.518315
+455998	[1728022346]	2000000 OPS in 2.081553 seconds, throughput 960821.079261
+455998	[1728022347]	2000000 OPS in 2.072216 seconds, throughput 965150.351122
+455998	[1728022347]	2000000 OPS in 2.104143 seconds, throughput 950505.740342
+455998	[1728022347]	2000000 OPS in 2.083258 seconds, throughput 960034.714855
+455998	[1728022348]	2000000 OPS in 2.078949 seconds, throughput 962024.561449
+455998	[1728022349]	2000000 OPS in 2.083016 seconds, throughput 960146.249477
+455998	[1728022349]	2000000 OPS in 2.108361 seconds, throughput 948604.152704
+455998	[1728022349]	2000000 OPS in 2.091007 seconds, throughput 956476.951058
+455998	[1728022350]	2000000 OPS in 2.084019 seconds, throughput 959684.148753
+455998	[1728022351]	2000000 OPS in 2.077886 seconds, throughput 962516.711696
+455998	[1728022351]	2000000 OPS in 2.106877 seconds, throughput 949272.311578
+455998	[1728022351]	2000000 OPS in 2.087856 seconds, throughput 957920.469611
+455998	[1728022353]	2000000 OPS in 2.075746 seconds, throughput 963509.022780
+455998	[1728022353]	2000000 OPS in 2.075911 seconds, throughput 963432.440023
+455998	[1728022353]	2000000 OPS in 2.103114 seconds, throughput 950970.798540
+455998	[1728022353]	2000000 OPS in 2.085543 seconds, throughput 958982.864415
+455998	[1728022355]	2000000 OPS in 2.078209 seconds, throughput 962367.115146
+455998	[1728022355]	2000000 OPS in 2.082127 seconds, throughput 960556.200462
+455998	[1728022355]	2000000 OPS in 2.105229 seconds, throughput 950015.414000
+455998	[1728022355]	2000000 OPS in 2.087504 seconds, throughput 958081.996490
+455998	[1728022357]	2000000 OPS in 2.073625 seconds, throughput 964494.544578
+455998	[1728022357]	2000000 OPS in 2.080692 seconds, throughput 961218.671480
+455998	[1728022357]	2000000 OPS in 2.090341 seconds, throughput 956781.692556
+455998	[1728022357]	2000000 OPS in 2.100446 seconds, throughput 952178.727756
+455998	[1728022359]	2000000 OPS in 2.083865 seconds, throughput 959755.070506
+455998	[1728022359]	2000000 OPS in 2.077380 seconds, throughput 962751.157708
+455998	[1728022359]	2000000 OPS in 2.080429 seconds, throughput 961340.185125
+455998	[1728022359]	2000000 OPS in 2.101558 seconds, throughput 951674.900241
+455998	[1728022361]	2000000 OPS in 2.084439 seconds, throughput 959490.779054
+455998	[1728022361]	2000000 OPS in 2.081743 seconds, throughput 960733.385437
+455998	[1728022361]	2000000 OPS in 2.089251 seconds, throughput 957280.862855
+455998	[1728022362]	2000000 OPS in 2.105857 seconds, throughput 949732.104317
+455998	[1728022363]	2000000 OPS in 2.078662 seconds, throughput 962157.387781
+455998	[1728022363]	2000000 OPS in 2.074632 seconds, throughput 964026.391186
+455998	[1728022364]	2000000 OPS in 2.084661 seconds, throughput 959388.600832
+455998	[1728022364]	2000000 OPS in 2.101067 seconds, throughput 951897.297897
+455998	[1728022365]	2000000 OPS in 2.084797 seconds, throughput 959326.015914
+455998	[1728022365]	2000000 OPS in 2.074695 seconds, throughput 963997.117649
+455998	[1728022366]	2000000 OPS in 2.088473 seconds, throughput 957637.470056
+455998	[1728022366]	2000000 OPS in 2.108114 seconds, throughput 948715.297180
+455998	[1728022367]	2000000 OPS in 2.082284 seconds, throughput 960483.776469
+455998	[1728022367]	2000000 OPS in 2.078578 seconds, throughput 962196.270720
+455998	[1728022368]	2000000 OPS in 2.089208 seconds, throughput 957300.565573
+455998	[1728022368]	2000000 OPS in 2.107302 seconds, throughput 949080.862639
+455998	[1728022369]	2000000 OPS in 2.079407 seconds, throughput 961812.670632
+455998	[1728022369]	2000000 OPS in 2.072566 seconds, throughput 964987.363490
+455998	[1728022370]	2000000 OPS in 2.085348 seconds, throughput 959072.538492
+455998	[1728022370]	2000000 OPS in 2.102689 seconds, throughput 951163.010792
+455998	[1728022371]	2000000 OPS in 2.082447 seconds, throughput 960408.596233
+455998	[1728022372]	2000000 OPS in 2.081105 seconds, throughput 961027.915458
+455998	[1728022372]	2000000 OPS in 2.084729 seconds, throughput 959357.307353
+455998	[1728022372]	2000000 OPS in 2.106960 seconds, throughput 949234.916657
+455998	[1728022373]	2000000 OPS in 2.077844 seconds, throughput 962536.167296
+455998	[1728022374]	2000000 OPS in 2.073028 seconds, throughput 964772.304089
+455998	[1728022374]	2000000 OPS in 2.087281 seconds, throughput 958184.355628
+455998	[1728022374]	2000000 OPS in 2.107612 seconds, throughput 948941.266229
+455998	[1728022375]	2000000 OPS in 2.082319 seconds, throughput 960467.632481
+455998	[1728022376]	2000000 OPS in 2.078602 seconds, throughput 962185.160988
+455998	[1728022376]	2000000 OPS in 2.082609 seconds, throughput 960333.888886
+455998	[1728022376]	2000000 OPS in 2.103855 seconds, throughput 950635.856559
+455998	[1728022378]	2000000 OPS in 2.083710 seconds, throughput 959826.463375
+455998	[1728022378]	2000000 OPS in 2.079660 seconds, throughput 961695.661791
+455998	[1728022378]	2000000 OPS in 2.089474 seconds, throughput 957178.696648
+455998	[1728022378]	2000000 OPS in 2.105595 seconds, throughput 949850.279850
+455998	[1728022380]	2000000 OPS in 2.078078 seconds, throughput 962427.781825
+455998	[1728022380]	2000000 OPS in 2.072768 seconds, throughput 964893.321394
+455998	[1728022380]	2000000 OPS in 2.085091 seconds, throughput 959190.749948
+455998	[1728022380]	2000000 OPS in 2.107904 seconds, throughput 948809.812971
+455998	[1728022382]	2000000 OPS in 2.082112 seconds, throughput 960563.120524
+455998	[1728022382]	2000000 OPS in 2.080329 seconds, throughput 961386.396094
+455998	[1728022382]	2000000 OPS in 2.089846 seconds, throughput 957008.315445
+455998	[1728022383]	2000000 OPS in 2.103171 seconds, throughput 950945.025393
+455998	[1728022384]	2000000 OPS in 2.077050 seconds, throughput 962904.118822
+455998	[1728022384]	2000000 OPS in 2.080536 seconds, throughput 961290.744308
+455998	[1728022384]	2000000 OPS in 2.088987 seconds, throughput 957401.841179
+455998	[1728022385]	2000000 OPS in 2.109420 seconds, throughput 948127.921419
+455998	[1728022386]	2000000 OPS in 2.082387 seconds, throughput 960436.268571
+455998	[1728022386]	2000000 OPS in 2.076363 seconds, throughput 963222.712021
+455998	[1728022387]	2000000 OPS in 2.083124 seconds, throughput 960096.470493
+455998	[1728022387]	2000000 OPS in 2.103903 seconds, throughput 950614.168049
+455998	[1728022388]	2000000 OPS in 2.081007 seconds, throughput 961073.172748
+455998	[1728022388]	2000000 OPS in 2.083189 seconds, throughput 960066.513408
+455998	[1728022389]	2000000 OPS in 2.086895 seconds, throughput 958361.585034
+455998	[1728022389]	2000000 OPS in 2.106601 seconds, throughput 949396.682143
+455998	[1728022390]	2000000 OPS in 2.076993 seconds, throughput 962930.544301
+455998	[1728022390]	2000000 OPS in 2.074028 seconds, throughput 964307.135680
+455998	[1728022391]	2000000 OPS in 2.087927 seconds, throughput 957887.895506
+455998	[1728022391]	2000000 OPS in 2.104759 seconds, throughput 950227.555744
+455998	[1728022392]	2000000 OPS in 2.083864 seconds, throughput 959755.531071
+455998	[1728022392]	2000000 OPS in 2.080218 seconds, throughput 961437.695472
+455998	[1728022393]	2000000 OPS in 2.082023 seconds, throughput 960604.181606
+455998	[1728022393]	2000000 OPS in 2.100047 seconds, throughput 952359.637665
+455998	[1728022394]	2000000 OPS in 2.082546 seconds, throughput 960362.940362
+455998	[1728022394]	2000000 OPS in 2.078611 seconds, throughput 962180.994905
+455998	[1728022395]	2000000 OPS in 2.089925 seconds, throughput 956972.140149
+455998	[1728022395]	2000000 OPS in 2.107448 seconds, throughput 949015.112117
+455998	[1728022396]	2000000 OPS in 2.077207 seconds, throughput 962831.340353
+455998	[1728022396]	2000000 OPS in 2.074781 seconds, throughput 963957.159816
+455998	[1728022397]	2000000 OPS in 2.084898 seconds, throughput 959279.542692
+455998	[1728022397]	2000000 OPS in 2.108090 seconds, throughput 948726.098032
+455998	[1728022398]	2000000 OPS in 2.081632 seconds, throughput 960784.615148
+455998	[1728022399]	2000000 OPS in 2.080151 seconds, throughput 961468.662612
+455998	[1728022399]	2000000 OPS in 2.089105 seconds, throughput 957347.763755
+455998	[1728022399]	2000000 OPS in 2.102277 seconds, throughput 951349.417798
+455998	[1728022400]	2000000 OPS in 2.075523 seconds, throughput 963612.544886
+455998	[1728022401]	2000000 OPS in 2.080232 seconds, throughput 961431.224979
+455998	[1728022401]	2000000 OPS in 2.085758 seconds, throughput 958884.012431
+455998	[1728022402]	2000000 OPS in 2.106044 seconds, throughput 949647.775640
+455998	[1728022402]	2000000 OPS in 2.082375 seconds, throughput 960441.803229
+455998	[1728022403]	2000000 OPS in 2.077316 seconds, throughput 962780.819095
+455998	[1728022403]	2000000 OPS in 2.081997 seconds, throughput 960616.177641
+455998	[1728022404]	2000000 OPS in 2.102746 seconds, throughput 951137.227226
+455998	[1728022405]	2000000 OPS in 2.081138 seconds, throughput 961012.676718
+455998	[1728022405]	2000000 OPS in 2.080017 seconds, throughput 961530.602875
+455998	[1728022405]	2000000 OPS in 2.085986 seconds, throughput 958779.205613
+455998	[1728022406]	2000000 OPS in 2.109981 seconds, throughput 947875.833953
+455998	[1728022407]	2000000 OPS in 2.076312 seconds, throughput 963246.371451
+455998	[1728022407]	2000000 OPS in 2.075233 seconds, throughput 963747.203326
+455998	[1728022407]	2000000 OPS in 2.086241 seconds, throughput 958662.014599
+455998	[1728022408]	2000000 OPS in 2.105498 seconds, throughput 949894.039320
+455998	[1728022409]	2000000 OPS in 2.078727 seconds, throughput 962127.301950
+455998	[1728022409]	2000000 OPS in 2.082198 seconds, throughput 960523.446858
+455998	[1728022409]	2000000 OPS in 2.083252 seconds, throughput 960037.479863
+455998	[1728022410]	2000000 OPS in 2.101316 seconds, throughput 951784.500760
+455998	[1728022411]	2000000 OPS in 2.080844 seconds, throughput 961148.457068
+455998	[1728022411]	2000000 OPS in 2.082365 seconds, throughput 960446.415494
+455998	[1728022412]	2000000 OPS in 2.087530 seconds, throughput 958070.063664
+455998	[1728022412]	2000000 OPS in 2.106710 seconds, throughput 949347.560889
+455998	[1728022413]	2000000 OPS in 2.077319 seconds, throughput 962779.428677
+455998	[1728022413]	2000000 OPS in 2.070256 seconds, throughput 966064.100285
+455998	[1728022414]	2000000 OPS in 2.082948 seconds, throughput 960177.594448
+455998	[1728022414]	2000000 OPS in 2.107652 seconds, throughput 948923.256781
+455998	[1728022415]	2000000 OPS in 2.081071 seconds, throughput 961043.616484
+455998	[1728022415]	2000000 OPS in 2.078785 seconds, throughput 962100.457719
+455998	[1728022416]	2000000 OPS in 2.088954 seconds, throughput 957416.965620
+455998	[1728022416]	2000000 OPS in 2.101934 seconds, throughput 951504.661897
+455998	[1728022417]	2000000 OPS in 2.077622 seconds, throughput 962639.017107
+455998	[1728022417]	2000000 OPS in 2.076903 seconds, throughput 962972.271695
+455998	[1728022418]	2000000 OPS in 2.086310 seconds, throughput 958630.309014
+455998	[1728022418]	2000000 OPS in 2.104378 seconds, throughput 950399.595510
+455998	[1728022419]	2000000 OPS in 2.081333 seconds, throughput 960922.639482
+455998	[1728022419]	2000000 OPS in 2.074715 seconds, throughput 963987.824834
+455998	[1728022420]	2000000 OPS in 2.082499 seconds, throughput 960384.614831
+455998	[1728022420]	2000000 OPS in 2.103676 seconds, throughput 950716.745354
+455998	[1728022421]	2000000 OPS in 2.083902 seconds, throughput 959738.029907
+455998	[1728022421]	2000000 OPS in 2.077877 seconds, throughput 962520.880687
+455998	[1728022422]	2000000 OPS in 2.086389 seconds, throughput 958594.010992
+455998	[1728022423]	2000000 OPS in 2.108552 seconds, throughput 948518.224829
+455998	[1728022423]	2000000 OPS in 2.079631 seconds, throughput 961709.072427
+455998	[1728022423]	2000000 OPS in 2.074995 seconds, throughput 963857.744236
+455998	[1728022424]	2000000 OPS in 2.087617 seconds, throughput 958030.136754
+455998	[1728022425]	2000000 OPS in 2.109128 seconds, throughput 948259.185787
+455998	[1728022425]	2000000 OPS in 2.081677 seconds, throughput 960763.845688
+455998	[1728022426]	2000000 OPS in 2.084604 seconds, throughput 959414.833705
+455998	[1728022426]	2000000 OPS in 2.081592 seconds, throughput 960803.077644
+455998	[1728022427]	2000000 OPS in 2.102843 seconds, throughput 951093.353141
+455998	[1728022427]	2000000 OPS in 2.083377 seconds, throughput 959979.878822
+455998	[1728022428]	2000000 OPS in 2.079952 seconds, throughput 961560.651400
+455998	[1728022428]	2000000 OPS in 2.086206 seconds, throughput 958678.097944
+455998	[1728022429]	2000000 OPS in 2.108366 seconds, throughput 948601.903085
+455998	[1728022430]	2000000 OPS in 2.078561 seconds, throughput 962204.140268
+455998	[1728022430]	2000000 OPS in 2.074663 seconds, throughput 964011.986525
+455998	[1728022430]	2000000 OPS in 2.080667 seconds, throughput 961230.220886
+455998	[1728022431]	2000000 OPS in 2.107898 seconds, throughput 948812.513698
+455998	[1728022432]	2000000 OPS in 2.081569 seconds, throughput 960813.693901
+455998	[1728022432]	2000000 OPS in 2.080581 seconds, throughput 961269.952960
+455998	[1728022432]	2000000 OPS in 2.087753 seconds, throughput 957967.728941
+455998	[1728022433]	2000000 OPS in 2.103908 seconds, throughput 950611.908886
+455998	[1728022434]	2000000 OPS in 2.077442 seconds, throughput 962722.424982
+455998	[1728022434]	2000000 OPS in 2.074813 seconds, throughput 963942.292631
+455998	[1728022434]	2000000 OPS in 2.089851 seconds, throughput 957006.025788
+455998	[1728022435]	2000000 OPS in 2.108968 seconds, throughput 948331.126883
+455998	[1728022436]	2000000 OPS in 2.083088 seconds, throughput 960113.062914
+455998	[1728022436]	2000000 OPS in 2.076073 seconds, throughput 963357.261522
+455998	[1728022437]	2000000 OPS in 2.081116 seconds, throughput 961022.835825
+455998	[1728022437]	2000000 OPS in 2.104090 seconds, throughput 950529.682666
+455998	[1728022438]	2000000 OPS in 2.081693 seconds, throughput 960756.461207
+455998	[1728022438]	2000000 OPS in 2.077918 seconds, throughput 962501.888910
+455998	[1728022439]	2000000 OPS in 2.083004 seconds, throughput 960151.780794
+455998	[1728022439]	2000000 OPS in 2.106972 seconds, throughput 949229.510406
+455998	[1728022440]	2000000 OPS in 2.078497 seconds, throughput 962233.767958
+455998	[1728022440]	2000000 OPS in 2.074715 seconds, throughput 963987.824834
+455998	[1728022441]	2000000 OPS in 2.084361 seconds, throughput 959526.684677
+455998	[1728022442]	2000000 OPS in 2.106699 seconds, throughput 949352.517849
+455998	[1728022442]	2000000 OPS in 2.082656 seconds, throughput 960312.216708
+455998	[1728022442]	2000000 OPS in 2.080672 seconds, throughput 961227.910983
+455998	[1728022443]	2000000 OPS in 2.085454 seconds, throughput 959023.790503
+455998	[1728022444]	2000000 OPS in 2.098627 seconds, throughput 953004.035496
+455998	[1728022444]	2000000 OPS in 2.076340 seconds, throughput 963233.381816
+455998	[1728022444]	2000000 OPS in 2.079812 seconds, throughput 961625.377678
+455998	[1728022445]	2000000 OPS in 2.090151 seconds, throughput 956868.666426
+455998	[1728022446]	2000000 OPS in 2.108648 seconds, throughput 948475.041828
+455998	[1728022446]	2000000 OPS in 2.078536 seconds, throughput 962215.713367
+455998	[1728022446]	2000000 OPS in 2.072367 seconds, throughput 965080.026849
+455998	[1728022447]	2000000 OPS in 2.082360 seconds, throughput 960448.721643
+455998	[1728022448]	2000000 OPS in 2.107988 seconds, throughput 948772.004395
+455998	[1728022448]	2000000 OPS in 2.076482 seconds, throughput 963167.511204
+455998	[1728022449]	2000000 OPS in 2.059286 seconds, throughput 971210.409822
+455998	[1728022450]	2000000 OPS in 2.120105 seconds, throughput 943349.503916
+455998	[1728022452]	2000000 OPS in 1.939238 seconds, throughput 1031332.925613
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     260731 ms      1042850 ms            4 CompactionCPUUsage=0.308658 CompactionThroughput=2.93406G Lat_Get_Avg=918.121 Lat_Get_P50=903.607 Lat_Get_P95=1.52605k Lat_Get_P99=2.95877k Lat_Put_Avg=1.18072k Lat_Put_P50=1.13981k Lat_Put_P95=1.83427k Lat_Put_P99=2.43479k items_per_second=3.83537M/s
+4632.85user 40.84system 18:02.12elapsed 431%CPU (0avgtext+0avgdata 9176564maxresident)k
+317312inputs+16649936outputs (5819major+7460435minor)pagefaults 0swaps

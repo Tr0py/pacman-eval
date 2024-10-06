@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 83%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T00:24:36-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.36, 4.05, 4.23
+[1728192276]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728192276]	Setup starts!
+[1728192276]	Setup starts!
+[1728192276]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f4e27a00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728192276]	Initializing log segments...
+Log: pool_start 0x7f4e27a00000 total segments: 2028  cleaners: 2
+[1728192278]Initialized 2026 free log segments...
+[1728192278]	DB init finished in 1.529374 seconds
+[1728192278]	DB init finished in 1.529525 seconds
+[1728192278]	DB init finished in 1.529576 seconds
+[1728192278]	DB init finished in 1.529619 seconds
+[1728192282]	DB load finished in 4.018716 seconds
+[1728192282]	DB load finished in 4.021602 seconds
+[1728192282]	DB load finished in 4.029919 seconds
+[1728192282]	DB load finished in 4.038754 seconds
+[1728192282]	DB warmup finished in 0.000014 seconds
+[1728192282]	DB warmup finished in 0.009041 seconds
+[1728192282]	DB warmup finished in 0.020250 seconds
+[1728192282]	DB warmup finished in 0.017375 seconds
+[1728192282]	ETC init!
+[1728192282]	ETC starts!
+[1728192282]	ETC init!
+[1728192282]	ETC init!
+[1728192282]	ETC init!
+[1728192282]	ETC starts!
+[1728192282]	ETC starts!
+[1728192282]	ETC starts!
+129521	[1728192284]	2000000 OPS in 1.774161 seconds, throughput 1127293.407983
+129521	[1728192284]	2000000 OPS in 1.774875 seconds, throughput 1126839.918304
+129521	[1728192284]	2000000 OPS in 1.793085 seconds, throughput 1115396.091094
+129521	[1728192284]	2000000 OPS in 1.795508 seconds, throughput 1113890.887704
+129521	[1728192285]	2000000 OPS in 1.705964 seconds, throughput 1172357.681639
+129521	[1728192285]	2000000 OPS in 1.709605 seconds, throughput 1169860.874296
+129521	[1728192285]	2000000 OPS in 1.722921 seconds, throughput 1160819.329499
+129521	[1728192285]	2000000 OPS in 1.725722 seconds, throughput 1158935.216680
+129521	[1728192287]	2000000 OPS in 1.710772 seconds, throughput 1169062.855834
+129521	[1728192287]	2000000 OPS in 1.712254 seconds, throughput 1168051.001779
+129521	[1728192287]	2000000 OPS in 1.718212 seconds, throughput 1164000.717024
+129521	[1728192287]	2000000 OPS in 1.726807 seconds, throughput 1158207.026031
+129521	[1728192289]	2000000 OPS in 1.704864 seconds, throughput 1173114.101770
+129521	[1728192289]	2000000 OPS in 1.739596 seconds, throughput 1149692.227391
+129521	[1728192289]	2000000 OPS in 1.714425 seconds, throughput 1166571.882701
+129521	[1728192289]	2000000 OPS in 1.744785 seconds, throughput 1146273.036506
+129521	[1728192291]	2000000 OPS in 1.741428 seconds, throughput 1148482.739453
+129521	[1728192291]	2000000 OPS in 1.739866 seconds, throughput 1149513.813133
+129521	[1728192291]	2000000 OPS in 1.748949 seconds, throughput 1143543.922664
+129521	[1728192291]	2000000 OPS in 1.756110 seconds, throughput 1138880.821816
+129521	[1728192292]	2000000 OPS in 1.711160 seconds, throughput 1168797.774609
+129521	[1728192292]	2000000 OPS in 1.717064 seconds, throughput 1164778.948251
+129521	[1728192292]	2000000 OPS in 1.727858 seconds, throughput 1157502.526249
+129521	[1728192292]	2000000 OPS in 1.734411 seconds, throughput 1153129.217930
+129521	[1728192294]	2000000 OPS in 1.715682 seconds, throughput 1165717.190015
+129521	[1728192294]	2000000 OPS in 1.721315 seconds, throughput 1161902.382771
+129521	[1728192294]	2000000 OPS in 1.727777 seconds, throughput 1157556.791183
+129521	[1728192294]	2000000 OPS in 1.739605 seconds, throughput 1149686.279357
+129521	[1728192296]	2000000 OPS in 1.711472 seconds, throughput 1168584.703694
+129521	[1728192296]	2000000 OPS in 1.716423 seconds, throughput 1165213.936192
+129521	[1728192296]	2000000 OPS in 1.723859 seconds, throughput 1160187.695165
+129521	[1728192296]	2000000 OPS in 1.731907 seconds, throughput 1154796.418052
+129521	[1728192298]	2000000 OPS in 1.859939 seconds, throughput 1075304.082553
+129521	[1728192298]	2000000 OPS in 1.889323 seconds, throughput 1058580.242764
+129521	[1728192298]	2000000 OPS in 1.932028 seconds, throughput 1035181.684737
+129521	[1728192298]	2000000 OPS in 2.117785 seconds, throughput 944382.928390
+129521	[1728192300]	2000000 OPS in 2.361457 seconds, throughput 846934.752570
+129521	[1728192300]	2000000 OPS in 2.453419 seconds, throughput 815188.926148
+129521	[1728192300]	2000000 OPS in 2.375420 seconds, throughput 841956.369821
+129521	[1728192300]	2000000 OPS in 2.258441 seconds, throughput 885566.636454
+129521	[1728192302]	2000000 OPS in 2.248309 seconds, throughput 889557.440725
+129521	[1728192302]	2000000 OPS in 2.200787 seconds, throughput 908765.818773
+129521	[1728192302]	2000000 OPS in 2.245072 seconds, throughput 890840.026511
+129521	[1728192303]	2000000 OPS in 2.256504 seconds, throughput 886326.813513
+129521	[1728192304]	2000000 OPS in 2.040155 seconds, throughput 980317.671942
+129521	[1728192304]	2000000 OPS in 2.051822 seconds, throughput 974743.423162
+129521	[1728192305]	2000000 OPS in 2.235471 seconds, throughput 894666.045768
+129521	[1728192305]	2000000 OPS in 2.249745 seconds, throughput 888989.641048
+129521	[1728192306]	2000000 OPS in 2.059873 seconds, throughput 970933.644938
+129521	[1728192306]	2000000 OPS in 2.040872 seconds, throughput 979973.266329
+129521	[1728192307]	2000000 OPS in 2.074372 seconds, throughput 964147.221424
+129521	[1728192307]	2000000 OPS in 2.101609 seconds, throughput 951651.805831
+129521	[1728192308]	2000000 OPS in 1.774942 seconds, throughput 1126797.382675
+129521	[1728192308]	2000000 OPS in 1.765917 seconds, throughput 1132556.060109
+129521	[1728192308]	2000000 OPS in 1.723691 seconds, throughput 1160300.773166
+129521	[1728192309]	2000000 OPS in 1.732926 seconds, throughput 1154117.371428
+129521	[1728192310]	2000000 OPS in 1.704960 seconds, throughput 1173048.048048
+129521	[1728192310]	2000000 OPS in 1.710642 seconds, throughput 1169151.698602
+129521	[1728192310]	2000000 OPS in 1.720798 seconds, throughput 1162251.467052
+129521	[1728192310]	2000000 OPS in 1.729871 seconds, throughput 1156155.574606
+129521	[1728192311]	2000000 OPS in 1.702840 seconds, throughput 1174508.468206
+129521	[1728192312]	2000000 OPS in 1.711697 seconds, throughput 1168431.094989
+129521	[1728192312]	2000000 OPS in 1.718858 seconds, throughput 1163563.249553
+129521	[1728192312]	2000000 OPS in 1.728707 seconds, throughput 1156934.055337
+129521	[1728192313]	2000000 OPS in 1.702922 seconds, throughput 1174451.912654
+129521	[1728192313]	2000000 OPS in 1.708622 seconds, throughput 1170533.915635
+129521	[1728192314]	2000000 OPS in 1.716488 seconds, throughput 1165169.811848
+129521	[1728192314]	2000000 OPS in 1.725729 seconds, throughput 1158930.515741
+129521	[1728192315]	2000000 OPS in 1.702569 seconds, throughput 1174695.416162
+129521	[1728192315]	2000000 OPS in 1.708001 seconds, throughput 1170959.501780
+129521	[1728192315]	2000000 OPS in 1.717277 seconds, throughput 1164634.476558
+129521	[1728192316]	2000000 OPS in 1.727386 seconds, throughput 1157818.808303
+129521	[1728192317]	2000000 OPS in 1.700043 seconds, throughput 1176440.831203
+129521	[1728192317]	2000000 OPS in 1.708146 seconds, throughput 1170860.102122
+129521	[1728192317]	2000000 OPS in 1.714538 seconds, throughput 1166494.997486
+129521	[1728192317]	2000000 OPS in 1.725304 seconds, throughput 1159215.999036
+129521	[1728192318]	2000000 OPS in 1.699967 seconds, throughput 1176493.426049
+129521	[1728192318]	2000000 OPS in 1.704832 seconds, throughput 1173136.121330
+129521	[1728192319]	2000000 OPS in 1.716805 seconds, throughput 1164954.668701
+129521	[1728192319]	2000000 OPS in 1.727050 seconds, throughput 1158044.063577
+129521	[1728192320]	2000000 OPS in 1.699858 seconds, throughput 1176568.866341
+129521	[1728192320]	2000000 OPS in 1.704544 seconds, throughput 1173334.334579
+129521	[1728192320]	2000000 OPS in 1.719088 seconds, throughput 1163407.574249
+129521	[1728192321]	2000000 OPS in 1.726605 seconds, throughput 1158342.527677
+129521	[1728192322]	2000000 OPS in 1.701424 seconds, throughput 1175485.945890
+129521	[1728192322]	2000000 OPS in 1.709010 seconds, throughput 1170268.166950
+129521	[1728192322]	2000000 OPS in 1.747461 seconds, throughput 1144517.674500
+129521	[1728192323]	2000000 OPS in 1.816036 seconds, throughput 1101299.753970
+129521	[1728192324]	2000000 OPS in 1.937117 seconds, throughput 1032462.158971
+129521	[1728192324]	2000000 OPS in 2.002914 seconds, throughput 998545.119761
+129521	[1728192324]	2000000 OPS in 2.017547 seconds, throughput 991302.804842
+129521	[1728192325]	2000000 OPS in 1.984660 seconds, throughput 1007729.283605
+129521	[1728192326]	2000000 OPS in 1.924552 seconds, throughput 1039202.889815
+129521	[1728192326]	2000000 OPS in 1.944560 seconds, throughput 1028510.305673
+129521	[1728192326]	2000000 OPS in 1.837604 seconds, throughput 1088373.773675
+129521	[1728192326]	2000000 OPS in 1.929622 seconds, throughput 1036472.428279
+129521	[1728192327]	2000000 OPS in 1.801546 seconds, throughput 1110157.609076
+129521	[1728192328]	2000000 OPS in 1.851789 seconds, throughput 1080036.656444
+129521	[1728192328]	2000000 OPS in 1.870337 seconds, throughput 1069326.009163
+129521	[1728192328]	2000000 OPS in 1.859269 seconds, throughput 1075691.575560
+129521	[1728192329]	2000000 OPS in 1.868583 seconds, throughput 1070329.763248
+129521	[1728192330]	2000000 OPS in 1.881049 seconds, throughput 1063236.523876
+129521	[1728192330]	2000000 OPS in 1.909230 seconds, throughput 1047542.726649
+129521	[1728192330]	2000000 OPS in 1.881528 seconds, throughput 1062965.844781
+129521	[1728192331]	2000000 OPS in 1.965215 seconds, throughput 1017700.353396
+129521	[1728192332]	2000000 OPS in 2.053076 seconds, throughput 974148.058815
+129521	[1728192332]	2000000 OPS in 1.952013 seconds, throughput 1024583.340377
+129521	[1728192332]	2000000 OPS in 1.969531 seconds, throughput 1015470.180464
+129521	[1728192333]	2000000 OPS in 1.841197 seconds, throughput 1086249.868971
+129521	[1728192333]	2000000 OPS in 1.925296 seconds, throughput 1038801.306397
+129521	[1728192334]	2000000 OPS in 1.986677 seconds, throughput 1006706.173173
+129521	[1728192334]	2000000 OPS in 1.860314 seconds, throughput 1075087.323968
+129521	[1728192335]	2000000 OPS in 1.919656 seconds, throughput 1041853.332055
+129521	[1728192335]	2000000 OPS in 1.974336 seconds, throughput 1012998.800609
+129521	[1728192336]	2000000 OPS in 2.028068 seconds, throughput 986160.227369
+129521	[1728192336]	2000000 OPS in 1.856972 seconds, throughput 1077022.162962
+129521	[1728192337]	2000000 OPS in 1.834494 seconds, throughput 1090218.883245
+129521	[1728192337]	2000000 OPS in 1.893999 seconds, throughput 1055966.766614
+129521	[1728192338]	2000000 OPS in 1.899563 seconds, throughput 1052873.739908
+129521	[1728192338]	2000000 OPS in 1.983232 seconds, throughput 1008454.885762
+129521	[1728192339]	2000000 OPS in 1.899117 seconds, throughput 1053121.003077
+129521	[1728192339]	2000000 OPS in 1.843040 seconds, throughput 1085163.642677
+129521	[1728192340]	2000000 OPS in 1.838405 seconds, throughput 1087899.565112
+129521	[1728192340]	2000000 OPS in 1.877114 seconds, throughput 1065465.389955
+129521	[1728192340]	2000000 OPS in 1.808688 seconds, throughput 1105773.909043
+129521	[1728192341]	2000000 OPS in 1.801997 seconds, throughput 1109879.761176
+129521	[1728192341]	2000000 OPS in 1.790617 seconds, throughput 1116933.436910
+129521	[1728192341]	2000000 OPS in 1.807985 seconds, throughput 1106203.867842
+129521	[1728192342]	2000000 OPS in 1.758083 seconds, throughput 1137602.718415
+129521	[1728192343]	2000000 OPS in 1.738674 seconds, throughput 1150301.896733
+129521	[1728192343]	2000000 OPS in 1.800021 seconds, throughput 1111098.148299
+129521	[1728192343]	2000000 OPS in 1.821988 seconds, throughput 1097702.070486
+129521	[1728192344]	2000000 OPS in 1.755021 seconds, throughput 1139587.503511
+129521	[1728192345]	2000000 OPS in 1.757894 seconds, throughput 1137725.027789
+129521	[1728192345]	2000000 OPS in 1.758364 seconds, throughput 1137420.920810
+129521	[1728192345]	2000000 OPS in 1.783877 seconds, throughput 1121153.532446
+129521	[1728192346]	2000000 OPS in 1.827240 seconds, throughput 1094546.967010
+129521	[1728192346]	2000000 OPS in 1.785576 seconds, throughput 1120086.739517
+129521	[1728192347]	2000000 OPS in 1.823310 seconds, throughput 1096906.176130
+129521	[1728192347]	2000000 OPS in 1.893705 seconds, throughput 1056130.706736
+129521	[1728192348]	2000000 OPS in 1.862689 seconds, throughput 1073716.546348
+129521	[1728192348]	2000000 OPS in 1.926953 seconds, throughput 1037908.034083
+129521	[1728192349]	2000000 OPS in 1.839872 seconds, throughput 1087032.141366
+129521	[1728192349]	2000000 OPS in 1.896096 seconds, throughput 1054798.913135
+129521	[1728192350]	2000000 OPS in 1.840228 seconds, throughput 1086821.850336
+129521	[1728192350]	2000000 OPS in 1.891320 seconds, throughput 1057462.512954
+129521	[1728192350]	2000000 OPS in 1.820767 seconds, throughput 1098438.185666
+129521	[1728192351]	2000000 OPS in 1.869943 seconds, throughput 1069551.317874
+129521	[1728192351]	2000000 OPS in 1.847974 seconds, throughput 1082266.308942
+129521	[1728192352]	2000000 OPS in 1.842903 seconds, throughput 1085244.312913
+129521	[1728192352]	2000000 OPS in 1.813897 seconds, throughput 1102598.438610
+129521	[1728192353]	2000000 OPS in 1.841941 seconds, throughput 1085811.109042
+129521	[1728192353]	2000000 OPS in 1.864350 seconds, throughput 1072759.943144
+129521	[1728192354]	2000000 OPS in 1.867729 seconds, throughput 1070819.160596
+129521	[1728192354]	2000000 OPS in 1.800212 seconds, throughput 1110980.262325
+129521	[1728192354]	2000000 OPS in 1.859875 seconds, throughput 1075341.084750
+129521	[1728192355]	2000000 OPS in 1.851738 seconds, throughput 1080066.402482
+129521	[1728192356]	2000000 OPS in 1.832439 seconds, throughput 1091441.515925
+129521	[1728192356]	2000000 OPS in 1.895976 seconds, throughput 1054865.673405
+129521	[1728192356]	2000000 OPS in 1.935320 seconds, throughput 1033420.829630
+129521	[1728192357]	2000000 OPS in 1.891892 seconds, throughput 1057142.796735
+129521	[1728192358]	2000000 OPS in 1.854159 seconds, throughput 1078656.145455
+129521	[1728192358]	2000000 OPS in 1.866108 seconds, throughput 1071749.330693
+129521	[1728192358]	2000000 OPS in 1.881031 seconds, throughput 1063246.698220
+129521	[1728192359]	2000000 OPS in 1.855354 seconds, throughput 1077961.402514
+129521	[1728192359]	2000000 OPS in 1.860845 seconds, throughput 1074780.543248
+129521	[1728192360]	2000000 OPS in 1.822365 seconds, throughput 1097474.984430
+129521	[1728192360]	2000000 OPS in 1.901472 seconds, throughput 1051816.697800
+129521	[1728192361]	2000000 OPS in 1.800385 seconds, throughput 1110873.507611
+129521	[1728192361]	2000000 OPS in 1.843860 seconds, throughput 1084681.049537
+129521	[1728192362]	2000000 OPS in 1.877518 seconds, throughput 1065236.125566
+129521	[1728192362]	2000000 OPS in 1.869895 seconds, throughput 1069578.773140
+129521	[1728192362]	2000000 OPS in 1.851583 seconds, throughput 1080156.817167
+129521	[1728192363]	2000000 OPS in 1.950451 seconds, throughput 1025403.868131
+129521	[1728192363]	2000000 OPS in 1.903248 seconds, throughput 1050835.203820
+129521	[1728192364]	2000000 OPS in 1.871596 seconds, throughput 1068606.686486
+129521	[1728192364]	2000000 OPS in 1.867659 seconds, throughput 1070859.294978
+129521	[1728192365]	2000000 OPS in 1.830277 seconds, throughput 1092730.772446
+129521	[1728192365]	2000000 OPS in 1.820335 seconds, throughput 1098698.865868
+129521	[1728192366]	2000000 OPS in 1.820475 seconds, throughput 1098614.372623
+129521	[1728192366]	2000000 OPS in 1.825792 seconds, throughput 1095415.030847
+129521	[1728192367]	2000000 OPS in 1.860761 seconds, throughput 1074829.061873
+129521	[1728192367]	2000000 OPS in 1.978008 seconds, throughput 1011118.256347
+129521	[1728192368]	2000000 OPS in 1.954680 seconds, throughput 1023185.380727
+129521	[1728192368]	2000000 OPS in 1.840488 seconds, throughput 1086668.318403
+129521	[1728192369]	2000000 OPS in 1.861118 seconds, throughput 1074622.887963
+129521	[1728192369]	2000000 OPS in 1.872779 seconds, throughput 1067931.667324
+129521	[1728192369]	2000000 OPS in 1.807154 seconds, throughput 1106712.543591
+129521	[1728192370]	2000000 OPS in 1.827211 seconds, throughput 1094564.338765
+129521	[1728192371]	2000000 OPS in 1.915630 seconds, throughput 1044042.951927
+129521	[1728192371]	2000000 OPS in 1.847527 seconds, throughput 1082528.157911
+129521	[1728192371]	2000000 OPS in 1.922624 seconds, throughput 1040244.998502
+129521	[1728192372]	2000000 OPS in 1.891060 seconds, throughput 1057607.902446
+129521	[1728192373]	2000000 OPS in 1.897900 seconds, throughput 1053796.301175
+129521	[1728192373]	2000000 OPS in 1.856610 seconds, throughput 1077232.159689
+129521	[1728192373]	2000000 OPS in 1.870136 seconds, throughput 1069440.939055
+129521	[1728192374]	2000000 OPS in 1.835669 seconds, throughput 1089521.041103
+129521	[1728192374]	2000000 OPS in 1.829139 seconds, throughput 1093410.615596
+129521	[1728192375]	2000000 OPS in 1.865274 seconds, throughput 1072228.530500
+129521	[1728192375]	2000000 OPS in 1.923133 seconds, throughput 1039969.674484
+129521	[1728192375]	2000000 OPS in 1.851775 seconds, throughput 1080044.821860
+129521	[1728192376]	2000000 OPS in 1.891202 seconds, throughput 1057528.492461
+129521	[1728192377]	2000000 OPS in 1.863572 seconds, throughput 1073207.796640
+129521	[1728192377]	2000000 OPS in 1.860333 seconds, throughput 1075076.343859
+129521	[1728192377]	2000000 OPS in 1.853699 seconds, throughput 1078923.816650
+129521	[1728192378]	2000000 OPS in 1.817693 seconds, throughput 1100295.814530
+129521	[1728192378]	2000000 OPS in 1.868702 seconds, throughput 1070261.604044
+129521	[1728192379]	2000000 OPS in 1.966630 seconds, throughput 1016968.112965
+129521	[1728192379]	2000000 OPS in 1.835697 seconds, throughput 1089504.422571
+129521	[1728192380]	2000000 OPS in 1.919009 seconds, throughput 1042204.596226
+129521	[1728192380]	2000000 OPS in 1.865628 seconds, throughput 1072025.076811
+129521	[1728192381]	2000000 OPS in 1.921714 seconds, throughput 1040737.591546
+129521	[1728192381]	2000000 OPS in 1.865344 seconds, throughput 1072188.293419
+129521	[1728192382]	2000000 OPS in 1.904987 seconds, throughput 1049875.930912
+129521	[1728192382]	2000000 OPS in 1.889789 seconds, throughput 1058319.209182
+129521	[1728192383]	2000000 OPS in 1.855876 seconds, throughput 1077658.205613
+129521	[1728192383]	2000000 OPS in 1.940863 seconds, throughput 1030469.435504
+129521	[1728192384]	2000000 OPS in 1.815616 seconds, throughput 1101554.513730
+129521	[1728192384]	2000000 OPS in 1.830401 seconds, throughput 1092656.745708
+129521	[1728192385]	2000000 OPS in 1.786752 seconds, throughput 1119349.523605
+129521	[1728192385]	2000000 OPS in 1.832811 seconds, throughput 1091219.989404
+129521	[1728192386]	2000000 OPS in 1.811984 seconds, throughput 1103762.505629
+129521	[1728192386]	2000000 OPS in 1.828234 seconds, throughput 1093951.868306
+129521	[1728192386]	2000000 OPS in 1.828189 seconds, throughput 1093978.795409
+129521	[1728192387]	2000000 OPS in 1.867445 seconds, throughput 1070982.010180
+129521	[1728192387]	2000000 OPS in 1.851585 seconds, throughput 1080155.650429
+129521	[1728192388]	2000000 OPS in 1.847718 seconds, throughput 1082416.256160
+129521	[1728192388]	2000000 OPS in 1.796388 seconds, throughput 1113345.223860
+129521	[1728192388]	2000000 OPS in 1.896782 seconds, throughput 1054417.429098
+129521	[1728192389]	2000000 OPS in 1.807573 seconds, throughput 1106456.004820
+129521	[1728192389]	2000000 OPS in 1.820592 seconds, throughput 1098543.770378
+129521	[1728192390]	2000000 OPS in 1.819303 seconds, throughput 1099322.103025
+129521	[1728192390]	2000000 OPS in 1.820434 seconds, throughput 1098639.115727
+129521	[1728192391]	2000000 OPS in 1.850123 seconds, throughput 1081009.208577
+129521	[1728192391]	2000000 OPS in 1.857833 seconds, throughput 1076523.024405
+129521	[1728192392]	2000000 OPS in 1.840950 seconds, throughput 1086395.610962
+129521	[1728192392]	2000000 OPS in 1.892904 seconds, throughput 1056577.618305
+129521	[1728192393]	2000000 OPS in 1.829660 seconds, throughput 1093099.264344
+129521	[1728192393]	2000000 OPS in 1.812966 seconds, throughput 1103164.648427
+129521	[1728192394]	2000000 OPS in 1.811829 seconds, throughput 1103856.931311
+129521	[1728192394]	2000000 OPS in 1.806880 seconds, throughput 1106880.368370
+129521	[1728192395]	2000000 OPS in 1.830402 seconds, throughput 1092656.148759
+129521	[1728192395]	2000000 OPS in 1.835348 seconds, throughput 1089711.596929
+129521	[1728192396]	2000000 OPS in 1.863703 seconds, throughput 1073132.360682
+129521	[1728192396]	2000000 OPS in 1.904335 seconds, throughput 1050235.384005
+129521	[1728192397]	2000000 OPS in 1.893856 seconds, throughput 1056046.499839
+129521	[1728192397]	2000000 OPS in 1.856496 seconds, throughput 1077298.308211
+129521	[1728192397]	2000000 OPS in 1.831638 seconds, throughput 1091918.818020
+129521	[1728192398]	2000000 OPS in 1.814651 seconds, throughput 1102140.301358
+129521	[1728192398]	2000000 OPS in 1.866866 seconds, throughput 1071314.170380
+129521	[1728192399]	2000000 OPS in 1.928208 seconds, throughput 1037232.497739
+129521	[1728192399]	2000000 OPS in 1.903556 seconds, throughput 1050665.176123
+129521	[1728192400]	2000000 OPS in 1.932790 seconds, throughput 1034773.565674
+129521	[1728192400]	2000000 OPS in 1.848171 seconds, throughput 1082150.948154
+129521	[1728192401]	2000000 OPS in 1.827017 seconds, throughput 1094680.564001
+129521	[1728192401]	2000000 OPS in 1.809954 seconds, throughput 1105000.458575
+129521	[1728192401]	2000000 OPS in 1.801290 seconds, throughput 1110315.385085
+129521	[1728192402]	2000000 OPS in 1.871172 seconds, throughput 1068848.828435
+129521	[1728192402]	2000000 OPS in 1.858393 seconds, throughput 1076198.629676
+129521	[1728192403]	2000000 OPS in 1.827850 seconds, throughput 1094181.688869
+129521	[1728192403]	2000000 OPS in 1.932397 seconds, throughput 1034984.012084
+129521	[1728192404]	2000000 OPS in 1.857417 seconds, throughput 1076764.129972
+129521	[1728192404]	2000000 OPS in 1.867270 seconds, throughput 1071082.382301
+129521	[1728192405]	2000000 OPS in 1.888223 seconds, throughput 1059196.927482
+129521	[1728192405]	2000000 OPS in 1.883448 seconds, throughput 1061882.250001
+129521	[1728192406]	2000000 OPS in 1.916491 seconds, throughput 1043573.906687
+129521	[1728192406]	2000000 OPS in 1.969189 seconds, throughput 1015646.542815
+129521	[1728192407]	2000000 OPS in 1.925128 seconds, throughput 1038891.959392
+129521	[1728192407]	2000000 OPS in 1.989038 seconds, throughput 1005511.206925
+129521	[1728192408]	2000000 OPS in 1.963047 seconds, throughput 1018824.307314
+129521	[1728192408]	2000000 OPS in 1.936414 seconds, throughput 1032836.986306
+129521	[1728192409]	2000000 OPS in 1.857015 seconds, throughput 1076997.224040
+129521	[1728192409]	2000000 OPS in 1.922833 seconds, throughput 1040131.930334
+129521	[1728192410]	2000000 OPS in 1.859879 seconds, throughput 1075338.772038
+129521	[1728192410]	2000000 OPS in 1.875793 seconds, throughput 1066215.728495
+129521	[1728192410]	2000000 OPS in 1.828289 seconds, throughput 1093918.959202
+129521	[1728192411]	2000000 OPS in 1.837480 seconds, throughput 1088447.221194
+129521	[1728192412]	2000000 OPS in 1.872735 seconds, throughput 1067956.758431
+129521	[1728192412]	2000000 OPS in 1.929230 seconds, throughput 1036683.028980
+129521	[1728192412]	2000000 OPS in 1.830821 seconds, throughput 1092406.084483
+129521	[1728192413]	2000000 OPS in 1.889375 seconds, throughput 1058551.108171
+129521	[1728192413]	2000000 OPS in 1.814878 seconds, throughput 1102002.448649
+129521	[1728192414]	2000000 OPS in 1.829320 seconds, throughput 1093302.429318
+129521	[1728192414]	2000000 OPS in 1.818006 seconds, throughput 1100106.380287
+129521	[1728192415]	2000000 OPS in 1.815487 seconds, throughput 1101632.785032
+129521	[1728192415]	2000000 OPS in 1.869696 seconds, throughput 1069692.613131
+129521	[1728192416]	2000000 OPS in 1.878359 seconds, throughput 1064759.186077
+129521	[1728192416]	2000000 OPS in 1.912760 seconds, throughput 1045609.485769
+129521	[1728192417]	2000000 OPS in 1.989854 seconds, throughput 1005098.866550
+129521	[1728192417]	2000000 OPS in 1.822611 seconds, throughput 1097326.856910
+129521	[1728192418]	2000000 OPS in 1.843232 seconds, throughput 1085050.606760
+129521	[1728192418]	2000000 OPS in 1.853695 seconds, throughput 1078926.144808
+129521	[1728192419]	2000000 OPS in 1.951662 seconds, throughput 1024767.608326
+129521	[1728192419]	2000000 OPS in 1.878096 seconds, throughput 1064908.290098
+129521	[1728192420]	2000000 OPS in 1.934897 seconds, throughput 1033646.752256
+129521	[1728192420]	2000000 OPS in 1.806057 seconds, throughput 1107384.761389
+129521	[1728192421]	2000000 OPS in 1.868542 seconds, throughput 1070353.248683
+129521	[1728192421]	2000000 OPS in 1.829271 seconds, throughput 1093331.715202
+129521	[1728192421]	2000000 OPS in 1.827715 seconds, throughput 1094262.508104
+129521	[1728192422]	2000000 OPS in 1.855908 seconds, throughput 1077639.624378
+129521	[1728192422]	2000000 OPS in 1.860300 seconds, throughput 1075095.414718
+129521	[1728192423]	2000000 OPS in 1.796086 seconds, throughput 1113532.425507
+129521	[1728192423]	2000000 OPS in 1.819091 seconds, throughput 1099450.219918
+129521	[1728192423]	2000000 OPS in 1.798827 seconds, throughput 1111835.657348
+129521	[1728192424]	2000000 OPS in 1.819603 seconds, throughput 1099140.856549
+129521	[1728192425]	2000000 OPS in 1.879505 seconds, throughput 1064109.965124
+129521	[1728192425]	2000000 OPS in 1.820414 seconds, throughput 1098651.185939
+129521	[1728192425]	2000000 OPS in 1.840366 seconds, throughput 1086740.354908
+129521	[1728192426]	2000000 OPS in 1.874832 seconds, throughput 1066762.248564
+129521	[1728192426]	2000000 OPS in 1.819973 seconds, throughput 1098917.401522
+129521	[1728192427]	2000000 OPS in 1.860293 seconds, throughput 1075099.460139
+129521	[1728192427]	2000000 OPS in 1.881891 seconds, throughput 1062760.808145
+129521	[1728192428]	2000000 OPS in 1.902525 seconds, throughput 1051234.543567
+129521	[1728192428]	2000000 OPS in 1.865070 seconds, throughput 1072345.810077
+129521	[1728192429]	2000000 OPS in 1.905921 seconds, throughput 1049361.437331
+129521	[1728192429]	2000000 OPS in 1.810164 seconds, throughput 1104872.265717
+129521	[1728192430]	2000000 OPS in 1.889125 seconds, throughput 1058691.193013
+129521	[1728192430]	2000000 OPS in 1.865410 seconds, throughput 1072150.358366
+129521	[1728192431]	2000000 OPS in 1.844700 seconds, throughput 1084187.130699
+129521	[1728192431]	2000000 OPS in 1.856088 seconds, throughput 1077535.116869
+129521	[1728192432]	2000000 OPS in 1.842728 seconds, throughput 1085347.376281
+129521	[1728192432]	2000000 OPS in 1.808983 seconds, throughput 1105593.584904
+129521	[1728192432]	2000000 OPS in 1.870003 seconds, throughput 1069517.000775
+129521	[1728192433]	2000000 OPS in 1.855824 seconds, throughput 1077688.401486
+129521	[1728192434]	2000000 OPS in 1.891985 seconds, throughput 1057090.833173
+129521	[1728192434]	2000000 OPS in 1.812900 seconds, throughput 1103204.809973
+129521	[1728192434]	2000000 OPS in 1.855802 seconds, throughput 1077701.177173
+129521	[1728192434]	2000000 OPS in 1.841100 seconds, throughput 1086307.099017
+129521	[1728192436]	2000000 OPS in 1.959093 seconds, throughput 1020880.580963
+129521	[1728192436]	2000000 OPS in 1.894383 seconds, throughput 1055752.717376
+129521	[1728192436]	2000000 OPS in 1.863046 seconds, throughput 1073510.798982
+129521	[1728192436]	2000000 OPS in 1.885396 seconds, throughput 1060785.108274
+129521	[1728192437]	2000000 OPS in 1.835387 seconds, throughput 1089688.441729
+129521	[1728192437]	2000000 OPS in 1.890508 seconds, throughput 1057916.708102
+129521	[1728192438]	2000000 OPS in 1.817632 seconds, throughput 1100332.740621
+129521	[1728192438]	2000000 OPS in 1.847095 seconds, throughput 1082781.340429
+129521	[1728192439]	2000000 OPS in 1.811523 seconds, throughput 1104043.393322
+129521	[1728192439]	2000000 OPS in 1.978922 seconds, throughput 1010651.253561
+129521	[1728192440]	2000000 OPS in 1.878765 seconds, throughput 1064529.092249
+129521	[1728192440]	2000000 OPS in 1.884907 seconds, throughput 1061060.306954
+129521	[1728192441]	2000000 OPS in 1.853981 seconds, throughput 1078759.706815
+129521	[1728192441]	2000000 OPS in 1.981372 seconds, throughput 1009401.566187
+129521	[1728192442]	2000000 OPS in 1.861062 seconds, throughput 1074655.223738
+129521	[1728192442]	2000000 OPS in 1.900444 seconds, throughput 1052385.653037
+129521	[1728192443]	2000000 OPS in 1.836535 seconds, throughput 1089007.288181
+129521	[1728192443]	2000000 OPS in 1.909973 seconds, throughput 1047135.221283
+129521	[1728192444]	2000000 OPS in 1.852668 seconds, throughput 1079524.232080
+129521	[1728192444]	2000000 OPS in 1.806792 seconds, throughput 1106934.279098
+129521	[1728192445]	2000000 OPS in 1.851956 seconds, throughput 1079939.264216
+129521	[1728192445]	2000000 OPS in 1.854265 seconds, throughput 1078594.483529
+129521	[1728192445]	2000000 OPS in 1.786263 seconds, throughput 1119655.952119
+129521	[1728192446]	2000000 OPS in 1.874009 seconds, throughput 1067230.733684
+129521	[1728192447]	2000000 OPS in 1.803320 seconds, throughput 1109065.501409
+129521	[1728192447]	2000000 OPS in 1.832922 seconds, throughput 1091153.906167
+129521	[1728192447]	2000000 OPS in 1.806682 seconds, throughput 1107001.674894
+129521	[1728192447]	2000000 OPS in 1.863603 seconds, throughput 1073189.944425
+129521	[1728192448]	2000000 OPS in 1.865406 seconds, throughput 1072152.657384
+129521	[1728192449]	2000000 OPS in 1.879290 seconds, throughput 1064231.704527
+129521	[1728192449]	2000000 OPS in 1.869611 seconds, throughput 1069741.245639
+129521	[1728192449]	2000000 OPS in 1.872558 seconds, throughput 1068057.705022
+129521	[1728192450]	2000000 OPS in 1.911014 seconds, throughput 1046564.808002
+129521	[1728192451]	2000000 OPS in 1.824945 seconds, throughput 1095923.438789
+129521	[1728192451]	2000000 OPS in 1.818714 seconds, throughput 1099678.124213
+129521	[1728192451]	2000000 OPS in 1.866944 seconds, throughput 1071269.411402
+129521	[1728192452]	2000000 OPS in 1.909210 seconds, throughput 1047553.700222
+129521	[1728192453]	2000000 OPS in 1.852845 seconds, throughput 1079421.106461
+129521	[1728192453]	2000000 OPS in 1.837486 seconds, throughput 1088443.667054
+129521	[1728192453]	2000000 OPS in 1.889436 seconds, throughput 1058516.933095
+129521	[1728192454]	2000000 OPS in 1.951949 seconds, throughput 1024616.934151
+129521	[1728192454]	2000000 OPS in 1.924571 seconds, throughput 1039192.630462
+129521	[1728192455]	2000000 OPS in 1.898430 seconds, throughput 1053502.104370
+129521	[1728192455]	2000000 OPS in 1.858690 seconds, throughput 1076026.663941
+129521	[1728192456]	2000000 OPS in 1.905531 seconds, throughput 1049576.207367
+129521	[1728192456]	2000000 OPS in 1.889067 seconds, throughput 1058723.697995
+129521	[1728192456]	2000000 OPS in 1.860640 seconds, throughput 1074898.959498
+129521	[1728192457]	2000000 OPS in 1.831157 seconds, throughput 1092205.638293
+129521	[1728192458]	2000000 OPS in 1.883026 seconds, throughput 1062120.225637
+129521	[1728192458]	2000000 OPS in 1.833558 seconds, throughput 1090775.421339
+129521	[1728192458]	2000000 OPS in 1.839896 seconds, throughput 1087017.961885
+129521	[1728192459]	2000000 OPS in 1.807599 seconds, throughput 1106440.089865
+129521	[1728192460]	2000000 OPS in 1.856028 seconds, throughput 1077569.950453
+129521	[1728192460]	2000000 OPS in 1.831405 seconds, throughput 1092057.737093
+129521	[1728192460]	2000000 OPS in 1.821648 seconds, throughput 1097906.950190
+129521	[1728192460]	2000000 OPS in 1.832601 seconds, throughput 1091345.033643
+129521	[1728192462]	2000000 OPS in 1.904761 seconds, throughput 1050000.498750
+129521	[1728192462]	2000000 OPS in 1.893276 seconds, throughput 1056370.016839
+129521	[1728192462]	2000000 OPS in 1.865339 seconds, throughput 1072191.167396
+129521	[1728192462]	2000000 OPS in 1.887389 seconds, throughput 1059664.965728
+129521	[1728192464]	2000000 OPS in 1.874826 seconds, throughput 1066765.662520
+129521	[1728192464]	2000000 OPS in 1.865662 seconds, throughput 1072005.540125
+129521	[1728192464]	2000000 OPS in 1.818177 seconds, throughput 1100002.915008
+129521	[1728192464]	2000000 OPS in 1.807982 seconds, throughput 1106205.703375
+129521	[1728192466]	2000000 OPS in 1.915306 seconds, throughput 1044219.565960
+129521	[1728192466]	2000000 OPS in 1.901574 seconds, throughput 1051760.278590
+129521	[1728192466]	2000000 OPS in 2.001037 seconds, throughput 999481.768703
+129521	[1728192466]	2000000 OPS in 1.940629 seconds, throughput 1030593.688953
+129521	[1728192467]	2000000 OPS in 1.922254 seconds, throughput 1040445.227322
+129521	[1728192468]	2000000 OPS in 1.844347 seconds, throughput 1084394.639404
+129521	[1728192468]	2000000 OPS in 1.966023 seconds, throughput 1017282.096903
+129521	[1728192468]	2000000 OPS in 1.835670 seconds, throughput 1089520.447575
+129521	[1728192469]	2000000 OPS in 1.844596 seconds, throughput 1084248.258155
+129521	[1728192469]	2000000 OPS in 1.820368 seconds, throughput 1098678.948432
+129521	[1728192470]	2000000 OPS in 1.897453 seconds, throughput 1054044.553409
+129521	[1728192470]	2000000 OPS in 1.821143 seconds, throughput 1098211.398007
+129521	[1728192471]	2000000 OPS in 1.833653 seconds, throughput 1090718.909194
+129521	[1728192471]	2000000 OPS in 1.866046 seconds, throughput 1071784.939921
+129521	[1728192472]	2000000 OPS in 1.852111 seconds, throughput 1079848.885947
+129521	[1728192472]	2000000 OPS in 1.815911 seconds, throughput 1101375.563009
+129521	[1728192473]	2000000 OPS in 1.796474 seconds, throughput 1113291.926296
+129521	[1728192473]	2000000 OPS in 1.898801 seconds, throughput 1053296.264327
+129521	[1728192473]	2000000 OPS in 1.856394 seconds, throughput 1077357.500617
+129521	[1728192473]	2000000 OPS in 1.911399 seconds, throughput 1046354.005626
+129521	[1728192475]	2000000 OPS in 1.851789 seconds, throughput 1080036.656444
+129521	[1728192475]	2000000 OPS in 1.826069 seconds, throughput 1095248.865185
+129521	[1728192475]	2000000 OPS in 1.850402 seconds, throughput 1080846.216120
+129521	[1728192475]	2000000 OPS in 1.841130 seconds, throughput 1086289.398359
+129521	[1728192477]	2000000 OPS in 1.785243 seconds, throughput 1120295.668433
+129521	[1728192477]	2000000 OPS in 1.805541 seconds, throughput 1107701.237468
+129521	[1728192477]	2000000 OPS in 1.821971 seconds, throughput 1097712.312655
+129521	[1728192477]	2000000 OPS in 1.832216 seconds, throughput 1091574.355862
+129521	[1728192479]	2000000 OPS in 1.842251 seconds, throughput 1085628.396999
+129521	[1728192479]	2000000 OPS in 1.842552 seconds, throughput 1085451.048329
+129521	[1728192479]	2000000 OPS in 1.864833 seconds, throughput 1072482.093571
+129521	[1728192479]	2000000 OPS in 1.867230 seconds, throughput 1071105.327142
+129521	[1728192480]	2000000 OPS in 1.816034 seconds, throughput 1101300.966832
+129521	[1728192480]	2000000 OPS in 1.888075 seconds, throughput 1059279.954451
+129521	[1728192481]	2000000 OPS in 1.809954 seconds, throughput 1105000.458575
+129521	[1728192481]	2000000 OPS in 1.871339 seconds, throughput 1068753.443390
+129521	[1728192482]	2000000 OPS in 1.803193 seconds, throughput 1109143.613579
+129521	[1728192482]	2000000 OPS in 1.853203 seconds, throughput 1079212.584914
+129521	[1728192483]	2000000 OPS in 1.865982 seconds, throughput 1071821.700317
+129521	[1728192483]	2000000 OPS in 1.859818 seconds, throughput 1075374.041976
+129521	[1728192484]	2000000 OPS in 1.856566 seconds, throughput 1077257.689735
+129521	[1728192484]	2000000 OPS in 1.871371 seconds, throughput 1068735.167960
+129521	[1728192484]	2000000 OPS in 1.849946 seconds, throughput 1081112.637882
+129521	[1728192485]	2000000 OPS in 1.883855 seconds, throughput 1061652.834215
+129521	[1728192486]	2000000 OPS in 1.845621 seconds, throughput 1083646.100689
+129521	[1728192486]	2000000 OPS in 1.862624 seconds, throughput 1073754.015840
+129521	[1728192486]	2000000 OPS in 1.876316 seconds, throughput 1065918.533978
+129521	[1728192486]	2000000 OPS in 1.912834 seconds, throughput 1045569.035264
+129521	[1728192488]	2000000 OPS in 1.851190 seconds, throughput 1080386.130003
+129521	[1728192488]	2000000 OPS in 1.884172 seconds, throughput 1061474.217853
+129521	[1728192488]	2000000 OPS in 1.843545 seconds, throughput 1084866.385144
+129521	[1728192488]	2000000 OPS in 1.902350 seconds, throughput 1051331.248193
+129521	[1728192490]	2000000 OPS in 1.879383 seconds, throughput 1064179.041739
+129521	[1728192490]	2000000 OPS in 1.914671 seconds, throughput 1044565.881031
+129521	[1728192490]	2000000 OPS in 1.912845 seconds, throughput 1045563.022618
+129521	[1728192490]	2000000 OPS in 1.931009 seconds, throughput 1035727.953624
+129521	[1728192491]	2000000 OPS in 1.826650 seconds, throughput 1094900.500917
+129521	[1728192492]	2000000 OPS in 1.825630 seconds, throughput 1095512.234133
+129521	[1728192492]	2000000 OPS in 1.838040 seconds, throughput 1088115.601401
+129521	[1728192492]	2000000 OPS in 1.869611 seconds, throughput 1069741.245639
+129521	[1728192493]	2000000 OPS in 1.876988 seconds, throughput 1065536.913395
+129521	[1728192493]	2000000 OPS in 1.849044 seconds, throughput 1081640.025873
+129521	[1728192494]	2000000 OPS in 1.798263 seconds, throughput 1112184.369027
+129521	[1728192494]	2000000 OPS in 1.878195 seconds, throughput 1064852.158588
+129521	[1728192495]	2000000 OPS in 1.860233 seconds, throughput 1075134.136423
+129521	[1728192495]	2000000 OPS in 1.898041 seconds, throughput 1053718.017682
+129521	[1728192496]	2000000 OPS in 1.857500 seconds, throughput 1076716.016151
+129521	[1728192496]	2000000 OPS in 1.928120 seconds, throughput 1037279.837355
+129521	[1728192497]	2000000 OPS in 1.858276 seconds, throughput 1076266.388846
+129521	[1728192497]	2000000 OPS in 1.867582 seconds, throughput 1070903.446274
+129521	[1728192497]	2000000 OPS in 1.861306 seconds, throughput 1074514.346378
+129521	[1728192498]	2000000 OPS in 1.912676 seconds, throughput 1045655.406352
+129521	[1728192499]	2000000 OPS in 1.845514 seconds, throughput 1083708.928786
+129521	[1728192499]	2000000 OPS in 1.988690 seconds, throughput 1005687.160895
+129521	[1728192499]	2000000 OPS in 1.857247 seconds, throughput 1076862.689777
+129521	[1728192500]	2000000 OPS in 1.896149 seconds, throughput 1054769.430040
+129521	[1728192501]	2000000 OPS in 1.835470 seconds, throughput 1089639.165990
+129521	[1728192501]	2000000 OPS in 1.862491 seconds, throughput 1073830.692336
+129521	[1728192501]	2000000 OPS in 1.788896 seconds, throughput 1118007.978105
+129521	[1728192502]	2000000 OPS in 1.882020 seconds, throughput 1062687.962933
+129521	[1728192503]	2000000 OPS in 1.807493 seconds, throughput 1106504.976783
+129521	[1728192503]	2000000 OPS in 1.842455 seconds, throughput 1085508.194230
+129521	[1728192503]	2000000 OPS in 1.842306 seconds, throughput 1085595.986769
+129521	[1728192504]	2000000 OPS in 1.837898 seconds, throughput 1088199.671581
+129521	[1728192504]	2000000 OPS in 1.826632 seconds, throughput 1094911.290287
+129521	[1728192505]	2000000 OPS in 1.835533 seconds, throughput 1089601.766898
+129521	[1728192505]	2000000 OPS in 1.849692 seconds, throughput 1081261.096442
+129521	[1728192505]	2000000 OPS in 1.888212 seconds, throughput 1059203.097957
+129521	[1728192506]	2000000 OPS in 1.911315 seconds, throughput 1046399.991629
+129521	[1728192507]	2000000 OPS in 1.893762 seconds, throughput 1056098.918449
+129521	[1728192507]	2000000 OPS in 1.903106 seconds, throughput 1050913.611748
+129521	[1728192507]	2000000 OPS in 1.934421 seconds, throughput 1033901.100122
+129521	[1728192508]	2000000 OPS in 1.796400 seconds, throughput 1113337.786684
+129521	[1728192508]	2000000 OPS in 1.823521 seconds, throughput 1096779.252885
+129521	[1728192509]	2000000 OPS in 1.811860 seconds, throughput 1103838.044882
+129521	[1728192509]	2000000 OPS in 1.885470 seconds, throughput 1060743.475102
+129521	[1728192510]	2000000 OPS in 1.810930 seconds, throughput 1104404.919020
+129521	[1728192510]	2000000 OPS in 1.875615 seconds, throughput 1066316.914719
+129521	[1728192510]	2000000 OPS in 1.832800 seconds, throughput 1091226.538629
+129521	[1728192511]	2000000 OPS in 1.871407 seconds, throughput 1068714.608848
+129521	[1728192512]	2000000 OPS in 1.887470 seconds, throughput 1059619.490641
+129521	[1728192512]	2000000 OPS in 1.818688 seconds, throughput 1099693.845233
+129521	[1728192512]	2000000 OPS in 1.842157 seconds, throughput 1085683.793509
+129521	[1728192513]	2000000 OPS in 1.945809 seconds, throughput 1027850.112729
+129521	[1728192514]	2000000 OPS in 1.840750 seconds, throughput 1086513.649328
+129521	[1728192514]	2000000 OPS in 1.889015 seconds, throughput 1058752.842090
+129521	[1728192514]	2000000 OPS in 1.848741 seconds, throughput 1081817.301612
+129521	[1728192515]	2000000 OPS in 1.937057 seconds, throughput 1032494.139305
+129521	[1728192515]	2000000 OPS in 1.814517 seconds, throughput 1102221.693156
+129521	[1728192516]	2000000 OPS in 1.909492 seconds, throughput 1047398.994078
+129521	[1728192516]	2000000 OPS in 1.906910 seconds, throughput 1048817.196407
+129521	[1728192517]	2000000 OPS in 1.872147 seconds, throughput 1068292.180048
+129521	[1728192517]	2000000 OPS in 1.877703 seconds, throughput 1065131.173567
+129521	[1728192518]	2000000 OPS in 1.865735 seconds, throughput 1071963.596116
+129521	[1728192518]	2000000 OPS in 1.875855 seconds, throughput 1066180.488364
+129521	[1728192519]	2000000 OPS in 1.986349 seconds, throughput 1006872.407618
+129521	[1728192519]	2000000 OPS in 1.850761 seconds, throughput 1080636.559772
+129521	[1728192520]	2000000 OPS in 1.893438 seconds, throughput 1056279.635246
+129521	[1728192520]	2000000 OPS in 1.855647 seconds, throughput 1077791.196278
+129521	[1728192521]	2000000 OPS in 1.929934 seconds, throughput 1036304.868457
+129521	[1728192521]	2000000 OPS in 1.823928 seconds, throughput 1096534.512327
+129521	[1728192522]	2000000 OPS in 1.863413 seconds, throughput 1073299.370564
+129521	[1728192522]	2000000 OPS in 1.855030 seconds, throughput 1078149.679520
+129521	[1728192523]	2000000 OPS in 1.927528 seconds, throughput 1037598.416210
+129521	[1728192523]	2000000 OPS in 1.826820 seconds, throughput 1094798.611795
+129521	[1728192523]	2000000 OPS in 1.836180 seconds, throughput 1089217.832674
+129521	[1728192523]	2000000 OPS in 1.879359 seconds, throughput 1064192.631637
+129521	[1728192525]	2000000 OPS in 1.888295 seconds, throughput 1059156.540689
+129521	[1728192525]	2000000 OPS in 1.864144 seconds, throughput 1072878.490074
+129521	[1728192525]	2000000 OPS in 1.847465 seconds, throughput 1082564.487013
+129521	[1728192525]	2000000 OPS in 1.879525 seconds, throughput 1064098.641944
+129521	[1728192526]	2000000 OPS in 1.881637 seconds, throughput 1062904.268996
+129521	[1728192527]	2000000 OPS in 1.856937 seconds, throughput 1077042.462938
+129521	[1728192527]	2000000 OPS in 1.813452 seconds, throughput 1102869.003426
+129521	[1728192527]	2000000 OPS in 1.838106 seconds, throughput 1088076.530951
+129521	[1728192528]	2000000 OPS in 1.864228 seconds, throughput 1072830.147385
+129521	[1728192528]	2000000 OPS in 1.831894 seconds, throughput 1091766.226648
+129521	[1728192529]	2000000 OPS in 1.820645 seconds, throughput 1098511.791151
+129521	[1728192529]	2000000 OPS in 1.911043 seconds, throughput 1046548.926424
+129521	[1728192530]	2000000 OPS in 1.887380 seconds, throughput 1059670.018756
+129521	[1728192530]	2000000 OPS in 1.905358 seconds, throughput 1049671.505302
+129521	[1728192531]	2000000 OPS in 1.845122 seconds, throughput 1083939.164998
+129521	[1728192531]	2000000 OPS in 1.864123 seconds, throughput 1072890.576427
+129521	[1728192532]	2000000 OPS in 1.778913 seconds, throughput 1124282.075627
+129521	[1728192532]	2000000 OPS in 1.840132 seconds, throughput 1086878.550017
+129521	[1728192532]	2000000 OPS in 1.796823 seconds, throughput 1113075.689703
+129521	[1728192533]	2000000 OPS in 1.824757 seconds, throughput 1096036.348949
+129521	[1728192534]	2000000 OPS in 1.929193 seconds, throughput 1036702.911528
+129521	[1728192534]	2000000 OPS in 1.944678 seconds, throughput 1028447.897287
+129521	[1728192534]	2000000 OPS in 1.893673 seconds, throughput 1056148.553631
+129521	[1728192535]	2000000 OPS in 1.874696 seconds, throughput 1066839.636933
+129521	[1728192536]	2000000 OPS in 1.785348 seconds, throughput 1120229.781533
+129521	[1728192536]	2000000 OPS in 1.816863 seconds, throughput 1100798.464166
+129521	[1728192536]	2000000 OPS in 1.772236 seconds, throughput 1128517.872338
+129521	[1728192536]	2000000 OPS in 1.800895 seconds, throughput 1110558.916539
+129521	[1728192538]	2000000 OPS in 1.843290 seconds, throughput 1085016.465125
+129521	[1728192538]	2000000 OPS in 1.879718 seconds, throughput 1063989.385642
+129521	[1728192538]	2000000 OPS in 1.893740 seconds, throughput 1056111.187386
+129521	[1728192538]	2000000 OPS in 1.893366 seconds, throughput 1056319.802933
+129521	[1728192539]	2000000 OPS in 1.834291 seconds, throughput 1090339.537184
+129521	[1728192540]	2000000 OPS in 1.821062 seconds, throughput 1098260.245944
+129521	[1728192540]	2000000 OPS in 1.840847 seconds, throughput 1086456.397517
+129521	[1728192540]	2000000 OPS in 1.855832 seconds, throughput 1077683.755857
+129521	[1728192541]	2000000 OPS in 1.917274 seconds, throughput 1043147.719105
+129521	[1728192541]	2000000 OPS in 1.979593 seconds, throughput 1010308.684664
+129521	[1728192542]	2000000 OPS in 1.927586 seconds, throughput 1037567.195445
+129521	[1728192542]	2000000 OPS in 1.918049 seconds, throughput 1042726.228579
+129521	[1728192543]	2000000 OPS in 1.877560 seconds, throughput 1065212.296811
+129521	[1728192543]	2000000 OPS in 1.877714 seconds, throughput 1065124.933829
+129521	[1728192544]	2000000 OPS in 1.898815 seconds, throughput 1053288.498353
+129521	[1728192544]	2000000 OPS in 1.903482 seconds, throughput 1050706.021911
+129521	[1728192545]	2000000 OPS in 1.855968 seconds, throughput 1077604.786289
+129521	[1728192545]	2000000 OPS in 1.867661 seconds, throughput 1070858.148240
+129521	[1728192546]	2000000 OPS in 1.833400 seconds, throughput 1090869.422930
+129521	[1728192546]	2000000 OPS in 1.872721 seconds, throughput 1067964.742212
+129521	[1728192547]	2000000 OPS in 1.835615 seconds, throughput 1089553.092560
+129521	[1728192547]	2000000 OPS in 1.806178 seconds, throughput 1107310.575148
+129521	[1728192547]	2000000 OPS in 1.818061 seconds, throughput 1100073.099857
+129521	[1728192548]	2000000 OPS in 1.804161 seconds, throughput 1108548.516457
+129521	[1728192549]	2000000 OPS in 1.844198 seconds, throughput 1084482.251906
+129521	[1728192549]	2000000 OPS in 1.835342 seconds, throughput 1089715.159354
+129521	[1728192549]	2000000 OPS in 1.832922 seconds, throughput 1091153.906167
+129521	[1728192549]	2000000 OPS in 1.849661 seconds, throughput 1081279.218192
+129521	[1728192551]	2000000 OPS in 1.910626 seconds, throughput 1046777.338945
+129521	[1728192551]	2000000 OPS in 1.973928 seconds, throughput 1013208.181859
+129521	[1728192551]	2000000 OPS in 1.912897 seconds, throughput 1045534.600138
+129521	[1728192551]	2000000 OPS in 1.868870 seconds, throughput 1070165.394062
+129521	[1728192553]	2000000 OPS in 1.847713 seconds, throughput 1082419.185231
+129521	[1728192553]	2000000 OPS in 1.915464 seconds, throughput 1044133.431900
+129521	[1728192553]	2000000 OPS in 1.892874 seconds, throughput 1056594.363914
+129521	[1728192553]	2000000 OPS in 1.796713 seconds, throughput 1113143.835437
+129521	[1728192554]	2000000 OPS in 1.842379 seconds, throughput 1085552.972543
+129521	[1728192555]	2000000 OPS in 1.832272 seconds, throughput 1091540.993914
+129521	[1728192555]	2000000 OPS in 1.860381 seconds, throughput 1075048.605635
+129521	[1728192555]	2000000 OPS in 1.837298 seconds, throughput 1088555.041153
+129521	[1728192556]	2000000 OPS in 1.837620 seconds, throughput 1088364.297298
+129521	[1728192556]	2000000 OPS in 1.902952 seconds, throughput 1050998.658926
+129521	[1728192557]	2000000 OPS in 1.830081 seconds, throughput 1092847.802911
+129521	[1728192557]	2000000 OPS in 1.807167 seconds, throughput 1106704.582366
+129521	[1728192558]	2000000 OPS in 1.923841 seconds, throughput 1039586.951313
+129521	[1728192558]	2000000 OPS in 1.927442 seconds, throughput 1037644.712526
+129521	[1728192559]	2000000 OPS in 1.899930 seconds, throughput 1052670.361540
+129521	[1728192559]	2000000 OPS in 1.834563 seconds, throughput 1090177.878874
+129521	[1728192560]	2000000 OPS in 1.836240 seconds, throughput 1089182.241973
+129521	[1728192560]	2000000 OPS in 1.917750 seconds, throughput 1042888.801981
+129521	[1728192560]	2000000 OPS in 1.838805 seconds, throughput 1087662.911510
+129521	[1728192560]	2000000 OPS in 1.827327 seconds, throughput 1094494.855053
+129521	[1728192562]	2000000 OPS in 1.832815 seconds, throughput 1091217.607887
+129521	[1728192562]	2000000 OPS in 1.863686 seconds, throughput 1073142.149482
+129521	[1728192562]	2000000 OPS in 1.840139 seconds, throughput 1086874.415465
+129521	[1728192562]	2000000 OPS in 1.887723 seconds, throughput 1059477.476303
+129521	[1728192564]	2000000 OPS in 1.825029 seconds, throughput 1095872.997087
+129521	[1728192564]	2000000 OPS in 1.818751 seconds, throughput 1099655.752767
+129521	[1728192564]	2000000 OPS in 1.830192 seconds, throughput 1092781.522376
+129521	[1728192564]	2000000 OPS in 1.820743 seconds, throughput 1098452.664654
+129521	[1728192566]	2000000 OPS in 1.831681 seconds, throughput 1091893.184457
+129521	[1728192566]	2000000 OPS in 1.927671 seconds, throughput 1037521.444271
+129521	[1728192566]	2000000 OPS in 1.864030 seconds, throughput 1072944.104977
+129521	[1728192566]	2000000 OPS in 1.880344 seconds, throughput 1063635.164629
+129521	[1728192567]	2000000 OPS in 1.882685 seconds, throughput 1062312.601418
+129521	[1728192568]	2000000 OPS in 1.837654 seconds, throughput 1088344.160544
+129521	[1728192568]	2000000 OPS in 1.887356 seconds, throughput 1059683.493734
+129521	[1728192568]	2000000 OPS in 1.845667 seconds, throughput 1083619.092718
+129521	[1728192569]	2000000 OPS in 1.841461 seconds, throughput 1086094.139382
+129521	[1728192570]	2000000 OPS in 1.896534 seconds, throughput 1054555.309844
+129521	[1728192570]	2000000 OPS in 1.872755 seconds, throughput 1067945.353236
+129521	[1728192570]	2000000 OPS in 1.962241 seconds, throughput 1019242.794336
+129521	[1728192571]	2000000 OPS in 1.877613 seconds, throughput 1065182.228713
+129521	[1728192572]	2000000 OPS in 1.854634 seconds, throughput 1078379.885196
+129521	[1728192572]	2000000 OPS in 1.909191 seconds, throughput 1047564.125328
+129521	[1728192572]	2000000 OPS in 1.941599 seconds, throughput 1030078.816481
+129521	[1728192573]	2000000 OPS in 1.873897 seconds, throughput 1067294.520457
+129521	[1728192573]	2000000 OPS in 1.830251 seconds, throughput 1092746.295453
+129521	[1728192573]	2000000 OPS in 1.814286 seconds, throughput 1102362.031124
+129521	[1728192574]	2000000 OPS in 1.859128 seconds, throughput 1075773.158169
+129521	[1728192575]	2000000 OPS in 1.858256 seconds, throughput 1076277.972465
+129521	[1728192575]	2000000 OPS in 1.833302 seconds, throughput 1090927.735856
+129521	[1728192575]	2000000 OPS in 1.808723 seconds, throughput 1105752.511579
+129521	[1728192575]	2000000 OPS in 1.870883 seconds, throughput 1069013.936200
+129521	[1728192577]	2000000 OPS in 1.868876 seconds, throughput 1070161.958311
+129521	[1728192577]	2000000 OPS in 1.853622 seconds, throughput 1078968.635461
+129521	[1728192577]	2000000 OPS in 1.840359 seconds, throughput 1086744.488439
+129521	[1728192577]	2000000 OPS in 1.937487 seconds, throughput 1032264.990681
+129521	[1728192579]	2000000 OPS in 1.901078 seconds, throughput 1052034.687688
+129521	[1728192579]	2000000 OPS in 1.832951 seconds, throughput 1091136.642496
+129521	[1728192579]	2000000 OPS in 1.927855 seconds, throughput 1037422.420255
+129521	[1728192579]	2000000 OPS in 1.854788 seconds, throughput 1078290.349086
+129521	[1728192580]	2000000 OPS in 1.847014 seconds, throughput 1082828.825336
+129521	[1728192581]	2000000 OPS in 1.865137 seconds, throughput 1072307.288955
+129521	[1728192581]	2000000 OPS in 1.849259 seconds, throughput 1081514.271392
+129521	[1728192581]	2000000 OPS in 1.878732 seconds, throughput 1064547.790744
+129521	[1728192582]	2000000 OPS in 1.848431 seconds, throughput 1081998.732979
+129521	[1728192583]	2000000 OPS in 1.848638 seconds, throughput 1081877.576897
+129521	[1728192583]	2000000 OPS in 1.883539 seconds, throughput 1061830.946957
+129521	[1728192583]	2000000 OPS in 1.888605 seconds, throughput 1058982.688281
+129521	[1728192584]	2000000 OPS in 1.842374 seconds, throughput 1085555.918614
+129521	[1728192585]	2000000 OPS in 1.843817 seconds, throughput 1084706.345586
+129521	[1728192585]	2000000 OPS in 1.859444 seconds, throughput 1075590.337757
+129521	[1728192585]	2000000 OPS in 1.889312 seconds, throughput 1058586.406057
+129521	[1728192586]	2000000 OPS in 1.879783 seconds, throughput 1063952.594528
+129521	[1728192586]	2000000 OPS in 1.892207 seconds, throughput 1056966.811771
+129521	[1728192586]	2000000 OPS in 1.850855 seconds, throughput 1080581.677117
+129521	[1728192587]	2000000 OPS in 1.885768 seconds, throughput 1060575.850264
+129521	[1728192588]	2000000 OPS in 1.828045 seconds, throughput 1094064.971048
+129521	[1728192588]	2000000 OPS in 1.822514 seconds, throughput 1097385.260141
+129521	[1728192588]	2000000 OPS in 1.866533 seconds, throughput 1071505.298862
+129521	[1728192589]	2000000 OPS in 1.887122 seconds, throughput 1059814.892731
+129521	[1728192590]	2000000 OPS in 1.855837 seconds, throughput 1077680.852359
+129521	[1728192590]	2000000 OPS in 1.838581 seconds, throughput 1087795.424841
+129521	[1728192590]	2000000 OPS in 1.895415 seconds, throughput 1055177.889802
+129521	[1728192591]	2000000 OPS in 1.900112 seconds, throughput 1052569.532743
+129521	[1728192592]	2000000 OPS in 1.926360 seconds, throughput 1038227.537947
+129521	[1728192592]	2000000 OPS in 1.817092 seconds, throughput 1100659.735445
+129521	[1728192592]	2000000 OPS in 1.822084 seconds, throughput 1097644.235941
+129521	[1728192593]	2000000 OPS in 1.934335 seconds, throughput 1033947.067080
+129521	[1728192593]	2000000 OPS in 1.835789 seconds, throughput 1089449.822392
+129521	[1728192594]	2000000 OPS in 1.834614 seconds, throughput 1090147.573277
+129521	[1728192594]	2000000 OPS in 1.853167 seconds, throughput 1079233.549918
+129521	[1728192594]	2000000 OPS in 1.921315 seconds, throughput 1040953.721800
+129521	[1728192595]	2000000 OPS in 1.914943 seconds, throughput 1044417.510077
+129521	[1728192596]	2000000 OPS in 1.892796 seconds, throughput 1056637.904983
+129521	[1728192596]	2000000 OPS in 1.917485 seconds, throughput 1043032.931157
+129521	[1728192596]	2000000 OPS in 1.877367 seconds, throughput 1065321.804421
+129521	[1728192597]	2000000 OPS in 1.906235 seconds, throughput 1049188.583779
+129521	[1728192597]	2000000 OPS in 1.816533 seconds, throughput 1100998.440436
+129521	[1728192598]	2000000 OPS in 1.852075 seconds, throughput 1079869.875680
+129521	[1728192598]	2000000 OPS in 1.875795 seconds, throughput 1066214.591680
+129521	[1728192599]	2000000 OPS in 1.872001 seconds, throughput 1068375.497663
+129521	[1728192599]	2000000 OPS in 1.866777 seconds, throughput 1071365.246090
+129521	[1728192599]	2000000 OPS in 1.840054 seconds, throughput 1086924.622864
+129521	[1728192600]	2000000 OPS in 1.906343 seconds, throughput 1049129.144126
+129521	[1728192601]	2000000 OPS in 1.841283 seconds, throughput 1086199.133973
+129521	[1728192601]	2000000 OPS in 1.814262 seconds, throughput 1102376.613742
+129521	[1728192601]	2000000 OPS in 1.823274 seconds, throughput 1096927.834215
+129521	[1728192602]	2000000 OPS in 1.880211 seconds, throughput 1063710.402715
+129521	[1728192603]	2000000 OPS in 1.852774 seconds, throughput 1079462.470868
+129521	[1728192603]	2000000 OPS in 1.834845 seconds, throughput 1090010.327848
+129521	[1728192603]	2000000 OPS in 1.862327 seconds, throughput 1073925.255876
+129521	[1728192604]	2000000 OPS in 1.834011 seconds, throughput 1090506.000237
+129521	[1728192605]	2000000 OPS in 1.836884 seconds, throughput 1088800.381516
+129521	[1728192605]	2000000 OPS in 1.824944 seconds, throughput 1095924.039313
+129521	[1728192605]	2000000 OPS in 1.806953 seconds, throughput 1106835.650955
+129521	[1728192606]	2000000 OPS in 1.918748 seconds, throughput 1042346.363358
+129521	[1728192607]	2000000 OPS in 1.823550 seconds, throughput 1096761.810754
+129521	[1728192607]	2000000 OPS in 1.860199 seconds, throughput 1075153.787310
+129521	[1728192607]	2000000 OPS in 1.849753 seconds, throughput 1081225.439288
+129521	[1728192608]	2000000 OPS in 1.884899 seconds, throughput 1061064.810369
+129521	[1728192608]	2000000 OPS in 1.827089 seconds, throughput 1094637.425982
+129521	[1728192609]	2000000 OPS in 1.861700 seconds, throughput 1074286.942042
+129521	[1728192609]	2000000 OPS in 1.829834 seconds, throughput 1092995.320887
+129521	[1728192609]	2000000 OPS in 1.843476 seconds, throughput 1084906.990924
+129521	[1728192610]	2000000 OPS in 1.837049 seconds, throughput 1088702.587683
+129521	[1728192610]	2000000 OPS in 1.824030 seconds, throughput 1096473.193972
+129521	[1728192610]	2000000 OPS in 1.788600 seconds, throughput 1118193.000112
+129521	[1728192611]	2000000 OPS in 1.856510 seconds, throughput 1077290.184270
+129521	[1728192612]	2000000 OPS in 1.832020 seconds, throughput 1091691.138743
+129521	[1728192612]	2000000 OPS in 1.794813 seconds, throughput 1114322.216298
+129521	[1728192612]	2000000 OPS in 1.854636 seconds, throughput 1078378.722294
+129521	[1728192613]	2000000 OPS in 1.917419 seconds, throughput 1043068.833677
+129521	[1728192614]	2000000 OPS in 1.898636 seconds, throughput 1053387.800505
+129521	[1728192614]	2000000 OPS in 1.944110 seconds, throughput 1028748.373292
+129521	[1728192614]	2000000 OPS in 1.932976 seconds, throughput 1034673.994918
+129521	[1728192615]	2000000 OPS in 1.950228 seconds, throughput 1025521.118556
+129521	[1728192616]	2000000 OPS in 1.873870 seconds, throughput 1067309.898766
+129521	[1728192616]	2000000 OPS in 1.884880 seconds, throughput 1061075.506133
+129521	[1728192616]	2000000 OPS in 1.844273 seconds, throughput 1084438.149883
+129521	[1728192617]	2000000 OPS in 1.879552 seconds, throughput 1064083.356034
+129521	[1728192618]	2000000 OPS in 1.918008 seconds, throughput 1042748.518254
+129521	[1728192618]	2000000 OPS in 1.883038 seconds, throughput 1062113.457084
+129521	[1728192618]	2000000 OPS in 1.849662 seconds, throughput 1081278.633610
+129521	[1728192619]	2000000 OPS in 1.870660 seconds, throughput 1069141.372564
+129521	[1728192620]	2000000 OPS in 1.854583 seconds, throughput 1078409.540042
+129521	[1728192620]	2000000 OPS in 1.868422 seconds, throughput 1070421.992462
+129521	[1728192620]	2000000 OPS in 1.865164 seconds, throughput 1072291.766300
+129521	[1728192621]	2000000 OPS in 1.838919 seconds, throughput 1087595.484086
+129521	[1728192621]	2000000 OPS in 1.879501 seconds, throughput 1064112.229789
+129521	[1728192622]	2000000 OPS in 1.849265 seconds, throughput 1081510.762384
+129521	[1728192622]	2000000 OPS in 1.856314 seconds, throughput 1077403.930585
+129521	[1728192623]	2000000 OPS in 1.899253 seconds, throughput 1053045.592135
+129521	[1728192623]	2000000 OPS in 1.949250 seconds, throughput 1026035.654739
+129521	[1728192624]	2000000 OPS in 1.944954 seconds, throughput 1028301.954699
+129521	[1728192624]	2000000 OPS in 1.921749 seconds, throughput 1040718.637033
+129521	[1728192625]	2000000 OPS in 1.841404 seconds, throughput 1086127.759036
+129521	[1728192625]	2000000 OPS in 1.823227 seconds, throughput 1096956.111334
+129521	[1728192625]	2000000 OPS in 1.816314 seconds, throughput 1101131.192074
+129521	[1728192625]	2000000 OPS in 1.821750 seconds, throughput 1097845.478249
+129521	[1728192626]	2000000 OPS in 1.832181 seconds, throughput 1091595.208115
+129521	[1728192627]	2000000 OPS in 1.867473 seconds, throughput 1070965.952386
+129521	[1728192627]	2000000 OPS in 1.811047 seconds, throughput 1104333.570581
+129521	[1728192627]	2000000 OPS in 1.852125 seconds, throughput 1079840.723493
+129521	[1728192628]	2000000 OPS in 1.895910 seconds, throughput 1054902.395156
+129521	[1728192629]	2000000 OPS in 1.839719 seconds, throughput 1087122.544258
+129521	[1728192629]	2000000 OPS in 1.901526 seconds, throughput 1051786.828053
+129521	[1728192629]	2000000 OPS in 1.842028 seconds, throughput 1085759.825584
+129521	[1728192630]	2000000 OPS in 1.898522 seconds, throughput 1053451.052977
+129521	[1728192631]	2000000 OPS in 1.855250 seconds, throughput 1078021.829942
+129521	[1728192631]	2000000 OPS in 1.860765 seconds, throughput 1074826.751363
+129521	[1728192631]	2000000 OPS in 1.842441 seconds, throughput 1085516.442589
+129521	[1728192632]	2000000 OPS in 1.850352 seconds, throughput 1080875.422622
+129521	[1728192633]	2000000 OPS in 1.856878 seconds, throughput 1077076.684629
+129521	[1728192633]	2000000 OPS in 1.885331 seconds, throughput 1060821.680649
+129521	[1728192633]	2000000 OPS in 2.041917 seconds, throughput 979471.741506
+129521	[1728192634]	2000000 OPS in 1.931744 seconds, throughput 1035333.874468
+129521	[1728192635]	2000000 OPS in 1.875927 seconds, throughput 1066139.567265
+129521	[1728192635]	2000000 OPS in 1.874312 seconds, throughput 1067058.205891
+129521	[1728192635]	2000000 OPS in 1.880900 seconds, throughput 1063320.750704
+129521	[1728192636]	2000000 OPS in 1.810364 seconds, throughput 1104750.204931
+129521	[1728192636]	2000000 OPS in 1.821977 seconds, throughput 1097708.697750
+129521	[1728192637]	2000000 OPS in 1.833446 seconds, throughput 1090842.053707
+129521	[1728192637]	2000000 OPS in 1.853568 seconds, throughput 1079000.069056
+129521	[1728192638]	2000000 OPS in 1.838154 seconds, throughput 1088048.117840
+129521	[1728192638]	2000000 OPS in 1.763609 seconds, throughput 1134038.213686
+129521	[1728192638]	2000000 OPS in 1.795085 seconds, throughput 1114153.368782
+129521	[1728192638]	2000000 OPS in 1.808762 seconds, throughput 1105728.669665
+129521	[1728192639]	2000000 OPS in 1.847085 seconds, throughput 1082787.202538
+129521	[1728192640]	2000000 OPS in 1.896091 seconds, throughput 1054801.694644
+129521	[1728192640]	2000000 OPS in 1.892542 seconds, throughput 1056779.717438
+129521	[1728192640]	2000000 OPS in 1.946507 seconds, throughput 1027481.534872
+129521	[1728192641]	2000000 OPS in 1.844859 seconds, throughput 1084093.689545
+129521	[1728192642]	2000000 OPS in 1.858206 seconds, throughput 1076306.932601
+129521	[1728192642]	2000000 OPS in 1.851242 seconds, throughput 1080355.782766
+129521	[1728192642]	2000000 OPS in 1.932266 seconds, throughput 1035054.179911
+129521	[1728192643]	2000000 OPS in 1.852633 seconds, throughput 1079544.626486
+129521	[1728192644]	2000000 OPS in 1.855573 seconds, throughput 1077834.178445
+129521	[1728192644]	2000000 OPS in 1.855150 seconds, throughput 1078079.939628
+129521	[1728192644]	2000000 OPS in 1.842979 seconds, throughput 1085199.560060
+129521	[1728192645]	2000000 OPS in 1.832106 seconds, throughput 1091639.894198
+129521	[1728192646]	2000000 OPS in 1.856940 seconds, throughput 1077040.722910
+129521	[1728192646]	2000000 OPS in 1.845589 seconds, throughput 1083664.889637
+129521	[1728192646]	2000000 OPS in 1.952801 seconds, throughput 1024169.897496
+129521	[1728192647]	2000000 OPS in 1.860771 seconds, throughput 1074823.285617
+129521	[1728192647]	2000000 OPS in 1.833744 seconds, throughput 1090664.781998
+129521	[1728192648]	2000000 OPS in 1.826807 seconds, throughput 1094806.402647
+129521	[1728192648]	2000000 OPS in 1.875681 seconds, throughput 1066279.393991
+129521	[1728192649]	2000000 OPS in 1.821337 seconds, throughput 1098094.421845
+129521	[1728192649]	2000000 OPS in 1.835236 seconds, throughput 1089778.099383
+129521	[1728192649]	2000000 OPS in 1.901626 seconds, throughput 1051731.518185
+129521	[1728192650]	2000000 OPS in 1.902519 seconds, throughput 1051237.858860
+129521	[1728192650]	2000000 OPS in 1.828602 seconds, throughput 1093731.714173
+129521	[1728192651]	2000000 OPS in 1.854557 seconds, throughput 1078424.658827
+129521	[1728192651]	2000000 OPS in 1.845721 seconds, throughput 1083587.389427
+129521	[1728192652]	2000000 OPS in 1.871013 seconds, throughput 1068939.659960
+129521	[1728192652]	2000000 OPS in 1.847403 seconds, throughput 1082600.818554
+129521	[1728192653]	2000000 OPS in 1.855553 seconds, throughput 1077845.795836
+129521	[1728192653]	2000000 OPS in 1.871674 seconds, throughput 1068562.153452
+129521	[1728192654]	2000000 OPS in 1.928000 seconds, throughput 1037344.398340
+129521	[1728192654]	2000000 OPS in 1.939937 seconds, throughput 1030961.314723
+129521	[1728192655]	2000000 OPS in 1.876333 seconds, throughput 1065908.876516
+129521	[1728192655]	2000000 OPS in 1.903449 seconds, throughput 1050724.237949
+129521	[1728192656]	2000000 OPS in 1.876253 seconds, throughput 1065954.324923
+129521	[1728192656]	2000000 OPS in 1.922421 seconds, throughput 1040354.844230
+129521	[1728192657]	2000000 OPS in 1.798392 seconds, throughput 1112104.591213
+129521	[1728192657]	2000000 OPS in 1.835263 seconds, throughput 1089762.066799
+129521	[1728192657]	2000000 OPS in 1.853636 seconds, throughput 1078960.486309
+129521	[1728192658]	2000000 OPS in 1.871182 seconds, throughput 1068843.116276
+129521	[1728192659]	2000000 OPS in 1.848598 seconds, throughput 1081900.986586
+129521	[1728192659]	2000000 OPS in 1.851476 seconds, throughput 1080219.241297
+129521	[1728192659]	2000000 OPS in 1.815587 seconds, throughput 1101572.108635
+129521	[1728192660]	2000000 OPS in 1.932311 seconds, throughput 1035030.075386
+129521	[1728192660]	2000000 OPS in 1.811353 seconds, throughput 1104147.010550
+129521	[1728192661]	2000000 OPS in 1.870972 seconds, throughput 1068963.084429
+129521	[1728192661]	2000000 OPS in 1.831855 seconds, throughput 1091789.470236
+129521	[1728192662]	2000000 OPS in 1.948260 seconds, throughput 1026557.030376
+129521	[1728192662]	2000000 OPS in 1.852453 seconds, throughput 1079649.524171
+129521	[1728192663]	2000000 OPS in 1.860686 seconds, throughput 1074872.385776
+129521	[1728192663]	2000000 OPS in 1.876050 seconds, throughput 1066069.667653
+129521	[1728192664]	2000000 OPS in 1.873179 seconds, throughput 1067703.620423
+129521	[1728192664]	2000000 OPS in 1.815465 seconds, throughput 1101646.134737
+129521	[1728192664]	2000000 OPS in 1.833755 seconds, throughput 1090658.239514
+129521	[1728192665]	2000000 OPS in 1.890811 seconds, throughput 1057747.178327
+129521	[1728192666]	2000000 OPS in 1.920277 seconds, throughput 1041516.406227
+129521	[1728192666]	2000000 OPS in 1.894283 seconds, throughput 1055808.451008
+129521	[1728192666]	2000000 OPS in 1.822698 seconds, throughput 1097274.479919
+129521	[1728192667]	2000000 OPS in 1.827089 seconds, throughput 1094637.425982
+129521	[1728192668]	2000000 OPS in 1.916037 seconds, throughput 1043821.178819
+129521	[1728192668]	2000000 OPS in 1.894010 seconds, throughput 1055960.633788
+129521	[1728192668]	2000000 OPS in 1.883514 seconds, throughput 1061845.040706
+129521	[1728192669]	2000000 OPS in 1.865339 seconds, throughput 1072191.167396
+129521	[1728192669]	2000000 OPS in 1.852550 seconds, throughput 1079592.993441
+129521	[1728192670]	2000000 OPS in 1.877375 seconds, throughput 1065317.264798
+129521	[1728192670]	2000000 OPS in 1.817029 seconds, throughput 1100697.897502
+129521	[1728192670]	2000000 OPS in 1.818227 seconds, throughput 1099972.665679
+129521	[1728192671]	2000000 OPS in 1.896779 seconds, throughput 1054419.096795
+129521	[1728192672]	2000000 OPS in 1.832410 seconds, throughput 1091458.789245
+129521	[1728192672]	2000000 OPS in 1.893008 seconds, throughput 1056519.570969
+129521	[1728192672]	2000000 OPS in 1.851375 seconds, throughput 1080278.171629
+129521	[1728192673]	2000000 OPS in 1.866470 seconds, throughput 1071541.465976
+129521	[1728192673]	2000000 OPS in 1.837723 seconds, throughput 1088303.297069
+129521	[1728192674]	2000000 OPS in 1.820337 seconds, throughput 1098697.658730
+129521	[1728192674]	2000000 OPS in 1.839935 seconds, throughput 1086994.921016
+129521	[1728192675]	2000000 OPS in 1.847208 seconds, throughput 1082715.103010
+129521	[1728192675]	2000000 OPS in 1.960306 seconds, throughput 1020248.879512
+129521	[1728192675]	2000000 OPS in 1.795711 seconds, throughput 1113764.965521
+129521	[1728192676]	2000000 OPS in 1.837387 seconds, throughput 1088502.313340
+129521	[1728192677]	2000000 OPS in 1.835031 seconds, throughput 1089899.843654
+129521	[1728192677]	2000000 OPS in 1.874445 seconds, throughput 1066982.493485
+129521	[1728192677]	2000000 OPS in 2.002984 seconds, throughput 998510.222748
+129521	[1728192678]	2000000 OPS in 1.885039 seconds, throughput 1060986.006125
+129521	[1728192679]	2000000 OPS in 1.864734 seconds, throughput 1072539.032377
+129521	[1728192679]	2000000 OPS in 1.839335 seconds, throughput 1087349.504033
+129521	[1728192679]	2000000 OPS in 1.800260 seconds, throughput 1110950.640463
+129521	[1728192680]	2000000 OPS in 1.836349 seconds, throughput 1089117.591482
+129521	[1728192681]	2000000 OPS in 1.822539 seconds, throughput 1097370.207167
+129521	[1728192681]	2000000 OPS in 1.875548 seconds, throughput 1066355.006643
+129521	[1728192681]	2000000 OPS in 1.879363 seconds, throughput 1064190.366630
+129521	[1728192681]	2000000 OPS in 1.806769 seconds, throughput 1106948.370268
+129521	[1728192683]	2000000 OPS in 1.866833 seconds, throughput 1071333.107996
+129521	[1728192683]	2000000 OPS in 1.867824 seconds, throughput 1070764.697316
+129521	[1728192683]	2000000 OPS in 1.829204 seconds, throughput 1093371.761706
+129521	[1728192683]	2000000 OPS in 1.894923 seconds, throughput 1055451.857411
+129521	[1728192684]	2000000 OPS in 1.838445 seconds, throughput 1087875.895118
+129521	[1728192684]	2000000 OPS in 1.827987 seconds, throughput 1094099.684516
+129521	[1728192685]	2000000 OPS in 1.836059 seconds, throughput 1089289.614332
+129521	[1728192685]	2000000 OPS in 1.926560 seconds, throughput 1038119.757495
+129521	[1728192686]	2000000 OPS in 1.892487 seconds, throughput 1056810.429873
+129521	[1728192686]	2000000 OPS in 1.917411 seconds, throughput 1043073.185665
+129521	[1728192687]	2000000 OPS in 1.900787 seconds, throughput 1052195.748393
+129521	[1728192687]	2000000 OPS in 1.907152 seconds, throughput 1048684.111177
+129521	[1728192688]	2000000 OPS in 1.842986 seconds, throughput 1085195.438272
+129521	[1728192688]	2000000 OPS in 1.887182 seconds, throughput 1059781.197574
+129521	[1728192688]	2000000 OPS in 1.858029 seconds, throughput 1076409.464007
+129521	[1728192689]	2000000 OPS in 1.835185 seconds, throughput 1089808.384441
+129521	[1728192690]	2000000 OPS in 1.786207 seconds, throughput 1119691.054844
+129521	[1728192690]	2000000 OPS in 1.815645 seconds, throughput 1101536.919387
+129521	[1728192690]	2000000 OPS in 1.772797 seconds, throughput 1128160.753882
+129521	[1728192691]	2000000 OPS in 1.814250 seconds, throughput 1102383.905195
+129521	[1728192692]	2000000 OPS in 1.850007 seconds, throughput 1081076.990519
+129521	[1728192692]	2000000 OPS in 1.972546 seconds, throughput 1013918.053115
+129521	[1728192692]	2000000 OPS in 1.855741 seconds, throughput 1077736.602252
+129521	[1728192693]	2000000 OPS in 1.849006 seconds, throughput 1081662.255287
+129521	[1728192694]	2000000 OPS in 1.844054 seconds, throughput 1084566.937845
+129521	[1728192694]	2000000 OPS in 1.864770 seconds, throughput 1072518.326657
+129521	[1728192694]	2000000 OPS in 1.886108 seconds, throughput 1060384.665141
+129521	[1728192695]	2000000 OPS in 1.868335 seconds, throughput 1070471.837224
+129521	[1728192696]	2000000 OPS in 1.858266 seconds, throughput 1076272.180624
+129521	[1728192696]	2000000 OPS in 1.849357 seconds, throughput 1081456.960446
+129521	[1728192696]	2000000 OPS in 1.862443 seconds, throughput 1073858.367746
+129521	[1728192696]	2000000 OPS in 1.862405 seconds, throughput 1073880.278457
+129521	[1728192697]	2000000 OPS in 1.905171 seconds, throughput 1049774.534674
+129521	[1728192698]	2000000 OPS in 1.890706 seconds, throughput 1057805.920117
+129521	[1728192698]	2000000 OPS in 1.911120 seconds, throughput 1046506.760434
+129521	[1728192698]	2000000 OPS in 1.822735 seconds, throughput 1097252.206163
+129521	[1728192699]	2000000 OPS in 1.852699 seconds, throughput 1079506.169108
+129521	[1728192700]	2000000 OPS in 1.872411 seconds, throughput 1068141.556528
+129521	[1728192700]	2000000 OPS in 1.878954 seconds, throughput 1064422.013525
+129521	[1728192700]	2000000 OPS in 1.789828 seconds, throughput 1117425.808513
+129521	[1728192701]	2000000 OPS in 1.881893 seconds, throughput 1062759.678685
+129521	[1728192701]	2000000 OPS in 1.928587 seconds, throughput 1037028.663991
+129521	[1728192702]	2000000 OPS in 1.850284 seconds, throughput 1080915.145999
+129521	[1728192702]	2000000 OPS in 1.927696 seconds, throughput 1037507.988812
+129521	[1728192703]	2000000 OPS in 1.875682 seconds, throughput 1066278.825515
+129521	[1728192703]	2000000 OPS in 1.848306 seconds, throughput 1082071.908007
+129521	[1728192703]	2000000 OPS in 1.857908 seconds, throughput 1076479.567341
+129521	[1728192704]	2000000 OPS in 1.856734 seconds, throughput 1077160.217888
+129521	[1728192705]	2000000 OPS in 1.882428 seconds, throughput 1062457.634502
+129521	[1728192705]	2000000 OPS in 1.883192 seconds, throughput 1062026.601642
+129521	[1728192705]	2000000 OPS in 1.875775 seconds, throughput 1066225.959937
+129521	[1728192706]	2000000 OPS in 1.942730 seconds, throughput 1029479.135032
+129521	[1728192707]	2000000 OPS in 1.823060 seconds, throughput 1097056.597150
+129521	[1728192707]	2000000 OPS in 1.901952 seconds, throughput 1051551.248402
+129521	[1728192707]	2000000 OPS in 1.846310 seconds, throughput 1083241.709139
+129521	[1728192708]	2000000 OPS in 1.889492 seconds, throughput 1058485.561198
+129521	[1728192709]	2000000 OPS in 1.828061 seconds, throughput 1094055.395307
+129521	[1728192709]	2000000 OPS in 1.875257 seconds, throughput 1066520.482259
+129521	[1728192709]	2000000 OPS in 1.880671 seconds, throughput 1063450.226010
+129521	[1728192709]	2000000 OPS in 1.824515 seconds, throughput 1096181.725006
+129521	[1728192710]	2000000 OPS in 1.857249 seconds, throughput 1076861.530145
+129521	[1728192711]	2000000 OPS in 1.860647 seconds, throughput 1074894.915586
+129521	[1728192711]	2000000 OPS in 1.967651 seconds, throughput 1016440.415501
+129521	[1728192711]	2000000 OPS in 1.882481 seconds, throughput 1062427.721714
+129521	[1728192712]	2000000 OPS in 1.837747 seconds, throughput 1088289.084406
+129521	[1728192713]	2000000 OPS in 1.854821 seconds, throughput 1078271.164711
+129521	[1728192713]	2000000 OPS in 1.864178 seconds, throughput 1072858.922270
+129521	[1728192713]	2000000 OPS in 1.872797 seconds, throughput 1067921.403121
+129521	[1728192714]	2000000 OPS in 1.811829 seconds, throughput 1103856.931311
+129521	[1728192715]	2000000 OPS in 1.829662 seconds, throughput 1093098.069479
+129521	[1728192715]	2000000 OPS in 1.946411 seconds, throughput 1027532.211850
+129521	[1728192715]	2000000 OPS in 1.897719 seconds, throughput 1053896.809802
+129521	[1728192716]	2000000 OPS in 1.848755 seconds, throughput 1081809.109374
+129521	[1728192716]	2000000 OPS in 1.910518 seconds, throughput 1046836.512401
+129521	[1728192717]	2000000 OPS in 1.958574 seconds, throughput 1021151.102792
+129521	[1728192717]	2000000 OPS in 1.878786 seconds, throughput 1064517.193549
+129521	[1728192718]	2000000 OPS in 1.835146 seconds, throughput 1089831.544738
+129521	[1728192718]	2000000 OPS in 1.844458 seconds, throughput 1084329.380230
+129521	[1728192719]	2000000 OPS in 1.844521 seconds, throughput 1084292.344733
+129521	[1728192719]	2000000 OPS in 1.788104 seconds, throughput 1118503.174312
+129521	[1728192720]	2000000 OPS in 1.827967 seconds, throughput 1094111.655189
+129521	[1728192720]	2000000 OPS in 1.791119 seconds, throughput 1116620.392057
+129521	[1728192720]	2000000 OPS in 1.792205 seconds, throughput 1115943.767594
+129521	[1728192721]	2000000 OPS in 1.849456 seconds, throughput 1081399.070862
+129521	[1728192721]	2000000 OPS in 1.810759 seconds, throughput 1104509.214092
+129521	[1728192722]	2000000 OPS in 1.809176 seconds, throughput 1105475.641950
+129521	[1728192722]	2000000 OPS in 1.862048 seconds, throughput 1074086.167489
+129521	[1728192722]	2000000 OPS in 1.898521 seconds, throughput 1053451.607857
+129521	[1728192723]	2000000 OPS in 1.873710 seconds, throughput 1067401.038581
+129521	[1728192724]	2000000 OPS in 1.862803 seconds, throughput 1073650.836938
+129521	[1728192724]	2000000 OPS in 1.841643 seconds, throughput 1085986.806346
+129521	[1728192724]	2000000 OPS in 1.825482 seconds, throughput 1095601.052215
+129521	[1728192725]	2000000 OPS in 1.803837 seconds, throughput 1108747.630745
+129521	[1728192726]	2000000 OPS in 1.882593 seconds, throughput 1062364.515325
+129521	[1728192726]	2000000 OPS in 1.803359 seconds, throughput 1109041.516415
+129521	[1728192726]	2000000 OPS in 1.895417 seconds, throughput 1055176.776403
+129521	[1728192727]	2000000 OPS in 1.888718 seconds, throughput 1058919.330466
+129521	[1728192728]	2000000 OPS in 1.882695 seconds, throughput 1062306.958907
+129521	[1728192728]	2000000 OPS in 1.880895 seconds, throughput 1063323.577340
+129521	[1728192728]	2000000 OPS in 1.855736 seconds, throughput 1077739.506050
+129521	[1728192729]	2000000 OPS in 1.900068 seconds, throughput 1052593.907165
+129521	[1728192729]	2000000 OPS in 1.888192 seconds, throughput 1059214.317188
+129521	[1728192730]	2000000 OPS in 1.910548 seconds, throughput 1046820.074659
+129521	[1728192730]	2000000 OPS in 1.896229 seconds, throughput 1054724.930375
+129521	[1728192731]	2000000 OPS in 1.860895 seconds, throughput 1074751.665193
+129521	[1728192731]	2000000 OPS in 1.826501 seconds, throughput 1094989.819332
+129521	[1728192732]	2000000 OPS in 1.853388 seconds, throughput 1079104.860936
+129521	[1728192732]	2000000 OPS in 1.873332 seconds, throughput 1067616.418232
+129521	[1728192733]	2000000 OPS in 1.875544 seconds, throughput 1066357.280874
+129521	[1728192733]	2000000 OPS in 1.851342 seconds, throughput 1080297.427488
+129521	[1728192733]	2000000 OPS in 1.929429 seconds, throughput 1036576.106195
+129521	[1728192734]	2000000 OPS in 1.891840 seconds, throughput 1057171.853857
+129521	[1728192735]	2000000 OPS in 1.915275 seconds, throughput 1044236.467348
+129521	[1728192735]	2000000 OPS in 1.920955 seconds, throughput 1041148.803590
+129521	[1728192735]	2000000 OPS in 1.898916 seconds, throughput 1053232.475791
+129521	[1728192736]	2000000 OPS in 1.885881 seconds, throughput 1060512.301678
+129521	[1728192736]	2000000 OPS in 1.873229 seconds, throughput 1067675.121408
+129521	[1728192737]	2000000 OPS in 1.836318 seconds, throughput 1089135.977538
+129521	[1728192737]	2000000 OPS in 1.828275 seconds, throughput 1093927.335877
+129521	[1728192737]	2000000 OPS in 1.851090 seconds, throughput 1080444.494865
+129521	[1728192738]	2000000 OPS in 1.839266 seconds, throughput 1087390.295912
+129521	[1728192739]	2000000 OPS in 1.872168 seconds, throughput 1068280.197076
+129521	[1728192739]	2000000 OPS in 1.945997 seconds, throughput 1027750.813593
+129521	[1728192739]	2000000 OPS in 1.942681 seconds, throughput 1029505.101455
+129521	[1728192740]	2000000 OPS in 1.846468 seconds, throughput 1083149.017476
+129521	[1728192741]	2000000 OPS in 1.924517 seconds, throughput 1039221.789155
+129521	[1728192741]	2000000 OPS in 1.866316 seconds, throughput 1071629.884757
+129521	[1728192741]	2000000 OPS in 1.844360 seconds, throughput 1084386.996031
+129521	[1728192742]	2000000 OPS in 1.879663 seconds, throughput 1064020.518572
+129521	[1728192743]	2000000 OPS in 1.935058 seconds, throughput 1033560.751151
+129521	[1728192743]	2000000 OPS in 1.945611 seconds, throughput 1027954.714483
+129521	[1728192743]	2000000 OPS in 1.889537 seconds, throughput 1058460.352986
+129521	[1728192744]	2000000 OPS in 1.814695 seconds, throughput 1102113.578315
+129521	[1728192744]	2000000 OPS in 1.868014 seconds, throughput 1070655.787376
+129521	[1728192745]	2000000 OPS in 1.929738 seconds, throughput 1036410.124069
+129521	[1728192745]	2000000 OPS in 1.825558 seconds, throughput 1095555.441131
+129521	[1728192746]	2000000 OPS in 1.885981 seconds, throughput 1060456.070342
+129521	[1728192746]	2000000 OPS in 1.849684 seconds, throughput 1081265.772964
+129521	[1728192747]	2000000 OPS in 1.799671 seconds, throughput 1111314.234657
+129521	[1728192747]	2000000 OPS in 1.834050 seconds, throughput 1090482.811265
+129521	[1728192747]	2000000 OPS in 1.828749 seconds, throughput 1093643.796934
+129521	[1728192748]	2000000 OPS in 1.818523 seconds, throughput 1099793.623727
+129521	[1728192748]	2000000 OPS in 1.846050 seconds, throughput 1083394.274261
+129521	[1728192749]	2000000 OPS in 1.806600 seconds, throughput 1107051.920735
+129521	[1728192749]	2000000 OPS in 1.810299 seconds, throughput 1104789.871728
+129521	[1728192750]	2000000 OPS in 1.884978 seconds, throughput 1061020.340821
+129521	[1728192750]	2000000 OPS in 1.876055 seconds, throughput 1066066.826399
+129521	[1728192750]	2000000 OPS in 1.867123 seconds, throughput 1071166.709424
+129521	[1728192751]	2000000 OPS in 1.846463 seconds, throughput 1083151.950513
+129521	[1728192752]	2000000 OPS in 1.900732 seconds, throughput 1052226.194961
+129521	[1728192752]	2000000 OPS in 1.836700 seconds, throughput 1088909.457179
+129521	[1728192752]	2000000 OPS in 1.825802 seconds, throughput 1095409.031209
+129521	[1728192753]	2000000 OPS in 1.788727 seconds, throughput 1118113.608169
+129521	[1728192754]	2000000 OPS in 1.824960 seconds, throughput 1095914.431001
+129521	[1728192754]	2000000 OPS in 1.813491 seconds, throughput 1102845.285695
+129521	[1728192754]	2000000 OPS in 1.832918 seconds, throughput 1091156.287406
+129521	[1728192755]	2000000 OPS in 1.795241 seconds, throughput 1114056.552853
+129521	[1728192756]	2000000 OPS in 1.924727 seconds, throughput 1039108.403426
+129521	[1728192756]	2000000 OPS in 1.910246 seconds, throughput 1046985.571492
+129521	[1728192756]	2000000 OPS in 1.882247 seconds, throughput 1062559.802194
+129521	[1728192757]	2000000 OPS in 1.820901 seconds, throughput 1098357.351663
+129521	[1728192757]	2000000 OPS in 1.854149 seconds, throughput 1078661.962981
+129521	[1728192758]	2000000 OPS in 1.843977 seconds, throughput 1084612.226725
+129521	[1728192758]	2000000 OPS in 1.858804 seconds, throughput 1075960.671486
+129521	[1728192758]	2000000 OPS in 1.855754 seconds, throughput 1077729.052450
+129521	[1728192759]	2000000 OPS in 1.799247 seconds, throughput 1111576.120455
+129521	[1728192760]	2000000 OPS in 1.818242 seconds, throughput 1099963.591205
+129521	[1728192760]	2000000 OPS in 1.775479 seconds, throughput 1126456.578760
+129521	[1728192760]	2000000 OPS in 1.790050 seconds, throughput 1117287.226614
+129521	[1728192761]	2000000 OPS in 1.876228 seconds, throughput 1065968.528345
+129521	[1728192761]	2000000 OPS in 1.858881 seconds, throughput 1075916.102214
+129521	[1728192762]	2000000 OPS in 1.894312 seconds, throughput 1055792.287648
+129521	[1728192762]	2000000 OPS in 1.906797 seconds, throughput 1048879.351079
+129521	[1728192763]	2000000 OPS in 1.922412 seconds, throughput 1040359.714775
+129521	[1728192763]	2000000 OPS in 1.913019 seconds, throughput 1045467.922692
+129521	[1728192763]	2000000 OPS in 1.859970 seconds, throughput 1075286.160529
+129521	[1728192764]	2000000 OPS in 1.888099 seconds, throughput 1059266.489734
+129521	[1728192765]	2000000 OPS in 1.848365 seconds, throughput 1082037.368161
+129521	[1728192765]	2000000 OPS in 1.904087 seconds, throughput 1050372.173120
+129521	[1728192765]	2000000 OPS in 1.862522 seconds, throughput 1073812.819392
+129521	[1728192766]	2000000 OPS in 1.904045 seconds, throughput 1050395.342547
+129521	[1728192767]	2000000 OPS in 1.877510 seconds, throughput 1065240.664497
+129521	[1728192767]	2000000 OPS in 1.853023 seconds, throughput 1079317.418078
+129521	[1728192767]	2000000 OPS in 1.938954 seconds, throughput 1031483.985695
+129521	[1728192768]	2000000 OPS in 1.880627 seconds, throughput 1063475.106972
+129521	[1728192769]	2000000 OPS in 1.878186 seconds, throughput 1064857.261208
+129521	[1728192769]	2000000 OPS in 1.870261 seconds, throughput 1069369.462337
+129521	[1728192769]	2000000 OPS in 1.892032 seconds, throughput 1057064.573961
+129521	[1728192770]	2000000 OPS in 1.817631 seconds, throughput 1100333.345987
+129521	[1728192771]	2000000 OPS in 1.841624 seconds, throughput 1085998.010452
+129521	[1728192771]	2000000 OPS in 1.834043 seconds, throughput 1090486.973315
+129521	[1728192771]	2000000 OPS in 1.857208 seconds, throughput 1076885.303100
+129521	[1728192771]	2000000 OPS in 1.832948 seconds, throughput 1091138.428368
+129521	[1728192772]	2000000 OPS in 1.829685 seconds, throughput 1093084.328723
+129521	[1728192773]	2000000 OPS in 1.828313 seconds, throughput 1093904.599486
+129521	[1728192773]	2000000 OPS in 1.913391 seconds, throughput 1045264.663626
+129521	[1728192773]	2000000 OPS in 1.937969 seconds, throughput 1032008.251938
+129521	[1728192774]	2000000 OPS in 1.896043 seconds, throughput 1054828.397879
+129521	[1728192775]	2000000 OPS in 1.862411 seconds, throughput 1073876.818812
+129521	[1728192775]	2000000 OPS in 1.947548 seconds, throughput 1026932.327214
+129521	[1728192775]	2000000 OPS in 1.846645 seconds, throughput 1083045.198184
+129521	[1728192776]	2000000 OPS in 1.889280 seconds, throughput 1058604.336043
+129521	[1728192776]	2000000 OPS in 1.969899 seconds, throughput 1015280.478847
+129521	[1728192777]	2000000 OPS in 2.002380 seconds, throughput 998811.414417
+129521	[1728192777]	2000000 OPS in 1.886038 seconds, throughput 1060424.021149
+129521	[1728192778]	2000000 OPS in 1.834371 seconds, throughput 1090291.985645
+129521	[1728192778]	2000000 OPS in 1.830238 seconds, throughput 1092754.057123
+129521	[1728192779]	2000000 OPS in 1.848641 seconds, throughput 1081875.821211
+129521	[1728192779]	2000000 OPS in 1.825596 seconds, throughput 1095532.637013
+129521	[1728192780]	2000000 OPS in 1.881912 seconds, throughput 1062748.948941
+129521	[1728192780]	2000000 OPS in 1.828604 seconds, throughput 1093730.517925
+129521	[1728192781]	2000000 OPS in 1.873064 seconds, throughput 1067769.173931
+129521	[1728192781]	2000000 OPS in 1.794094 seconds, throughput 1114768.791379
+129521	[1728192782]	2000000 OPS in 1.842193 seconds, throughput 1085662.577157
+129521	[1728192782]	2000000 OPS in 1.856923 seconds, throughput 1077050.583142
+129521	[1728192782]	2000000 OPS in 1.953019 seconds, throughput 1024055.577544
+129521	[1728192783]	2000000 OPS in 1.824411 seconds, throughput 1096244.212516
+129521	[1728192784]	2000000 OPS in 1.903746 seconds, throughput 1050560.316345
+129521	[1728192784]	2000000 OPS in 1.830038 seconds, throughput 1092873.481316
+129521	[1728192784]	2000000 OPS in 1.830897 seconds, throughput 1092360.739026
+129521	[1728192784]	2000000 OPS in 1.918816 seconds, throughput 1042309.424145
+129521	[1728192786]	2000000 OPS in 1.919759 seconds, throughput 1041797.433949
+129521	[1728192786]	2000000 OPS in 1.891412 seconds, throughput 1057411.077015
+129521	[1728192786]	2000000 OPS in 1.888629 seconds, throughput 1058969.231120
+129521	[1728192786]	2000000 OPS in 1.940694 seconds, throughput 1030559.171101
+129521	[1728192787]	2000000 OPS in 1.847412 seconds, throughput 1082595.544470
+129521	[1728192788]	2000000 OPS in 1.823806 seconds, throughput 1096607.862898
+129521	[1728192788]	2000000 OPS in 1.834579 seconds, throughput 1090168.371054
+129521	[1728192788]	2000000 OPS in 1.857887 seconds, throughput 1076491.734966
+129521	[1728192789]	2000000 OPS in 1.854969 seconds, throughput 1078185.134091
+129521	[1728192789]	2000000 OPS in 1.861206 seconds, throughput 1074572.078534
+129521	[1728192790]	2000000 OPS in 1.888899 seconds, throughput 1058817.861622
+129521	[1728192790]	2000000 OPS in 1.897990 seconds, throughput 1053746.331646
+129521	[1728192791]	2000000 OPS in 1.858143 seconds, throughput 1076343.424591
+129521	[1728192791]	2000000 OPS in 1.873399 seconds, throughput 1067578.236137
+129521	[1728192792]	2000000 OPS in 1.897405 seconds, throughput 1054071.218322
+129521	[1728192792]	2000000 OPS in 1.886771 seconds, throughput 1060012.052337
+129521	[1728192793]	2000000 OPS in 1.862510 seconds, throughput 1073819.737881
+129521	[1728192793]	2000000 OPS in 1.831279 seconds, throughput 1092132.875438
+129521	[1728192794]	2000000 OPS in 1.815472 seconds, throughput 1101641.887068
+129521	[1728192794]	2000000 OPS in 1.869112 seconds, throughput 1070026.836273
+129521	[1728192795]	2000000 OPS in 1.906309 seconds, throughput 1049147.855883
+129521	[1728192795]	2000000 OPS in 1.853527 seconds, throughput 1079023.936527
+129521	[1728192796]	2000000 OPS in 1.886842 seconds, throughput 1059972.165131
+129521	[1728192796]	2000000 OPS in 1.869193 seconds, throughput 1069980.467507
+129521	[1728192797]	2000000 OPS in 1.854955 seconds, throughput 1078193.271535
+129521	[1728192797]	2000000 OPS in 1.783905 seconds, throughput 1121135.934929
+129521	[1728192797]	2000000 OPS in 1.846683 seconds, throughput 1083022.911891
+129521	[1728192798]	2000000 OPS in 1.889751 seconds, throughput 1058340.490361
+129521	[1728192799]	2000000 OPS in 1.798205 seconds, throughput 1112220.241852
+129521	[1728192799]	2000000 OPS in 1.858159 seconds, throughput 1076334.156550
+129521	[1728192799]	2000000 OPS in 1.852876 seconds, throughput 1079403.046939
+129521	[1728192800]	2000000 OPS in 1.920403 seconds, throughput 1041448.071056
+129521	[1728192800]	2000000 OPS in 1.883553 seconds, throughput 1061823.054621
+129521	[1728192800]	2000000 OPS in 1.881356 seconds, throughput 1063063.024754
+129521	[1728192801]	2000000 OPS in 1.869325 seconds, throughput 1069904.912201
+129521	[1728192802]	2000000 OPS in 1.956912 seconds, throughput 1022018.363626
+129521	[1728192802]	2000000 OPS in 1.848998 seconds, throughput 1081666.935281
+129521	[1728192802]	2000000 OPS in 1.820967 seconds, throughput 1098317.542273
+129521	[1728192803]	2000000 OPS in 1.847168 seconds, throughput 1082738.548957
+129521	[1728192803]	2000000 OPS in 1.868894 seconds, throughput 1070151.651190
+129521	[1728192804]	2000000 OPS in 1.842219 seconds, throughput 1085647.254751
+129521	[1728192804]	2000000 OPS in 1.849645 seconds, throughput 1081288.571591
+129521	[1728192805]	2000000 OPS in 1.826757 seconds, throughput 1094836.368493
+129521	[1728192805]	2000000 OPS in 1.851389 seconds, throughput 1080270.002684
+129521	[1728192806]	2000000 OPS in 1.886665 seconds, throughput 1060071.607837
+129521	[1728192806]	2000000 OPS in 1.821780 seconds, throughput 1097827.399576
+129521	[1728192807]	2000000 OPS in 1.843736 seconds, throughput 1084753.999488
+129521	[1728192807]	2000000 OPS in 1.835149 seconds, throughput 1089829.763142
+129521	[1728192808]	2000000 OPS in 1.841905 seconds, throughput 1085832.331201
+129521	[1728192808]	2000000 OPS in 1.873750 seconds, throughput 1067378.252168
+129521	[1728192809]	2000000 OPS in 1.925027 seconds, throughput 1038946.466725
+129521	[1728192809]	2000000 OPS in 1.908571 seconds, throughput 1047904.426925
+129521	[1728192810]	2000000 OPS in 1.841683 seconds, throughput 1085963.219512
+129521	[1728192810]	2000000 OPS in 1.834525 seconds, throughput 1090200.460610
+129521	[1728192810]	2000000 OPS in 1.881553 seconds, throughput 1062951.721264
+129521	[1728192811]	2000000 OPS in 1.877526 seconds, throughput 1065231.586673
+129521	[1728192812]	2000000 OPS in 1.915954 seconds, throughput 1043866.397628
+129521	[1728192812]	2000000 OPS in 1.891494 seconds, throughput 1057365.236157
+129521	[1728192812]	2000000 OPS in 1.868963 seconds, throughput 1070112.142402
+129521	[1728192813]	2000000 OPS in 1.877153 seconds, throughput 1065443.253693
+129521	[1728192813]	2000000 OPS in 1.815518 seconds, throughput 1101613.974634
+129521	[1728192813]	2000000 OPS in 1.826637 seconds, throughput 1094908.293219
+129521	[1728192814]	2000000 OPS in 1.794099 seconds, throughput 1114765.684614
+129521	[1728192815]	2000000 OPS in 1.897652 seconds, throughput 1053934.019515
+129521	[1728192815]	2000000 OPS in 1.857298 seconds, throughput 1076833.119941
+129521	[1728192815]	2000000 OPS in 1.870229 seconds, throughput 1069387.759467
+129521	[1728192816]	2000000 OPS in 1.796862 seconds, throughput 1113051.530947
+129521	[1728192817]	2000000 OPS in 1.943886 seconds, throughput 1028866.919151
+129521	[1728192817]	2000000 OPS in 1.884596 seconds, throughput 1061235.405360
+129521	[1728192817]	2000000 OPS in 1.848720 seconds, throughput 1081829.590203
+129521	[1728192818]	2000000 OPS in 1.832268 seconds, throughput 1091543.376842
+129521	[1728192818]	2000000 OPS in 1.905908 seconds, throughput 1049368.594916
+129521	[1728192819]	2000000 OPS in 1.838727 seconds, throughput 1087709.050881
+129521	[1728192819]	2000000 OPS in 1.891911 seconds, throughput 1057132.180108
+129521	[1728192820]	2000000 OPS in 1.877930 seconds, throughput 1065002.422881
+129521	[1728192820]	2000000 OPS in 1.942639 seconds, throughput 1029527.359432
+129521	[1728192821]	2000000 OPS in 1.870621 seconds, throughput 1069163.662762
+129521	[1728192821]	2000000 OPS in 1.862589 seconds, throughput 1073774.192804
+129521	[1728192821]	2000000 OPS in 1.847794 seconds, throughput 1082371.736243
+129521	[1728192822]	2000000 OPS in 1.870396 seconds, throughput 1069292.278213
+129521	[1728192823]	2000000 OPS in 1.839077 seconds, throughput 1087502.045863
+129521	[1728192823]	2000000 OPS in 1.847876 seconds, throughput 1082323.705703
+129521	[1728192823]	2000000 OPS in 1.824677 seconds, throughput 1096084.402883
+129521	[1728192824]	2000000 OPS in 1.846856 seconds, throughput 1082921.462204
+129521	[1728192825]	2000000 OPS in 1.819187 seconds, throughput 1099392.201022
+129521	[1728192825]	2000000 OPS in 1.820667 seconds, throughput 1098498.517302
+129521	[1728192825]	2000000 OPS in 1.912208 seconds, throughput 1045911.323454
+129521	[1728192826]	2000000 OPS in 1.949510 seconds, throughput 1025898.815600
+129521	[1728192826]	2000000 OPS in 1.822416 seconds, throughput 1097444.271780
+129521	[1728192826]	2000000 OPS in 1.874052 seconds, throughput 1067206.246145
+129521	[1728192827]	2000000 OPS in 1.819044 seconds, throughput 1099478.627235
+129521	[1728192828]	2000000 OPS in 1.831519 seconds, throughput 1091989.763688
+129521	[1728192828]	2000000 OPS in 1.800678 seconds, throughput 1110692.750175
+129521	[1728192828]	2000000 OPS in 1.881175 seconds, throughput 1063165.308916
+129521	[1728192829]	2000000 OPS in 1.825750 seconds, throughput 1095440.230042
+129521	[1728192830]	2000000 OPS in 1.860649 seconds, throughput 1074893.760188
+129521	[1728192830]	2000000 OPS in 1.855466 seconds, throughput 1077896.334398
+129521	[1728192830]	2000000 OPS in 1.832153 seconds, throughput 1091611.890492
+129521	[1728192831]	2000000 OPS in 1.828968 seconds, throughput 1093512.844402
+129521	[1728192832]	2000000 OPS in 1.866533 seconds, throughput 1071505.298862
+129521	[1728192832]	2000000 OPS in 1.864826 seconds, throughput 1072486.119348
+129521	[1728192832]	2000000 OPS in 1.865810 seconds, throughput 1071920.506375
+129521	[1728192832]	2000000 OPS in 1.791345 seconds, throughput 1116479.516788
+129521	[1728192834]	2000000 OPS in 1.870123 seconds, throughput 1069448.373182
+129521	[1728192834]	2000000 OPS in 1.858686 seconds, throughput 1076028.979612
+129521	[1728192834]	2000000 OPS in 1.855895 seconds, throughput 1077647.172927
+129521	[1728192834]	2000000 OPS in 1.843969 seconds, throughput 1084616.932280
+129521	[1728192835]	2000000 OPS in 1.947131 seconds, throughput 1027152.256320
+129521	[1728192836]	2000000 OPS in 1.875047 seconds, throughput 1066639.929559
+129521	[1728192836]	2000000 OPS in 1.903593 seconds, throughput 1050644.754420
+129521	[1728192836]	2000000 OPS in 1.874788 seconds, throughput 1066787.284749
+129521	[1728192837]	2000000 OPS in 1.896305 seconds, throughput 1054682.659171
+129521	[1728192837]	2000000 OPS in 1.879845 seconds, throughput 1063917.503837
+129521	[1728192838]	2000000 OPS in 1.951090 seconds, throughput 1025068.038891
+129521	[1728192838]	2000000 OPS in 1.815191 seconds, throughput 1101812.426351
+129521	[1728192839]	2000000 OPS in 1.944756 seconds, throughput 1028406.648443
+129521	[1728192839]	2000000 OPS in 1.918728 seconds, throughput 1042357.228330
+129521	[1728192840]	2000000 OPS in 1.874580 seconds, throughput 1066905.653533
+129521	[1728192840]	2000000 OPS in 1.896130 seconds, throughput 1054779.999262
+129521	[1728192841]	2000000 OPS in 1.894687 seconds, throughput 1055583.323261
+129521	[1728192841]	2000000 OPS in 1.848759 seconds, throughput 1081806.768757
+129521	[1728192841]	2000000 OPS in 1.832079 seconds, throughput 1091655.982084
+129521	[1728192842]	2000000 OPS in 1.824259 seconds, throughput 1096335.553230
+129521	[1728192843]	2000000 OPS in 1.809347 seconds, throughput 1105371.164293
+129521	[1728192843]	2000000 OPS in 1.846236 seconds, throughput 1083285.127145
+129521	[1728192843]	2000000 OPS in 1.828518 seconds, throughput 1093781.958942
+129521	[1728192844]	2000000 OPS in 1.874491 seconds, throughput 1066956.309740
+129521	[1728192845]	2000000 OPS in 1.818056 seconds, throughput 1100076.125268
+129521	[1728192845]	2000000 OPS in 1.890554 seconds, throughput 1057890.967410
+129521	[1728192845]	2000000 OPS in 1.902101 seconds, throughput 1051468.875733
+129521	[1728192846]	2000000 OPS in 1.908326 seconds, throughput 1048038.961896
+129521	[1728192847]	2000000 OPS in 1.857521 seconds, throughput 1076703.843456
+129521	[1728192847]	2000000 OPS in 1.860561 seconds, throughput 1074944.600043
+129521	[1728192847]	2000000 OPS in 1.855990 seconds, throughput 1077592.012888
+129521	[1728192847]	2000000 OPS in 1.811974 seconds, throughput 1103768.597121
+129521	[1728192849]	2000000 OPS in 1.813879 seconds, throughput 1102609.380229
+129521	[1728192849]	2000000 OPS in 1.858876 seconds, throughput 1075918.996211
+129521	[1728192849]	2000000 OPS in 1.888006 seconds, throughput 1059318.667419
+129521	[1728192849]	2000000 OPS in 1.827735 seconds, throughput 1094250.534131
+129521	[1728192850]	2000000 OPS in 1.848180 seconds, throughput 1082145.678451
+129521	[1728192851]	2000000 OPS in 1.882878 seconds, throughput 1062203.711552
+129521	[1728192851]	2000000 OPS in 1.908697 seconds, throughput 1047835.250959
+129521	[1728192851]	2000000 OPS in 1.874420 seconds, throughput 1066996.724320
+129521	[1728192852]	2000000 OPS in 1.862833 seconds, throughput 1073633.546324
+129521	[1728192852]	2000000 OPS in 1.930439 seconds, throughput 1036033.772629
+129521	[1728192853]	2000000 OPS in 1.864278 seconds, throughput 1072801.374044
+129521	[1728192853]	2000000 OPS in 1.839224 seconds, throughput 1087415.127249
+129521	[1728192854]	2000000 OPS in 1.774806 seconds, throughput 1126883.727010
+129521	[1728192854]	2000000 OPS in 1.861112 seconds, throughput 1074626.352417
+129521	[1728192855]	2000000 OPS in 1.896758 seconds, throughput 1054430.770821
+129521	[1728192855]	2000000 OPS in 1.821614 seconds, throughput 1097927.442367
+129521	[1728192856]	2000000 OPS in 1.864524 seconds, throughput 1072659.831678
+129521	[1728192856]	2000000 OPS in 1.894062 seconds, throughput 1055931.643209
+129521	[1728192856]	2000000 OPS in 1.846485 seconds, throughput 1083139.045267
+129521	[1728192857]	2000000 OPS in 1.868005 seconds, throughput 1070660.945768
+129521	[1728192858]	2000000 OPS in 1.788935 seconds, throughput 1117983.604770
+129521	[1728192858]	2000000 OPS in 1.868069 seconds, throughput 1070624.264950
+129521	[1728192858]	2000000 OPS in 1.806604 seconds, throughput 1107049.469613
+129521	[1728192858]	2000000 OPS in 1.812220 seconds, throughput 1103618.765933
+129521	[1728192859]	2000000 OPS in 1.806836 seconds, throughput 1106907.323077
+129521	[1728192860]	2000000 OPS in 1.844072 seconds, throughput 1084556.351379
+129521	[1728192860]	2000000 OPS in 1.822362 seconds, throughput 1097476.791110
+129521	[1728192860]	2000000 OPS in 1.827920 seconds, throughput 1094139.787299
+129521	[1728192861]	2000000 OPS in 1.858794 seconds, throughput 1075966.459974
+129521	[1728192862]	2000000 OPS in 1.898215 seconds, throughput 1053621.428553
+129521	[1728192862]	2000000 OPS in 1.842456 seconds, throughput 1085507.605066
+129521	[1728192862]	2000000 OPS in 1.862384 seconds, throughput 1073892.387392
+129521	[1728192863]	2000000 OPS in 1.865182 seconds, throughput 1072281.418114
+129521	[1728192864]	2000000 OPS in 1.841812 seconds, throughput 1085887.158950
+129521	[1728192864]	2000000 OPS in 1.911837 seconds, throughput 1046114.286940
+129521	[1728192864]	2000000 OPS in 1.879477 seconds, throughput 1064125.817980
+129521	[1728192865]	2000000 OPS in 1.891834 seconds, throughput 1057175.206704
+129521	[1728192866]	2000000 OPS in 1.828122 seconds, throughput 1094018.889330
+129521	[1728192866]	2000000 OPS in 1.872481 seconds, throughput 1068101.625597
+129521	[1728192866]	2000000 OPS in 1.847354 seconds, throughput 1082629.533917
+129521	[1728192867]	2000000 OPS in 1.876544 seconds, throughput 1065789.024931
+129521	[1728192867]	2000000 OPS in 1.871871 seconds, throughput 1068449.695519
+129521	[1728192867]	2000000 OPS in 1.869095 seconds, throughput 1070036.568500
+129521	[1728192868]	2000000 OPS in 1.808440 seconds, throughput 1105925.549092
+129521	[1728192869]	2000000 OPS in 1.885272 seconds, throughput 1060854.879296
+129521	[1728192869]	2000000 OPS in 1.788119 seconds, throughput 1118493.791521
+129521	[1728192869]	2000000 OPS in 1.875891 seconds, throughput 1066160.027422
+129521	[1728192869]	2000000 OPS in 1.865157 seconds, throughput 1072295.790649
+129521	[1728192871]	2000000 OPS in 1.855009 seconds, throughput 1078161.884929
+129521	[1728192871]	2000000 OPS in 1.840041 seconds, throughput 1086932.302052
+129521	[1728192871]	2000000 OPS in 1.898583 seconds, throughput 1053417.206411
+129521	[1728192871]	2000000 OPS in 2.024068 seconds, throughput 988109.095149
+129521	[1728192873]	2000000 OPS in 1.930472 seconds, throughput 1036016.062393
+129521	[1728192873]	2000000 OPS in 1.859594 seconds, throughput 1075503.577663
+129521	[1728192873]	2000000 OPS in 1.850462 seconds, throughput 1080811.170400
+129521	[1728192873]	2000000 OPS in 1.904277 seconds, throughput 1050267.371816
+129521	[1728192874]	2000000 OPS in 1.847626 seconds, throughput 1082470.153592
+129521	[1728192875]	2000000 OPS in 1.849065 seconds, throughput 1081627.741588
+129521	[1728192875]	2000000 OPS in 1.861703 seconds, throughput 1074285.210906
+129521	[1728192875]	2000000 OPS in 1.830932 seconds, throughput 1092339.857515
+129521	[1728192876]	2000000 OPS in 1.849359 seconds, throughput 1081455.790898
+129521	[1728192877]	2000000 OPS in 1.835672 seconds, throughput 1089519.260521
+129521	[1728192877]	2000000 OPS in 1.848399 seconds, throughput 1082017.464844
+129521	[1728192877]	2000000 OPS in 1.898448 seconds, throughput 1053492.115665
+129521	[1728192878]	2000000 OPS in 1.916293 seconds, throughput 1043681.733430
+129521	[1728192879]	2000000 OPS in 1.918267 seconds, throughput 1042607.728747
+129521	[1728192879]	2000000 OPS in 1.836365 seconds, throughput 1089108.102147
+129521	[1728192879]	2000000 OPS in 1.884009 seconds, throughput 1061566.054090
+129521	[1728192880]	2000000 OPS in 1.871302 seconds, throughput 1068774.575135
+129521	[1728192880]	2000000 OPS in 1.850346 seconds, throughput 1080878.927509
+129521	[1728192881]	2000000 OPS in 1.855588 seconds, throughput 1077825.465567
+129521	[1728192881]	2000000 OPS in 1.920775 seconds, throughput 1041246.371907
+129521	[1728192882]	2000000 OPS in 1.833685 seconds, throughput 1090699.874842
+129521	[1728192882]	2000000 OPS in 1.866316 seconds, throughput 1071629.884757
+129521	[1728192882]	2000000 OPS in 1.840326 seconds, throughput 1086763.975513
+129521	[1728192883]	2000000 OPS in 1.829934 seconds, throughput 1092935.592213
+129521	[1728192884]	2000000 OPS in 1.880247 seconds, throughput 1063690.036469
+129521	[1728192884]	2000000 OPS in 1.851322 seconds, throughput 1080309.098039
+129521	[1728192884]	2000000 OPS in 1.863263 seconds, throughput 1073385.775384
+129521	[1728192885]	2000000 OPS in 1.939288 seconds, throughput 1031306.335109
+129521	[1728192886]	2000000 OPS in 1.781235 seconds, throughput 1122816.472840
+129521	[1728192886]	2000000 OPS in 1.808984 seconds, throughput 1105592.973736
+129521	[1728192886]	2000000 OPS in 1.777649 seconds, throughput 1125081.498091
+129521	[1728192886]	2000000 OPS in 1.824190 seconds, throughput 1096377.022130
+129521	[1728192887]	2000000 OPS in 1.853102 seconds, throughput 1079271.405460
+129521	[1728192888]	2000000 OPS in 1.789320 seconds, throughput 1117743.053227
+129521	[1728192888]	2000000 OPS in 1.809235 seconds, throughput 1105439.591872
+129521	[1728192888]	2000000 OPS in 1.939554 seconds, throughput 1031164.896672
+129521	[1728192889]	2000000 OPS in 1.843885 seconds, throughput 1084666.343075
+129521	[1728192890]	2000000 OPS in 1.879887 seconds, throughput 1063893.734038
+129521	[1728192890]	2000000 OPS in 1.853837 seconds, throughput 1078843.501343
+129521	[1728192890]	2000000 OPS in 1.836666 seconds, throughput 1088929.614856
+129521	[1728192891]	2000000 OPS in 1.872867 seconds, throughput 1067881.488648
+129521	[1728192891]	2000000 OPS in 1.894019 seconds, throughput 1055955.616074
+129521	[1728192892]	2000000 OPS in 1.938456 seconds, throughput 1031748.979600
+129521	[1728192892]	2000000 OPS in 1.968352 seconds, throughput 1016078.424997
+129521	[1728192893]	2000000 OPS in 1.843368 seconds, throughput 1084970.553899
+129521	[1728192893]	2000000 OPS in 1.870268 seconds, throughput 1069365.459923
+129521	[1728192894]	2000000 OPS in 1.842336 seconds, throughput 1085578.309277
+129521	[1728192894]	2000000 OPS in 1.890547 seconds, throughput 1057894.884391
+129521	[1728192895]	2000000 OPS in 1.863156 seconds, throughput 1073447.419325
+129521	[1728192895]	2000000 OPS in 1.869806 seconds, throughput 1069629.683507
+129521	[1728192895]	2000000 OPS in 1.865481 seconds, throughput 1072109.552443
+129521	[1728192896]	2000000 OPS in 1.781653 seconds, throughput 1122553.044841
+129521	[1728192897]	2000000 OPS in 1.784965 seconds, throughput 1120470.149275
+129521	[1728192897]	2000000 OPS in 1.807889 seconds, throughput 1106262.607937
+129521	[1728192897]	2000000 OPS in 1.849364 seconds, throughput 1081452.867040
+129521	[1728192898]	2000000 OPS in 1.934586 seconds, throughput 1033812.919147
+129521	[1728192899]	2000000 OPS in 1.930805 seconds, throughput 1035837.383889
+129521	[1728192899]	2000000 OPS in 1.851502 seconds, throughput 1080204.072153
+129521	[1728192899]	2000000 OPS in 1.802078 seconds, throughput 1109829.874179
+129521	[1728192900]	2000000 OPS in 1.856792 seconds, throughput 1077126.570989
+129521	[1728192901]	2000000 OPS in 1.955196 seconds, throughput 1022915.349663
+129521	[1728192901]	2000000 OPS in 1.892909 seconds, throughput 1056574.827422
+129521	[1728192901]	2000000 OPS in 1.926192 seconds, throughput 1038318.090824
+129521	[1728192902]	2000000 OPS in 1.942336 seconds, throughput 1029687.963360
+129521	[1728192902]	2000000 OPS in 1.893494 seconds, throughput 1056248.395823
+129521	[1728192903]	2000000 OPS in 1.924302 seconds, throughput 1039337.900184
+129521	[1728192903]	2000000 OPS in 1.844872 seconds, throughput 1084086.050414
+129521	[1728192903]	2000000 OPS in 1.837881 seconds, throughput 1088209.737192
+129521	[1728192904]	2000000 OPS in 1.889651 seconds, throughput 1058396.497554
+129521	[1728192905]	2000000 OPS in 1.843385 seconds, throughput 1084960.548122
+129521	[1728192905]	2000000 OPS in 1.859337 seconds, throughput 1075652.235178
+129521	[1728192905]	2000000 OPS in 1.859248 seconds, throughput 1075703.725377
+129521	[1728192906]	2000000 OPS in 1.805665 seconds, throughput 1107625.168567
+129521	[1728192906]	2000000 OPS in 1.844113 seconds, throughput 1084532.238534
+129521	[1728192906]	2000000 OPS in 1.810154 seconds, throughput 1104878.369465
+129521	[1728192907]	2000000 OPS in 1.823879 seconds, throughput 1096563.971623
+129521	[1728192908]	2000000 OPS in 1.835950 seconds, throughput 1089354.285247
+129521	[1728192908]	2000000 OPS in 1.782597 seconds, throughput 1121958.580655
+129521	[1728192908]	2000000 OPS in 1.791087 seconds, throughput 1116640.341871
+129521	[1728192909]	2000000 OPS in 1.836675 seconds, throughput 1088924.278928
+129521	[1728192910]	2000000 OPS in 1.873226 seconds, throughput 1067676.831306
+129521	[1728192910]	2000000 OPS in 1.882327 seconds, throughput 1062514.642780
+129521	[1728192910]	2000000 OPS in 1.887788 seconds, throughput 1059440.996553
+129521	[1728192911]	2000000 OPS in 1.871185 seconds, throughput 1068841.402641
+129521	[1728192912]	2000000 OPS in 1.798174 seconds, throughput 1112239.416208
+129521	[1728192912]	2000000 OPS in 1.801718 seconds, throughput 1110051.628501
+129521	[1728192912]	2000000 OPS in 1.802424 seconds, throughput 1109616.827117
+129521	[1728192913]	2000000 OPS in 1.854003 seconds, throughput 1078746.906019
+129521	[1728192914]	2000000 OPS in 1.851777 seconds, throughput 1080043.655365
+129521	[1728192914]	2000000 OPS in 1.901891 seconds, throughput 1051584.975164
+129521	[1728192914]	2000000 OPS in 1.869514 seconds, throughput 1069796.749316
+129521	[1728192915]	2000000 OPS in 1.860415 seconds, throughput 1075028.958593
+129521	[1728192915]	2000000 OPS in 1.867787 seconds, throughput 1070785.908672
+129521	[1728192916]	2000000 OPS in 1.878171 seconds, throughput 1064865.765684
+129521	[1728192916]	2000000 OPS in 1.870283 seconds, throughput 1069356.883424
+129521	[1728192916]	2000000 OPS in 1.862266 seconds, throughput 1073960.433150
+129521	[1728192917]	2000000 OPS in 1.899833 seconds, throughput 1052724.107856
+129521	[1728192917]	2000000 OPS in 1.871775 seconds, throughput 1068504.494397
+129521	[1728192918]	2000000 OPS in 1.823553 seconds, throughput 1096760.006427
+129521	[1728192918]	2000000 OPS in 1.902798 seconds, throughput 1051083.719869
+129521	[1728192919]	2000000 OPS in 1.879612 seconds, throughput 1064049.388916
+129521	[1728192919]	2000000 OPS in 1.845579 seconds, throughput 1083670.761317
+129521	[1728192919]	2000000 OPS in 1.838174 seconds, throughput 1088036.279482
+129521	[1728192920]	2000000 OPS in 1.825056 seconds, throughput 1095856.784669
+129521	[1728192921]	2000000 OPS in 1.805177 seconds, throughput 1107924.596868
+129521	[1728192921]	2000000 OPS in 1.882124 seconds, throughput 1062629.242282
+129521	[1728192921]	2000000 OPS in 1.938674 seconds, throughput 1031632.961498
+129521	[1728192922]	2000000 OPS in 1.929077 seconds, throughput 1036765.250946
+129521	[1728192923]	2000000 OPS in 1.839666 seconds, throughput 1087153.863799
+129521	[1728192923]	2000000 OPS in 1.874271 seconds, throughput 1067081.547973
+129521	[1728192923]	2000000 OPS in 1.887623 seconds, throughput 1059533.603903
+129521	[1728192924]	2000000 OPS in 1.878331 seconds, throughput 1064775.058283
+129521	[1728192925]	2000000 OPS in 1.844336 seconds, throughput 1084401.106957
+129521	[1728192925]	2000000 OPS in 1.880679 seconds, throughput 1063445.702323
+129521	[1728192925]	2000000 OPS in 1.911387 seconds, throughput 1046360.574808
+129521	[1728192926]	2000000 OPS in 1.896055 seconds, throughput 1054821.721944
+129521	[1728192927]	2000000 OPS in 1.896545 seconds, throughput 1054549.193402
+129521	[1728192927]	2000000 OPS in 1.846032 seconds, throughput 1083404.838053
+129521	[1728192927]	2000000 OPS in 1.932544 seconds, throughput 1034905.285468
+129521	[1728192928]	2000000 OPS in 1.845336 seconds, throughput 1083813.462697
+129521	[1728192928]	2000000 OPS in 1.838161 seconds, throughput 1088043.974385
+129521	[1728192929]	2000000 OPS in 1.816261 seconds, throughput 1101163.323994
+129521	[1728192929]	2000000 OPS in 1.877263 seconds, throughput 1065380.823039
+129521	[1728192930]	2000000 OPS in 1.876193 seconds, throughput 1065988.413772
+129521	[1728192930]	2000000 OPS in 1.965422 seconds, throughput 1017593.168287
+129521	[1728192931]	2000000 OPS in 1.861380 seconds, throughput 1074471.628577
+129521	[1728192931]	2000000 OPS in 1.826145 seconds, throughput 1095203.283419
+129521	[1728192931]	2000000 OPS in 1.976522 seconds, throughput 1011878.441019
+129521	[1728192932]	2000000 OPS in 1.820430 seconds, throughput 1098641.529748
+129521	[1728192932]	2000000 OPS in 1.829114 seconds, throughput 1093425.560135
+129521	[1728192933]	2000000 OPS in 1.884046 seconds, throughput 1061545.206433
+129521	[1728192933]	2000000 OPS in 1.966993 seconds, throughput 1016780.435924
+129521	[1728192934]	2000000 OPS in 1.871639 seconds, throughput 1068582.135764
+129521	[1728192934]	2000000 OPS in 1.837942 seconds, throughput 1088173.620277
+129521	[1728192934]	2000000 OPS in 1.865274 seconds, throughput 1072228.530500
+129521	[1728192935]	2000000 OPS in 1.890280 seconds, throughput 1058044.310896
+129521	[1728192936]	2000000 OPS in 1.894856 seconds, throughput 1055489.177014
+129521	[1728192936]	2000000 OPS in 1.849863 seconds, throughput 1081161.145447
+129521	[1728192936]	2000000 OPS in 1.846870 seconds, throughput 1082913.253234
+129521	[1728192937]	2000000 OPS in 1.800438 seconds, throughput 1110840.806515
+129521	[1728192938]	2000000 OPS in 1.841823 seconds, throughput 1085880.673659
+129521	[1728192938]	2000000 OPS in 1.847518 seconds, throughput 1082533.431339
+129521	[1728192938]	2000000 OPS in 1.840071 seconds, throughput 1086914.581013
+129521	[1728192939]	2000000 OPS in 1.855727 seconds, throughput 1077744.732927
+129521	[1728192940]	2000000 OPS in 1.902390 seconds, throughput 1051309.142710
+129521	[1728192940]	2000000 OPS in 1.897439 seconds, throughput 1054052.330536
+129521	[1728192940]	2000000 OPS in 1.884346 seconds, throughput 1061376.201611
+129521	[1728192941]	2000000 OPS in 1.928395 seconds, throughput 1037131.915401
+129521	[1728192942]	2000000 OPS in 1.862422 seconds, throughput 1073870.476186
+129521	[1728192942]	2000000 OPS in 1.851734 seconds, throughput 1080068.735574
+129521	[1728192942]	2000000 OPS in 1.818124 seconds, throughput 1100034.981112
+129521	[1728192943]	2000000 OPS in 1.869741 seconds, throughput 1069666.868299
+129521	[1728192943]	2000000 OPS in 1.858459 seconds, throughput 1076160.410318
+129521	[1728192943]	2000000 OPS in 1.846519 seconds, throughput 1083119.101401
+129521	[1728192944]	2000000 OPS in 1.860251 seconds, throughput 1075123.733303
+129521	[1728192945]	2000000 OPS in 1.870692 seconds, throughput 1069123.083864
+129521	[1728192945]	2000000 OPS in 1.903107 seconds, throughput 1050913.059539
+129521	[1728192945]	2000000 OPS in 1.878325 seconds, throughput 1064778.459532
+129521	[1728192946]	2000000 OPS in 1.814712 seconds, throughput 1102103.253850
+129521	[1728192947]	2000000 OPS in 1.907039 seconds, throughput 1048746.250077
+129521	[1728192947]	2000000 OPS in 1.878538 seconds, throughput 1064657.728510
+129521	[1728192947]	2000000 OPS in 1.865280 seconds, throughput 1072225.081489
+129521	[1728192947]	2000000 OPS in 1.873850 seconds, throughput 1067321.290391
+129521	[1728192948]	2000000 OPS in 1.858870 seconds, throughput 1075922.469027
+129521	[1728192949]	2000000 OPS in 1.780231 seconds, throughput 1123449.709616
+129521	[1728192949]	2000000 OPS in 1.864812 seconds, throughput 1072494.170994
+129521	[1728192949]	2000000 OPS in 1.871197 seconds, throughput 1068834.548153
+129521	[1728192950]	2000000 OPS in 1.861659 seconds, throughput 1074310.601458
+129521	[1728192951]	2000000 OPS in 1.828928 seconds, throughput 1093536.760332
+129521	[1728192951]	2000000 OPS in 1.826303 seconds, throughput 1095108.533469
+129521	[1728192951]	2000000 OPS in 1.796472 seconds, throughput 1113293.165716
+129521	[1728192952]	2000000 OPS in 1.814965 seconds, throughput 1101949.624373
+129521	[1728192953]	2000000 OPS in 1.777669 seconds, throughput 1125068.840150
+129521	[1728192953]	2000000 OPS in 1.829574 seconds, throughput 1093150.645997
+129521	[1728192953]	2000000 OPS in 1.850143 seconds, throughput 1080997.522894
+129521	[1728192954]	2000000 OPS in 1.826621 seconds, throughput 1094917.883896
+129521	[1728192954]	2000000 OPS in 1.859990 seconds, throughput 1075274.598251
+129521	[1728192955]	2000000 OPS in 1.936508 seconds, throughput 1032786.851384
+129521	[1728192955]	2000000 OPS in 1.842225 seconds, throughput 1085643.718873
+129521	[1728192956]	2000000 OPS in 1.853252 seconds, throughput 1079184.050523
+129521	[1728192956]	2000000 OPS in 1.831618 seconds, throughput 1091930.741017
+129521	[1728192957]	2000000 OPS in 1.813392 seconds, throughput 1102905.494234
+129521	[1728192957]	2000000 OPS in 1.789931 seconds, throughput 1117361.507231
+129521	[1728192958]	2000000 OPS in 1.925873 seconds, throughput 1038490.076968
+129521	[1728192958]	2000000 OPS in 1.830457 seconds, throughput 1092623.317565
+129521	[1728192958]	2000000 OPS in 1.828626 seconds, throughput 1093717.359373
+129521	[1728192958]	2000000 OPS in 1.920354 seconds, throughput 1041474.644779
+129521	[1728192960]	2000000 OPS in 1.917379 seconds, throughput 1043090.593983
+129521	[1728192960]	2000000 OPS in 1.888978 seconds, throughput 1058773.580211
+129521	[1728192960]	2000000 OPS in 1.907447 seconds, throughput 1048521.924856
+129521	[1728192960]	2000000 OPS in 1.893624 seconds, throughput 1056175.882857
+129521	[1728192962]	2000000 OPS in 1.878095 seconds, throughput 1064908.857113
+129521	[1728192962]	2000000 OPS in 1.841052 seconds, throughput 1086335.421270
+129521	[1728192962]	2000000 OPS in 1.869509 seconds, throughput 1069799.610486
+129521	[1728192962]	2000000 OPS in 1.868130 seconds, throughput 1070589.305883
+129521	[1728192963]	2000000 OPS in 1.865414 seconds, throughput 1072148.059358
+129521	[1728192964]	2000000 OPS in 1.865054 seconds, throughput 1072355.009560
+129521	[1728192964]	2000000 OPS in 1.863509 seconds, throughput 1073244.078778
+129521	[1728192964]	2000000 OPS in 1.840741 seconds, throughput 1086518.961657
+129521	[1728192965]	2000000 OPS in 1.865923 seconds, throughput 1071855.591040
+129521	[1728192966]	2000000 OPS in 1.896296 seconds, throughput 1054687.664795
+129521	[1728192966]	2000000 OPS in 1.835154 seconds, throughput 1089826.793828
+129521	[1728192966]	2000000 OPS in 1.886377 seconds, throughput 1060233.452804
+129521	[1728192967]	2000000 OPS in 1.850016 seconds, throughput 1081071.731272
+129521	[1728192967]	2000000 OPS in 1.820076 seconds, throughput 1098855.212639
+129521	[1728192968]	2000000 OPS in 1.867260 seconds, throughput 1071088.118420
+129521	[1728192968]	2000000 OPS in 1.895536 seconds, throughput 1055110.533379
+129521	[1728192969]	2000000 OPS in 1.882633 seconds, throughput 1062341.943438
+129521	[1728192969]	2000000 OPS in 1.817015 seconds, throughput 1100706.378318
+129521	[1728192970]	2000000 OPS in 1.882535 seconds, throughput 1062397.246266
+129521	[1728192970]	2000000 OPS in 1.925996 seconds, throughput 1038423.755813
+129521	[1728192971]	2000000 OPS in 1.903408 seconds, throughput 1050746.870876
+129521	[1728192971]	2000000 OPS in 1.850299 seconds, throughput 1080906.383239
+129521	[1728192971]	2000000 OPS in 1.833163 seconds, throughput 1091010.455699
+129521	[1728192972]	2000000 OPS in 1.927621 seconds, throughput 1037548.356238
+129521	[1728192973]	2000000 OPS in 1.917924 seconds, throughput 1042794.187882
+129521	[1728192973]	2000000 OPS in 1.887355 seconds, throughput 1059684.055199
+129521	[1728192973]	2000000 OPS in 1.911137 seconds, throughput 1046497.451517
+129521	[1728192974]	2000000 OPS in 1.862971 seconds, throughput 1073554.016676
+129521	[1728192975]	2000000 OPS in 1.920830 seconds, throughput 1041216.557426
+129521	[1728192975]	2000000 OPS in 1.909296 seconds, throughput 1047506.515491
+129521	[1728192975]	2000000 OPS in 1.877710 seconds, throughput 1065127.202816
+129521	[1728192975]	2000000 OPS in 1.940826 seconds, throughput 1030489.080422
+129521	[1728192977]	2000000 OPS in 1.990692 seconds, throughput 1004675.760992
+129521	[1728192977]	2000000 OPS in 1.910990 seconds, throughput 1046577.951742
+129521	[1728192977]	2000000 OPS in 1.903137 seconds, throughput 1050896.493526
+129521	[1728192977]	2000000 OPS in 1.874691 seconds, throughput 1066842.482308
+129521	[1728192979]	2000000 OPS in 1.807708 seconds, throughput 1106373.374461
+129521	[1728192979]	2000000 OPS in 1.807783 seconds, throughput 1106327.474039
+129521	[1728192979]	2000000 OPS in 1.782237 seconds, throughput 1122185.208813
+129521	[1728192979]	2000000 OPS in 1.793072 seconds, throughput 1115404.177858
+129521	[1728192980]	2000000 OPS in 1.855907 seconds, throughput 1077640.205032
+129521	[1728192980]	2000000 OPS in 1.891488 seconds, throughput 1057368.590232
+129521	[1728192981]	2000000 OPS in 1.840002 seconds, throughput 1086955.340266
+129521	[1728192981]	2000000 OPS in 1.871521 seconds, throughput 1068649.510211
+129521	[1728192982]	2000000 OPS in 1.781737 seconds, throughput 1122500.122072
+129521	[1728192982]	2000000 OPS in 1.816498 seconds, throughput 1101019.654302
+129521	[1728192983]	2000000 OPS in 1.839753 seconds, throughput 1087102.453427
+129521	[1728192983]	2000000 OPS in 1.807546 seconds, throughput 1106472.532373
+129521	[1728192984]	2000000 OPS in 1.889656 seconds, throughput 1058393.697054
+129521	[1728192984]	2000000 OPS in 1.855596 seconds, throughput 1077820.818756
+129521	[1728192984]	2000000 OPS in 1.866698 seconds, throughput 1071410.587037
+129521	[1728192985]	2000000 OPS in 1.865127 seconds, throughput 1072313.038201
+129521	[1728192986]	2000000 OPS in 1.850121 seconds, throughput 1081010.377159
+129521	[1728192986]	2000000 OPS in 1.840902 seconds, throughput 1086423.937830
+129521	[1728192986]	2000000 OPS in 1.820588 seconds, throughput 1098546.183980
+129521	[1728192986]	2000000 OPS in 1.812142 seconds, throughput 1103666.268979
+129521	[1728192988]	2000000 OPS in 1.871131 seconds, throughput 1068872.248923
+129521	[1728192988]	2000000 OPS in 1.826367 seconds, throughput 1095070.158407
+129521	[1728192988]	2000000 OPS in 1.868639 seconds, throughput 1070297.687247
+129521	[1728192988]	2000000 OPS in 1.842090 seconds, throughput 1085723.281707
+129521	[1728192990]	2000000 OPS in 1.882061 seconds, throughput 1062664.812671
+129521	[1728192990]	2000000 OPS in 1.881277 seconds, throughput 1063107.665697
+129521	[1728192990]	2000000 OPS in 1.851572 seconds, throughput 1080163.234268
+129521	[1728192990]	2000000 OPS in 1.874144 seconds, throughput 1067153.857975
+129521	[1728192992]	2000000 OPS in 1.862001 seconds, throughput 1074113.279209
+129521	[1728192992]	2000000 OPS in 1.824326 seconds, throughput 1096295.289329
+129521	[1728192992]	2000000 OPS in 1.893785 seconds, throughput 1056086.092138
+129521	[1728192992]	2000000 OPS in 1.900031 seconds, throughput 1052614.404712
+129521	[1728192993]	2000000 OPS in 1.820752 seconds, throughput 1098447.234989
+129521	[1728192993]	2000000 OPS in 1.836842 seconds, throughput 1088825.277297
+129521	[1728192994]	2000000 OPS in 1.790294 seconds, throughput 1117134.951019
+129521	[1728192994]	2000000 OPS in 1.812394 seconds, throughput 1103512.812336
+129521	[1728192995]	2000000 OPS in 1.882237 seconds, throughput 1062565.447391
+129521	[1728192995]	2000000 OPS in 1.916970 seconds, throughput 1043313.145224
+129521	[1728192996]	2000000 OPS in 1.855198 seconds, throughput 1078052.046197
+129521	[1728192996]	2000000 OPS in 1.888098 seconds, throughput 1059267.050757
+129521	[1728192997]	2000000 OPS in 1.926449 seconds, throughput 1038179.572883
+129521	[1728192997]	2000000 OPS in 1.960738 seconds, throughput 1020024.092969
+129521	[1728192997]	2000000 OPS in 1.906762 seconds, throughput 1048898.604021
+129521	[1728192998]	2000000 OPS in 1.914478 seconds, throughput 1044671.184521
+129521	[1728192999]	2000000 OPS in 1.850172 seconds, throughput 1080980.579103
+129521	[1728192999]	2000000 OPS in 1.851070 seconds, throughput 1080456.168594
+129521	[1728192999]	2000000 OPS in 1.853702 seconds, throughput 1078922.070538
+129521	[1728193000]	2000000 OPS in 1.939683 seconds, throughput 1031096.318316
+129521	[1728193001]	2000000 OPS in 1.877161 seconds, throughput 1065438.713035
+129521	[1728193001]	2000000 OPS in 1.937243 seconds, throughput 1032395.006718
+129521	[1728193001]	2000000 OPS in 1.854764 seconds, throughput 1078304.301787
+129521	[1728193002]	2000000 OPS in 1.840403 seconds, throughput 1086718.506762
+129521	[1728193003]	2000000 OPS in 1.888340 seconds, throughput 1059131.300507
+129521	[1728193003]	2000000 OPS in 1.813391 seconds, throughput 1102906.102435
+129521	[1728193003]	2000000 OPS in 1.826675 seconds, throughput 1094885.516033
+129521	[1728193003]	2000000 OPS in 1.861610 seconds, throughput 1074338.878713
+129521	[1728193005]	2000000 OPS in 1.863202 seconds, throughput 1073420.917324
+129521	[1728193005]	2000000 OPS in 1.936260 seconds, throughput 1032919.132761
+129521	[1728193005]	2000000 OPS in 1.855408 seconds, throughput 1077930.029406
+129521	[1728193005]	2000000 OPS in 1.849481 seconds, throughput 1081384.453260
+129521	[1728193006]	2000000 OPS in 1.856840 seconds, throughput 1077098.726869
+129521	[1728193007]	2000000 OPS in 1.824945 seconds, throughput 1095923.438789
+129521	[1728193007]	2000000 OPS in 1.858874 seconds, throughput 1075920.153814
+129521	[1728193007]	2000000 OPS in 1.827023 seconds, throughput 1094676.969037
+129521	[1728193008]	2000000 OPS in 1.902156 seconds, throughput 1051438.472975
+129521	[1728193008]	2000000 OPS in 1.891589 seconds, throughput 1057312.132815
+129521	[1728193009]	2000000 OPS in 1.872201 seconds, throughput 1068261.367236
+129521	[1728193009]	2000000 OPS in 1.859549 seconds, throughput 1075529.604221
+129521	[1728193010]	2000000 OPS in 1.834845 seconds, throughput 1090010.327848
+129521	[1728193010]	2000000 OPS in 1.837431 seconds, throughput 1088476.247543
+129521	[1728193010]	2000000 OPS in 1.921600 seconds, throughput 1040799.333888
+129521	[1728193011]	2000000 OPS in 1.903309 seconds, throughput 1050801.525133
+129521	[1728193012]	2000000 OPS in 1.844632 seconds, throughput 1084227.097871
+129521	[1728193012]	2000000 OPS in 1.797086 seconds, throughput 1112912.793266
+129521	[1728193012]	2000000 OPS in 1.834323 seconds, throughput 1090320.516071
+129521	[1728193013]	2000000 OPS in 1.798366 seconds, throughput 1112120.669541
+129521	[1728193014]	2000000 OPS in 1.901152 seconds, throughput 1051993.738533
+129521	[1728193014]	2000000 OPS in 1.889755 seconds, throughput 1058338.250196
+129521	[1728193014]	2000000 OPS in 1.853029 seconds, throughput 1079313.923312
+129521	[1728193014]	2000000 OPS in 1.883115 seconds, throughput 1062070.027587
+129521	[1728193016]	2000000 OPS in 1.795909 seconds, throughput 1113642.172293
+129521	[1728193016]	2000000 OPS in 1.800270 seconds, throughput 1110944.469441
+129521	[1728193016]	2000000 OPS in 1.836935 seconds, throughput 1088770.152455
+129521	[1728193016]	2000000 OPS in 1.876695 seconds, throughput 1065703.270910
+129521	[1728193018]	2000000 OPS in 1.870324 seconds, throughput 1069333.441692
+129521	[1728193018]	2000000 OPS in 1.854470 seconds, throughput 1078475.251689
+129521	[1728193018]	2000000 OPS in 1.816191 seconds, throughput 1101205.765253
+129521	[1728193018]	2000000 OPS in 1.839218 seconds, throughput 1087418.674676
+129521	[1728193020]	2000000 OPS in 1.896416 seconds, throughput 1054620.927054
+129521	[1728193020]	2000000 OPS in 1.829691 seconds, throughput 1093080.744235
+129521	[1728193020]	2000000 OPS in 1.904639 seconds, throughput 1050067.755622
+129521	[1728193020]	2000000 OPS in 1.851682 seconds, throughput 1080099.066686
+129521	[1728193021]	2000000 OPS in 1.836157 seconds, throughput 1089231.476393
+129521	[1728193021]	2000000 OPS in 1.830211 seconds, throughput 1092770.177865
+129521	[1728193022]	2000000 OPS in 1.866520 seconds, throughput 1071512.761717
+129521	[1728193022]	2000000 OPS in 1.831388 seconds, throughput 1092067.874203
+129521	[1728193023]	2000000 OPS in 1.838152 seconds, throughput 1088049.301690
+129521	[1728193023]	2000000 OPS in 1.863202 seconds, throughput 1073420.917324
+129521	[1728193023]	2000000 OPS in 1.862830 seconds, throughput 1073635.275361
+129521	[1728193024]	2000000 OPS in 1.909328 seconds, throughput 1047488.959466
+129521	[1728193025]	2000000 OPS in 1.849593 seconds, throughput 1081318.971255
+129521	[1728193025]	2000000 OPS in 1.857853 seconds, throughput 1076511.435512
+129521	[1728193025]	2000000 OPS in 1.860433 seconds, throughput 1075018.557508
+129521	[1728193026]	2000000 OPS in 1.882812 seconds, throughput 1062240.945989
+129521	[1728193027]	2000000 OPS in 1.832995 seconds, throughput 1091110.450383
+129521	[1728193027]	2000000 OPS in 1.850487 seconds, throughput 1080796.568687
+129521	[1728193027]	2000000 OPS in 1.903706 seconds, throughput 1050582.390348
+129521	[1728193028]	2000000 OPS in 1.846700 seconds, throughput 1083012.942005
+129521	[1728193029]	2000000 OPS in 1.865918 seconds, throughput 1071858.463234
+129521	[1728193029]	2000000 OPS in 1.847642 seconds, throughput 1082460.779740
+129521	[1728193029]	2000000 OPS in 1.878770 seconds, throughput 1064526.259201
+129521	[1728193029]	2000000 OPS in 1.927394 seconds, throughput 1037670.554126
+129521	[1728193031]	2000000 OPS in 1.873141 seconds, throughput 1067725.280692
+129521	[1728193031]	2000000 OPS in 1.894906 seconds, throughput 1055461.326314
+129521	[1728193031]	2000000 OPS in 1.872937 seconds, throughput 1067841.577159
+129521	[1728193031]	2000000 OPS in 1.889580 seconds, throughput 1058436.266260
+129521	[1728193033]	2000000 OPS in 1.919761 seconds, throughput 1041796.348608
+129521	[1728193033]	2000000 OPS in 1.875795 seconds, throughput 1066214.591680
+129521	[1728193033]	2000000 OPS in 1.883623 seconds, throughput 1061783.594700
+129521	[1728193033]	2000000 OPS in 1.874728 seconds, throughput 1066821.426895
+129521	[1728193034]	2000000 OPS in 1.844487 seconds, throughput 1084312.331830
+129521	[1728193034]	2000000 OPS in 1.854124 seconds, throughput 1078676.507073
+129521	[1728193035]	2000000 OPS in 1.941667 seconds, throughput 1030042.741624
+129521	[1728193035]	2000000 OPS in 1.871737 seconds, throughput 1068526.187173
+129521	[1728193036]	2000000 OPS in 1.879375 seconds, throughput 1064183.571666
+129521	[1728193036]	2000000 OPS in 1.860643 seconds, throughput 1074897.226389
+129521	[1728193037]	2000000 OPS in 1.918857 seconds, throughput 1042287.153238
+129521	[1728193037]	2000000 OPS in 1.865918 seconds, throughput 1071858.463234
+129521	[1728193038]	2000000 OPS in 1.869750 seconds, throughput 1069661.719481
+129521	[1728193038]	2000000 OPS in 1.890436 seconds, throughput 1057957.000396
+129521	[1728193039]	2000000 OPS in 1.979297 seconds, throughput 1010459.774354
+129521	[1728193039]	2000000 OPS in 1.859447 seconds, throughput 1075588.602418
+129521	[1728193040]	2000000 OPS in 1.853784 seconds, throughput 1078874.345663
+129521	[1728193040]	2000000 OPS in 1.871277 seconds, throughput 1068788.853815
+129521	[1728193040]	2000000 OPS in 1.860579 seconds, throughput 1074934.200590
+129521	[1728193041]	2000000 OPS in 1.825955 seconds, throughput 1095317.244949
+129521	[1728193042]	2000000 OPS in 1.838248 seconds, throughput 1087992.479796
+129521	[1728193042]	2000000 OPS in 1.822396 seconds, throughput 1097456.315751
+129521	[1728193042]	2000000 OPS in 1.856055 seconds, throughput 1077554.275062
+129521	[1728193042]	2000000 OPS in 1.804852 seconds, throughput 1108124.101034
+129521	[1728193044]	2000000 OPS in 1.808129 seconds, throughput 1106115.769395
+129521	[1728193044]	2000000 OPS in 1.788932 seconds, throughput 1117985.479605
+129521	[1728193044]	2000000 OPS in 1.833830 seconds, throughput 1090613.633761
+129521	[1728193044]	2000000 OPS in 1.771957 seconds, throughput 1128695.560897
+129521	[1728193046]	2000000 OPS in 1.842250 seconds, throughput 1085628.986294
+129521	[1728193046]	2000000 OPS in 1.885900 seconds, throughput 1060501.617265
+129521	[1728193046]	2000000 OPS in 1.861329 seconds, throughput 1074501.068860
+129521	[1728193046]	2000000 OPS in 1.852407 seconds, throughput 1079676.334628
+129521	[1728193047]	2000000 OPS in 1.860210 seconds, throughput 1075147.429591
+129521	[1728193047]	2000000 OPS in 1.844924 seconds, throughput 1084055.494969
+129521	[1728193048]	2000000 OPS in 1.855884 seconds, throughput 1077653.560244
+129521	[1728193048]	2000000 OPS in 1.902176 seconds, throughput 1051427.417862
+129521	[1728193049]	2000000 OPS in 1.884468 seconds, throughput 1061307.488373
+129521	[1728193049]	2000000 OPS in 1.899187 seconds, throughput 1053082.187273
+129521	[1728193050]	2000000 OPS in 1.892690 seconds, throughput 1056697.081931
+129521	[1728193050]	2000000 OPS in 1.874742 seconds, throughput 1066813.460199
+129521	[1728193051]	2000000 OPS in 1.866665 seconds, throughput 1071429.528062
+129521	[1728193051]	2000000 OPS in 1.891212 seconds, throughput 1057522.900658
+129521	[1728193052]	2000000 OPS in 1.877466 seconds, throughput 1065265.629311
+129521	[1728193052]	2000000 OPS in 1.858947 seconds, throughput 1075877.902920
+129521	[1728193053]	2000000 OPS in 1.826374 seconds, throughput 1095065.961298
+129521	[1728193053]	2000000 OPS in 1.815658 seconds, throughput 1101529.032450
+129521	[1728193054]	2000000 OPS in 1.868600 seconds, throughput 1070320.025688
+129521	[1728193054]	2000000 OPS in 1.835798 seconds, throughput 1089444.481365
+129521	[1728193055]	2000000 OPS in 1.806836 seconds, throughput 1106907.323077
+129521	[1728193055]	2000000 OPS in 1.838058 seconds, throughput 1088104.945546
+129521	[1728193055]	2000000 OPS in 1.841606 seconds, throughput 1086008.625081
+129521	[1728193055]	2000000 OPS in 1.849961 seconds, throughput 1081103.871919
+129521	[1728193057]	2000000 OPS in 1.914441 seconds, throughput 1044691.374662
+129521	[1728193057]	2000000 OPS in 1.892235 seconds, throughput 1056951.171498
+129521	[1728193057]	2000000 OPS in 1.884015 seconds, throughput 1061562.673333
+129521	[1728193057]	2000000 OPS in 1.927472 seconds, throughput 1037628.562179
+129521	[1728193058]	2000000 OPS in 1.794504 seconds, throughput 1114514.094145
+129521	[1728193059]	2000000 OPS in 1.806548 seconds, throughput 1107083.786315
+129521	[1728193059]	2000000 OPS in 1.787079 seconds, throughput 1119144.704851
+129521	[1728193059]	2000000 OPS in 1.815769 seconds, throughput 1101461.694742
+129521	[1728193060]	2000000 OPS in 1.811030 seconds, throughput 1104343.936876
+129521	[1728193060]	2000000 OPS in 1.828043 seconds, throughput 1094066.168028
+129521	[1728193061]	2000000 OPS in 1.822275 seconds, throughput 1097529.187417
+129521	[1728193061]	2000000 OPS in 1.928156 seconds, throughput 1037260.470626
+129521	[1728193062]	2000000 OPS in 1.836055 seconds, throughput 1089291.987440
+129521	[1728193062]	2000000 OPS in 1.865882 seconds, throughput 1071879.143483
+129521	[1728193063]	2000000 OPS in 1.817007 seconds, throughput 1100711.224558
+129521	[1728193063]	2000000 OPS in 1.875667 seconds, throughput 1066287.352712
+129521	[1728193064]	2000000 OPS in 1.874669 seconds, throughput 1066855.002136
+129521	[1728193064]	2000000 OPS in 1.912960 seconds, throughput 1045500.167280
+129521	[1728193065]	2000000 OPS in 1.921088 seconds, throughput 1041076.723190
+129521	[1728193065]	2000000 OPS in 1.977235 seconds, throughput 1011513.553017
+129521	[1728193066]	2000000 OPS in 1.874347 seconds, throughput 1067038.280532
+129521	[1728193066]	2000000 OPS in 1.836689 seconds, throughput 1088915.978699
+129521	[1728193066]	2000000 OPS in 1.861812 seconds, throughput 1074222.316754
+129521	[1728193067]	2000000 OPS in 1.903324 seconds, throughput 1050793.243820
+129521	[1728193068]	2000000 OPS in 1.843709 seconds, throughput 1084769.885052
+129521	[1728193068]	2000000 OPS in 1.863133 seconds, throughput 1073460.670816
+129521	[1728193068]	2000000 OPS in 1.908230 seconds, throughput 1048091.687061
+129521	[1728193069]	2000000 OPS in 1.871774 seconds, throughput 1068505.065248
+129521	[1728193070]	2000000 OPS in 1.905417 seconds, throughput 1049639.002906
+129521	[1728193070]	2000000 OPS in 1.925909 seconds, throughput 1038470.665021
+129521	[1728193070]	2000000 OPS in 1.825702 seconds, throughput 1095469.030543
+129521	[1728193071]	2000000 OPS in 1.836942 seconds, throughput 1088766.003499
+129521	[1728193072]	2000000 OPS in 1.951114 seconds, throughput 1025055.429872
+129521	[1728193072]	2000000 OPS in 1.885176 seconds, throughput 1060908.901874
+129521	[1728193072]	2000000 OPS in 1.864206 seconds, throughput 1072842.808145
+129521	[1728193072]	2000000 OPS in 1.901729 seconds, throughput 1051674.555102
+129521	[1728193073]	2000000 OPS in 1.852431 seconds, throughput 1079662.346398
+129521	[1728193073]	2000000 OPS in 1.854028 seconds, throughput 1078732.360029
+129521	[1728193074]	2000000 OPS in 1.853620 seconds, throughput 1078969.799635
+129521	[1728193074]	2000000 OPS in 1.871804 seconds, throughput 1068487.939977
+129521	[1728193075]	2000000 OPS in 1.890598 seconds, throughput 1057866.347050
+129521	[1728193075]	2000000 OPS in 1.861878 seconds, throughput 1074184.237635
+129521	[1728193076]	2000000 OPS in 1.826861 seconds, throughput 1094774.041375
+129521	[1728193076]	2000000 OPS in 1.880947 seconds, throughput 1063294.181069
+129521	[1728193077]	2000000 OPS in 1.808000 seconds, throughput 1106194.690265
+129521	[1728193077]	2000000 OPS in 1.823595 seconds, throughput 1096734.746476
+129521	[1728193078]	2000000 OPS in 1.811762 seconds, throughput 1103897.752575
+129521	[1728193078]	2000000 OPS in 1.862876 seconds, throughput 1073608.764083
+129521	[1728193079]	2000000 OPS in 1.802072 seconds, throughput 1109833.569358
+129521	[1728193079]	2000000 OPS in 1.827534 seconds, throughput 1094370.884481
+129521	[1728193079]	2000000 OPS in 1.846901 seconds, throughput 1082895.076672
+129521	[1728193080]	2000000 OPS in 1.875212 seconds, throughput 1066546.075857
+129521	[1728193081]	2000000 OPS in 1.865966 seconds, throughput 1071830.890809
+129521	[1728193081]	2000000 OPS in 1.875351 seconds, throughput 1066467.024040
+129521	[1728193081]	2000000 OPS in 1.875577 seconds, throughput 1066338.518760
+129521	[1728193082]	2000000 OPS in 1.853902 seconds, throughput 1078805.675812
+129521	[1728193083]	2000000 OPS in 1.896360 seconds, throughput 1054652.070282
+129521	[1728193083]	2000000 OPS in 1.846997 seconds, throughput 1082838.791833
+129521	[1728193083]	2000000 OPS in 1.868291 seconds, throughput 1070497.047837
+129521	[1728193084]	2000000 OPS in 1.848830 seconds, throughput 1081765.224493
+129521	[1728193085]	2000000 OPS in 1.877188 seconds, throughput 1065423.388600
+129521	[1728193085]	2000000 OPS in 1.888942 seconds, throughput 1058793.758623
+129521	[1728193085]	2000000 OPS in 1.868735 seconds, throughput 1070242.704289
+129521	[1728193085]	2000000 OPS in 1.877460 seconds, throughput 1065269.033694
+129521	[1728193086]	2000000 OPS in 1.879919 seconds, throughput 1063875.624428
+129521	[1728193086]	2000000 OPS in 1.860010 seconds, throughput 1075263.036220
+129521	[1728193087]	2000000 OPS in 1.842735 seconds, throughput 1085343.253371
+129521	[1728193087]	2000000 OPS in 1.836986 seconds, throughput 1088739.925073
+129521	[1728193088]	2000000 OPS in 1.867542 seconds, throughput 1070926.383449
+129521	[1728193088]	2000000 OPS in 1.849123 seconds, throughput 1081593.815014
+129521	[1728193089]	2000000 OPS in 1.803402 seconds, throughput 1109015.072624
+129521	[1728193089]	2000000 OPS in 1.886007 seconds, throughput 1060441.451172
+129521	[1728193090]	2000000 OPS in 1.807593 seconds, throughput 1106443.762506
+129521	[1728193090]	2000000 OPS in 1.811399 seconds, throughput 1104118.971027
+129521	[1728193091]	2000000 OPS in 1.887604 seconds, throughput 1059544.268819
+129521	[1728193091]	2000000 OPS in 1.879779 seconds, throughput 1063954.858523
+129521	[1728193092]	2000000 OPS in 1.862133 seconds, throughput 1074037.139130
+129521	[1728193092]	2000000 OPS in 1.898672 seconds, throughput 1053367.827618
+129521	[1728193092]	2000000 OPS in 1.861843 seconds, throughput 1074204.430771
+129521	[1728193093]	2000000 OPS in 1.849064 seconds, throughput 1081628.326548
+129521	[1728193094]	2000000 OPS in 1.867540 seconds, throughput 1070927.530334
+129521	[1728193094]	2000000 OPS in 1.877293 seconds, throughput 1065363.797766
+129521	[1728193094]	2000000 OPS in 1.836037 seconds, throughput 1089302.666558
+129521	[1728193095]	2000000 OPS in 1.880892 seconds, throughput 1063325.273328
+129521	[1728193096]	2000000 OPS in 1.865046 seconds, throughput 1072359.609361
+129521	[1728193096]	2000000 OPS in 1.839942 seconds, throughput 1086990.785579
+129521	[1728193096]	2000000 OPS in 1.864847 seconds, throughput 1072474.042106
+129521	[1728193097]	2000000 OPS in 1.816047 seconds, throughput 1101293.083274
+129521	[1728193098]	2000000 OPS in 1.864685 seconds, throughput 1072567.216447
+129521	[1728193098]	2000000 OPS in 1.869605 seconds, throughput 1069744.678689
+129521	[1728193098]	2000000 OPS in 1.844835 seconds, throughput 1084107.792838
+129521	[1728193098]	2000000 OPS in 1.830650 seconds, throughput 1092508.125529
+129521	[1728193099]	2000000 OPS in 1.854351 seconds, throughput 1078544.461108
+129521	[1728193100]	2000000 OPS in 1.924143 seconds, throughput 1039423.785031
+129521	[1728193100]	2000000 OPS in 1.869931 seconds, throughput 1069558.181559
+129521	[1728193100]	2000000 OPS in 1.854516 seconds, throughput 1078448.500849
+129521	[1728193101]	2000000 OPS in 1.907997 seconds, throughput 1048219.677494
+129521	[1728193101]	2000000 OPS in 1.958638 seconds, throughput 1021117.735896
+129521	[1728193102]	2000000 OPS in 1.880640 seconds, throughput 1063467.755658
+129521	[1728193102]	2000000 OPS in 1.888014 seconds, throughput 1059314.178814
+129521	[1728193103]	2000000 OPS in 1.863781 seconds, throughput 1073087.449652
+129521	[1728193103]	2000000 OPS in 1.869021 seconds, throughput 1070078.934373
+129521	[1728193104]	2000000 OPS in 1.873140 seconds, throughput 1067725.850711
+129521	[1728193104]	2000000 OPS in 1.844406 seconds, throughput 1084359.951117
+129521	[1728193105]	2000000 OPS in 1.887718 seconds, throughput 1059480.282542
+129521	[1728193105]	2000000 OPS in 1.887137 seconds, throughput 1059806.468741
+129521	[1728193105]	2000000 OPS in 1.829731 seconds, throughput 1093056.848247
+129521	[1728193106]	2000000 OPS in 1.886814 seconds, throughput 1059987.894938
+129521	[1728193107]	2000000 OPS in 1.866530 seconds, throughput 1071507.021050
+129521	[1728193107]	2000000 OPS in 1.857757 seconds, throughput 1076567.064476
+129521	[1728193107]	2000000 OPS in 1.842079 seconds, throughput 1085729.765119
+129521	[1728193108]	2000000 OPS in 1.813237 seconds, throughput 1102999.773334
+129521	[1728193109]	2000000 OPS in 1.861441 seconds, throughput 1074436.417807
+129521	[1728193109]	2000000 OPS in 1.908087 seconds, throughput 1048170.235424
+129521	[1728193109]	2000000 OPS in 1.830558 seconds, throughput 1092563.032693
+129521	[1728193110]	2000000 OPS in 1.852343 seconds, throughput 1079713.638349
+129521	[1728193111]	2000000 OPS in 1.915587 seconds, throughput 1044066.388005
+129521	[1728193111]	2000000 OPS in 1.891764 seconds, throughput 1057214.324831
+129521	[1728193111]	2000000 OPS in 1.860875 seconds, throughput 1074763.216229
+129521	[1728193112]	2000000 OPS in 1.928805 seconds, throughput 1036911.455539
+129521	[1728193113]	2000000 OPS in 1.883991 seconds, throughput 1061576.196489
+129521	[1728193113]	2000000 OPS in 1.822403 seconds, throughput 1097452.100331
+129521	[1728193113]	2000000 OPS in 1.825866 seconds, throughput 1095370.635085
+129521	[1728193113]	2000000 OPS in 1.892371 seconds, throughput 1056875.211045
+129521	[1728193114]	2000000 OPS in 1.813763 seconds, throughput 1102679.898090
+129521	[1728193115]	2000000 OPS in 1.808122 seconds, throughput 1106120.051634
+129521	[1728193115]	2000000 OPS in 1.812015 seconds, throughput 1103743.622431
+129521	[1728193115]	2000000 OPS in 1.822052 seconds, throughput 1097663.513445
+129521	[1728193116]	2000000 OPS in 1.956078 seconds, throughput 1022454.114815
+129521	[1728193116]	2000000 OPS in 1.885446 seconds, throughput 1060756.977394
+129521	[1728193116]	2000000 OPS in 1.852339 seconds, throughput 1079715.969917
+129521	[1728193117]	2000000 OPS in 1.847956 seconds, throughput 1082276.850748
+129521	[1728193118]	2000000 OPS in 1.821214 seconds, throughput 1098168.584252
+129521	[1728193118]	2000000 OPS in 1.789795 seconds, throughput 1117446.411461
+129521	[1728193118]	2000000 OPS in 1.852846 seconds, throughput 1079420.523886
+129521	[1728193119]	2000000 OPS in 1.897126 seconds, throughput 1054226.234842
+129521	[1728193120]	2000000 OPS in 1.834680 seconds, throughput 1090108.356771
+129521	[1728193120]	2000000 OPS in 1.868229 seconds, throughput 1070532.573898
+129521	[1728193120]	2000000 OPS in 1.907300 seconds, throughput 1048602.736853
+129521	[1728193121]	2000000 OPS in 1.893487 seconds, throughput 1056252.300650
+129521	[1728193122]	2000000 OPS in 1.871849 seconds, throughput 1068462.253098
+129521	[1728193122]	2000000 OPS in 1.854862 seconds, throughput 1078247.330529
+129521	[1728193122]	2000000 OPS in 1.838360 seconds, throughput 1087926.195087
+129521	[1728193123]	2000000 OPS in 1.924300 seconds, throughput 1039338.980408
+129521	[1728193124]	2000000 OPS in 1.828236 seconds, throughput 1093950.671576
+129521	[1728193124]	2000000 OPS in 1.813926 seconds, throughput 1102580.810904
+129521	[1728193124]	2000000 OPS in 1.848137 seconds, throughput 1082170.856381
+129521	[1728193125]	2000000 OPS in 1.909840 seconds, throughput 1047208.143091
+129521	[1728193126]	2000000 OPS in 1.818665 seconds, throughput 1099707.752665
+129521	[1728193126]	2000000 OPS in 1.839250 seconds, throughput 1087399.755335
+129521	[1728193126]	2000000 OPS in 1.852211 seconds, throughput 1079790.585414
+129521	[1728193127]	2000000 OPS in 1.859078 seconds, throughput 1075802.091144
+129521	[1728193127]	2000000 OPS in 1.853966 seconds, throughput 1078768.434804
+129521	[1728193127]	2000000 OPS in 1.828947 seconds, throughput 1093525.400135
+129521	[1728193128]	2000000 OPS in 1.927246 seconds, throughput 1037750.240499
+129521	[1728193128]	2000000 OPS in 1.825461 seconds, throughput 1095613.655948
+129521	[1728193129]	2000000 OPS in 1.819016 seconds, throughput 1099495.551441
+129521	[1728193129]	2000000 OPS in 1.831832 seconds, throughput 1091803.178457
+129521	[1728193129]	2000000 OPS in 1.816375 seconds, throughput 1101094.212374
+129521	[1728193130]	2000000 OPS in 1.888076 seconds, throughput 1059279.393414
+129521	[1728193131]	2000000 OPS in 1.878993 seconds, throughput 1064399.920596
+129521	[1728193131]	2000000 OPS in 1.919247 seconds, throughput 1042075.355595
+129521	[1728193131]	2000000 OPS in 1.847116 seconds, throughput 1082769.030207
+129521	[1728193132]	2000000 OPS in 1.921101 seconds, throughput 1041069.678273
+129521	[1728193133]	2000000 OPS in 1.823506 seconds, throughput 1096788.274895
+129521	[1728193133]	2000000 OPS in 1.831333 seconds, throughput 1092100.672024
+129521	[1728193133]	2000000 OPS in 1.820384 seconds, throughput 1098669.291754
+129521	[1728193134]	2000000 OPS in 1.864740 seconds, throughput 1072535.581368
+129521	[1728193135]	2000000 OPS in 1.830838 seconds, throughput 1092395.941094
+129521	[1728193135]	2000000 OPS in 1.855008 seconds, throughput 1078162.466146
+129521	[1728193135]	2000000 OPS in 1.823341 seconds, throughput 1096887.526798
+129521	[1728193136]	2000000 OPS in 1.892268 seconds, throughput 1056932.738914
+129521	[1728193137]	2000000 OPS in 1.891515 seconds, throughput 1057353.497065
+129521	[1728193137]	2000000 OPS in 1.862926 seconds, throughput 1073579.948962
+129521	[1728193137]	2000000 OPS in 1.877442 seconds, throughput 1065279.246975
+129521	[1728193138]	2000000 OPS in 1.892951 seconds, throughput 1056551.384584
+129521	[1728193139]	2000000 OPS in 1.885814 seconds, throughput 1060549.980009
+129521	[1728193139]	2000000 OPS in 1.905857 seconds, throughput 1049396.675616
+129521	[1728193139]	2000000 OPS in 1.887420 seconds, throughput 1059647.561221
+129521	[1728193140]	2000000 OPS in 1.879672 seconds, throughput 1064015.423968
+129521	[1728193140]	2000000 OPS in 1.863905 seconds, throughput 1073016.060368
+129521	[1728193141]	2000000 OPS in 1.924449 seconds, throughput 1039258.509838
+129521	[1728193141]	2000000 OPS in 1.894912 seconds, throughput 1055457.984329
+129521	[1728193142]	2000000 OPS in 1.838553 seconds, throughput 1087811.991278
+129521	[1728193142]	2000000 OPS in 1.819758 seconds, throughput 1099047.235951
+129521	[1728193142]	2000000 OPS in 1.863703 seconds, throughput 1073132.360682
+129521	[1728193142]	2000000 OPS in 1.885446 seconds, throughput 1060756.977394
+129521	[1728193143]	2000000 OPS in 1.850380 seconds, throughput 1080859.066786
+129521	[1728193144]	2000000 OPS in 1.910680 seconds, throughput 1046747.754726
+129521	[1728193144]	2000000 OPS in 1.883217 seconds, throughput 1062012.503073
+129521	[1728193144]	2000000 OPS in 1.922306 seconds, throughput 1040417.082400
+129521	[1728193145]	2000000 OPS in 1.854789 seconds, throughput 1078289.767731
+129521	[1728193146]	2000000 OPS in 1.845939 seconds, throughput 1083459.420923
+129521	[1728193146]	2000000 OPS in 1.819075 seconds, throughput 1099459.890329
+129521	[1728193146]	2000000 OPS in 1.871215 seconds, throughput 1068824.266586
+129521	[1728193147]	2000000 OPS in 1.955250 seconds, throughput 1022887.098836
+129521	[1728193148]	2000000 OPS in 1.836040 seconds, throughput 1089300.886691
+129521	[1728193148]	2000000 OPS in 1.861205 seconds, throughput 1074572.655887
+129521	[1728193148]	2000000 OPS in 1.869062 seconds, throughput 1070055.460975
+129521	[1728193149]	2000000 OPS in 1.917332 seconds, throughput 1043116.163502
+129521	[1728193150]	2000000 OPS in 1.846310 seconds, throughput 1083241.709139
+129521	[1728193150]	2000000 OPS in 1.841059 seconds, throughput 1086331.290849
+129521	[1728193150]	2000000 OPS in 1.879775 seconds, throughput 1063957.122528
+129521	[1728193151]	2000000 OPS in 1.920183 seconds, throughput 1041567.392275
+129521	[1728193152]	2000000 OPS in 1.819673 seconds, throughput 1099098.574304
+129521	[1728193152]	2000000 OPS in 1.830946 seconds, throughput 1092331.505135
+129521	[1728193152]	2000000 OPS in 1.865769 seconds, throughput 1071944.061671
+129521	[1728193153]	2000000 OPS in 1.883230 seconds, throughput 1062005.171965
+129521	[1728193153]	2000000 OPS in 1.815025 seconds, throughput 1101913.196788
+129521	[1728193153]	2000000 OPS in 1.877496 seconds, throughput 1065248.607720
+129521	[1728193154]	2000000 OPS in 1.899476 seconds, throughput 1052921.963742
+129521	[1728193155]	2000000 OPS in 1.836391 seconds, throughput 1089092.682332
+129521	[1728193155]	2000000 OPS in 1.826098 seconds, throughput 1095231.471695
+129521	[1728193155]	2000000 OPS in 1.871963 seconds, throughput 1068397.185201
+129521	[1728193156]	2000000 OPS in 1.859878 seconds, throughput 1075339.350215
+129521	[1728193157]	2000000 OPS in 1.858989 seconds, throughput 1075853.595691
+129521	[1728193157]	2000000 OPS in 1.927466 seconds, throughput 1037631.792208
+129521	[1728193157]	2000000 OPS in 1.807967 seconds, throughput 1106214.881134
+129521	[1728193158]	2000000 OPS in 1.859677 seconds, throughput 1075455.576425
+129521	[1728193159]	2000000 OPS in 1.874934 seconds, throughput 1066704.214655
+129521	[1728193159]	2000000 OPS in 1.854589 seconds, throughput 1078406.051152
+129521	[1728193159]	2000000 OPS in 1.879730 seconds, throughput 1063982.593245
+129521	[1728193159]	2000000 OPS in 1.816627 seconds, throughput 1100941.470098
+129521	[1728193160]	2000000 OPS in 1.838476 seconds, throughput 1087857.551581
+129521	[1728193161]	2000000 OPS in 1.811250 seconds, throughput 1104209.799862
+129521	[1728193161]	2000000 OPS in 1.808077 seconds, throughput 1106147.581104
+129521	[1728193161]	2000000 OPS in 1.829153 seconds, throughput 1093402.246832
+129521	[1728193162]	2000000 OPS in 1.844139 seconds, throughput 1084516.948017
+129521	[1728193163]	2000000 OPS in 1.851303 seconds, throughput 1080320.185297
+129521	[1728193163]	2000000 OPS in 1.866939 seconds, throughput 1071272.280455
+129521	[1728193163]	2000000 OPS in 1.946972 seconds, throughput 1027236.138989
+129521	[1728193164]	2000000 OPS in 1.879892 seconds, throughput 1063890.904371
+129521	[1728193165]	2000000 OPS in 1.875912 seconds, throughput 1066148.092235
+129521	[1728193165]	2000000 OPS in 1.843060 seconds, throughput 1085151.867004
+129521	[1728193165]	2000000 OPS in 1.853296 seconds, throughput 1079158.429091
+129521	[1728193166]	2000000 OPS in 1.862210 seconds, throughput 1073992.729069
+129521	[1728193166]	2000000 OPS in 1.813429 seconds, throughput 1102882.991283
+129521	[1728193166]	2000000 OPS in 1.848290 seconds, throughput 1082081.275125
+129521	[1728193167]	2000000 OPS in 1.866292 seconds, throughput 1071643.665621
+129521	[1728193168]	2000000 OPS in 1.895374 seconds, throughput 1055200.715004
+129521	[1728193168]	2000000 OPS in 1.848101 seconds, throughput 1082191.936480
+129521	[1728193168]	2000000 OPS in 1.863217 seconds, throughput 1073412.275650
+129521	[1728193169]	2000000 OPS in 1.801286 seconds, throughput 1110317.850691
+129521	[1728193170]	2000000 OPS in 1.833196 seconds, throughput 1090990.816039
+129521	[1728193170]	2000000 OPS in 1.840430 seconds, throughput 1086702.564075
+129521	[1728193170]	2000000 OPS in 1.798966 seconds, throughput 1111749.749578
+129521	[1728193170]	2000000 OPS in 1.817412 seconds, throughput 1100465.937278
+129521	[1728193172]	2000000 OPS in 1.925900 seconds, throughput 1038475.517940
+129521	[1728193172]	2000000 OPS in 1.867409 seconds, throughput 1071002.656622
+129521	[1728193172]	2000000 OPS in 1.906791 seconds, throughput 1048882.651533
+129521	[1728193172]	2000000 OPS in 1.876890 seconds, throughput 1065592.549377
+129521	[1728193174]	2000000 OPS in 1.917896 seconds, throughput 1042809.411981
+129521	[1728193174]	2000000 OPS in 1.853922 seconds, throughput 1078794.037721
+129521	[1728193174]	2000000 OPS in 1.902945 seconds, throughput 1051002.525034
+129521	[1728193174]	2000000 OPS in 1.897311 seconds, throughput 1054123.441017
+129521	[1728193175]	2000000 OPS in 1.928403 seconds, throughput 1037127.612849
+129521	[1728193176]	2000000 OPS in 1.821859 seconds, throughput 1097779.795253
+129521	[1728193176]	2000000 OPS in 1.861855 seconds, throughput 1074197.507325
+129521	[1728193176]	2000000 OPS in 1.891705 seconds, throughput 1057247.298072
+129521	[1728193177]	2000000 OPS in 1.896806 seconds, throughput 1054404.087714
+129521	[1728193177]	2000000 OPS in 1.922503 seconds, throughput 1040310.470257
+129521	[1728193178]	2000000 OPS in 1.899768 seconds, throughput 1052760.126500
+129521	[1728193178]	2000000 OPS in 1.883203 seconds, throughput 1062020.398226
+129521	[1728193179]	2000000 OPS in 1.868942 seconds, throughput 1070124.166507
+129521	[1728193179]	2000000 OPS in 1.926434 seconds, throughput 1038187.656572
+129521	[1728193179]	2000000 OPS in 1.824445 seconds, throughput 1096223.783123
+129521	[1728193180]	2000000 OPS in 1.811967 seconds, throughput 1103772.861206
+129521	[1728193181]	2000000 OPS in 1.888131 seconds, throughput 1059248.537310
+129521	[1728193181]	2000000 OPS in 1.837059 seconds, throughput 1088696.661348
+129521	[1728193181]	2000000 OPS in 1.853175 seconds, throughput 1079228.890957
+129521	[1728193182]	2000000 OPS in 1.838926 seconds, throughput 1087591.344078
+129521	[1728193183]	2000000 OPS in 1.849739 seconds, throughput 1081233.622689
+129521	[1728193183]	2000000 OPS in 2.021922 seconds, throughput 989157.840906
+129521	[1728193183]	2000000 OPS in 1.896760 seconds, throughput 1054429.658997
+129521	[1728193183]	2000000 OPS in 1.864610 seconds, throughput 1072610.358198
+129521	[1728193185]	2000000 OPS in 1.850116 seconds, throughput 1081013.298626
+129521	[1728193185]	2000000 OPS in 1.869133 seconds, throughput 1070014.814355
+129521	[1728193185]	2000000 OPS in 1.838185 seconds, throughput 1088029.768494
+129521	[1728193185]	2000000 OPS in 1.897763 seconds, throughput 1053872.375002
+129521	[1728193187]	2000000 OPS in 1.859628 seconds, throughput 1075483.913987
+129521	[1728193187]	2000000 OPS in 1.861408 seconds, throughput 1074455.465970
+129521	[1728193187]	2000000 OPS in 1.817652 seconds, throughput 1100320.633433
+129521	[1728193187]	2000000 OPS in 1.820560 seconds, throughput 1098563.079492
+129521	[1728193189]	2000000 OPS in 1.833342 seconds, throughput 1090903.933909
+129521	[1728193189]	2000000 OPS in 1.880154 seconds, throughput 1063742.650868
+129521	[1728193189]	2000000 OPS in 1.963404 seconds, throughput 1018639.057474
+129521	[1728193189]	2000000 OPS in 1.885726 seconds, throughput 1060599.472034
+129521	[1728193190]	2000000 OPS in 1.812307 seconds, throughput 1103565.786591
+129521	[1728193191]	2000000 OPS in 1.836232 seconds, throughput 1089186.987265
+129521	[1728193191]	2000000 OPS in 1.807402 seconds, throughput 1106560.687661
+129521	[1728193191]	2000000 OPS in 1.829316 seconds, throughput 1093304.819944
+129521	[1728193192]	2000000 OPS in 1.850458 seconds, throughput 1080813.506710
+129521	[1728193192]	2000000 OPS in 1.866522 seconds, throughput 1071511.613579
+129521	[1728193192]	2000000 OPS in 1.842558 seconds, throughput 1085447.513728
+129521	[1728193193]	2000000 OPS in 1.861231 seconds, throughput 1074557.644914
+129521	[1728193194]	2000000 OPS in 1.832789 seconds, throughput 1091233.087933
+129521	[1728193194]	2000000 OPS in 1.843984 seconds, throughput 1084608.109398
+129521	[1728193194]	2000000 OPS in 1.862022 seconds, throughput 1074101.165292
+129521	[1728193195]	2000000 OPS in 1.849745 seconds, throughput 1081230.115502
+129521	[1728193196]	2000000 OPS in 1.841653 seconds, throughput 1085980.909542
+129521	[1728193196]	2000000 OPS in 1.863019 seconds, throughput 1073526.356951
+129521	[1728193196]	2000000 OPS in 1.922588 seconds, throughput 1040264.476841
+129521	[1728193196]	2000000 OPS in 1.840269 seconds, throughput 1086797.636650
+129521	[1728193198]	2000000 OPS in 1.889443 seconds, throughput 1058513.011507
+129521	[1728193198]	2000000 OPS in 1.882723 seconds, throughput 1062291.160197
+129521	[1728193198]	2000000 OPS in 1.931040 seconds, throughput 1035711.326539
+129521	[1728193198]	2000000 OPS in 1.905357 seconds, throughput 1049672.056208
+129521	[1728193200]	2000000 OPS in 1.833696 seconds, throughput 1090693.331937
+129521	[1728193200]	2000000 OPS in 1.881326 seconds, throughput 1063079.976570
+129521	[1728193200]	2000000 OPS in 1.944366 seconds, throughput 1028612.925756
+129521	[1728193200]	2000000 OPS in 1.838426 seconds, throughput 1087887.138237
+129521	[1728193202]	2000000 OPS in 1.856089 seconds, throughput 1077534.536329
+129521	[1728193202]	2000000 OPS in 1.811494 seconds, throughput 1104061.067826
+129521	[1728193202]	2000000 OPS in 1.899536 seconds, throughput 1052888.705452
+129521	[1728193202]	2000000 OPS in 1.888613 seconds, throughput 1058978.202522
+129521	[1728193203]	2000000 OPS in 1.873739 seconds, throughput 1067384.518335
+129521	[1728193204]	2000000 OPS in 1.821950 seconds, throughput 1097724.965010
+129521	[1728193204]	2000000 OPS in 1.859393 seconds, throughput 1075619.839378
+129521	[1728193204]	2000000 OPS in 1.823397 seconds, throughput 1096853.839290
+129521	[1728193205]	2000000 OPS in 1.878351 seconds, throughput 1064763.720945
+129521	[1728193205]	2000000 OPS in 1.876007 seconds, throughput 1066094.103060
+129521	[1728193206]	2000000 OPS in 1.896088 seconds, throughput 1054803.363557
+129521	[1728193206]	2000000 OPS in 1.870312 seconds, throughput 1069340.302581
+129521	[1728193207]	2000000 OPS in 1.837428 seconds, throughput 1088478.024717
+129521	[1728193207]	2000000 OPS in 1.846165 seconds, throughput 1083326.788234
+129521	[1728193208]	2000000 OPS in 1.817394 seconds, throughput 1100476.836613
+129521	[1728193208]	2000000 OPS in 1.900170 seconds, throughput 1052537.404548
+129521	[1728193209]	2000000 OPS in 1.879643 seconds, throughput 1064031.840089
+129521	[1728193210]	2000000 OPS in 1.902242 seconds, throughput 1051390.937641
+129521	[1728193211]	2000000 OPS in 1.620775 seconds, throughput 1233977.572458
+129521	[1728193213]	2000000 OPS in 1.507285 seconds, throughput 1326889.075391
+129521	[1728193214]	2000000 OPS in 1.467951 seconds, throughput 1362443.296813
+129521	[1728193216]	2000000 OPS in 1.464464 seconds, throughput 1365687.377771
+129521	[1728193217]	2000000 OPS in 1.463091 seconds, throughput 1366968.971855
+129521	[1728193218]	2000000 OPS in 1.467977 seconds, throughput 1362419.165968
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     232600 ms       858000 ms            4 CompactionCPUUsage=1.97106 CompactionThroughput=600.935M Lat_Get_Avg=783.61 Lat_Get_P50=757.315 Lat_Get_P95=1.27173k Lat_Get_P99=1.71868k Lat_Put_Avg=1082.9 Lat_Put_P50=958.094 Lat_Put_P95=1.32756k Lat_Put_P99=1.8035k items_per_second=4.29922M/s
+5321.15user 16.21system 16:06.02elapsed 552%CPU (0avgtext+0avgdata 9121976maxresident)k
+334967inputs+16649760outputs (5820major+1408133minor)pagefaults 0swaps

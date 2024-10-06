@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 54%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 83%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-04T00:20:28-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 4.41, 5.59, 5.77
+[1728019228]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728019228]	Setup starts!
+[1728019228]	Setup starts!
+[1728019228]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f21a5000000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728019228]	Initializing log segments...
+Log: pool_start 0x7f21a5000000 total segments: 2028  cleaners: 2
+[1728019233]Initialized 2026 free log segments...
+[1728019233]	DB init finished in 4.316472 seconds
+[1728019233]	DB init finished in 4.316601 seconds
+[1728019233]	DB init finished in 4.316715 seconds
+[1728019233]	DB init finished in 4.316625 seconds
+[1728019238]	DB load finished in 5.557037 seconds
+[1728019238]	DB load finished in 5.575841 seconds
+[1728019238]	DB load finished in 5.598697 seconds
+[1728019238]	DB load finished in 5.626787 seconds
+[1728019238]	DB warmup finished in 0.000018 seconds
+[1728019238]	DB warmup finished in 0.028305 seconds
+[1728019238]	DB warmup finished in 0.069977 seconds
+[1728019238]	DB warmup finished in 0.051169 seconds
+[1728019238]	ETC init!
+[1728019238]	ETC init!
+[1728019238]	ETC starts!
+[1728019238]	ETC starts!
+[1728019238]	ETC init!
+[1728019238]	ETC starts!
+[1728019238]	ETC init!
+[1728019238]	ETC starts!
+434866	[1728019241]	2000000 OPS in 2.338021 seconds, throughput 855424.309705
+434866	[1728019241]	2000000 OPS in 2.353001 seconds, throughput 849978.389299
+434866	[1728019241]	2000000 OPS in 2.377845 seconds, throughput 841097.716630
+434866	[1728019241]	2000000 OPS in 2.378853 seconds, throughput 840741.315247
+434866	[1728019243]	2000000 OPS in 2.287086 seconds, throughput 874475.205567
+434866	[1728019243]	2000000 OPS in 2.291442 seconds, throughput 872812.840124
+434866	[1728019243]	2000000 OPS in 2.295341 seconds, throughput 871330.229365
+434866	[1728019243]	2000000 OPS in 2.336598 seconds, throughput 855945.267436
+434866	[1728019245]	2000000 OPS in 2.289403 seconds, throughput 873590.189233
+434866	[1728019245]	2000000 OPS in 2.272034 seconds, throughput 880268.517108
+434866	[1728019245]	2000000 OPS in 2.298595 seconds, throughput 870096.733004
+434866	[1728019245]	2000000 OPS in 2.304867 seconds, throughput 867729.027315
+434866	[1728019248]	2000000 OPS in 2.289454 seconds, throughput 873570.729091
+434866	[1728019248]	2000000 OPS in 2.279188 seconds, throughput 877505.497572
+434866	[1728019248]	2000000 OPS in 2.305290 seconds, throughput 867569.806836
+434866	[1728019248]	2000000 OPS in 2.308677 seconds, throughput 866297.017729
+434866	[1728019250]	2000000 OPS in 2.217315 seconds, throughput 901991.823444
+434866	[1728019250]	2000000 OPS in 2.237309 seconds, throughput 893931.057355
+434866	[1728019250]	2000000 OPS in 2.235031 seconds, throughput 894842.174449
+434866	[1728019250]	2000000 OPS in 2.244870 seconds, throughput 890920.186915
+434866	[1728019252]	2000000 OPS in 1.982479 seconds, throughput 1008837.924639
+434866	[1728019252]	2000000 OPS in 1.992403 seconds, throughput 1003812.983618
+434866	[1728019252]	2000000 OPS in 2.002744 seconds, throughput 998629.879805
+434866	[1728019252]	2000000 OPS in 2.010523 seconds, throughput 994766.038488
+434866	[1728019254]	2000000 OPS in 2.003824 seconds, throughput 998091.648768
+434866	[1728019254]	2000000 OPS in 2.015694 seconds, throughput 992214.095989
+434866	[1728019254]	2000000 OPS in 2.028011 seconds, throughput 986187.944740
+434866	[1728019254]	2000000 OPS in 2.035694 seconds, throughput 982465.930538
+434866	[1728019256]	2000000 OPS in 2.019108 seconds, throughput 990536.415090
+434866	[1728019256]	2000000 OPS in 2.027289 seconds, throughput 986539.166345
+434866	[1728019256]	2000000 OPS in 2.045874 seconds, throughput 977577.309258
+434866	[1728019256]	2000000 OPS in 2.050184 seconds, throughput 975522.197032
+434866	[1728019258]	2000000 OPS in 2.053470 seconds, throughput 973961.148690
+434866	[1728019258]	2000000 OPS in 2.065602 seconds, throughput 968240.735631
+434866	[1728019258]	2000000 OPS in 2.077077 seconds, throughput 962891.601996
+434866	[1728019258]	2000000 OPS in 2.080530 seconds, throughput 961293.516556
+434866	[1728019260]	2000000 OPS in 2.065963 seconds, throughput 968071.548232
+434866	[1728019260]	2000000 OPS in 2.076451 seconds, throughput 963181.890639
+434866	[1728019260]	2000000 OPS in 2.088529 seconds, throughput 957611.792798
+434866	[1728019260]	2000000 OPS in 2.095762 seconds, throughput 954306.834459
+434866	[1728019262]	2000000 OPS in 2.068468 seconds, throughput 966899.173688
+434866	[1728019262]	2000000 OPS in 2.075744 seconds, throughput 963509.951131
+434866	[1728019262]	2000000 OPS in 2.084710 seconds, throughput 959366.050914
+434866	[1728019262]	2000000 OPS in 2.089181 seconds, throughput 957312.937462
+434866	[1728019264]	2000000 OPS in 2.071110 seconds, throughput 965665.754113
+434866	[1728019264]	2000000 OPS in 2.073180 seconds, throughput 964701.569569
+434866	[1728019264]	2000000 OPS in 2.086128 seconds, throughput 958713.942769
+434866	[1728019264]	2000000 OPS in 2.093720 seconds, throughput 955237.567583
+434866	[1728019266]	2000000 OPS in 2.071636 seconds, throughput 965420.566161
+434866	[1728019266]	2000000 OPS in 2.077860 seconds, throughput 962528.755547
+434866	[1728019266]	2000000 OPS in 2.084636 seconds, throughput 959400.106302
+434866	[1728019266]	2000000 OPS in 2.094190 seconds, throughput 955023.183188
+434866	[1728019268]	2000000 OPS in 2.061771 seconds, throughput 970039.834686
+434866	[1728019268]	2000000 OPS in 2.073301 seconds, throughput 964645.268584
+434866	[1728019268]	2000000 OPS in 2.086974 seconds, throughput 958325.307359
+434866	[1728019269]	2000000 OPS in 2.099594 seconds, throughput 952565.114970
+434866	[1728019270]	2000000 OPS in 2.069070 seconds, throughput 966617.852465
+434866	[1728019270]	2000000 OPS in 2.079155 seconds, throughput 961929.245294
+434866	[1728019271]	2000000 OPS in 2.086819 seconds, throughput 958396.487669
+434866	[1728019271]	2000000 OPS in 2.092385 seconds, throughput 955847.035799
+434866	[1728019272]	2000000 OPS in 2.059423 seconds, throughput 971145.801518
+434866	[1728019272]	2000000 OPS in 2.073238 seconds, throughput 964674.581500
+434866	[1728019273]	2000000 OPS in 2.080819 seconds, throughput 961160.004787
+434866	[1728019273]	2000000 OPS in 2.092366 seconds, throughput 955855.715491
+434866	[1728019274]	2000000 OPS in 2.060047 seconds, throughput 970851.635909
+434866	[1728019275]	2000000 OPS in 2.074064 seconds, throughput 964290.397982
+434866	[1728019275]	2000000 OPS in 2.081247 seconds, throughput 960962.346132
+434866	[1728019275]	2000000 OPS in 2.090321 seconds, throughput 956790.846956
+434866	[1728019276]	2000000 OPS in 2.059492 seconds, throughput 971113.264825
+434866	[1728019277]	2000000 OPS in 2.069200 seconds, throughput 966557.123526
+434866	[1728019277]	2000000 OPS in 2.076544 seconds, throughput 963138.753621
+434866	[1728019277]	2000000 OPS in 2.083924 seconds, throughput 959727.897946
+434866	[1728019279]	2000000 OPS in 2.055595 seconds, throughput 972954.302769
+434866	[1728019279]	2000000 OPS in 2.064119 seconds, throughput 968936.383997
+434866	[1728019279]	2000000 OPS in 2.082792 seconds, throughput 960249.511233
+434866	[1728019279]	2000000 OPS in 2.088223 seconds, throughput 957752.117470
+434866	[1728019281]	2000000 OPS in 2.064767 seconds, throughput 968632.296041
+434866	[1728019281]	2000000 OPS in 2.072442 seconds, throughput 965045.101383
+434866	[1728019281]	2000000 OPS in 2.082549 seconds, throughput 960361.556919
+434866	[1728019281]	2000000 OPS in 2.079486 seconds, throughput 961776.131217
+434866	[1728019283]	2000000 OPS in 2.056353 seconds, throughput 972595.658430
+434866	[1728019283]	2000000 OPS in 2.066004 seconds, throughput 968052.336782
+434866	[1728019283]	2000000 OPS in 2.078315 seconds, throughput 962318.031675
+434866	[1728019283]	2000000 OPS in 2.087998 seconds, throughput 957855.323616
+434866	[1728019285]	2000000 OPS in 2.057206 seconds, throughput 972192.381317
+434866	[1728019285]	2000000 OPS in 2.067221 seconds, throughput 967482.431728
+434866	[1728019285]	2000000 OPS in 2.061198 seconds, throughput 970309.499621
+434866	[1728019285]	2000000 OPS in 2.087591 seconds, throughput 958042.068585
+434866	[1728019287]	2000000 OPS in 2.059904 seconds, throughput 970919.033120
+434866	[1728019287]	2000000 OPS in 2.070390 seconds, throughput 966001.574583
+434866	[1728019287]	2000000 OPS in 2.065292 seconds, throughput 968386.068411
+434866	[1728019287]	2000000 OPS in 2.084432 seconds, throughput 959494.001244
+434866	[1728019289]	2000000 OPS in 2.062461 seconds, throughput 969715.306132
+434866	[1728019289]	2000000 OPS in 2.069217 seconds, throughput 966549.182614
+434866	[1728019289]	2000000 OPS in 2.069012 seconds, throughput 966644.949377
+434866	[1728019289]	2000000 OPS in 2.090278 seconds, throughput 956810.529509
+434866	[1728019291]	2000000 OPS in 2.061573 seconds, throughput 970133.000384
+434866	[1728019291]	2000000 OPS in 2.075287 seconds, throughput 963722.126144
+434866	[1728019291]	2000000 OPS in 2.066911 seconds, throughput 967627.536938
+434866	[1728019292]	2000000 OPS in 2.089840 seconds, throughput 957011.063048
+434866	[1728019293]	2000000 OPS in 2.068082 seconds, throughput 967079.641910
+434866	[1728019293]	2000000 OPS in 2.074853 seconds, throughput 963923.709294
+434866	[1728019293]	2000000 OPS in 2.065400 seconds, throughput 968335.431393
+434866	[1728019294]	2000000 OPS in 2.092390 seconds, throughput 955844.751695
+434866	[1728019295]	2000000 OPS in 2.066500 seconds, throughput 967819.985483
+434866	[1728019295]	2000000 OPS in 2.074161 seconds, throughput 964245.302076
+434866	[1728019295]	2000000 OPS in 2.068887 seconds, throughput 966703.353059
+434866	[1728019296]	2000000 OPS in 2.090144 seconds, throughput 956871.871029
+434866	[1728019297]	2000000 OPS in 2.068933 seconds, throughput 966681.859683
+434866	[1728019297]	2000000 OPS in 2.075311 seconds, throughput 963710.981149
+434866	[1728019298]	2000000 OPS in 2.072712 seconds, throughput 964919.390634
+434866	[1728019298]	2000000 OPS in 2.097363 seconds, throughput 953578.374368
+434866	[1728019299]	2000000 OPS in 2.068234 seconds, throughput 967008.568663
+434866	[1728019299]	2000000 OPS in 2.075139 seconds, throughput 963790.859311
+434866	[1728019300]	2000000 OPS in 2.076936 seconds, throughput 962956.971231
+434866	[1728019300]	2000000 OPS in 2.096518 seconds, throughput 953962.713413
+434866	[1728019301]	2000000 OPS in 2.071584 seconds, throughput 965444.799728
+434866	[1728019302]	2000000 OPS in 2.086374 seconds, throughput 958600.902810
+434866	[1728019302]	2000000 OPS in 2.070900 seconds, throughput 965763.677628
+434866	[1728019302]	2000000 OPS in 2.095118 seconds, throughput 954600.170492
+434866	[1728019303]	2000000 OPS in 2.068992 seconds, throughput 966654.293492
+434866	[1728019304]	2000000 OPS in 2.077673 seconds, throughput 962615.387503
+434866	[1728019304]	2000000 OPS in 2.073381 seconds, throughput 964608.048400
+434866	[1728019304]	2000000 OPS in 2.094339 seconds, throughput 954955.238861
+434866	[1728019305]	2000000 OPS in 2.070526 seconds, throughput 965938.123936
+434866	[1728019306]	2000000 OPS in 2.080327 seconds, throughput 961387.320359
+434866	[1728019306]	2000000 OPS in 2.071283 seconds, throughput 965585.098705
+434866	[1728019306]	2000000 OPS in 2.093468 seconds, throughput 955352.553753
+434866	[1728019307]	2000000 OPS in 2.065136 seconds, throughput 968459.220119
+434866	[1728019308]	2000000 OPS in 2.082030 seconds, throughput 960600.951956
+434866	[1728019308]	2000000 OPS in 2.070257 seconds, throughput 966063.633645
+434866	[1728019308]	2000000 OPS in 2.098026 seconds, throughput 953277.032792
+434866	[1728019310]	2000000 OPS in 2.067408 seconds, throughput 967394.921564
+434866	[1728019310]	2000000 OPS in 2.081893 seconds, throughput 960664.164777
+434866	[1728019310]	2000000 OPS in 2.081818 seconds, throughput 960698.773860
+434866	[1728019310]	2000000 OPS in 2.099845 seconds, throughput 952451.252354
+434866	[1728019312]	2000000 OPS in 2.075415 seconds, throughput 963662.689149
+434866	[1728019312]	2000000 OPS in 2.082081 seconds, throughput 960577.422300
+434866	[1728019312]	2000000 OPS in 2.074207 seconds, throughput 964223.917864
+434866	[1728019313]	2000000 OPS in 2.097489 seconds, throughput 953521.091171
+434866	[1728019314]	2000000 OPS in 2.072661 seconds, throughput 964943.133489
+434866	[1728019314]	2000000 OPS in 2.080855 seconds, throughput 961143.376160
+434866	[1728019314]	2000000 OPS in 2.076128 seconds, throughput 963331.740625
+434866	[1728019315]	2000000 OPS in 2.095920 seconds, throughput 954234.894462
+434866	[1728019316]	2000000 OPS in 2.073996 seconds, throughput 964322.014122
+434866	[1728019316]	2000000 OPS in 2.082492 seconds, throughput 960387.843027
+434866	[1728019316]	2000000 OPS in 2.073551 seconds, throughput 964528.965046
+434866	[1728019317]	2000000 OPS in 2.104719 seconds, throughput 950245.614735
+434866	[1728019318]	2000000 OPS in 2.071894 seconds, throughput 965300.348377
+434866	[1728019318]	2000000 OPS in 2.083191 seconds, throughput 960065.591681
+434866	[1728019318]	2000000 OPS in 2.069524 seconds, throughput 966405.801527
+434866	[1728019319]	2000000 OPS in 2.099520 seconds, throughput 952598.689224
+434866	[1728019320]	2000000 OPS in 2.074938 seconds, throughput 963884.222083
+434866	[1728019320]	2000000 OPS in 2.087099 seconds, throughput 958267.911584
+434866	[1728019320]	2000000 OPS in 2.078983 seconds, throughput 962008.828355
+434866	[1728019321]	2000000 OPS in 2.100104 seconds, throughput 952333.789184
+434866	[1728019322]	2000000 OPS in 2.071107 seconds, throughput 965667.152880
+434866	[1728019322]	2000000 OPS in 2.079414 seconds, throughput 961809.432850
+434866	[1728019322]	2000000 OPS in 2.079866 seconds, throughput 961600.410796
+434866	[1728019323]	2000000 OPS in 2.100288 seconds, throughput 952250.358046
+434866	[1728019324]	2000000 OPS in 2.067690 seconds, throughput 967262.984296
+434866	[1728019324]	2000000 OPS in 2.085213 seconds, throughput 959134.630371
+434866	[1728019325]	2000000 OPS in 2.076390 seconds, throughput 963210.186911
+434866	[1728019325]	2000000 OPS in 2.096741 seconds, throughput 953861.254204
+434866	[1728019326]	2000000 OPS in 2.073163 seconds, throughput 964709.480152
+434866	[1728019326]	2000000 OPS in 2.083689 seconds, throughput 959836.136775
+434866	[1728019327]	2000000 OPS in 2.078801 seconds, throughput 962093.052678
+434866	[1728019327]	2000000 OPS in 2.100525 seconds, throughput 952142.916652
+434866	[1728019328]	2000000 OPS in 2.071672 seconds, throughput 965403.789789
+434866	[1728019329]	2000000 OPS in 2.082663 seconds, throughput 960308.989020
+434866	[1728019329]	2000000 OPS in 2.070243 seconds, throughput 966070.166642
+434866	[1728019329]	2000000 OPS in 2.099566 seconds, throughput 952577.818463
+434866	[1728019330]	2000000 OPS in 2.071158 seconds, throughput 965643.374383
+434866	[1728019331]	2000000 OPS in 2.084874 seconds, throughput 959290.585426
+434866	[1728019331]	2000000 OPS in 2.078318 seconds, throughput 962316.642593
+434866	[1728019331]	2000000 OPS in 2.101395 seconds, throughput 951748.719303
+434866	[1728019332]	2000000 OPS in 2.072153 seconds, throughput 965179.694743
+434866	[1728019333]	2000000 OPS in 2.081341 seconds, throughput 960918.946006
+434866	[1728019333]	2000000 OPS in 2.076870 seconds, throughput 962987.572645
+434866	[1728019334]	2000000 OPS in 2.097393 seconds, throughput 953564.734888
+434866	[1728019334]	2000000 OPS in 2.070765 seconds, throughput 965826.638947
+434866	[1728019335]	2000000 OPS in 2.078354 seconds, throughput 962299.973922
+434866	[1728019335]	2000000 OPS in 2.073319 seconds, throughput 964636.893792
+434866	[1728019336]	2000000 OPS in 2.095828 seconds, throughput 954276.782255
+434866	[1728019336]	2000000 OPS in 2.073648 seconds, throughput 964483.846825
+434866	[1728019337]	2000000 OPS in 2.081710 seconds, throughput 960748.615321
+434866	[1728019337]	2000000 OPS in 2.071407 seconds, throughput 965527.296181
+434866	[1728019338]	2000000 OPS in 2.099642 seconds, throughput 952543.338341
+434866	[1728019339]	2000000 OPS in 2.068646 seconds, throughput 966815.975280
+434866	[1728019339]	2000000 OPS in 2.079406 seconds, throughput 961813.133174
+434866	[1728019339]	2000000 OPS in 2.076997 seconds, throughput 962928.689834
+434866	[1728019340]	2000000 OPS in 2.095189 seconds, throughput 954567.821805
+434866	[1728019341]	2000000 OPS in 2.075759 seconds, throughput 963502.988545
+434866	[1728019341]	2000000 OPS in 2.086697 seconds, throughput 958452.520898
+434866	[1728019341]	2000000 OPS in 2.082737 seconds, throughput 960274.869079
+434866	[1728019342]	2000000 OPS in 2.096430 seconds, throughput 954002.757068
+434866	[1728019343]	2000000 OPS in 2.073764 seconds, throughput 964429.896555
+434866	[1728019343]	2000000 OPS in 2.080255 seconds, throughput 961420.595071
+434866	[1728019343]	2000000 OPS in 2.074163 seconds, throughput 964244.372308
+434866	[1728019344]	2000000 OPS in 2.097690 seconds, throughput 953429.725079
+434866	[1728019345]	2000000 OPS in 2.070468 seconds, throughput 965965.182751
+434866	[1728019345]	2000000 OPS in 2.081298 seconds, throughput 960938.798769
+434866	[1728019345]	2000000 OPS in 2.076985 seconds, throughput 962934.253257
+434866	[1728019346]	2000000 OPS in 2.103309 seconds, throughput 950882.633032
+434866	[1728019347]	2000000 OPS in 2.074022 seconds, throughput 964309.925353
+434866	[1728019347]	2000000 OPS in 2.083973 seconds, throughput 959705.332075
+434866	[1728019347]	2000000 OPS in 2.069068 seconds, throughput 966618.786816
+434866	[1728019348]	2000000 OPS in 2.097259 seconds, throughput 953625.660922
+434866	[1728019349]	2000000 OPS in 2.073041 seconds, throughput 964766.254020
+434866	[1728019349]	2000000 OPS in 2.084808 seconds, throughput 959320.954256
+434866	[1728019349]	2000000 OPS in 2.080269 seconds, throughput 961414.124808
+434866	[1728019350]	2000000 OPS in 2.095689 seconds, throughput 954340.076223
+434866	[1728019351]	2000000 OPS in 2.073127 seconds, throughput 964726.232402
+434866	[1728019351]	2000000 OPS in 2.085030 seconds, throughput 959218.812199
+434866	[1728019351]	2000000 OPS in 2.077749 seconds, throughput 962580.176913
+434866	[1728019352]	2000000 OPS in 2.098468 seconds, throughput 953076.244193
+434866	[1728019353]	2000000 OPS in 2.075229 seconds, throughput 963749.060947
+434866	[1728019354]	2000000 OPS in 2.085453 seconds, throughput 959024.250367
+434866	[1728019354]	2000000 OPS in 2.077546 seconds, throughput 962674.232003
+434866	[1728019354]	2000000 OPS in 2.099448 seconds, throughput 952631.358338
+434866	[1728019355]	2000000 OPS in 2.074241 seconds, throughput 964208.112751
+434866	[1728019356]	2000000 OPS in 2.081189 seconds, throughput 960989.126889
+434866	[1728019356]	2000000 OPS in 2.078575 seconds, throughput 962197.659454
+434866	[1728019357]	2000000 OPS in 2.102945 seconds, throughput 951047.221872
+434866	[1728019357]	2000000 OPS in 2.071193 seconds, throughput 965627.056484
+434866	[1728019358]	2000000 OPS in 2.071993 seconds, throughput 965254.226245
+434866	[1728019358]	2000000 OPS in 2.085365 seconds, throughput 959064.720085
+434866	[1728019359]	2000000 OPS in 2.097096 seconds, throughput 953699.782938
+434866	[1728019359]	2000000 OPS in 2.073645 seconds, throughput 964485.242170
+434866	[1728019360]	2000000 OPS in 2.083242 seconds, throughput 960042.088245
+434866	[1728019360]	2000000 OPS in 2.086859 seconds, throughput 958378.117544
+434866	[1728019361]	2000000 OPS in 2.098884 seconds, throughput 952887.343941
+434866	[1728019361]	2000000 OPS in 2.075727 seconds, throughput 963517.842183
+434866	[1728019362]	2000000 OPS in 2.076742 seconds, throughput 963046.926388
+434866	[1728019362]	2000000 OPS in 2.083273 seconds, throughput 960027.802405
+434866	[1728019363]	2000000 OPS in 2.096778 seconds, throughput 953844.422252
+434866	[1728019363]	2000000 OPS in 2.077000 seconds, throughput 962927.298989
+434866	[1728019364]	2000000 OPS in 2.076905 seconds, throughput 962971.344380
+434866	[1728019364]	2000000 OPS in 2.083529 seconds, throughput 959909.845267
+434866	[1728019365]	2000000 OPS in 2.105080 seconds, throughput 950082.657191
+434866	[1728019365]	2000000 OPS in 2.071005 seconds, throughput 965714.713388
+434866	[1728019366]	2000000 OPS in 2.080508 seconds, throughput 961303.681601
+434866	[1728019366]	2000000 OPS in 2.081248 seconds, throughput 960961.884408
+434866	[1728019367]	2000000 OPS in 2.098510 seconds, throughput 953057.169134
+434866	[1728019368]	2000000 OPS in 2.073987 seconds, throughput 964326.198766
+434866	[1728019368]	2000000 OPS in 2.077356 seconds, throughput 962762.280514
+434866	[1728019368]	2000000 OPS in 2.085495 seconds, throughput 959004.936478
+434866	[1728019369]	2000000 OPS in 2.098102 seconds, throughput 953242.502033
+434866	[1728019370]	2000000 OPS in 2.070080 seconds, throughput 966146.235894
+434866	[1728019370]	2000000 OPS in 2.083874 seconds, throughput 959750.925440
+434866	[1728019370]	2000000 OPS in 2.091772 seconds, throughput 956127.149613
+434866	[1728019371]	2000000 OPS in 2.103006 seconds, throughput 951019.635702
+434866	[1728019372]	2000000 OPS in 2.080315 seconds, throughput 961392.865984
+434866	[1728019372]	2000000 OPS in 2.077613 seconds, throughput 962643.187158
+434866	[1728019372]	2000000 OPS in 2.081684 seconds, throughput 960760.614964
+434866	[1728019373]	2000000 OPS in 2.101094 seconds, throughput 951885.065590
+434866	[1728019374]	2000000 OPS in 2.077234 seconds, throughput 962818.825419
+434866	[1728019374]	2000000 OPS in 2.080882 seconds, throughput 961130.905068
+434866	[1728019374]	2000000 OPS in 2.084026 seconds, throughput 959680.925286
+434866	[1728019375]	2000000 OPS in 2.105147 seconds, throughput 950052.419142
+434866	[1728019376]	2000000 OPS in 2.074176 seconds, throughput 964238.328859
+434866	[1728019376]	2000000 OPS in 2.080975 seconds, throughput 961087.951561
+434866	[1728019376]	2000000 OPS in 2.083294 seconds, throughput 960018.125142
+434866	[1728019378]	2000000 OPS in 2.097919 seconds, throughput 953325.652706
+434866	[1728019378]	2000000 OPS in 2.080576 seconds, throughput 961272.263066
+434866	[1728019379]	2000000 OPS in 2.081488 seconds, throughput 960851.083456
+434866	[1728019379]	2000000 OPS in 2.089398 seconds, throughput 957213.513175
+434866	[1728019380]	2000000 OPS in 2.099419 seconds, throughput 952644.517364
+434866	[1728019380]	2000000 OPS in 2.071476 seconds, throughput 965495.134870
+434866	[1728019381]	2000000 OPS in 2.085455 seconds, throughput 959023.330640
+434866	[1728019381]	2000000 OPS in 2.088124 seconds, throughput 957797.525434
+434866	[1728019382]	2000000 OPS in 2.099867 seconds, throughput 952441.273662
+434866	[1728019382]	2000000 OPS in 2.080945 seconds, throughput 961101.807112
+434866	[1728019383]	2000000 OPS in 2.075062 seconds, throughput 963826.623012
+434866	[1728019383]	2000000 OPS in 2.084616 seconds, throughput 959409.310875
+434866	[1728019384]	2000000 OPS in 2.102491 seconds, throughput 951252.585623
+434866	[1728019384]	2000000 OPS in 2.075647 seconds, throughput 963554.978279
+434866	[1728019385]	2000000 OPS in 2.077519 seconds, throughput 962686.743178
+434866	[1728019385]	2000000 OPS in 2.085462 seconds, throughput 959020.111611
+434866	[1728019386]	2000000 OPS in 2.096501 seconds, throughput 953970.448857
+434866	[1728019386]	2000000 OPS in 2.073047 seconds, throughput 964763.461706
+434866	[1728019387]	2000000 OPS in 2.074802 seconds, throughput 963947.403174
+434866	[1728019387]	2000000 OPS in 2.086343 seconds, throughput 958615.146215
+434866	[1728019388]	2000000 OPS in 2.101833 seconds, throughput 951550.384831
+434866	[1728019388]	2000000 OPS in 2.074873 seconds, throughput 963914.417894
+434866	[1728019389]	2000000 OPS in 2.080261 seconds, throughput 961417.822091
+434866	[1728019389]	2000000 OPS in 2.093516 seconds, throughput 955330.649491
+434866	[1728019390]	2000000 OPS in 2.100718 seconds, throughput 952055.440092
+434866	[1728019390]	2000000 OPS in 2.073823 seconds, throughput 964402.458648
+434866	[1728019391]	2000000 OPS in 2.076364 seconds, throughput 963222.248122
+434866	[1728019391]	2000000 OPS in 2.086354 seconds, throughput 958610.092055
+434866	[1728019392]	2000000 OPS in 2.101184 seconds, throughput 951844.293503
+434866	[1728019392]	2000000 OPS in 2.077922 seconds, throughput 962500.036094
+434866	[1728019393]	2000000 OPS in 2.080623 seconds, throughput 961250.548514
+434866	[1728019393]	2000000 OPS in 2.089614 seconds, throughput 957114.567571
+434866	[1728019394]	2000000 OPS in 2.105688 seconds, throughput 949808.328679
+434866	[1728019395]	2000000 OPS in 2.075008 seconds, throughput 963851.705632
+434866	[1728019395]	2000000 OPS in 2.075449 seconds, throughput 963646.902429
+434866	[1728019395]	2000000 OPS in 2.085771 seconds, throughput 958878.035988
+434866	[1728019396]	2000000 OPS in 2.102556 seconds, throughput 951223.177884
+434866	[1728019397]	2000000 OPS in 2.078095 seconds, throughput 962419.908618
+434866	[1728019397]	2000000 OPS in 2.076828 seconds, throughput 963007.047286
+434866	[1728019397]	2000000 OPS in 2.085779 seconds, throughput 958874.358213
+434866	[1728019399]	2000000 OPS in 2.097683 seconds, throughput 953432.906688
+434866	[1728019399]	2000000 OPS in 2.075408 seconds, throughput 963665.939420
+434866	[1728019399]	2000000 OPS in 2.080409 seconds, throughput 961349.426964
+434866	[1728019399]	2000000 OPS in 2.094345 seconds, throughput 954952.503050
+434866	[1728019401]	2000000 OPS in 2.104203 seconds, throughput 950478.637280
+434866	[1728019401]	2000000 OPS in 2.075410 seconds, throughput 963665.010769
+434866	[1728019401]	2000000 OPS in 2.077639 seconds, throughput 962631.140444
+434866	[1728019402]	2000000 OPS in 2.084070 seconds, throughput 959660.663989
+434866	[1728019403]	2000000 OPS in 2.107902 seconds, throughput 948810.713212
+434866	[1728019403]	2000000 OPS in 2.078628 seconds, throughput 962173.125735
+434866	[1728019403]	2000000 OPS in 2.076038 seconds, throughput 963373.502797
+434866	[1728019404]	2000000 OPS in 2.087171 seconds, throughput 958234.854739
+434866	[1728019405]	2000000 OPS in 2.102365 seconds, throughput 951309.596573
+434866	[1728019405]	2000000 OPS in 2.078056 seconds, throughput 962437.970873
+434866	[1728019406]	2000000 OPS in 2.078862 seconds, throughput 962064.822004
+434866	[1728019406]	2000000 OPS in 2.084416 seconds, throughput 959501.366330
+434866	[1728019407]	2000000 OPS in 2.101771 seconds, throughput 951578.454551
+434866	[1728019407]	2000000 OPS in 2.074406 seconds, throughput 964131.418825
+434866	[1728019408]	2000000 OPS in 2.079423 seconds, throughput 961805.270020
+434866	[1728019408]	2000000 OPS in 2.085559 seconds, throughput 958975.507286
+434866	[1728019409]	2000000 OPS in 2.074563 seconds, throughput 964058.454720
+434866	[1728019409]	2000000 OPS in 2.100660 seconds, throughput 952081.726695
+434866	[1728019410]	2000000 OPS in 2.081571 seconds, throughput 960812.770739
+434866	[1728019410]	2000000 OPS in 2.096219 seconds, throughput 954098.784526
+434866	[1728019411]	2000000 OPS in 2.074008 seconds, throughput 964316.434652
+434866	[1728019411]	2000000 OPS in 2.104022 seconds, throughput 950560.402886
+434866	[1728019412]	2000000 OPS in 2.079477 seconds, throughput 961780.293795
+434866	[1728019412]	2000000 OPS in 2.091010 seconds, throughput 956475.578787
+434866	[1728019413]	2000000 OPS in 2.079558 seconds, throughput 961742.831890
+434866	[1728019413]	2000000 OPS in 2.107033 seconds, throughput 949202.029584
+434866	[1728019414]	2000000 OPS in 2.081146 seconds, throughput 961008.982551
+434866	[1728019414]	2000000 OPS in 2.088463 seconds, throughput 957642.055425
+434866	[1728019415]	2000000 OPS in 2.072418 seconds, throughput 965056.277257
+434866	[1728019415]	2000000 OPS in 2.103956 seconds, throughput 950590.221469
+434866	[1728019416]	2000000 OPS in 2.080312 seconds, throughput 961394.252401
+434866	[1728019416]	2000000 OPS in 2.089944 seconds, throughput 956963.440169
+434866	[1728019417]	2000000 OPS in 2.072749 seconds, throughput 964902.166157
+434866	[1728019418]	2000000 OPS in 2.100295 seconds, throughput 952247.184324
+434866	[1728019418]	2000000 OPS in 2.079736 seconds, throughput 961660.518450
+434866	[1728019418]	2000000 OPS in 2.093160 seconds, throughput 955493.130004
+434866	[1728019419]	2000000 OPS in 2.073012 seconds, throughput 964779.750431
+434866	[1728019420]	2000000 OPS in 2.101331 seconds, throughput 951777.706606
+434866	[1728019420]	2000000 OPS in 2.081027 seconds, throughput 961063.936220
+434866	[1728019420]	2000000 OPS in 2.088931 seconds, throughput 957427.507180
+434866	[1728019422]	2000000 OPS in 2.074490 seconds, throughput 964092.379332
+434866	[1728019422]	2000000 OPS in 2.106117 seconds, throughput 949614.859953
+434866	[1728019422]	2000000 OPS in 2.077820 seconds, throughput 962547.285135
+434866	[1728019422]	2000000 OPS in 2.087912 seconds, throughput 957894.777175
+434866	[1728019424]	2000000 OPS in 2.079508 seconds, throughput 961765.956178
+434866	[1728019424]	2000000 OPS in 2.104596 seconds, throughput 950301.150435
+434866	[1728019424]	2000000 OPS in 2.077528 seconds, throughput 962682.572750
+434866	[1728019425]	2000000 OPS in 2.084945 seconds, throughput 959257.918075
+434866	[1728019426]	2000000 OPS in 2.073771 seconds, throughput 964426.641129
+434866	[1728019426]	2000000 OPS in 2.105910 seconds, throughput 949708.202155
+434866	[1728019426]	2000000 OPS in 2.080117 seconds, throughput 961484.378042
+434866	[1728019427]	2000000 OPS in 2.087308 seconds, throughput 958171.961206
+434866	[1728019428]	2000000 OPS in 2.073486 seconds, throughput 964559.201268
+434866	[1728019428]	2000000 OPS in 2.102942 seconds, throughput 951048.578610
+434866	[1728019428]	2000000 OPS in 2.079205 seconds, throughput 961906.113154
+434866	[1728019429]	2000000 OPS in 2.098632 seconds, throughput 953001.764959
+434866	[1728019430]	2000000 OPS in 2.075246 seconds, throughput 963741.166108
+434866	[1728019430]	2000000 OPS in 2.104214 seconds, throughput 950473.668553
+434866	[1728019431]	2000000 OPS in 2.085840 seconds, throughput 958846.316112
+434866	[1728019431]	2000000 OPS in 2.090820 seconds, throughput 956562.497011
+434866	[1728019432]	2000000 OPS in 2.079671 seconds, throughput 961690.575096
+434866	[1728019432]	2000000 OPS in 2.108529 seconds, throughput 948528.571340
+434866	[1728019433]	2000000 OPS in 2.075734 seconds, throughput 963514.592910
+434866	[1728019433]	2000000 OPS in 2.086066 seconds, throughput 958742.436721
+434866	[1728019434]	2000000 OPS in 2.081104 seconds, throughput 961028.377246
+434866	[1728019434]	2000000 OPS in 2.105988 seconds, throughput 949673.027577
+434866	[1728019435]	2000000 OPS in 2.083453 seconds, throughput 959944.860767
+434866	[1728019435]	2000000 OPS in 2.088480 seconds, throughput 957634.260323
+434866	[1728019436]	2000000 OPS in 2.075138 seconds, throughput 963791.323758
+434866	[1728019436]	2000000 OPS in 2.100926 seconds, throughput 951961.182831
+434866	[1728019437]	2000000 OPS in 2.078357 seconds, throughput 962298.584892
+434866	[1728019437]	2000000 OPS in 2.086735 seconds, throughput 958435.067222
+434866	[1728019438]	2000000 OPS in 2.076025 seconds, throughput 963379.535410
+434866	[1728019439]	2000000 OPS in 2.098832 seconds, throughput 952910.952377
+434866	[1728019439]	2000000 OPS in 2.080759 seconds, throughput 961187.720442
+434866	[1728019439]	2000000 OPS in 2.091223 seconds, throughput 956378.157662
+434866	[1728019440]	2000000 OPS in 2.074231 seconds, throughput 964212.761259
+434866	[1728019441]	2000000 OPS in 2.103734 seconds, throughput 950690.534069
+434866	[1728019441]	2000000 OPS in 2.082906 seconds, throughput 960196.955600
+434866	[1728019441]	2000000 OPS in 2.086152 seconds, throughput 958702.913306
+434866	[1728019442]	2000000 OPS in 2.077389 seconds, throughput 962746.986722
+434866	[1728019443]	2000000 OPS in 2.099908 seconds, throughput 952422.677565
+434866	[1728019443]	2000000 OPS in 2.082995 seconds, throughput 960155.929323
+434866	[1728019443]	2000000 OPS in 2.087352 seconds, throughput 958151.763574
+434866	[1728019444]	2000000 OPS in 2.075033 seconds, throughput 963840.093146
+434866	[1728019445]	2000000 OPS in 2.101226 seconds, throughput 951825.267725
+434866	[1728019445]	2000000 OPS in 2.083008 seconds, throughput 960149.937014
+434866	[1728019445]	2000000 OPS in 2.086083 seconds, throughput 958734.623694
+434866	[1728019446]	2000000 OPS in 2.076580 seconds, throughput 963122.056458
+434866	[1728019447]	2000000 OPS in 2.102618 seconds, throughput 951195.129120
+434866	[1728019447]	2000000 OPS in 2.079969 seconds, throughput 961552.792373
+434866	[1728019448]	2000000 OPS in 2.091446 seconds, throughput 956276.184037
+434866	[1728019449]	2000000 OPS in 2.077230 seconds, throughput 962820.679463
+434866	[1728019449]	2000000 OPS in 2.101723 seconds, throughput 951600.187085
+434866	[1728019449]	2000000 OPS in 2.082165 seconds, throughput 960538.670086
+434866	[1728019450]	2000000 OPS in 2.089180 seconds, throughput 957313.395686
+434866	[1728019451]	2000000 OPS in 2.075984 seconds, throughput 963398.561839
+434866	[1728019451]	2000000 OPS in 2.110291 seconds, throughput 947736.591778
+434866	[1728019451]	2000000 OPS in 2.080644 seconds, throughput 961240.846584
+434866	[1728019452]	2000000 OPS in 2.087642 seconds, throughput 958018.664120
+434866	[1728019453]	2000000 OPS in 2.076847 seconds, throughput 962998.237232
+434866	[1728019453]	2000000 OPS in 2.102995 seconds, throughput 951024.610139
+434866	[1728019453]	2000000 OPS in 2.077376 seconds, throughput 962753.011491
+434866	[1728019454]	2000000 OPS in 2.090124 seconds, throughput 956881.027154
+434866	[1728019455]	2000000 OPS in 2.078997 seconds, throughput 962002.350172
+434866	[1728019455]	2000000 OPS in 2.102106 seconds, throughput 951426.807211
+434866	[1728019455]	2000000 OPS in 2.080348 seconds, throughput 961377.615668
+434866	[1728019456]	2000000 OPS in 2.090061 seconds, throughput 956909.870095
+434866	[1728019457]	2000000 OPS in 2.078704 seconds, throughput 962137.947490
+434866	[1728019457]	2000000 OPS in 2.100358 seconds, throughput 952218.621778
+434866	[1728019458]	2000000 OPS in 2.078550 seconds, throughput 962209.232398
+434866	[1728019458]	2000000 OPS in 2.093325 seconds, throughput 955417.816154
+434866	[1728019459]	2000000 OPS in 2.078098 seconds, throughput 962418.519242
+434866	[1728019460]	2000000 OPS in 2.106276 seconds, throughput 949543.174779
+434866	[1728019460]	2000000 OPS in 2.081646 seconds, throughput 960778.153442
+434866	[1728019460]	2000000 OPS in 2.087662 seconds, throughput 958009.486210
+434866	[1728019461]	2000000 OPS in 2.075054 seconds, throughput 963830.338873
+434866	[1728019462]	2000000 OPS in 2.104933 seconds, throughput 950149.007118
+434866	[1728019462]	2000000 OPS in 2.082394 seconds, throughput 960433.040049
+434866	[1728019462]	2000000 OPS in 2.085224 seconds, throughput 959129.570732
+434866	[1728019463]	2000000 OPS in 2.083004 seconds, throughput 960151.780794
+434866	[1728019464]	2000000 OPS in 2.079090 seconds, throughput 961959.318740
+434866	[1728019464]	2000000 OPS in 2.102678 seconds, throughput 951167.986729
+434866	[1728019464]	2000000 OPS in 2.089102 seconds, throughput 957349.138529
+434866	[1728019465]	2000000 OPS in 2.078707 seconds, throughput 962136.558928
+434866	[1728019466]	2000000 OPS in 2.076700 seconds, throughput 963066.403429
+434866	[1728019466]	2000000 OPS in 2.101941 seconds, throughput 951501.493144
+434866	[1728019466]	2000000 OPS in 2.091038 seconds, throughput 956462.771121
+434866	[1728019467]	2000000 OPS in 2.076064 seconds, throughput 963361.437798
+434866	[1728019468]	2000000 OPS in 2.077069 seconds, throughput 962895.310652
+434866	[1728019468]	2000000 OPS in 2.100637 seconds, throughput 952092.151095
+434866	[1728019468]	2000000 OPS in 2.093906 seconds, throughput 955152.714592
+434866	[1728019469]	2000000 OPS in 2.078611 seconds, throughput 962180.994905
+434866	[1728019470]	2000000 OPS in 2.084321 seconds, throughput 959545.098860
+434866	[1728019470]	2000000 OPS in 2.109064 seconds, throughput 948287.960915
+434866	[1728019470]	2000000 OPS in 2.086371 seconds, throughput 958602.281186
+434866	[1728019471]	2000000 OPS in 2.078406 seconds, throughput 962275.897972
+434866	[1728019472]	2000000 OPS in 2.077621 seconds, throughput 962639.480444
+434866	[1728019472]	2000000 OPS in 2.101221 seconds, throughput 951827.532658
+434866	[1728019473]	2000000 OPS in 2.090510 seconds, throughput 956704.344873
+434866	[1728019473]	2000000 OPS in 2.083920 seconds, throughput 959729.740105
+434866	[1728019474]	2000000 OPS in 2.080920 seconds, throughput 961113.353709
+434866	[1728019474]	2000000 OPS in 2.104300 seconds, throughput 950434.823932
+434866	[1728019475]	2000000 OPS in 2.087725 seconds, throughput 957980.576944
+434866	[1728019476]	2000000 OPS in 2.077696 seconds, throughput 962604.731395
+434866	[1728019476]	2000000 OPS in 2.082118 seconds, throughput 960560.352487
+434866	[1728019476]	2000000 OPS in 2.103900 seconds, throughput 950615.523551
+434866	[1728019477]	2000000 OPS in 2.092807 seconds, throughput 955654.295881
+434866	[1728019478]	2000000 OPS in 2.077337 seconds, throughput 962771.086251
+434866	[1728019478]	2000000 OPS in 2.084437 seconds, throughput 959491.699677
+434866	[1728019479]	2000000 OPS in 2.110120 seconds, throughput 947813.394499
+434866	[1728019479]	2000000 OPS in 2.089754 seconds, throughput 957050.447086
+434866	[1728019480]	2000000 OPS in 2.075976 seconds, throughput 963402.274400
+434866	[1728019480]	2000000 OPS in 2.085930 seconds, throughput 958804.945516
+434866	[1728019481]	2000000 OPS in 2.101118 seconds, throughput 951874.192692
+434866	[1728019481]	2000000 OPS in 2.088750 seconds, throughput 957510.472771
+434866	[1728019482]	2000000 OPS in 2.077371 seconds, throughput 962755.328730
+434866	[1728019483]	2000000 OPS in 2.081798 seconds, throughput 960708.003370
+434866	[1728019483]	2000000 OPS in 2.102525 seconds, throughput 951237.202887
+434866	[1728019483]	2000000 OPS in 2.092928 seconds, throughput 955599.045930
+434866	[1728019484]	2000000 OPS in 2.083492 seconds, throughput 959926.891968
+434866	[1728019485]	2000000 OPS in 2.078250 seconds, throughput 962348.129436
+434866	[1728019485]	2000000 OPS in 2.102623 seconds, throughput 951192.867195
+434866	[1728019485]	2000000 OPS in 2.091171 seconds, throughput 956401.939392
+434866	[1728019486]	2000000 OPS in 2.076357 seconds, throughput 963225.495423
+434866	[1728019487]	2000000 OPS in 2.078831 seconds, throughput 962079.168533
+434866	[1728019487]	2000000 OPS in 2.100964 seconds, throughput 951943.964770
+434866	[1728019487]	2000000 OPS in 2.095907 seconds, throughput 954240.813166
+434866	[1728019488]	2000000 OPS in 2.073277 seconds, throughput 964656.435199
+434866	[1728019489]	2000000 OPS in 2.081070 seconds, throughput 961044.078287
+434866	[1728019489]	2000000 OPS in 2.108532 seconds, throughput 948527.221783
+434866	[1728019489]	2000000 OPS in 2.092168 seconds, throughput 955946.176406
+434866	[1728019490]	2000000 OPS in 2.077440 seconds, throughput 962723.351818
+434866	[1728019491]	2000000 OPS in 2.086854 seconds, throughput 958380.413771
+434866	[1728019491]	2000000 OPS in 2.100178 seconds, throughput 952300.233599
+434866	[1728019491]	2000000 OPS in 2.087526 seconds, throughput 958071.899464
+434866	[1728019492]	2000000 OPS in 2.076549 seconds, throughput 963136.434536
+434866	[1728019493]	2000000 OPS in 2.081626 seconds, throughput 960787.384477
+434866	[1728019493]	2000000 OPS in 2.101029 seconds, throughput 951914.514269
+434866	[1728019493]	2000000 OPS in 2.091201 seconds, throughput 956388.219019
+434866	[1728019494]	2000000 OPS in 2.082562 seconds, throughput 960355.562043
+434866	[1728019495]	2000000 OPS in 2.080934 seconds, throughput 961106.887580
+434866	[1728019495]	2000000 OPS in 2.103486 seconds, throughput 950802.620032
+434866	[1728019496]	2000000 OPS in 2.088992 seconds, throughput 957399.549639
+434866	[1728019496]	2000000 OPS in 2.079026 seconds, throughput 961988.931355
+434866	[1728019497]	2000000 OPS in 2.081749 seconds, throughput 960730.616419
+434866	[1728019497]	2000000 OPS in 2.107558 seconds, throughput 948965.580069
+434866	[1728019498]	2000000 OPS in 2.097667 seconds, throughput 953440.179018
+434866	[1728019498]	2000000 OPS in 2.077325 seconds, throughput 962776.647852
+434866	[1728019499]	2000000 OPS in 2.082038 seconds, throughput 960597.260953
+434866	[1728019500]	2000000 OPS in 2.104672 seconds, throughput 950266.834927
+434866	[1728019500]	2000000 OPS in 2.084630 seconds, throughput 959402.867655
+434866	[1728019500]	2000000 OPS in 2.077715 seconds, throughput 962595.928701
+434866	[1728019501]	2000000 OPS in 2.082938 seconds, throughput 960182.204175
+434866	[1728019502]	2000000 OPS in 2.104363 seconds, throughput 950406.370004
+434866	[1728019502]	2000000 OPS in 2.086085 seconds, throughput 958733.704523
+434866	[1728019503]	2000000 OPS in 2.083699 seconds, throughput 959831.530370
+434866	[1728019503]	2000000 OPS in 2.078572 seconds, throughput 962199.048193
+434866	[1728019504]	2000000 OPS in 2.102714 seconds, throughput 951151.702038
+434866	[1728019504]	2000000 OPS in 2.086184 seconds, throughput 958688.207752
+434866	[1728019505]	2000000 OPS in 2.080497 seconds, throughput 961308.764204
+434866	[1728019505]	2000000 OPS in 2.079723 seconds, throughput 961666.529629
+434866	[1728019506]	2000000 OPS in 2.100998 seconds, throughput 951928.559665
+434866	[1728019506]	2000000 OPS in 2.096434 seconds, throughput 954000.936829
+434866	[1728019507]	2000000 OPS in 2.077910 seconds, throughput 962505.594564
+434866	[1728019507]	2000000 OPS in 2.082411 seconds, throughput 960425.199444
+434866	[1728019508]	2000000 OPS in 2.108153 seconds, throughput 948697.746321
+434866	[1728019508]	2000000 OPS in 2.089912 seconds, throughput 956978.092857
+434866	[1728019509]	2000000 OPS in 2.076161 seconds, throughput 963316.428736
+434866	[1728019510]	2000000 OPS in 2.083523 seconds, throughput 959912.609556
+434866	[1728019510]	2000000 OPS in 2.110119 seconds, throughput 947813.843674
+434866	[1728019510]	2000000 OPS in 2.087840 seconds, throughput 957927.810560
+434866	[1728019511]	2000000 OPS in 2.077302 seconds, throughput 962787.307767
+434866	[1728019512]	2000000 OPS in 2.078388 seconds, throughput 962284.231818
+434866	[1728019512]	2000000 OPS in 2.103690 seconds, throughput 950710.418360
+434866	[1728019512]	2000000 OPS in 2.092095 seconds, throughput 955979.532478
+434866	[1728019513]	2000000 OPS in 2.080919 seconds, throughput 961113.815579
+434866	[1728019514]	2000000 OPS in 2.078553 seconds, throughput 962207.843630
+434866	[1728019514]	2000000 OPS in 2.100277 seconds, throughput 952255.345366
+434866	[1728019514]	2000000 OPS in 2.092620 seconds, throughput 955739.694737
+434866	[1728019515]	2000000 OPS in 2.074938 seconds, throughput 963884.222083
+434866	[1728019516]	2000000 OPS in 2.079542 seconds, throughput 961750.231541
+434866	[1728019516]	2000000 OPS in 2.104779 seconds, throughput 950218.526506
+434866	[1728019516]	2000000 OPS in 2.094619 seconds, throughput 954827.584396
+434866	[1728019517]	2000000 OPS in 2.079978 seconds, throughput 961548.631764
+434866	[1728019518]	2000000 OPS in 2.080021 seconds, throughput 961528.753796
+434866	[1728019519]	2000000 OPS in 2.104538 seconds, throughput 950327.340252
+434866	[1728019519]	2000000 OPS in 2.087365 seconds, throughput 958145.796255
+434866	[1728019519]	2000000 OPS in 2.075159 seconds, throughput 963781.570472
+434866	[1728019520]	2000000 OPS in 2.082096 seconds, throughput 960570.502033
+434866	[1728019521]	2000000 OPS in 2.103114 seconds, throughput 950970.798540
+434866	[1728019521]	2000000 OPS in 2.084921 seconds, throughput 959268.960311
+434866	[1728019521]	2000000 OPS in 2.075906 seconds, throughput 963434.760533
+434866	[1728019522]	2000000 OPS in 2.078826 seconds, throughput 962081.482529
+434866	[1728019523]	2000000 OPS in 2.100944 seconds, throughput 951953.026830
+434866	[1728019523]	2000000 OPS in 2.088137 seconds, throughput 957791.562527
+434866	[1728019523]	2000000 OPS in 2.083154 seconds, throughput 960082.643914
+434866	[1728019524]	2000000 OPS in 2.078624 seconds, throughput 962174.977293
+434866	[1728019525]	2000000 OPS in 2.105617 seconds, throughput 949840.355582
+434866	[1728019525]	2000000 OPS in 2.089795 seconds, throughput 957031.670571
+434866	[1728019525]	2000000 OPS in 2.074334 seconds, throughput 964164.883765
+434866	[1728019526]	2000000 OPS in 2.082535 seconds, throughput 960368.013023
+434866	[1728019527]	2000000 OPS in 2.105759 seconds, throughput 949776.303936
+434866	[1728019527]	2000000 OPS in 2.099705 seconds, throughput 952514.758026
+434866	[1728019527]	2000000 OPS in 2.077514 seconds, throughput 962689.060098
+434866	[1728019528]	2000000 OPS in 2.080173 seconds, throughput 961458.494077
+434866	[1728019529]	2000000 OPS in 2.088566 seconds, throughput 957594.828222
+434866	[1728019529]	2000000 OPS in 2.102661 seconds, throughput 951175.676916
+434866	[1728019530]	2000000 OPS in 2.079516 seconds, throughput 961762.256217
+434866	[1728019530]	2000000 OPS in 2.085279 seconds, throughput 959104.273337
+434866	[1728019531]	2000000 OPS in 2.089491 seconds, throughput 957170.909087
+434866	[1728019531]	2000000 OPS in 2.102634 seconds, throughput 951187.890998
+434866	[1728019532]	2000000 OPS in 2.074967 seconds, throughput 963870.750716
+434866	[1728019532]	2000000 OPS in 2.083507 seconds, throughput 959919.981070
+434866	[1728019533]	2000000 OPS in 2.087413 seconds, throughput 958123.763721
+434866	[1728019533]	2000000 OPS in 2.102945 seconds, throughput 951047.221872
+434866	[1728019534]	2000000 OPS in 2.083018 seconds, throughput 960145.327597
+434866	[1728019535]	2000000 OPS in 2.082636 seconds, throughput 960321.438792
+434866	[1728019535]	2000000 OPS in 2.091366 seconds, throughput 956312.764002
+434866	[1728019535]	2000000 OPS in 2.106919 seconds, throughput 949253.388479
+434866	[1728019536]	2000000 OPS in 2.075300 seconds, throughput 963716.089240
+434866	[1728019537]	2000000 OPS in 2.081907 seconds, throughput 960657.704691
+434866	[1728019537]	2000000 OPS in 2.090356 seconds, throughput 956774.826872
+434866	[1728019537]	2000000 OPS in 2.106485 seconds, throughput 949448.963558
+434866	[1728019538]	2000000 OPS in 2.072973 seconds, throughput 964797.901372
+434866	[1728019539]	2000000 OPS in 2.080421 seconds, throughput 961343.881839
+434866	[1728019539]	2000000 OPS in 2.086101 seconds, throughput 958726.351217
+434866	[1728019540]	2000000 OPS in 2.103751 seconds, throughput 950682.851725
+434866	[1728019540]	2000000 OPS in 2.076062 seconds, throughput 963362.365864
+434866	[1728019541]	2000000 OPS in 2.087350 seconds, throughput 958152.681630
+434866	[1728019542]	2000000 OPS in 2.087057 seconds, throughput 958287.195798
+434866	[1728019542]	2000000 OPS in 2.105370 seconds, throughput 949951.789947
+434866	[1728019542]	2000000 OPS in 2.078083 seconds, throughput 962425.466163
+434866	[1728019543]	2000000 OPS in 2.081103 seconds, throughput 961028.839034
+434866	[1728019544]	2000000 OPS in 2.087874 seconds, throughput 957912.211177
+434866	[1728019544]	2000000 OPS in 2.105852 seconds, throughput 949734.359300
+434866	[1728019544]	2000000 OPS in 2.082083 seconds, throughput 960576.499592
+434866	[1728019545]	2000000 OPS in 2.077884 seconds, throughput 962517.638136
+434866	[1728019546]	2000000 OPS in 2.094729 seconds, throughput 954777.443765
+434866	[1728019546]	2000000 OPS in 2.109254 seconds, throughput 948202.539855
+434866	[1728019546]	2000000 OPS in 2.076342 seconds, throughput 963232.453998
+434866	[1728019547]	2000000 OPS in 2.079773 seconds, throughput 961643.410122
+434866	[1728019548]	2000000 OPS in 2.092436 seconds, throughput 955823.738456
+434866	[1728019548]	2000000 OPS in 2.104849 seconds, throughput 950186.925523
+434866	[1728019548]	2000000 OPS in 2.078005 seconds, throughput 962461.591767
+434866	[1728019549]	2000000 OPS in 2.083100 seconds, throughput 960107.532044
+434866	[1728019550]	2000000 OPS in 2.087536 seconds, throughput 958067.309977
+434866	[1728019550]	2000000 OPS in 2.103645 seconds, throughput 950730.755427
+434866	[1728019550]	2000000 OPS in 2.079589 seconds, throughput 961728.495390
+434866	[1728019551]	2000000 OPS in 2.086037 seconds, throughput 958755.765118
+434866	[1728019552]	2000000 OPS in 2.090895 seconds, throughput 956528.185299
+434866	[1728019552]	2000000 OPS in 2.099546 seconds, throughput 952586.892595
+434866	[1728019552]	2000000 OPS in 2.075839 seconds, throughput 963465.856456
+434866	[1728019553]	2000000 OPS in 2.080480 seconds, throughput 961316.619242
+434866	[1728019554]	2000000 OPS in 2.090579 seconds, throughput 956672.768644
+434866	[1728019554]	2000000 OPS in 2.111178 seconds, throughput 947338.405383
+434866	[1728019555]	2000000 OPS in 2.083413 seconds, throughput 959963.291004
+434866	[1728019555]	2000000 OPS in 2.080918 seconds, throughput 961114.277449
+434866	[1728019556]	2000000 OPS in 2.096853 seconds, throughput 953810.305253
+434866	[1728019556]	2000000 OPS in 2.105341 seconds, throughput 949964.875049
+434866	[1728019557]	2000000 OPS in 2.080641 seconds, throughput 961242.232562
+434866	[1728019557]	2000000 OPS in 2.081688 seconds, throughput 960758.768845
+434866	[1728019558]	2000000 OPS in 2.085532 seconds, throughput 958987.922506
+434866	[1728019559]	2000000 OPS in 2.105760 seconds, throughput 949775.852899
+434866	[1728019559]	2000000 OPS in 2.074488 seconds, throughput 964093.308807
+434866	[1728019560]	2000000 OPS in 2.084678 seconds, throughput 959380.777271
+434866	[1728019560]	2000000 OPS in 2.092218 seconds, throughput 955923.331125
+434866	[1728019561]	2000000 OPS in 2.101079 seconds, throughput 951891.861277
+434866	[1728019561]	2000000 OPS in 2.078621 seconds, throughput 962176.365966
+434866	[1728019562]	2000000 OPS in 2.080500 seconds, throughput 961307.378034
+434866	[1728019562]	2000000 OPS in 2.086951 seconds, throughput 958335.868930
+434866	[1728019563]	2000000 OPS in 2.102893 seconds, throughput 951070.739215
+434866	[1728019563]	2000000 OPS in 2.075848 seconds, throughput 963461.679275
+434866	[1728019564]	2000000 OPS in 2.083533 seconds, throughput 959908.002417
+434866	[1728019565]	2000000 OPS in 2.090170 seconds, throughput 956859.968328
+434866	[1728019565]	2000000 OPS in 2.110007 seconds, throughput 947864.154005
+434866	[1728019565]	2000000 OPS in 2.082560 seconds, throughput 960356.484327
+434866	[1728019566]	2000000 OPS in 2.078930 seconds, throughput 962033.353696
+434866	[1728019567]	2000000 OPS in 2.092320 seconds, throughput 955876.730137
+434866	[1728019567]	2000000 OPS in 2.101747 seconds, throughput 951589.320694
+434866	[1728019567]	2000000 OPS in 2.076506 seconds, throughput 963156.379033
+434866	[1728019568]	2000000 OPS in 2.081200 seconds, throughput 960984.047665
+434866	[1728019569]	2000000 OPS in 2.090095 seconds, throughput 956894.303847
+434866	[1728019569]	2000000 OPS in 2.100833 seconds, throughput 952003.324396
+434866	[1728019569]	2000000 OPS in 2.078254 seconds, throughput 962346.277212
+434866	[1728019570]	2000000 OPS in 2.082748 seconds, throughput 960269.797402
+434866	[1728019571]	2000000 OPS in 2.089268 seconds, throughput 957273.073632
+434866	[1728019571]	2000000 OPS in 2.106629 seconds, throughput 949384.063354
+434866	[1728019571]	2000000 OPS in 2.080844 seconds, throughput 961148.457068
+434866	[1728019572]	2000000 OPS in 2.082256 seconds, throughput 960496.692049
+434866	[1728019573]	2000000 OPS in 2.089429 seconds, throughput 957199.311391
+434866	[1728019573]	2000000 OPS in 2.084572 seconds, throughput 959429.561560
+434866	[1728019573]	2000000 OPS in 2.105704 seconds, throughput 949801.111647
+434866	[1728019574]	2000000 OPS in 2.079928 seconds, throughput 961571.746714
+434866	[1728019575]	2000000 OPS in 2.097668 seconds, throughput 953439.724494
+434866	[1728019575]	2000000 OPS in 2.080066 seconds, throughput 961507.952152
+434866	[1728019575]	2000000 OPS in 2.103837 seconds, throughput 950643.990005
+434866	[1728019576]	2000000 OPS in 2.080609 seconds, throughput 961257.016575
+434866	[1728019577]	2000000 OPS in 2.091411 seconds, throughput 956292.187428
+434866	[1728019577]	2000000 OPS in 2.078548 seconds, throughput 962210.158245
+434866	[1728019577]	2000000 OPS in 2.105734 seconds, throughput 949787.580008
+434866	[1728019578]	2000000 OPS in 2.082627 seconds, throughput 960325.588788
+434866	[1728019579]	2000000 OPS in 2.088046 seconds, throughput 957833.304439
+434866	[1728019579]	2000000 OPS in 2.077168 seconds, throughput 962849.418054
+434866	[1728019580]	2000000 OPS in 2.106990 seconds, throughput 949221.401146
+434866	[1728019580]	2000000 OPS in 2.084191 seconds, throughput 959604.949834
+434866	[1728019581]	2000000 OPS in 2.087784 seconds, throughput 957953.504769
+434866	[1728019582]	2000000 OPS in 2.076279 seconds, throughput 963261.681113
+434866	[1728019582]	2000000 OPS in 2.102212 seconds, throughput 951378.833343
+434866	[1728019582]	2000000 OPS in 2.081091 seconds, throughput 961034.380524
+434866	[1728019583]	2000000 OPS in 2.089595 seconds, throughput 957123.270299
+434866	[1728019584]	2000000 OPS in 2.081370 seconds, throughput 960905.557397
+434866	[1728019584]	2000000 OPS in 2.109873 seconds, throughput 947924.353741
+434866	[1728019585]	2000000 OPS in 2.083228 seconds, throughput 960048.540054
+434866	[1728019585]	2000000 OPS in 2.099249 seconds, throughput 952721.663795
+434866	[1728019586]	2000000 OPS in 2.075511 seconds, throughput 963618.116213
+434866	[1728019586]	2000000 OPS in 2.103039 seconds, throughput 951004.712704
+434866	[1728019587]	2000000 OPS in 2.080531 seconds, throughput 961293.054513
+434866	[1728019588]	2000000 OPS in 2.090444 seconds, throughput 956734.550172
+434866	[1728019588]	2000000 OPS in 2.080223 seconds, throughput 961435.384572
+434866	[1728019588]	2000000 OPS in 2.102390 seconds, throughput 951298.284334
+434866	[1728019589]	2000000 OPS in 2.086217 seconds, throughput 958673.043121
+434866	[1728019590]	2000000 OPS in 2.089245 seconds, throughput 957283.612023
+434866	[1728019590]	2000000 OPS in 2.074675 seconds, throughput 964006.410643
+434866	[1728019590]	2000000 OPS in 2.105412 seconds, throughput 949932.839748
+434866	[1728019591]	2000000 OPS in 2.082499 seconds, throughput 960384.614831
+434866	[1728019592]	2000000 OPS in 2.092920 seconds, throughput 955602.698622
+434866	[1728019592]	2000000 OPS in 2.080177 seconds, throughput 961456.645276
+434866	[1728019592]	2000000 OPS in 2.106787 seconds, throughput 949312.863616
+434866	[1728019593]	2000000 OPS in 2.082577 seconds, throughput 960348.644972
+434866	[1728019594]	2000000 OPS in 2.093131 seconds, throughput 955506.368211
+434866	[1728019594]	2000000 OPS in 2.083037 seconds, throughput 960136.569826
+434866	[1728019594]	2000000 OPS in 2.104712 seconds, throughput 950248.775129
+434866	[1728019595]	2000000 OPS in 2.078399 seconds, throughput 962279.138895
+434866	[1728019596]	2000000 OPS in 2.091267 seconds, throughput 956358.035583
+434866	[1728019596]	2000000 OPS in 2.077000 seconds, throughput 962927.298989
+434866	[1728019596]	2000000 OPS in 2.104100 seconds, throughput 950525.165154
+434866	[1728019597]	2000000 OPS in 2.081476 seconds, throughput 960856.622896
+434866	[1728019598]	2000000 OPS in 2.089752 seconds, throughput 957051.363033
+434866	[1728019598]	2000000 OPS in 2.078680 seconds, throughput 962149.056132
+434866	[1728019598]	2000000 OPS in 2.104812 seconds, throughput 950203.628638
+434866	[1728019599]	2000000 OPS in 2.086040 seconds, throughput 958754.386301
+434866	[1728019600]	2000000 OPS in 2.088361 seconds, throughput 957688.828703
+434866	[1728019600]	2000000 OPS in 2.076586 seconds, throughput 963119.273654
+434866	[1728019601]	2000000 OPS in 2.102151 seconds, throughput 951406.440356
+434866	[1728019601]	2000000 OPS in 2.078398 seconds, throughput 962279.601886
+434866	[1728019602]	2000000 OPS in 2.090991 seconds, throughput 956484.269899
+434866	[1728019602]	2000000 OPS in 2.078721 seconds, throughput 962130.079025
+434866	[1728019603]	2000000 OPS in 2.109315 seconds, throughput 948175.118463
+434866	[1728019603]	2000000 OPS in 2.079371 seconds, throughput 961829.322425
+434866	[1728019604]	2000000 OPS in 2.093225 seconds, throughput 955463.459494
+434866	[1728019604]	2000000 OPS in 2.081865 seconds, throughput 960677.085210
+434866	[1728019605]	2000000 OPS in 2.106436 seconds, throughput 949471.049678
+434866	[1728019605]	2000000 OPS in 2.080022 seconds, throughput 961528.291528
+434866	[1728019606]	2000000 OPS in 2.088527 seconds, throughput 957612.709819
+434866	[1728019606]	2000000 OPS in 2.076046 seconds, throughput 963369.790457
+434866	[1728019607]	2000000 OPS in 2.105044 seconds, throughput 950098.905296
+434866	[1728019607]	2000000 OPS in 2.085008 seconds, throughput 959228.933414
+434866	[1728019608]	2000000 OPS in 2.090734 seconds, throughput 956601.844137
+434866	[1728019609]	2000000 OPS in 2.078488 seconds, throughput 962237.934499
+434866	[1728019609]	2000000 OPS in 2.102035 seconds, throughput 951458.943357
+434866	[1728019610]	2000000 OPS in 2.087531 seconds, throughput 958069.604715
+434866	[1728019611]	2000000 OPS in 2.091812 seconds, throughput 956108.866380
+434866	[1728019611]	2000000 OPS in 2.077106 seconds, throughput 962878.158361
+434866	[1728019611]	2000000 OPS in 2.107778 seconds, throughput 948866.531485
+434866	[1728019612]	2000000 OPS in 2.081981 seconds, throughput 960623.559965
+434866	[1728019613]	2000000 OPS in 2.093634 seconds, throughput 955276.805784
+434866	[1728019613]	2000000 OPS in 2.079146 seconds, throughput 961933.409198
+434866	[1728019613]	2000000 OPS in 2.104858 seconds, throughput 950182.862692
+434866	[1728019614]	2000000 OPS in 2.083687 seconds, throughput 959837.058061
+434866	[1728019615]	2000000 OPS in 2.097321 seconds, throughput 953597.470297
+434866	[1728019615]	2000000 OPS in 2.083746 seconds, throughput 959809.880859
+434866	[1728019615]	2000000 OPS in 2.109431 seconds, throughput 948122.977239
+434866	[1728019616]	2000000 OPS in 2.082788 seconds, throughput 960251.355395
+434866	[1728019617]	2000000 OPS in 2.087258 seconds, throughput 958194.914093
+434866	[1728019617]	2000000 OPS in 2.074627 seconds, throughput 964028.714559
+434866	[1728019617]	2000000 OPS in 2.103235 seconds, throughput 950916.088787
+434866	[1728019618]	2000000 OPS in 2.080982 seconds, throughput 961084.718657
+434866	[1728019619]	2000000 OPS in 2.085459 seconds, throughput 959021.491192
+434866	[1728019619]	2000000 OPS in 2.075908 seconds, throughput 963433.832328
+434866	[1728019620]	2000000 OPS in 2.108833 seconds, throughput 948391.835674
+434866	[1728019620]	2000000 OPS in 2.087416 seconds, throughput 958122.386721
+434866	[1728019621]	2000000 OPS in 2.088205 seconds, throughput 957760.373143
+434866	[1728019621]	2000000 OPS in 2.076969 seconds, throughput 962941.671253
+434866	[1728019622]	2000000 OPS in 2.109368 seconds, throughput 948151.294606
+434866	[1728019622]	2000000 OPS in 2.079662 seconds, throughput 961694.736933
+434866	[1728019623]	2000000 OPS in 2.091985 seconds, throughput 956029.799449
+434866	[1728019623]	2000000 OPS in 2.078221 seconds, throughput 962361.558275
+434866	[1728019624]	2000000 OPS in 2.104854 seconds, throughput 950184.668390
+434866	[1728019624]	2000000 OPS in 2.078545 seconds, throughput 962211.547020
+434866	[1728019625]	2000000 OPS in 2.078981 seconds, throughput 962009.753817
+434866	[1728019625]	2000000 OPS in 2.094193 seconds, throughput 955021.815086
+434866	[1728019626]	2000000 OPS in 2.103188 seconds, throughput 950937.338935
+434866	[1728019626]	2000000 OPS in 2.081676 seconds, throughput 960764.307222
+434866	[1728019627]	2000000 OPS in 2.080388 seconds, throughput 961359.131085
+434866	[1728019627]	2000000 OPS in 2.090669 seconds, throughput 956631.585392
+434866	[1728019628]	2000000 OPS in 2.102358 seconds, throughput 951312.764049
+434866	[1728019628]	2000000 OPS in 2.076453 seconds, throughput 963180.962921
+434866	[1728019629]	2000000 OPS in 2.077688 seconds, throughput 962608.437841
+434866	[1728019629]	2000000 OPS in 2.089054 seconds, throughput 957371.135452
+434866	[1728019630]	2000000 OPS in 2.110110 seconds, throughput 947817.886271
+434866	[1728019630]	2000000 OPS in 2.085387 seconds, throughput 959054.602335
+434866	[1728019631]	2000000 OPS in 2.077572 seconds, throughput 962662.184512
+434866	[1728019631]	2000000 OPS in 2.088711 seconds, throughput 957528.351218
+434866	[1728019632]	2000000 OPS in 2.105090 seconds, throughput 950078.143927
+434866	[1728019632]	2000000 OPS in 2.080833 seconds, throughput 961153.538030
+434866	[1728019634]	2000000 OPS in 2.082023 seconds, throughput 960604.181606
+434866	[1728019634]	2000000 OPS in 2.097317 seconds, throughput 953599.288996
+434866	[1728019634]	2000000 OPS in 2.105803 seconds, throughput 949756.458700
+434866	[1728019634]	2000000 OPS in 2.079074 seconds, throughput 961966.721723
+434866	[1728019636]	2000000 OPS in 2.075645 seconds, throughput 963555.906718
+434866	[1728019636]	2000000 OPS in 2.090874 seconds, throughput 956537.792330
+434866	[1728019636]	2000000 OPS in 2.103995 seconds, throughput 950572.601171
+434866	[1728019637]	2000000 OPS in 2.080508 seconds, throughput 961303.681601
+434866	[1728019638]	2000000 OPS in 2.077068 seconds, throughput 962895.774236
+434866	[1728019638]	2000000 OPS in 2.090032 seconds, throughput 956923.147588
+434866	[1728019638]	2000000 OPS in 2.101221 seconds, throughput 951827.532658
+434866	[1728019639]	2000000 OPS in 2.083630 seconds, throughput 959863.315464
+434866	[1728019640]	2000000 OPS in 2.078541 seconds, throughput 962213.398725
+434866	[1728019640]	2000000 OPS in 2.089013 seconds, throughput 957389.925290
+434866	[1728019641]	2000000 OPS in 2.110114 seconds, throughput 947816.089557
+434866	[1728019641]	2000000 OPS in 2.080577 seconds, throughput 961271.801044
+434866	[1728019642]	2000000 OPS in 2.079823 seconds, throughput 961620.291727
+434866	[1728019642]	2000000 OPS in 2.088991 seconds, throughput 957400.007946
+434866	[1728019643]	2000000 OPS in 2.108053 seconds, throughput 948742.749826
+434866	[1728019643]	2000000 OPS in 2.081531 seconds, throughput 960831.234317
+434866	[1728019644]	2000000 OPS in 2.083176 seconds, throughput 960072.504676
+434866	[1728019644]	2000000 OPS in 2.093409 seconds, throughput 955379.479118
+434866	[1728019645]	2000000 OPS in 2.107251 seconds, throughput 949103.832434
+434866	[1728019645]	2000000 OPS in 2.087050 seconds, throughput 958290.409909
+434866	[1728019646]	2000000 OPS in 2.074509 seconds, throughput 964083.549409
+434866	[1728019646]	2000000 OPS in 2.085219 seconds, throughput 959131.870561
+434866	[1728019647]	2000000 OPS in 2.105967 seconds, throughput 949682.497399
+434866	[1728019647]	2000000 OPS in 2.081551 seconds, throughput 960822.002440
+434866	[1728019648]	2000000 OPS in 2.076007 seconds, throughput 963387.888384
+434866	[1728019648]	2000000 OPS in 2.091214 seconds, throughput 956382.273646
+434866	[1728019649]	2000000 OPS in 2.108831 seconds, throughput 948392.735122
+434866	[1728019649]	2000000 OPS in 2.083960 seconds, throughput 959711.318835
+434866	[1728019650]	2000000 OPS in 2.080636 seconds, throughput 961244.542534
+434866	[1728019650]	2000000 OPS in 2.089699 seconds, throughput 957075.636252
+434866	[1728019651]	2000000 OPS in 2.101737 seconds, throughput 951593.848326
+434866	[1728019651]	2000000 OPS in 2.079907 seconds, throughput 961581.455325
+434866	[1728019652]	2000000 OPS in 2.081197 seconds, throughput 960985.432902
+434866	[1728019652]	2000000 OPS in 2.086700 seconds, throughput 958451.142953
+434866	[1728019653]	2000000 OPS in 2.079942 seconds, throughput 961565.274416
+434866	[1728019653]	2000000 OPS in 2.101792 seconds, throughput 951568.946880
+434866	[1728019654]	2000000 OPS in 2.085222 seconds, throughput 959130.490662
+434866	[1728019654]	2000000 OPS in 2.098358 seconds, throughput 953126.206300
+434866	[1728019655]	2000000 OPS in 2.079410 seconds, throughput 961811.283008
+434866	[1728019655]	2000000 OPS in 2.106237 seconds, throughput 949560.756933
+434866	[1728019656]	2000000 OPS in 2.075973 seconds, throughput 963403.666618
+434866	[1728019657]	2000000 OPS in 2.088005 seconds, throughput 957852.112423
+434866	[1728019657]	2000000 OPS in 2.079115 seconds, throughput 961947.751808
+434866	[1728019657]	2000000 OPS in 2.100480 seconds, throughput 952163.315052
+434866	[1728019658]	2000000 OPS in 2.077529 seconds, throughput 962682.109371
+434866	[1728019659]	2000000 OPS in 2.091511 seconds, throughput 956246.464876
+434866	[1728019659]	2000000 OPS in 2.083724 seconds, throughput 959820.014551
+434866	[1728019660]	2000000 OPS in 2.110125 seconds, throughput 947811.148629
+434866	[1728019661]	2000000 OPS in 2.074878 seconds, throughput 963912.095073
+434866	[1728019661]	2000000 OPS in 2.091830 seconds, throughput 956100.639153
+434866	[1728019662]	2000000 OPS in 2.078942 seconds, throughput 962027.800679
+434866	[1728019662]	2000000 OPS in 2.102177 seconds, throughput 951394.673236
+434866	[1728019663]	2000000 OPS in 2.079743 seconds, throughput 961657.281693
+434866	[1728019663]	2000000 OPS in 2.096600 seconds, throughput 953925.403033
+434866	[1728019664]	2000000 OPS in 2.077926 seconds, throughput 962498.183285
+434866	[1728019664]	2000000 OPS in 2.109506 seconds, throughput 948089.268293
+434866	[1728019665]	2000000 OPS in 2.082336 seconds, throughput 960459.791311
+434866	[1728019665]	2000000 OPS in 2.091753 seconds, throughput 956135.834393
+434866	[1728019666]	2000000 OPS in 2.077682 seconds, throughput 962611.217694
+434866	[1728019666]	2000000 OPS in 2.106778 seconds, throughput 949316.919011
+434866	[1728019667]	2000000 OPS in 2.075552 seconds, throughput 963599.081112
+434866	[1728019667]	2000000 OPS in 2.088276 seconds, throughput 957727.809926
+434866	[1728019668]	2000000 OPS in 2.081037 seconds, throughput 961059.318023
+434866	[1728019668]	2000000 OPS in 2.107870 seconds, throughput 948825.117299
+434866	[1728019669]	2000000 OPS in 2.076718 seconds, throughput 963058.056029
+434866	[1728019669]	2000000 OPS in 2.088477 seconds, throughput 957635.635920
+434866	[1728019670]	2000000 OPS in 2.084212 seconds, throughput 959595.281094
+434866	[1728019670]	2000000 OPS in 2.102893 seconds, throughput 951070.739215
+434866	[1728019671]	2000000 OPS in 2.077598 seconds, throughput 962650.137322
+434866	[1728019671]	2000000 OPS in 2.090202 seconds, throughput 956845.319256
+434866	[1728019672]	2000000 OPS in 2.081199 seconds, throughput 960984.509410
+434866	[1728019672]	2000000 OPS in 2.104853 seconds, throughput 950185.119816
+434866	[1728019673]	2000000 OPS in 2.077012 seconds, throughput 962921.735647
+434866	[1728019673]	2000000 OPS in 2.093113 seconds, throughput 955514.585214
+434866	[1728019674]	2000000 OPS in 2.082190 seconds, throughput 960527.137293
+434866	[1728019674]	2000000 OPS in 2.105797 seconds, throughput 949759.164820
+434866	[1728019675]	2000000 OPS in 2.079253 seconds, throughput 961883.907346
+434866	[1728019675]	2000000 OPS in 2.092072 seconds, throughput 955990.042408
+434866	[1728019676]	2000000 OPS in 2.079967 seconds, throughput 961553.716958
+434866	[1728019676]	2000000 OPS in 2.101679 seconds, throughput 951620.109446
+434866	[1728019677]	2000000 OPS in 2.080293 seconds, throughput 961403.033130
+434866	[1728019677]	2000000 OPS in 2.091471 seconds, throughput 956264.753372
+434866	[1728019678]	2000000 OPS in 2.079892 seconds, throughput 961588.390166
+434866	[1728019679]	2000000 OPS in 2.113508 seconds, throughput 946294.028695
+434866	[1728019679]	2000000 OPS in 2.076228 seconds, throughput 963285.342458
+434866	[1728019680]	2000000 OPS in 2.090829 seconds, throughput 956558.379475
+434866	[1728019680]	2000000 OPS in 2.086604 seconds, throughput 958495.239154
+434866	[1728019681]	2000000 OPS in 2.101893 seconds, throughput 951523.222162
+434866	[1728019681]	2000000 OPS in 2.079535 seconds, throughput 961753.468925
+434866	[1728019682]	2000000 OPS in 2.093198 seconds, throughput 955475.783944
+434866	[1728019682]	2000000 OPS in 2.078005 seconds, throughput 962461.591767
+434866	[1728019683]	2000000 OPS in 2.101619 seconds, throughput 951647.277646
+434866	[1728019683]	2000000 OPS in 2.083043 seconds, throughput 960133.804247
+434866	[1728019684]	2000000 OPS in 2.094790 seconds, throughput 954749.640775
+434866	[1728019684]	2000000 OPS in 2.083125 seconds, throughput 960096.009601
+434866	[1728019685]	2000000 OPS in 2.101939 seconds, throughput 951502.398500
+434866	[1728019685]	2000000 OPS in 2.079720 seconds, throughput 961667.916835
+434866	[1728019686]	2000000 OPS in 2.087479 seconds, throughput 958093.470641
+434866	[1728019687]	2000000 OPS in 2.086610 seconds, throughput 958492.483023
+434866	[1728019687]	2000000 OPS in 2.110315 seconds, throughput 947725.813445
+434866	[1728019688]	2000000 OPS in 2.078979 seconds, throughput 962010.679281
+434866	[1728019688]	2000000 OPS in 2.090993 seconds, throughput 956483.355038
+434866	[1728019689]	2000000 OPS in 2.086284 seconds, throughput 958642.255800
+434866	[1728019689]	2000000 OPS in 2.105710 seconds, throughput 949798.405288
+434866	[1728019690]	2000000 OPS in 2.075104 seconds, throughput 963807.115210
+434866	[1728019690]	2000000 OPS in 2.085060 seconds, throughput 959205.010887
+434866	[1728019691]	2000000 OPS in 2.081463 seconds, throughput 960862.624029
+434866	[1728019691]	2000000 OPS in 2.104337 seconds, throughput 950418.112688
+434866	[1728019692]	2000000 OPS in 2.079363 seconds, throughput 961833.022902
+434866	[1728019692]	2000000 OPS in 2.093711 seconds, throughput 955241.673755
+434866	[1728019693]	2000000 OPS in 2.081335 seconds, throughput 960921.716110
+434866	[1728019693]	2000000 OPS in 2.105159 seconds, throughput 950047.003576
+434866	[1728019694]	2000000 OPS in 2.079857 seconds, throughput 961604.571853
+434866	[1728019694]	2000000 OPS in 2.093021 seconds, throughput 955556.585433
+434866	[1728019695]	2000000 OPS in 2.080559 seconds, throughput 961280.117507
+434866	[1728019695]	2000000 OPS in 2.101854 seconds, throughput 951540.877720
+434866	[1728019696]	2000000 OPS in 2.075881 seconds, throughput 963446.363255
+434866	[1728019696]	2000000 OPS in 2.089239 seconds, throughput 957286.361206
+434866	[1728019697]	2000000 OPS in 2.081143 seconds, throughput 961010.367860
+434866	[1728019697]	2000000 OPS in 2.106423 seconds, throughput 949476.909434
+434866	[1728019698]	2000000 OPS in 2.077658 seconds, throughput 962622.337266
+434866	[1728019698]	2000000 OPS in 2.090475 seconds, throughput 956720.362597
+434866	[1728019699]	2000000 OPS in 2.088209 seconds, throughput 957758.538537
+434866	[1728019700]	2000000 OPS in 2.103365 seconds, throughput 950857.316728
+434866	[1728019700]	2000000 OPS in 2.076489 seconds, throughput 963164.264294
+434866	[1728019700]	2000000 OPS in 2.089367 seconds, throughput 957227.715380
+434866	[1728019701]	2000000 OPS in 2.076557 seconds, throughput 963132.724023
+434866	[1728019702]	2000000 OPS in 2.102658 seconds, throughput 951177.034021
+434866	[1728019702]	2000000 OPS in 2.079276 seconds, throughput 961873.267426
+434866	[1728019703]	2000000 OPS in 2.097606 seconds, throughput 953467.905794
+434866	[1728019703]	2000000 OPS in 2.076689 seconds, throughput 963071.504688
+434866	[1728019704]	2000000 OPS in 2.104737 seconds, throughput 950237.488104
+434866	[1728019704]	2000000 OPS in 2.080431 seconds, throughput 961339.260951
+434866	[1728019705]	2000000 OPS in 2.089327 seconds, throughput 957246.041429
+434866	[1728019705]	2000000 OPS in 2.083018 seconds, throughput 960145.327597
+434866	[1728019706]	2000000 OPS in 2.109489 seconds, throughput 948096.908777
+434866	[1728019706]	2000000 OPS in 2.077959 seconds, throughput 962482.897882
+434866	[1728019707]	2000000 OPS in 2.092587 seconds, throughput 955754.766707
+434866	[1728019707]	2000000 OPS in 2.081645 seconds, throughput 960778.614990
+434866	[1728019708]	2000000 OPS in 2.104265 seconds, throughput 950450.632406
+434866	[1728019708]	2000000 OPS in 2.077234 seconds, throughput 962818.825419
+434866	[1728019709]	2000000 OPS in 2.086903 seconds, throughput 958357.911221
+434866	[1728019709]	2000000 OPS in 2.087352 seconds, throughput 958151.763574
+434866	[1728019710]	2000000 OPS in 2.101367 seconds, throughput 951761.401031
+434866	[1728019710]	2000000 OPS in 2.079859 seconds, throughput 961603.647170
+434866	[1728019711]	2000000 OPS in 2.090412 seconds, throughput 956749.195852
+434866	[1728019712]	2000000 OPS in 2.077582 seconds, throughput 962657.550941
+434866	[1728019712]	2000000 OPS in 2.103655 seconds, throughput 950726.236004
+434866	[1728019712]	2000000 OPS in 2.078208 seconds, throughput 962367.578221
+434866	[1728019713]	2000000 OPS in 2.095822 seconds, throughput 954279.514195
+434866	[1728019714]	2000000 OPS in 2.085639 seconds, throughput 958938.723336
+434866	[1728019714]	2000000 OPS in 2.106652 seconds, throughput 949373.698171
+434866	[1728019715]	2000000 OPS in 2.081433 seconds, throughput 960876.473084
+434866	[1728019715]	2000000 OPS in 2.091123 seconds, throughput 956423.892808
+434866	[1728019716]	2000000 OPS in 2.078657 seconds, throughput 962159.702154
+434866	[1728019716]	2000000 OPS in 2.111696 seconds, throughput 947106.022837
+434866	[1728019717]	2000000 OPS in 2.075871 seconds, throughput 963451.004422
+434866	[1728019717]	2000000 OPS in 2.086326 seconds, throughput 958622.957294
+434866	[1728019718]	2000000 OPS in 2.077646 seconds, throughput 962627.897149
+434866	[1728019718]	2000000 OPS in 2.101120 seconds, throughput 951873.286628
+434866	[1728019719]	2000000 OPS in 2.076644 seconds, throughput 963092.374042
+434866	[1728019719]	2000000 OPS in 2.086583 seconds, throughput 958504.885739
+434866	[1728019720]	2000000 OPS in 2.083678 seconds, throughput 959841.203871
+434866	[1728019721]	2000000 OPS in 2.104328 seconds, throughput 950422.177531
+434866	[1728019721]	2000000 OPS in 2.075327 seconds, throughput 963703.551296
+434866	[1728019721]	2000000 OPS in 2.093558 seconds, throughput 955311.484086
+434866	[1728019722]	2000000 OPS in 2.081510 seconds, throughput 960840.927980
+434866	[1728019723]	2000000 OPS in 2.099834 seconds, throughput 952456.241779
+434866	[1728019723]	2000000 OPS in 2.082863 seconds, throughput 960216.778540
+434866	[1728019723]	2000000 OPS in 2.090230 seconds, throughput 956832.501686
+434866	[1728019724]	2000000 OPS in 2.078368 seconds, throughput 962293.491817
+434866	[1728019725]	2000000 OPS in 2.108472 seconds, throughput 948554.213668
+434866	[1728019725]	2000000 OPS in 2.082671 seconds, throughput 960305.300261
+434866	[1728019726]	2000000 OPS in 2.088989 seconds, throughput 957400.924562
+434866	[1728019726]	2000000 OPS in 2.082564 seconds, throughput 960354.639761
+434866	[1728019727]	2000000 OPS in 2.108222 seconds, throughput 948666.696392
+434866	[1728019727]	2000000 OPS in 2.076579 seconds, throughput 963122.520260
+434866	[1728019728]	2000000 OPS in 2.090801 seconds, throughput 956571.189702
+434866	[1728019728]	2000000 OPS in 2.081810 seconds, throughput 960702.465643
+434866	[1728019729]	2000000 OPS in 2.103314 seconds, throughput 950880.372593
+434866	[1728019729]	2000000 OPS in 2.079716 seconds, throughput 961669.766449
+434866	[1728019730]	2000000 OPS in 2.094899 seconds, throughput 954699.964056
+434866	[1728019730]	2000000 OPS in 2.083965 seconds, throughput 959709.016226
+434866	[1728019731]	2000000 OPS in 2.105368 seconds, throughput 949952.692356
+434866	[1728019731]	2000000 OPS in 2.080800 seconds, throughput 961168.781238
+434866	[1728019732]	2000000 OPS in 2.093282 seconds, throughput 955437.442256
+434866	[1728019732]	2000000 OPS in 2.082780 seconds, throughput 960255.043740
+434866	[1728019733]	2000000 OPS in 2.104212 seconds, throughput 950474.571954
+434866	[1728019733]	2000000 OPS in 2.081930 seconds, throughput 960647.091881
+434866	[1728019734]	2000000 OPS in 2.087737 seconds, throughput 957975.070615
+434866	[1728019734]	2000000 OPS in 2.081769 seconds, throughput 960721.386475
+434866	[1728019735]	2000000 OPS in 2.111526 seconds, throughput 947182.274810
+434866	[1728019735]	2000000 OPS in 2.081313 seconds, throughput 960931.873293
+434866	[1728019736]	2000000 OPS in 2.089400 seconds, throughput 957212.596918
+434866	[1728019736]	2000000 OPS in 2.081279 seconds, throughput 960947.571181
+434866	[1728019737]	2000000 OPS in 2.075652 seconds, throughput 963552.657189
+434866	[1728019737]	2000000 OPS in 2.106553 seconds, throughput 949418.315134
+434866	[1728019738]	2000000 OPS in 2.087772 seconds, throughput 957959.010850
+434866	[1728019739]	2000000 OPS in 2.085417 seconds, throughput 959040.805748
+434866	[1728019740]	2000000 OPS in 2.078171 seconds, throughput 962384.712326
+434866	[1728019740]	2000000 OPS in 2.104937 seconds, throughput 950147.201555
+434866	[1728019740]	2000000 OPS in 2.094225 seconds, throughput 955007.222242
+434866	[1728019741]	2000000 OPS in 2.082154 seconds, throughput 960543.744603
+434866	[1728019742]	2000000 OPS in 2.077209 seconds, throughput 962830.413309
+434866	[1728019742]	2000000 OPS in 2.105228 seconds, throughput 950015.865265
+434866	[1728019742]	2000000 OPS in 2.092617 seconds, throughput 955741.064896
+434866	[1728019743]	2000000 OPS in 2.080631 seconds, throughput 961246.852517
+434866	[1728019744]	2000000 OPS in 2.083689 seconds, throughput 959836.136775
+434866	[1728019744]	2000000 OPS in 2.110903 seconds, throughput 947461.820842
+434866	[1728019744]	2000000 OPS in 2.087236 seconds, throughput 958205.013712
+434866	[1728019745]	2000000 OPS in 2.079779 seconds, throughput 961640.635856
+434866	[1728019746]	2000000 OPS in 2.080145 seconds, throughput 961471.435885
+434866	[1728019746]	2000000 OPS in 2.105951 seconds, throughput 949689.712629
+434866	[1728019746]	2000000 OPS in 2.088578 seconds, throughput 957589.326326
+434866	[1728019747]	2000000 OPS in 2.081205 seconds, throughput 960981.738945
+434866	[1728019748]	2000000 OPS in 2.077021 seconds, throughput 962917.563183
+434866	[1728019748]	2000000 OPS in 2.106480 seconds, throughput 949451.217196
+434866	[1728019749]	2000000 OPS in 2.088470 seconds, throughput 957638.845662
+434866	[1728019749]	2000000 OPS in 2.083861 seconds, throughput 959756.912769
+434866	[1728019750]	2000000 OPS in 2.077739 seconds, throughput 962584.809738
+434866	[1728019750]	2000000 OPS in 2.105038 seconds, throughput 950101.613368
+434866	[1728019751]	2000000 OPS in 2.094397 seconds, throughput 954928.793347
+434866	[1728019751]	2000000 OPS in 2.082389 seconds, throughput 960435.346134
+434866	[1728019752]	2000000 OPS in 2.074789 seconds, throughput 963953.442977
+434866	[1728019752]	2000000 OPS in 2.105661 seconds, throughput 949820.507670
+434866	[1728019753]	2000000 OPS in 2.090700 seconds, throughput 956617.400871
+434866	[1728019753]	2000000 OPS in 2.081862 seconds, throughput 960678.469562
+434866	[1728019754]	2000000 OPS in 2.080529 seconds, throughput 961293.978599
+434866	[1728019754]	2000000 OPS in 2.107348 seconds, throughput 949060.145738
+434866	[1728019755]	2000000 OPS in 2.087954 seconds, throughput 957875.508752
+434866	[1728019755]	2000000 OPS in 2.079126 seconds, throughput 961942.662446
+434866	[1728019756]	2000000 OPS in 2.080107 seconds, throughput 961489.000325
+434866	[1728019756]	2000000 OPS in 2.102318 seconds, throughput 951330.864313
+434866	[1728019757]	2000000 OPS in 2.090417 seconds, throughput 956746.907435
+434866	[1728019757]	2000000 OPS in 2.078963 seconds, throughput 962018.083054
+434866	[1728019758]	2000000 OPS in 2.075845 seconds, throughput 963463.071665
+434866	[1728019759]	2000000 OPS in 2.108209 seconds, throughput 948672.546223
+434866	[1728019759]	2000000 OPS in 2.087708 seconds, throughput 957988.377685
+434866	[1728019759]	2000000 OPS in 2.084132 seconds, throughput 959632.115432
+434866	[1728019760]	2000000 OPS in 2.078310 seconds, throughput 962320.346820
+434866	[1728019761]	2000000 OPS in 2.107045 seconds, throughput 949196.623708
+434866	[1728019761]	2000000 OPS in 2.098260 seconds, throughput 953170.722408
+434866	[1728019761]	2000000 OPS in 2.079064 seconds, throughput 961971.348645
+434866	[1728019762]	2000000 OPS in 2.077542 seconds, throughput 962676.085489
+434866	[1728019763]	2000000 OPS in 2.109124 seconds, throughput 948260.984181
+434866	[1728019763]	2000000 OPS in 2.089663 seconds, throughput 957092.124424
+434866	[1728019764]	2000000 OPS in 2.081991 seconds, throughput 960618.945999
+434866	[1728019764]	2000000 OPS in 2.084107 seconds, throughput 959643.626743
+434866	[1728019765]	2000000 OPS in 2.101972 seconds, throughput 951487.460347
+434866	[1728019765]	2000000 OPS in 2.091681 seconds, throughput 956168.746573
+434866	[1728019766]	2000000 OPS in 2.081631 seconds, throughput 960785.076702
+434866	[1728019767]	2000000 OPS in 2.080159 seconds, throughput 961464.964938
+434866	[1728019767]	2000000 OPS in 2.102730 seconds, throughput 951144.464577
+434866	[1728019767]	2000000 OPS in 2.090795 seconds, throughput 956573.934795
+434866	[1728019768]	2000000 OPS in 2.087189 seconds, throughput 958226.590884
+434866	[1728019769]	2000000 OPS in 2.078001 seconds, throughput 962463.444435
+434866	[1728019769]	2000000 OPS in 2.104214 seconds, throughput 950473.668553
+434866	[1728019769]	2000000 OPS in 2.094249 seconds, throughput 954996.277902
+434866	[1728019770]	2000000 OPS in 2.083695 seconds, throughput 959833.372926
+434866	[1728019771]	2000000 OPS in 2.079276 seconds, throughput 961873.267426
+434866	[1728019771]	2000000 OPS in 2.105787 seconds, throughput 949763.675054
+434866	[1728019772]	2000000 OPS in 2.091498 seconds, throughput 956252.408561
+434866	[1728019772]	2000000 OPS in 2.081080 seconds, throughput 961039.460280
+434866	[1728019773]	2000000 OPS in 2.076184 seconds, throughput 963305.757101
+434866	[1728019773]	2000000 OPS in 2.109071 seconds, throughput 948284.813551
+434866	[1728019774]	2000000 OPS in 2.087730 seconds, throughput 957978.282632
+434866	[1728019774]	2000000 OPS in 2.084697 seconds, throughput 959372.033442
+434866	[1728019775]	2000000 OPS in 2.082403 seconds, throughput 960428.889125
+434866	[1728019775]	2000000 OPS in 2.104136 seconds, throughput 950508.902466
+434866	[1728019776]	2000000 OPS in 2.089033 seconds, throughput 957380.759423
+434866	[1728019776]	2000000 OPS in 2.083325 seconds, throughput 960003.840015
+434866	[1728019777]	2000000 OPS in 2.076273 seconds, throughput 963264.464740
+434866	[1728019777]	2000000 OPS in 2.101407 seconds, throughput 951743.284380
+434866	[1728019778]	2000000 OPS in 2.088583 seconds, throughput 957587.033889
+434866	[1728019778]	2000000 OPS in 2.085735 seconds, throughput 958894.586321
+434866	[1728019779]	2000000 OPS in 2.079342 seconds, throughput 961842.736789
+434866	[1728019780]	2000000 OPS in 2.105970 seconds, throughput 949681.144556
+434866	[1728019780]	2000000 OPS in 2.097672 seconds, throughput 953437.906403
+434866	[1728019780]	2000000 OPS in 2.078136 seconds, throughput 962400.920825
+434866	[1728019781]	2000000 OPS in 2.079667 seconds, throughput 961692.424797
+434866	[1728019782]	2000000 OPS in 2.110756 seconds, throughput 947527.805203
+434866	[1728019782]	2000000 OPS in 2.091035 seconds, throughput 956464.143355
+434866	[1728019782]	2000000 OPS in 2.077791 seconds, throughput 962560.719533
+434866	[1728019783]	2000000 OPS in 2.083464 seconds, throughput 959939.792576
+434866	[1728019784]	2000000 OPS in 2.104926 seconds, throughput 950152.166870
+434866	[1728019784]	2000000 OPS in 2.087515 seconds, throughput 958076.947950
+434866	[1728019784]	2000000 OPS in 2.081291 seconds, throughput 960942.030692
+434866	[1728019785]	2000000 OPS in 2.079476 seconds, throughput 961780.756306
+434866	[1728019786]	2000000 OPS in 2.105044 seconds, throughput 950098.905296
+434866	[1728019786]	2000000 OPS in 2.087513 seconds, throughput 958077.865862
+434866	[1728019786]	2000000 OPS in 2.083434 seconds, throughput 959953.615041
+434866	[1728019787]	2000000 OPS in 2.073504 seconds, throughput 964550.827970
+434866	[1728019788]	2000000 OPS in 2.108075 seconds, throughput 948732.848689
+434866	[1728019788]	2000000 OPS in 2.091415 seconds, throughput 956290.358442
+434866	[1728019789]	2000000 OPS in 2.088815 seconds, throughput 957480.676843
+434866	[1728019789]	2000000 OPS in 2.076946 seconds, throughput 962952.334822
+434866	[1728019790]	2000000 OPS in 2.109624 seconds, throughput 948036.237737
+434866	[1728019790]	2000000 OPS in 2.092146 seconds, throughput 955956.228676
+434866	[1728019791]	2000000 OPS in 2.078361 seconds, throughput 962296.732858
+434866	[1728019791]	2000000 OPS in 2.081265 seconds, throughput 960954.035166
+434866	[1728019792]	2000000 OPS in 2.103409 seconds, throughput 950837.426292
+434866	[1728019792]	2000000 OPS in 2.085870 seconds, throughput 958832.525517
+434866	[1728019793]	2000000 OPS in 2.082645 seconds, throughput 960317.288832
+434866	[1728019794]	2000000 OPS in 2.084513 seconds, throughput 959456.717228
+434866	[1728019794]	2000000 OPS in 2.102639 seconds, throughput 951185.629107
+434866	[1728019795]	2000000 OPS in 2.088926 seconds, throughput 957429.798854
+434866	[1728019795]	2000000 OPS in 2.081080 seconds, throughput 961039.460280
+434866	[1728019796]	2000000 OPS in 2.077260 seconds, throughput 962806.774308
+434866	[1728019796]	2000000 OPS in 2.105935 seconds, throughput 949696.927968
+434866	[1728019797]	2000000 OPS in 2.086272 seconds, throughput 958647.769802
+434866	[1728019797]	2000000 OPS in 2.086538 seconds, throughput 958525.557646
+434866	[1728019798]	2000000 OPS in 2.076461 seconds, throughput 963177.252065
+434866	[1728019799]	2000000 OPS in 2.102338 seconds, throughput 951321.814095
+434866	[1728019799]	2000000 OPS in 2.096026 seconds, throughput 954186.636998
+434866	[1728019799]	2000000 OPS in 2.085756 seconds, throughput 958884.931890
+434866	[1728019800]	2000000 OPS in 2.077681 seconds, throughput 962611.681004
+434866	[1728019801]	2000000 OPS in 2.106808 seconds, throughput 949303.401164
+434866	[1728019801]	2000000 OPS in 2.089585 seconds, throughput 957127.850745
+434866	[1728019801]	2000000 OPS in 2.081910 seconds, throughput 960656.320398
+434866	[1728019802]	2000000 OPS in 2.078496 seconds, throughput 962234.230905
+434866	[1728019803]	2000000 OPS in 2.099747 seconds, throughput 952495.705435
+434866	[1728019803]	2000000 OPS in 2.088935 seconds, throughput 957425.673848
+434866	[1728019803]	2000000 OPS in 2.080778 seconds, throughput 961178.943645
+434866	[1728019804]	2000000 OPS in 2.083700 seconds, throughput 959831.069732
+434866	[1728019805]	2000000 OPS in 2.109499 seconds, throughput 948092.414360
+434866	[1728019805]	2000000 OPS in 2.087654 seconds, throughput 958013.157353
+434866	[1728019805]	2000000 OPS in 2.081700 seconds, throughput 960753.230533
+434866	[1728019806]	2000000 OPS in 2.078542 seconds, throughput 962212.935798
+434866	[1728019807]	2000000 OPS in 2.104910 seconds, throughput 950159.389238
+434866	[1728019807]	2000000 OPS in 2.087118 seconds, throughput 958259.188029
+434866	[1728019807]	2000000 OPS in 2.088790 seconds, throughput 957492.136596
+434866	[1728019808]	2000000 OPS in 2.076289 seconds, throughput 963257.041770
+434866	[1728019809]	2000000 OPS in 2.108284 seconds, throughput 948638.798188
+434866	[1728019809]	2000000 OPS in 2.091506 seconds, throughput 956248.750900
+434866	[1728019809]	2000000 OPS in 2.083765 seconds, throughput 959801.129206
+434866	[1728019810]	2000000 OPS in 2.078947 seconds, throughput 962025.486941
+434866	[1728019811]	2000000 OPS in 2.102814 seconds, throughput 951106.469712
+434866	[1728019811]	2000000 OPS in 2.084332 seconds, throughput 959540.034889
+434866	[1728019811]	2000000 OPS in 2.078970 seconds, throughput 962014.843889
+434866	[1728019812]	2000000 OPS in 2.079283 seconds, throughput 961870.029236
+434866	[1728019813]	2000000 OPS in 2.105613 seconds, throughput 949842.159979
+434866	[1728019813]	2000000 OPS in 2.086921 seconds, throughput 958349.645243
+434866	[1728019814]	2000000 OPS in 2.082336 seconds, throughput 960459.791311
+434866	[1728019814]	2000000 OPS in 2.082304 seconds, throughput 960474.551266
+434866	[1728019815]	2000000 OPS in 2.108499 seconds, throughput 948542.067129
+434866	[1728019815]	2000000 OPS in 2.092628 seconds, throughput 955736.040997
+434866	[1728019816]	2000000 OPS in 2.081855 seconds, throughput 960681.699734
+434866	[1728019816]	2000000 OPS in 2.080068 seconds, throughput 961507.027655
+434866	[1728019817]	2000000 OPS in 2.102469 seconds, throughput 951262.539424
+434866	[1728019818]	2000000 OPS in 2.092029 seconds, throughput 956009.692026
+434866	[1728019818]	2000000 OPS in 2.086779 seconds, throughput 958414.858497
+434866	[1728019819]	2000000 OPS in 2.080904 seconds, throughput 961120.743677
+434866	[1728019820]	2000000 OPS in 2.107434 seconds, throughput 949021.416566
+434866	[1728019820]	2000000 OPS in 2.090661 seconds, throughput 956635.245982
+434866	[1728019820]	2000000 OPS in 2.077938 seconds, throughput 962492.624900
+434866	[1728019821]	2000000 OPS in 2.079479 seconds, throughput 961779.368775
+434866	[1728019822]	2000000 OPS in 2.102440 seconds, throughput 951275.660661
+434866	[1728019822]	2000000 OPS in 2.089265 seconds, throughput 957274.448191
+434866	[1728019822]	2000000 OPS in 2.075882 seconds, throughput 963445.899141
+434866	[1728019823]	2000000 OPS in 2.082489 seconds, throughput 960389.226546
+434866	[1728019824]	2000000 OPS in 2.105811 seconds, throughput 949752.850564
+434866	[1728019824]	2000000 OPS in 2.091115 seconds, throughput 956427.551808
+434866	[1728019824]	2000000 OPS in 2.082533 seconds, throughput 960368.935330
+434866	[1728019825]	2000000 OPS in 2.079601 seconds, throughput 961722.945892
+434866	[1728019826]	2000000 OPS in 2.101508 seconds, throughput 951697.542907
+434866	[1728019826]	2000000 OPS in 2.089430 seconds, throughput 957198.853276
+434866	[1728019826]	2000000 OPS in 2.082698 seconds, throughput 960292.850908
+434866	[1728019827]	2000000 OPS in 2.076995 seconds, throughput 962929.617067
+434866	[1728019828]	2000000 OPS in 2.098793 seconds, throughput 952928.659472
+434866	[1728019828]	2000000 OPS in 2.109432 seconds, throughput 948122.527771
+434866	[1728019828]	2000000 OPS in 2.084400 seconds, throughput 959508.731529
+434866	[1728019829]	2000000 OPS in 2.076933 seconds, throughput 962958.362162
+434866	[1728019830]	2000000 OPS in 2.088159 seconds, throughput 957781.471622
+434866	[1728019830]	2000000 OPS in 2.107818 seconds, throughput 948848.524873
+434866	[1728019830]	2000000 OPS in 2.080587 seconds, throughput 961267.180848
+434866	[1728019831]	2000000 OPS in 2.079121 seconds, throughput 961944.975785
+434866	[1728019832]	2000000 OPS in 2.091904 seconds, throughput 956066.817598
+434866	[1728019832]	2000000 OPS in 2.108230 seconds, throughput 948663.096531
+434866	[1728019832]	2000000 OPS in 2.077374 seconds, throughput 962753.938386
+434866	[1728019833]	2000000 OPS in 2.083454 seconds, throughput 959944.400020
+434866	[1728019834]	2000000 OPS in 2.088651 seconds, throughput 957555.857824
+434866	[1728019834]	2000000 OPS in 2.102720 seconds, throughput 951148.987977
+434866	[1728019834]	2000000 OPS in 2.079152 seconds, throughput 961930.633258
+434866	[1728019835]	2000000 OPS in 2.080608 seconds, throughput 961257.478583
+434866	[1728019836]	2000000 OPS in 2.086795 seconds, throughput 958407.510081
+434866	[1728019836]	2000000 OPS in 2.104040 seconds, throughput 950552.270869
+434866	[1728019836]	2000000 OPS in 2.083232 seconds, throughput 960046.696671
+434866	[1728019837]	2000000 OPS in 2.082770 seconds, throughput 960259.654210
+434866	[1728019838]	2000000 OPS in 2.095718 seconds, throughput 954326.870314
+434866	[1728019839]	2000000 OPS in 2.082321 seconds, throughput 960466.709984
+434866	[1728019839]	2000000 OPS in 2.110156 seconds, throughput 947797.224471
+434866	[1728019839]	2000000 OPS in 2.080693 seconds, throughput 961218.209510
+434866	[1728019841]	2000000 OPS in 2.090838 seconds, throughput 956554.261975
+434866	[1728019841]	2000000 OPS in 2.076660 seconds, throughput 963084.953724
+434866	[1728019841]	2000000 OPS in 2.104752 seconds, throughput 950230.716018
+434866	[1728019841]	2000000 OPS in 2.077116 seconds, throughput 962873.522711
+434866	[1728019843]	2000000 OPS in 2.089029 seconds, throughput 957382.592582
+434866	[1728019843]	2000000 OPS in 2.075884 seconds, throughput 963444.970914
+434866	[1728019843]	2000000 OPS in 2.098938 seconds, throughput 952862.828726
+434866	[1728019843]	2000000 OPS in 2.082306 seconds, throughput 960473.628756
+434866	[1728019845]	2000000 OPS in 2.091863 seconds, throughput 956085.556272
+434866	[1728019845]	2000000 OPS in 2.079305 seconds, throughput 961859.852210
+434866	[1728019845]	2000000 OPS in 2.102758 seconds, throughput 951131.799285
+434866	[1728019846]	2000000 OPS in 2.080146 seconds, throughput 961470.973672
+434866	[1728019847]	2000000 OPS in 2.096567 seconds, throughput 953940.417835
+434866	[1728019847]	2000000 OPS in 2.084367 seconds, throughput 959523.922611
+434866	[1728019847]	2000000 OPS in 2.110126 seconds, throughput 947810.699456
+434866	[1728019848]	2000000 OPS in 2.080150 seconds, throughput 961469.124823
+434866	[1728019849]	2000000 OPS in 2.093735 seconds, throughput 955230.724041
+434866	[1728019849]	2000000 OPS in 2.079935 seconds, throughput 961568.510554
+434866	[1728019849]	2000000 OPS in 2.103826 seconds, throughput 950648.960513
+434866	[1728019850]	2000000 OPS in 2.079298 seconds, throughput 961863.090331
+434866	[1728019851]	2000000 OPS in 2.081282 seconds, throughput 960946.186053
+434866	[1728019851]	2000000 OPS in 2.087378 seconds, throughput 958139.829010
+434866	[1728019851]	2000000 OPS in 2.102093 seconds, throughput 951432.691132
+434866	[1728019852]	2000000 OPS in 2.077819 seconds, throughput 962547.748384
+434866	[1728019853]	2000000 OPS in 2.077679 seconds, throughput 962612.607626
+434866	[1728019853]	2000000 OPS in 2.089883 seconds, throughput 956991.372244
+434866	[1728019853]	2000000 OPS in 2.102531 seconds, throughput 951234.488338
+434866	[1728019854]	2000000 OPS in 2.084944 seconds, throughput 959258.378163
+434866	[1728019855]	2000000 OPS in 2.081400 seconds, throughput 960891.707505
+434866	[1728019855]	2000000 OPS in 2.085441 seconds, throughput 959029.768764
+434866	[1728019855]	2000000 OPS in 2.108051 seconds, throughput 948743.649940
+434866	[1728019856]	2000000 OPS in 2.076606 seconds, throughput 963109.997756
+434866	[1728019857]	2000000 OPS in 2.084280 seconds, throughput 959563.974130
+434866	[1728019857]	2000000 OPS in 2.096249 seconds, throughput 954085.130154
+434866	[1728019857]	2000000 OPS in 2.109228 seconds, throughput 948214.228144
+434866	[1728019858]	2000000 OPS in 2.077744 seconds, throughput 962582.493320
+434866	[1728019859]	2000000 OPS in 2.077267 seconds, throughput 962803.529830
+434866	[1728019859]	2000000 OPS in 2.092296 seconds, throughput 955887.694667
+434866	[1728019860]	2000000 OPS in 2.103403 seconds, throughput 950840.138575
+434866	[1728019860]	2000000 OPS in 2.076700 seconds, throughput 963066.403429
+434866	[1728019861]	2000000 OPS in 2.079854 seconds, throughput 961605.958880
+434866	[1728019861]	2000000 OPS in 2.086836 seconds, throughput 958388.680280
+434866	[1728019862]	2000000 OPS in 2.103839 seconds, throughput 950643.086282
+434866	[1728019862]	2000000 OPS in 2.077094 seconds, throughput 962883.721199
+434866	[1728019863]	2000000 OPS in 2.081208 seconds, throughput 960980.353718
+434866	[1728019864]	2000000 OPS in 2.087007 seconds, throughput 958310.154206
+434866	[1728019864]	2000000 OPS in 2.104541 seconds, throughput 950325.985571
+434866	[1728019864]	2000000 OPS in 2.081558 seconds, throughput 960818.771324
+434866	[1728019866]	2000000 OPS in 2.079255 seconds, throughput 961882.982126
+434866	[1728019866]	2000000 OPS in 2.088958 seconds, throughput 957415.132329
+434866	[1728019866]	2000000 OPS in 2.112295 seconds, throughput 946837.444580
+434866	[1728019866]	2000000 OPS in 2.076962 seconds, throughput 962944.916662
+434866	[1728019868]	2000000 OPS in 2.085100 seconds, throughput 959186.609755
+434866	[1728019868]	2000000 OPS in 2.096219 seconds, throughput 954098.784526
+434866	[1728019868]	2000000 OPS in 2.105082 seconds, throughput 950081.754535
+434866	[1728019868]	2000000 OPS in 2.080163 seconds, throughput 961463.116112
+434866	[1728019870]	2000000 OPS in 2.081032 seconds, throughput 961061.627116
+434866	[1728019870]	2000000 OPS in 2.092851 seconds, throughput 955634.204251
+434866	[1728019870]	2000000 OPS in 2.103241 seconds, throughput 950913.376071
+434866	[1728019871]	2000000 OPS in 2.078029 seconds, throughput 962450.475908
+434866	[1728019872]	2000000 OPS in 2.080610 seconds, throughput 961256.554568
+434866	[1728019872]	2000000 OPS in 2.087863 seconds, throughput 957917.257981
+434866	[1728019872]	2000000 OPS in 2.104843 seconds, throughput 950189.634096
+434866	[1728019873]	2000000 OPS in 2.079785 seconds, throughput 961637.861606
+434866	[1728019874]	2000000 OPS in 2.085681 seconds, throughput 958919.412892
+434866	[1728019874]	2000000 OPS in 2.088766 seconds, throughput 957503.138217
+434866	[1728019874]	2000000 OPS in 2.101355 seconds, throughput 951766.836160
+434866	[1728019875]	2000000 OPS in 2.081146 seconds, throughput 961008.982551
+434866	[1728019876]	2000000 OPS in 2.080815 seconds, throughput 961161.852447
+434866	[1728019876]	2000000 OPS in 2.096882 seconds, throughput 953797.114001
+434866	[1728019876]	2000000 OPS in 2.107395 seconds, throughput 949038.979403
+434866	[1728019877]	2000000 OPS in 2.076138 seconds, throughput 963327.100607
+434866	[1728019878]	2000000 OPS in 2.087988 seconds, throughput 957859.911072
+434866	[1728019878]	2000000 OPS in 2.095279 seconds, throughput 954526.819579
+434866	[1728019879]	2000000 OPS in 2.108376 seconds, throughput 948597.403879
+434866	[1728019879]	2000000 OPS in 2.075748 seconds, throughput 963508.094432
+434866	[1728019880]	2000000 OPS in 2.082641 seconds, throughput 960319.133254
+434866	[1728019880]	2000000 OPS in 2.090228 seconds, throughput 956833.417216
+434866	[1728019881]	2000000 OPS in 2.105453 seconds, throughput 949914.341474
+434866	[1728019881]	2000000 OPS in 2.078096 seconds, throughput 962419.445492
+434866	[1728019882]	2000000 OPS in 2.082286 seconds, throughput 960482.853940
+434866	[1728019882]	2000000 OPS in 2.092015 seconds, throughput 956016.089751
+434866	[1728019883]	2000000 OPS in 2.102273 seconds, throughput 951351.227933
+434866	[1728019883]	2000000 OPS in 2.079906 seconds, throughput 961581.917644
+434866	[1728019884]	2000000 OPS in 2.078286 seconds, throughput 962331.459674
+434866	[1728019884]	2000000 OPS in 2.090432 seconds, throughput 956740.042250
+434866	[1728019885]	2000000 OPS in 2.108111 seconds, throughput 948716.647273
+434866	[1728019885]	2000000 OPS in 2.078746 seconds, throughput 962118.507985
+434866	[1728019886]	2000000 OPS in 2.081303 seconds, throughput 960936.490266
+434866	[1728019887]	2000000 OPS in 2.099847 seconds, throughput 952450.345192
+434866	[1728019887]	2000000 OPS in 2.108547 seconds, throughput 948520.474052
+434866	[1728019887]	2000000 OPS in 2.076453 seconds, throughput 963180.962921
+434866	[1728019888]	2000000 OPS in 2.083761 seconds, throughput 959802.971646
+434866	[1728019889]	2000000 OPS in 2.088516 seconds, throughput 957617.753467
+434866	[1728019889]	2000000 OPS in 2.105224 seconds, throughput 950017.670329
+434866	[1728019889]	2000000 OPS in 2.077839 seconds, throughput 962538.483492
+434866	[1728019891]	2000000 OPS in 2.082729 seconds, throughput 960278.557604
+434866	[1728019891]	2000000 OPS in 2.090095 seconds, throughput 956894.303847
+434866	[1728019891]	2000000 OPS in 2.102786 seconds, throughput 951119.134329
+434866	[1728019891]	2000000 OPS in 2.078076 seconds, throughput 962428.708093
+434866	[1728019893]	2000000 OPS in 2.081613 seconds, throughput 960793.384745
+434866	[1728019893]	2000000 OPS in 2.085605 seconds, throughput 958954.356170
+434866	[1728019893]	2000000 OPS in 2.109066 seconds, throughput 948287.061666
+434866	[1728019893]	2000000 OPS in 2.079229 seconds, throughput 961895.010122
+434866	[1728019895]	2000000 OPS in 2.078829 seconds, throughput 962080.094130
+434866	[1728019895]	2000000 OPS in 2.088955 seconds, throughput 957416.507297
+434866	[1728019895]	2000000 OPS in 2.106128 seconds, throughput 949609.900253
+434866	[1728019895]	2000000 OPS in 2.074115 seconds, throughput 964266.687238
+434866	[1728019897]	2000000 OPS in 2.086130 seconds, throughput 958713.023637
+434866	[1728019897]	2000000 OPS in 2.098881 seconds, throughput 952888.705934
+434866	[1728019897]	2000000 OPS in 2.101961 seconds, throughput 951492.439679
+434866	[1728019898]	2000000 OPS in 2.076422 seconds, throughput 963195.342758
+434866	[1728019899]	2000000 OPS in 2.079939 seconds, throughput 961566.661330
+434866	[1728019899]	2000000 OPS in 2.092392 seconds, throughput 955843.838057
+434866	[1728019900]	2000000 OPS in 2.104969 seconds, throughput 950132.757300
+434866	[1728019900]	2000000 OPS in 2.081014 seconds, throughput 961069.939943
+434866	[1728019901]	2000000 OPS in 2.082455 seconds, throughput 960404.906709
+434866	[1728019901]	2000000 OPS in 2.091782 seconds, throughput 956122.578739
+434866	[1728019902]	2000000 OPS in 2.103096 seconds, throughput 950978.937718
+434866	[1728019902]	2000000 OPS in 2.077462 seconds, throughput 962713.156727
+434866	[1728019903]	2000000 OPS in 2.080200 seconds, throughput 961446.014806
+434866	[1728019903]	2000000 OPS in 2.091173 seconds, throughput 956401.024688
+434866	[1728019904]	2000000 OPS in 2.083007 seconds, throughput 960150.397958
+434866	[1728019904]	2000000 OPS in 2.109941 seconds, throughput 947893.803666
+434866	[1728019905]	2000000 OPS in 2.078698 seconds, throughput 962140.724627
+434866	[1728019905]	2000000 OPS in 2.095921 seconds, throughput 954234.439180
+434866	[1728019906]	2000000 OPS in 2.075968 seconds, throughput 963405.986990
+434866	[1728019906]	2000000 OPS in 2.105467 seconds, throughput 949908.025155
+434866	[1728019907]	2000000 OPS in 2.086150 seconds, throughput 958703.832419
+434866	[1728019907]	2000000 OPS in 2.091865 seconds, throughput 956084.642173
+434866	[1728019908]	2000000 OPS in 2.076802 seconds, throughput 963019.103410
+434866	[1728019908]	2000000 OPS in 2.104355 seconds, throughput 950409.983106
+434866	[1728019909]	2000000 OPS in 2.077021 seconds, throughput 962917.563183
+434866	[1728019910]	2000000 OPS in 2.092826 seconds, throughput 955645.619846
+434866	[1728019910]	2000000 OPS in 2.076754 seconds, throughput 963041.361663
+434866	[1728019910]	2000000 OPS in 2.102914 seconds, throughput 951061.241687
+434866	[1728019911]	2000000 OPS in 2.083104 seconds, throughput 960105.688434
+434866	[1728019912]	2000000 OPS in 2.085836 seconds, throughput 958848.154888
+434866	[1728019912]	2000000 OPS in 2.080168 seconds, throughput 961460.805089
+434866	[1728019912]	2000000 OPS in 2.103874 seconds, throughput 950627.271405
+434866	[1728019913]	2000000 OPS in 2.079132 seconds, throughput 961939.886453
+434866	[1728019914]	2000000 OPS in 2.086572 seconds, throughput 958509.938790
+434866	[1728019914]	2000000 OPS in 2.075756 seconds, throughput 963504.381054
+434866	[1728019914]	2000000 OPS in 2.100959 seconds, throughput 951946.230269
+434866	[1728019916]	2000000 OPS in 2.080596 seconds, throughput 961263.022711
+434866	[1728019916]	2000000 OPS in 2.091329 seconds, throughput 956329.683182
+434866	[1728019916]	2000000 OPS in 2.086974 seconds, throughput 958325.307359
+434866	[1728019916]	2000000 OPS in 2.107845 seconds, throughput 948836.370796
+434866	[1728019918]	2000000 OPS in 2.078114 seconds, throughput 962411.109304
+434866	[1728019918]	2000000 OPS in 2.090826 seconds, throughput 956559.751983
+434866	[1728019918]	2000000 OPS in 2.075922 seconds, throughput 963427.334938
+434866	[1728019919]	2000000 OPS in 2.103794 seconds, throughput 950663.420468
+434866	[1728019920]	2000000 OPS in 2.085366 seconds, throughput 959064.260183
+434866	[1728019920]	2000000 OPS in 2.088642 seconds, throughput 957559.983951
+434866	[1728019920]	2000000 OPS in 2.078000 seconds, throughput 962463.907603
+434866	[1728019921]	2000000 OPS in 2.101589 seconds, throughput 951660.862328
+434866	[1728019922]	2000000 OPS in 2.079598 seconds, throughput 961724.333261
+434866	[1728019922]	2000000 OPS in 2.084614 seconds, throughput 959410.231343
+434866	[1728019922]	2000000 OPS in 2.079439 seconds, throughput 961797.869522
+434866	[1728019923]	2000000 OPS in 2.100920 seconds, throughput 951963.901529
+434866	[1728019924]	2000000 OPS in 2.082220 seconds, throughput 960513.298307
+434866	[1728019924]	2000000 OPS in 2.092004 seconds, throughput 956021.116594
+434866	[1728019925]	2000000 OPS in 2.085160 seconds, throughput 959159.009381
+434866	[1728019925]	2000000 OPS in 2.104882 seconds, throughput 950172.028646
+434866	[1728019926]	2000000 OPS in 2.084214 seconds, throughput 959594.360272
+434866	[1728019926]	2000000 OPS in 2.091224 seconds, throughput 956377.700332
+434866	[1728019927]	2000000 OPS in 2.080954 seconds, throughput 961097.650405
+434866	[1728019927]	2000000 OPS in 2.101160 seconds, throughput 951855.165718
+434866	[1728019928]	2000000 OPS in 2.088131 seconds, throughput 957794.314629
+434866	[1728019928]	2000000 OPS in 2.087191 seconds, throughput 958225.672686
+434866	[1728019929]	2000000 OPS in 2.079747 seconds, throughput 961655.432127
+434866	[1728019929]	2000000 OPS in 2.102404 seconds, throughput 951291.949597
+434866	[1728019930]	2000000 OPS in 2.080043 seconds, throughput 961518.583991
+434866	[1728019930]	2000000 OPS in 2.084906 seconds, throughput 959275.861837
+434866	[1728019931]	2000000 OPS in 2.079308 seconds, throughput 961858.464451
+434866	[1728019931]	2000000 OPS in 2.108771 seconds, throughput 948419.719353
+434866	[1728019932]	2000000 OPS in 2.084581 seconds, throughput 959425.419305
+434866	[1728019933]	2000000 OPS in 2.086416 seconds, throughput 958581.605969
+434866	[1728019933]	2000000 OPS in 2.083675 seconds, throughput 959842.585816
+434866	[1728019933]	2000000 OPS in 2.108195 seconds, throughput 948678.846122
+434866	[1728019934]	2000000 OPS in 2.083164 seconds, throughput 960078.035143
+434866	[1728019935]	2000000 OPS in 2.092414 seconds, throughput 955833.788151
+434866	[1728019935]	2000000 OPS in 2.082489 seconds, throughput 960389.226546
+434866	[1728019935]	2000000 OPS in 2.100717 seconds, throughput 952055.893297
+434866	[1728019936]	2000000 OPS in 2.084326 seconds, throughput 959542.797048
+434866	[1728019937]	2000000 OPS in 2.087184 seconds, throughput 958228.886385
+434866	[1728019937]	2000000 OPS in 2.084179 seconds, throughput 959610.474916
+434866	[1728019937]	2000000 OPS in 2.101729 seconds, throughput 951597.470464
+434866	[1728019938]	2000000 OPS in 2.081864 seconds, throughput 960677.546660
+434866	[1728019939]	2000000 OPS in 2.085399 seconds, throughput 959049.083653
+434866	[1728019939]	2000000 OPS in 2.077680 seconds, throughput 962612.144315
+434866	[1728019940]	2000000 OPS in 2.105897 seconds, throughput 949714.064838
+434866	[1728019941]	2000000 OPS in 2.081093 seconds, throughput 961033.456938
+434866	[1728019941]	2000000 OPS in 2.085758 seconds, throughput 958884.012431
+434866	[1728019941]	2000000 OPS in 2.083369 seconds, throughput 959983.565081
+434866	[1728019942]	2000000 OPS in 2.103849 seconds, throughput 950638.567692
+434866	[1728019943]	2000000 OPS in 2.079355 seconds, throughput 961836.723407
+434866	[1728019943]	2000000 OPS in 2.089515 seconds, throughput 957159.915100
+434866	[1728019943]	2000000 OPS in 2.078035 seconds, throughput 962447.696983
+434866	[1728019944]	2000000 OPS in 2.102948 seconds, throughput 951045.865138
+434866	[1728019945]	2000000 OPS in 2.084810 seconds, throughput 959320.033960
+434866	[1728019945]	2000000 OPS in 2.087904 seconds, throughput 957898.447438
+434866	[1728019945]	2000000 OPS in 2.082183 seconds, throughput 960530.366447
+434866	[1728019946]	2000000 OPS in 2.105514 seconds, throughput 949886.820985
+434866	[1728019947]	2000000 OPS in 2.080581 seconds, throughput 961269.952960
+434866	[1728019947]	2000000 OPS in 2.084045 seconds, throughput 959672.175985
+434866	[1728019947]	2000000 OPS in 2.075034 seconds, throughput 963839.628652
+434866	[1728019948]	2000000 OPS in 2.110962 seconds, throughput 947435.339907
+434866	[1728019949]	2000000 OPS in 2.081989 seconds, throughput 960619.868789
+434866	[1728019949]	2000000 OPS in 2.088218 seconds, throughput 957754.410698
+434866	[1728019950]	2000000 OPS in 2.081630 seconds, throughput 960785.538256
+434866	[1728019950]	2000000 OPS in 2.101978 seconds, throughput 951484.744369
+434866	[1728019951]	2000000 OPS in 2.078443 seconds, throughput 962258.767741
+434866	[1728019951]	2000000 OPS in 2.095326 seconds, throughput 954505.408705
+434866	[1728019952]	2000000 OPS in 2.081499 seconds, throughput 960846.005691
+434866	[1728019952]	2000000 OPS in 2.102633 seconds, throughput 951188.343377
+434866	[1728019953]	2000000 OPS in 2.089485 seconds, throughput 957173.657624
+434866	[1728019953]	2000000 OPS in 2.086230 seconds, throughput 958667.069307
+434866	[1728019954]	2000000 OPS in 2.080227 seconds, throughput 961433.535859
+434866	[1728019954]	2000000 OPS in 2.104399 seconds, throughput 950390.111381
+434866	[1728019955]	2000000 OPS in 2.083179 seconds, throughput 960071.122069
+434866	[1728019955]	2000000 OPS in 2.086294 seconds, throughput 958637.660847
+434866	[1728019956]	2000000 OPS in 2.078479 seconds, throughput 962242.101075
+434866	[1728019956]	2000000 OPS in 2.107695 seconds, throughput 948903.897386
+434866	[1728019957]	2000000 OPS in 2.083535 seconds, throughput 959907.080995
+434866	[1728019958]	2000000 OPS in 2.088900 seconds, throughput 957441.715736
+434866	[1728019958]	2000000 OPS in 2.078876 seconds, throughput 962058.343066
+434866	[1728019958]	2000000 OPS in 2.102844 seconds, throughput 951092.900852
+434866	[1728019959]	2000000 OPS in 2.079837 seconds, throughput 961613.818775
+434866	[1728019960]	2000000 OPS in 2.094500 seconds, throughput 954881.833373
+434866	[1728019960]	2000000 OPS in 2.089771 seconds, throughput 957042.661612
+434866	[1728019961]	2000000 OPS in 2.102085 seconds, throughput 951436.312043
+434866	[1728019961]	2000000 OPS in 2.084707 seconds, throughput 959367.431490
+434866	[1728019962]	2000000 OPS in 2.090371 seconds, throughput 956767.961285
+434866	[1728019962]	2000000 OPS in 2.078312 seconds, throughput 962319.420761
+434866	[1728019963]	2000000 OPS in 2.103483 seconds, throughput 950803.976072
+434866	[1728019963]	2000000 OPS in 2.081649 seconds, throughput 960776.768802
+434866	[1728019964]	2000000 OPS in 2.089059 seconds, throughput 957368.844058
+434866	[1728019964]	2000000 OPS in 2.079986 seconds, throughput 961544.933476
+434866	[1728019965]	2000000 OPS in 2.108160 seconds, throughput 948694.596236
+434866	[1728019965]	2000000 OPS in 2.082977 seconds, throughput 960164.226489
+434866	[1728019966]	2000000 OPS in 2.089457 seconds, throughput 957186.484335
+434866	[1728019966]	2000000 OPS in 2.078720 seconds, throughput 962130.541872
+434866	[1728019967]	2000000 OPS in 2.103286 seconds, throughput 950893.031190
+434866	[1728019968]	2000000 OPS in 2.083770 seconds, throughput 959798.826166
+434866	[1728019968]	2000000 OPS in 2.091014 seconds, throughput 956473.749100
+434866	[1728019968]	2000000 OPS in 2.087329 seconds, throughput 958162.321321
+434866	[1728019969]	2000000 OPS in 2.104541 seconds, throughput 950325.985571
+434866	[1728019970]	2000000 OPS in 2.087135 seconds, throughput 958251.382877
+434866	[1728019970]	2000000 OPS in 2.091073 seconds, throughput 956446.762021
+434866	[1728019970]	2000000 OPS in 2.078657 seconds, throughput 962159.702154
+434866	[1728019971]	2000000 OPS in 2.103025 seconds, throughput 951011.043616
+434866	[1728019972]	2000000 OPS in 2.080016 seconds, throughput 961531.065146
+434866	[1728019972]	2000000 OPS in 2.090203 seconds, throughput 956844.861480
+434866	[1728019972]	2000000 OPS in 2.078609 seconds, throughput 962181.920698
+434866	[1728019973]	2000000 OPS in 2.108732 seconds, throughput 948437.259927
+434866	[1728019974]	2000000 OPS in 2.081061 seconds, throughput 961048.234530
+434866	[1728019974]	2000000 OPS in 2.087783 seconds, throughput 957953.963606
+434866	[1728019974]	2000000 OPS in 2.076919 seconds, throughput 962964.853227
+434866	[1728019975]	2000000 OPS in 2.102923 seconds, throughput 951057.171375
+434866	[1728019976]	2000000 OPS in 2.077779 seconds, throughput 962566.278704
+434866	[1728019976]	2000000 OPS in 2.094635 seconds, throughput 954820.290886
+434866	[1728019977]	2000000 OPS in 2.085981 seconds, throughput 958781.503762
+434866	[1728019977]	2000000 OPS in 2.103598 seconds, throughput 950751.997292
+434866	[1728019978]	2000000 OPS in 2.080153 seconds, throughput 961467.738190
+434866	[1728019978]	2000000 OPS in 2.088114 seconds, throughput 957802.112337
+434866	[1728019979]	2000000 OPS in 2.076727 seconds, throughput 963053.882383
+434866	[1728019980]	2000000 OPS in 2.103925 seconds, throughput 950604.227812
+434866	[1728019980]	2000000 OPS in 2.082252 seconds, throughput 960498.537161
+434866	[1728019981]	2000000 OPS in 2.089220 seconds, throughput 957295.067059
+434866	[1728019981]	2000000 OPS in 2.083074 seconds, throughput 960119.515677
+434866	[1728019982]	2000000 OPS in 2.108328 seconds, throughput 948619.000459
+434866	[1728019982]	2000000 OPS in 2.080629 seconds, throughput 961247.776514
+434866	[1728019983]	2000000 OPS in 2.088571 seconds, throughput 957592.535758
+434866	[1728019983]	2000000 OPS in 2.079596 seconds, throughput 961725.258175
+434866	[1728019984]	2000000 OPS in 2.099874 seconds, throughput 952438.098667
+434866	[1728019984]	2000000 OPS in 2.080895 seconds, throughput 961124.900584
+434866	[1728019985]	2000000 OPS in 2.095027 seconds, throughput 954641.634690
+434866	[1728019985]	2000000 OPS in 2.084546 seconds, throughput 959441.528275
+434866	[1728019986]	2000000 OPS in 2.101945 seconds, throughput 951499.682437
+434866	[1728019986]	2000000 OPS in 2.079435 seconds, throughput 961799.719635
+434866	[1728019987]	2000000 OPS in 2.089743 seconds, throughput 957055.484813
+434866	[1728019987]	2000000 OPS in 2.080475 seconds, throughput 961318.929571
+434866	[1728019988]	2000000 OPS in 2.104007 seconds, throughput 950567.179672
+434866	[1728019988]	2000000 OPS in 2.085878 seconds, throughput 958828.848092
+434866	[1728019989]	2000000 OPS in 2.091529 seconds, throughput 956238.235281
+434866	[1728019989]	2000000 OPS in 2.079569 seconds, throughput 961737.744696
+434866	[1728019990]	2000000 OPS in 2.104384 seconds, throughput 950396.885739
+434866	[1728019990]	2000000 OPS in 2.083259 seconds, throughput 960034.254022
+434866	[1728019991]	2000000 OPS in 2.086202 seconds, throughput 958679.936075
+434866	[1728019991]	2000000 OPS in 2.079005 seconds, throughput 961998.648392
+434866	[1728019992]	2000000 OPS in 2.104495 seconds, throughput 950346.757773
+434866	[1728019993]	2000000 OPS in 2.082611 seconds, throughput 960332.966646
+434866	[1728019993]	2000000 OPS in 2.089059 seconds, throughput 957368.844058
+434866	[1728019993]	2000000 OPS in 2.087812 seconds, throughput 957940.657492
+434866	[1728019994]	2000000 OPS in 2.102134 seconds, throughput 951414.134399
+434866	[1728019995]	2000000 OPS in 2.080941 seconds, throughput 961103.654549
+434866	[1728019995]	2000000 OPS in 2.090894 seconds, throughput 956528.642772
+434866	[1728019995]	2000000 OPS in 2.076495 seconds, throughput 963161.481246
+434866	[1728019996]	2000000 OPS in 2.105935 seconds, throughput 949696.927968
+434866	[1728019997]	2000000 OPS in 2.085471 seconds, throughput 959015.972891
+434866	[1728019997]	2000000 OPS in 2.084301 seconds, throughput 959554.306216
+434866	[1728019997]	2000000 OPS in 2.081208 seconds, throughput 960980.353718
+434866	[1728019998]	2000000 OPS in 2.111745 seconds, throughput 947084.046606
+434866	[1728019999]	2000000 OPS in 2.081450 seconds, throughput 960868.625237
+434866	[1728019999]	2000000 OPS in 2.088684 seconds, throughput 957540.728995
+434866	[1728019999]	2000000 OPS in 2.079750 seconds, throughput 961654.044957
+434866	[1728020001]	2000000 OPS in 2.105634 seconds, throughput 949832.686972
+434866	[1728020001]	2000000 OPS in 2.082689 seconds, throughput 960297.000656
+434866	[1728020001]	2000000 OPS in 2.092346 seconds, throughput 955864.852180
+434866	[1728020002]	2000000 OPS in 2.085211 seconds, throughput 959135.550311
+434866	[1728020003]	2000000 OPS in 2.105432 seconds, throughput 949923.816110
+434866	[1728020003]	2000000 OPS in 2.079081 seconds, throughput 961963.482904
+434866	[1728020004]	2000000 OPS in 2.087163 seconds, throughput 958238.527609
+434866	[1728020004]	2000000 OPS in 2.079927 seconds, throughput 961572.209025
+434866	[1728020005]	2000000 OPS in 2.108612 seconds, throughput 948491.234992
+434866	[1728020005]	2000000 OPS in 2.084965 seconds, throughput 959248.716405
+434866	[1728020006]	2000000 OPS in 2.089009 seconds, throughput 957391.758485
+434866	[1728020006]	2000000 OPS in 2.078656 seconds, throughput 962160.165030
+434866	[1728020007]	2000000 OPS in 2.102358 seconds, throughput 951312.764049
+434866	[1728020007]	2000000 OPS in 2.084226 seconds, throughput 959588.835376
+434866	[1728020008]	2000000 OPS in 2.085899 seconds, throughput 958819.194985
+434866	[1728020008]	2000000 OPS in 2.082155 seconds, throughput 960543.283281
+434866	[1728020009]	2000000 OPS in 2.105750 seconds, throughput 949780.363291
+434866	[1728020009]	2000000 OPS in 2.079409 seconds, throughput 961811.745549
+434866	[1728020010]	2000000 OPS in 2.093307 seconds, throughput 955426.031633
+434866	[1728020010]	2000000 OPS in 2.086092 seconds, throughput 958730.487438
+434866	[1728020011]	2000000 OPS in 2.106094 seconds, throughput 949625.230403
+434866	[1728020011]	2000000 OPS in 2.075133 seconds, throughput 963793.645998
+434866	[1728020012]	2000000 OPS in 2.090335 seconds, throughput 956784.438858
+434866	[1728020012]	2000000 OPS in 2.080882 seconds, throughput 961130.905068
+434866	[1728020013]	2000000 OPS in 2.105757 seconds, throughput 949777.206012
+434866	[1728020013]	2000000 OPS in 2.082144 seconds, throughput 960548.357847
+434866	[1728020014]	2000000 OPS in 2.091253 seconds, throughput 956364.437971
+434866	[1728020014]	2000000 OPS in 2.078787 seconds, throughput 962099.532083
+434866	[1728020015]	2000000 OPS in 2.104385 seconds, throughput 950396.434113
+434866	[1728020015]	2000000 OPS in 2.080232 seconds, throughput 961431.224979
+434866	[1728020016]	2000000 OPS in 2.085047 seconds, throughput 959210.991407
+434866	[1728020016]	2000000 OPS in 2.077809 seconds, throughput 962552.380897
+434866	[1728020017]	2000000 OPS in 2.103158 seconds, throughput 950950.903356
+434866	[1728020018]	2000000 OPS in 2.079728 seconds, throughput 961664.217628
+434866	[1728020018]	2000000 OPS in 2.090360 seconds, throughput 956772.996039
+434866	[1728020018]	2000000 OPS in 2.083742 seconds, throughput 959811.723332
+434866	[1728020020]	2000000 OPS in 2.107797 seconds, throughput 948857.978259
+434866	[1728020020]	2000000 OPS in 2.081690 seconds, throughput 960757.845789
+434866	[1728020020]	2000000 OPS in 2.087770 seconds, throughput 957959.928536
+434866	[1728020020]	2000000 OPS in 2.080873 seconds, throughput 961135.062063
+434866	[1728020022]	2000000 OPS in 2.110018 seconds, throughput 947859.212575
+434866	[1728020022]	2000000 OPS in 2.086834 seconds, throughput 958389.598789
+434866	[1728020022]	2000000 OPS in 2.076534 seconds, throughput 963143.391825
+434866	[1728020022]	2000000 OPS in 2.088358 seconds, throughput 957690.204457
+434866	[1728020024]	2000000 OPS in 2.103576 seconds, throughput 950761.940619
+434866	[1728020024]	2000000 OPS in 2.081745 seconds, throughput 960732.462429
+434866	[1728020024]	2000000 OPS in 2.078025 seconds, throughput 962452.328533
+434866	[1728020024]	2000000 OPS in 2.091033 seconds, throughput 956465.058179
+434866	[1728020026]	2000000 OPS in 2.104983 seconds, throughput 950126.438076
+434866	[1728020026]	2000000 OPS in 2.077865 seconds, throughput 962526.439398
+434866	[1728020027]	2000000 OPS in 2.081726 seconds, throughput 960741.231075
+434866	[1728020027]	2000000 OPS in 2.092048 seconds, throughput 956001.009537
+434866	[1728020028]	2000000 OPS in 2.080237 seconds, throughput 961428.914109
+434866	[1728020028]	2000000 OPS in 2.105269 seconds, throughput 949997.363757
+434866	[1728020029]	2000000 OPS in 2.079332 seconds, throughput 961847.362518
+434866	[1728020029]	2000000 OPS in 2.089520 seconds, throughput 957157.624718
+434866	[1728020030]	2000000 OPS in 2.085721 seconds, throughput 958901.022716
+434866	[1728020030]	2000000 OPS in 2.109783 seconds, throughput 947964.790692
+434866	[1728020031]	2000000 OPS in 2.078951 seconds, throughput 962023.635959
+434866	[1728020031]	2000000 OPS in 2.086710 seconds, throughput 958446.549832
+434866	[1728020032]	2000000 OPS in 2.080154 seconds, throughput 961467.275981
+434866	[1728020032]	2000000 OPS in 2.103186 seconds, throughput 950938.243218
+434866	[1728020033]	2000000 OPS in 2.077497 seconds, throughput 962696.937709
+434866	[1728020033]	2000000 OPS in 2.084018 seconds, throughput 959684.609250
+434866	[1728020034]	2000000 OPS in 2.081391 seconds, throughput 960895.862430
+434866	[1728020034]	2000000 OPS in 2.104315 seconds, throughput 950428.049033
+434866	[1728020035]	2000000 OPS in 2.075427 seconds, throughput 963657.117306
+434866	[1728020035]	2000000 OPS in 2.088630 seconds, throughput 957565.485510
+434866	[1728020036]	2000000 OPS in 2.081889 seconds, throughput 960666.010532
+434866	[1728020036]	2000000 OPS in 2.107726 seconds, throughput 948889.941102
+434866	[1728020037]	2000000 OPS in 2.081666 seconds, throughput 960768.922584
+434866	[1728020037]	2000000 OPS in 2.086235 seconds, throughput 958664.771706
+434866	[1728020038]	2000000 OPS in 2.086599 seconds, throughput 958497.535942
+434866	[1728020038]	2000000 OPS in 2.111258 seconds, throughput 947302.508741
+434866	[1728020039]	2000000 OPS in 2.079922 seconds, throughput 961574.520583
+434866	[1728020039]	2000000 OPS in 2.086649 seconds, throughput 958474.568555
+434866	[1728020040]	2000000 OPS in 2.078374 seconds, throughput 962290.713798
+434866	[1728020041]	2000000 OPS in 2.105565 seconds, throughput 949863.813276
+434866	[1728020041]	2000000 OPS in 2.079252 seconds, throughput 961884.369956
+434866	[1728020041]	2000000 OPS in 2.086871 seconds, throughput 958372.606644
+434866	[1728020043]	2000000 OPS in 2.079407 seconds, throughput 961812.670632
+434866	[1728020043]	2000000 OPS in 2.107745 seconds, throughput 948881.387454
+434866	[1728020043]	2000000 OPS in 2.076576 seconds, throughput 963123.911670
+434866	[1728020043]	2000000 OPS in 2.089046 seconds, throughput 957374.801704
+434866	[1728020045]	2000000 OPS in 2.083323 seconds, throughput 960004.761624
+434866	[1728020045]	2000000 OPS in 2.105307 seconds, throughput 949980.216662
+434866	[1728020045]	2000000 OPS in 2.085150 seconds, throughput 959163.609333
+434866	[1728020045]	2000000 OPS in 2.088740 seconds, throughput 957515.056924
+434866	[1728020047]	2000000 OPS in 2.085183 seconds, throughput 959148.429658
+434866	[1728020047]	2000000 OPS in 2.117572 seconds, throughput 944477.920940
+434866	[1728020047]	2000000 OPS in 2.078452 seconds, throughput 962254.601020
+434866	[1728020047]	2000000 OPS in 2.088885 seconds, throughput 957448.590995
+434866	[1728020049]	2000000 OPS in 2.077955 seconds, throughput 962484.750632
+434866	[1728020049]	2000000 OPS in 2.109623 seconds, throughput 948036.687124
+434866	[1728020049]	2000000 OPS in 2.076498 seconds, throughput 963160.089728
+434866	[1728020050]	2000000 OPS in 2.092658 seconds, throughput 955722.339723
+434866	[1728020051]	2000000 OPS in 2.081862 seconds, throughput 960678.469562
+434866	[1728020051]	2000000 OPS in 2.104974 seconds, throughput 950130.500424
+434866	[1728020051]	2000000 OPS in 2.080989 seconds, throughput 961081.485774
+434866	[1728020052]	2000000 OPS in 2.094271 seconds, throughput 954986.245811
+434866	[1728020053]	2000000 OPS in 2.083045 seconds, throughput 960132.882391
+434866	[1728020053]	2000000 OPS in 2.107062 seconds, throughput 949188.965488
+434866	[1728020054]	2000000 OPS in 2.087025 seconds, throughput 958301.889053
+434866	[1728020054]	2000000 OPS in 2.087728 seconds, throughput 957979.200356
+434866	[1728020055]	2000000 OPS in 2.084595 seconds, throughput 959418.975868
+434866	[1728020055]	2000000 OPS in 2.107550 seconds, throughput 948969.182226
+434866	[1728020056]	2000000 OPS in 2.077024 seconds, throughput 962916.172370
+434866	[1728020056]	2000000 OPS in 2.087966 seconds, throughput 957870.003630
+434866	[1728020057]	2000000 OPS in 2.079202 seconds, throughput 961907.501051
+434866	[1728020057]	2000000 OPS in 2.101731 seconds, throughput 951596.564927
+434866	[1728020058]	2000000 OPS in 2.077871 seconds, throughput 962523.660035
+434866	[1728020058]	2000000 OPS in 2.091376 seconds, throughput 956308.191353
+434866	[1728020059]	2000000 OPS in 2.078928 seconds, throughput 962034.279205
+434866	[1728020060]	2000000 OPS in 2.102279 seconds, throughput 951348.512733
+434866	[1728020060]	2000000 OPS in 2.082578 seconds, throughput 960348.183838
+434866	[1728020060]	2000000 OPS in 2.096087 seconds, throughput 954158.868406
+434866	[1728020061]	2000000 OPS in 2.083212 seconds, throughput 960055.913656
+434866	[1728020062]	2000000 OPS in 2.111027 seconds, throughput 947406.167709
+434866	[1728020062]	2000000 OPS in 2.084625 seconds, throughput 959405.168795
+434866	[1728020062]	2000000 OPS in 2.090980 seconds, throughput 956489.301667
+434866	[1728020063]	2000000 OPS in 2.085031 seconds, throughput 959218.352149
+434866	[1728020064]	2000000 OPS in 2.103099 seconds, throughput 950977.581179
+434866	[1728020064]	2000000 OPS in 2.078338 seconds, throughput 962307.382149
+434866	[1728020064]	2000000 OPS in 2.087872 seconds, throughput 957913.128774
+434866	[1728020065]	2000000 OPS in 2.082842 seconds, throughput 960226.459808
+434866	[1728020066]	2000000 OPS in 2.105912 seconds, throughput 949707.300210
+434866	[1728020066]	2000000 OPS in 2.080030 seconds, throughput 961524.593395
+434866	[1728020066]	2000000 OPS in 2.089512 seconds, throughput 957161.289335
+434866	[1728020068]	2000000 OPS in 2.083395 seconds, throughput 959971.584841
+434866	[1728020068]	2000000 OPS in 2.105816 seconds, throughput 949750.595494
+434866	[1728020068]	2000000 OPS in 2.077626 seconds, throughput 962637.163763
+434866	[1728020068]	2000000 OPS in 2.091644 seconds, throughput 956185.660657
+434866	[1728020070]	2000000 OPS in 2.081762 seconds, throughput 960724.616935
+434866	[1728020070]	2000000 OPS in 2.108093 seconds, throughput 948724.747912
+434866	[1728020070]	2000000 OPS in 2.083945 seconds, throughput 959718.226729
+434866	[1728020070]	2000000 OPS in 2.086830 seconds, throughput 958391.435814
+434866	[1728020072]	2000000 OPS in 2.084900 seconds, throughput 959278.622476
+434866	[1728020072]	2000000 OPS in 2.102908 seconds, throughput 951063.955247
+434866	[1728020072]	2000000 OPS in 2.078071 seconds, throughput 962431.023772
+434866	[1728020073]	2000000 OPS in 2.087625 seconds, throughput 958026.465481
+434866	[1728020074]	2000000 OPS in 2.076892 seconds, throughput 962977.371958
+434866	[1728020074]	2000000 OPS in 2.103206 seconds, throughput 950929.200468
+434866	[1728020074]	2000000 OPS in 2.076266 seconds, throughput 963267.712326
+434866	[1728020075]	2000000 OPS in 2.087754 seconds, throughput 957967.270090
+434866	[1728020076]	2000000 OPS in 2.080368 seconds, throughput 961368.373288
+434866	[1728020076]	2000000 OPS in 2.100514 seconds, throughput 952147.902847
+434866	[1728020076]	2000000 OPS in 2.079020 seconds, throughput 961991.707631
+434866	[1728020077]	2000000 OPS in 2.093998 seconds, throughput 955110.749867
+434866	[1728020078]	2000000 OPS in 2.081817 seconds, throughput 960699.235331
+434866	[1728020079]	2000000 OPS in 2.085637 seconds, throughput 958939.642900
+434866	[1728020079]	2000000 OPS in 2.111992 seconds, throughput 946973.283990
+434866	[1728020079]	2000000 OPS in 2.090805 seconds, throughput 956569.359649
+434866	[1728020080]	2000000 OPS in 2.082160 seconds, throughput 960540.976678
+434866	[1728020081]	2000000 OPS in 2.077092 seconds, throughput 962884.648345
+434866	[1728020081]	2000000 OPS in 2.106553 seconds, throughput 949418.315134
+434866	[1728020081]	2000000 OPS in 2.088584 seconds, throughput 957586.575402
+434866	[1728020082]	2000000 OPS in 2.079328 seconds, throughput 961849.212823
+434866	[1728020083]	2000000 OPS in 2.082556 seconds, throughput 960358.328900
+434866	[1728020083]	2000000 OPS in 2.105655 seconds, throughput 949823.214154
+434866	[1728020083]	2000000 OPS in 2.086089 seconds, throughput 958731.866186
+434866	[1728020084]	2000000 OPS in 2.084274 seconds, throughput 959566.736427
+434866	[1728020085]	2000000 OPS in 2.078734 seconds, throughput 962124.062049
+434866	[1728020085]	2000000 OPS in 2.098179 seconds, throughput 953207.519473
+434866	[1728020085]	2000000 OPS in 2.085656 seconds, throughput 958930.907110
+434866	[1728020086]	2000000 OPS in 2.077687 seconds, throughput 962608.901148
+434866	[1728020087]	2000000 OPS in 2.084891 seconds, throughput 959282.763463
+434866	[1728020087]	2000000 OPS in 2.108534 seconds, throughput 948526.322080
+434866	[1728020087]	2000000 OPS in 2.093560 seconds, throughput 955310.571467
+434866	[1728020088]	2000000 OPS in 2.076293 seconds, throughput 963255.186046
+434866	[1728020089]	2000000 OPS in 2.078307 seconds, throughput 962321.735913
+434866	[1728020089]	2000000 OPS in 2.102126 seconds, throughput 951417.755168
+434866	[1728020089]	2000000 OPS in 2.088498 seconds, throughput 957626.006824
+434866	[1728020090]	2000000 OPS in 2.087315 seconds, throughput 958168.747889
+434866	[1728020091]	2000000 OPS in 2.079529 seconds, throughput 961756.243842
+434866	[1728020091]	2000000 OPS in 2.102477 seconds, throughput 951258.919836
+434866	[1728020091]	2000000 OPS in 2.087635 seconds, throughput 958021.876430
+434866	[1728020092]	2000000 OPS in 2.084425 seconds, throughput 959497.223455
+434866	[1728020093]	2000000 OPS in 2.079988 seconds, throughput 961544.008908
+434866	[1728020093]	2000000 OPS in 2.103140 seconds, throughput 950959.042194
+434866	[1728020093]	2000000 OPS in 2.087473 seconds, throughput 958096.224478
+434866	[1728020095]	2000000 OPS in 2.084746 seconds, throughput 959349.484302
+434866	[1728020095]	2000000 OPS in 2.079960 seconds, throughput 961556.953018
+434866	[1728020095]	2000000 OPS in 2.104044 seconds, throughput 950550.463774
+434866	[1728020095]	2000000 OPS in 2.093479 seconds, throughput 955347.533938
+434866	[1728020097]	2000000 OPS in 2.079164 seconds, throughput 961925.081427
+434866	[1728020097]	2000000 OPS in 2.083409 seconds, throughput 959965.134066
+434866	[1728020097]	2000000 OPS in 2.105725 seconds, throughput 949791.639459
+434866	[1728020098]	2000000 OPS in 2.089827 seconds, throughput 957017.016241
+434866	[1728020099]	2000000 OPS in 2.083864 seconds, throughput 959755.531071
+434866	[1728020099]	2000000 OPS in 2.073911 seconds, throughput 964361.537212
+434866	[1728020100]	2000000 OPS in 2.104486 seconds, throughput 950350.822006
+434866	[1728020100]	2000000 OPS in 2.086364 seconds, throughput 958605.497411
+434866	[1728020101]	2000000 OPS in 2.090038 seconds, throughput 956920.400490
+434866	[1728020101]	2000000 OPS in 2.074091 seconds, throughput 964277.845090
+434866	[1728020102]	2000000 OPS in 2.107188 seconds, throughput 949132.208422
+434866	[1728020102]	2000000 OPS in 2.083163 seconds, throughput 960078.496018
+434866	[1728020103]	2000000 OPS in 2.078211 seconds, throughput 962366.188996
+434866	[1728020103]	2000000 OPS in 2.079285 seconds, throughput 961869.104043
+434866	[1728020104]	2000000 OPS in 2.104032 seconds, throughput 950555.885082
+434866	[1728020104]	2000000 OPS in 2.090025 seconds, throughput 956926.352556
+434866	[1728020105]	2000000 OPS in 2.080955 seconds, throughput 961097.188550
+434866	[1728020106]	2000000 OPS in 2.078909 seconds, throughput 962043.071630
+434866	[1728020106]	2000000 OPS in 2.109867 seconds, throughput 947927.049430
+434866	[1728020106]	2000000 OPS in 2.093513 seconds, throughput 955332.018478
+434866	[1728020107]	2000000 OPS in 2.082854 seconds, throughput 960220.927631
+434866	[1728020108]	2000000 OPS in 2.081496 seconds, throughput 960847.390531
+434866	[1728020108]	2000000 OPS in 2.103970 seconds, throughput 950583.896158
+434866	[1728020108]	2000000 OPS in 2.086990 seconds, throughput 958317.960316
+434866	[1728020109]	2000000 OPS in 2.085825 seconds, throughput 958853.211559
+434866	[1728020110]	2000000 OPS in 2.077978 seconds, throughput 962474.097416
+434866	[1728020110]	2000000 OPS in 2.099914 seconds, throughput 952419.956246
+434866	[1728020110]	2000000 OPS in 2.085177 seconds, throughput 959151.189563
+434866	[1728020111]	2000000 OPS in 2.086574 seconds, throughput 958509.020049
+434866	[1728020112]	2000000 OPS in 2.077151 seconds, throughput 962857.298290
+434866	[1728020112]	2000000 OPS in 2.086530 seconds, throughput 958529.232745
+434866	[1728020112]	2000000 OPS in 2.104960 seconds, throughput 950136.819702
+434866	[1728020113]	2000000 OPS in 2.082839 seconds, throughput 960227.842863
+434866	[1728020114]	2000000 OPS in 2.079044 seconds, throughput 961980.602623
+434866	[1728020114]	2000000 OPS in 2.088435 seconds, throughput 957654.894694
+434866	[1728020114]	2000000 OPS in 2.100838 seconds, throughput 952001.058625
+434866	[1728020115]	2000000 OPS in 2.082878 seconds, throughput 960209.863468
+434866	[1728020116]	2000000 OPS in 2.078754 seconds, throughput 962114.805311
+434866	[1728020116]	2000000 OPS in 2.092103 seconds, throughput 955975.876905
+434866	[1728020116]	2000000 OPS in 2.110082 seconds, throughput 947830.463461
+434866	[1728020117]	2000000 OPS in 2.081021 seconds, throughput 961066.707160
+434866	[1728020118]	2000000 OPS in 2.082408 seconds, throughput 960426.583071
+434866	[1728020118]	2000000 OPS in 2.087308 seconds, throughput 958171.961206
+434866	[1728020119]	2000000 OPS in 2.104259 seconds, throughput 950453.342483
+434866	[1728020120]	2000000 OPS in 2.086552 seconds, throughput 958519.126291
+434866	[1728020120]	2000000 OPS in 2.078836 seconds, throughput 962076.854547
+434866	[1728020121]	2000000 OPS in 2.090703 seconds, throughput 956616.028197
+434866	[1728020121]	2000000 OPS in 2.104244 seconds, throughput 950460.117743
+434866	[1728020122]	2000000 OPS in 2.079416 seconds, throughput 961808.507773
+434866	[1728020122]	2000000 OPS in 2.077603 seconds, throughput 962647.820589
+434866	[1728020123]	2000000 OPS in 2.087508 seconds, throughput 958080.160651
+434866	[1728020123]	2000000 OPS in 2.102622 seconds, throughput 951193.319579
+434866	[1728020124]	2000000 OPS in 2.081278 seconds, throughput 960948.032891
+434866	[1728020124]	2000000 OPS in 2.078368 seconds, throughput 962293.491817
+434866	[1728020125]	2000000 OPS in 2.092562 seconds, throughput 955766.185184
+434866	[1728020125]	2000000 OPS in 2.107508 seconds, throughput 948988.093995
+434866	[1728020126]	2000000 OPS in 2.080363 seconds, throughput 961370.683866
+434866	[1728020126]	2000000 OPS in 2.076950 seconds, throughput 962950.480272
+434866	[1728020127]	2000000 OPS in 2.087740 seconds, throughput 957973.694042
+434866	[1728020127]	2000000 OPS in 2.103139 seconds, throughput 950959.494356
+434866	[1728020128]	2000000 OPS in 2.083813 seconds, throughput 959779.020478
+434866	[1728020128]	2000000 OPS in 2.082410 seconds, throughput 960425.660653
+434866	[1728020129]	2000000 OPS in 2.084856 seconds, throughput 959298.867644
+434866	[1728020129]	2000000 OPS in 2.103931 seconds, throughput 950601.516875
+434866	[1728020130]	2000000 OPS in 2.087750 seconds, throughput 957969.105496
+434866	[1728020130]	2000000 OPS in 2.079827 seconds, throughput 961618.442303
+434866	[1728020131]	2000000 OPS in 2.086624 seconds, throughput 958486.052111
+434866	[1728020131]	2000000 OPS in 2.102322 seconds, throughput 951329.054255
+434866	[1728020132]	2000000 OPS in 2.084693 seconds, throughput 959373.874235
+434866	[1728020133]	2000000 OPS in 2.075670 seconds, throughput 963544.301358
+434866	[1728020133]	2000000 OPS in 2.087582 seconds, throughput 958046.198904
+434866	[1728020133]	2000000 OPS in 2.103042 seconds, throughput 951003.356091
+434866	[1728020134]	2000000 OPS in 2.082799 seconds, throughput 960246.283967
+434866	[1728020135]	2000000 OPS in 2.080003 seconds, throughput 961537.074706
+434866	[1728020135]	2000000 OPS in 2.095004 seconds, throughput 954652.115223
+434866	[1728020135]	2000000 OPS in 2.108977 seconds, throughput 948327.079907
+434866	[1728020136]	2000000 OPS in 2.080421 seconds, throughput 961343.881839
+434866	[1728020137]	2000000 OPS in 2.077489 seconds, throughput 962700.644865
+434866	[1728020137]	2000000 OPS in 2.089764 seconds, throughput 957045.867380
+434866	[1728020137]	2000000 OPS in 2.103987 seconds, throughput 950576.215537
+434866	[1728020138]	2000000 OPS in 2.083107 seconds, throughput 960104.305732
+434866	[1728020139]	2000000 OPS in 2.077873 seconds, throughput 962522.733584
+434866	[1728020139]	2000000 OPS in 2.088078 seconds, throughput 957818.625549
+434866	[1728020140]	2000000 OPS in 2.106704 seconds, throughput 949350.264679
+434866	[1728020140]	2000000 OPS in 2.088848 seconds, throughput 957465.550389
+434866	[1728020141]	2000000 OPS in 2.080066 seconds, throughput 961507.952152
+434866	[1728020141]	2000000 OPS in 2.087681 seconds, throughput 958000.767359
+434866	[1728020142]	2000000 OPS in 2.106784 seconds, throughput 949314.215411
+434866	[1728020142]	2000000 OPS in 2.081455 seconds, throughput 960866.317071
+434866	[1728020143]	2000000 OPS in 2.079711 seconds, throughput 961672.078476
+434866	[1728020144]	2000000 OPS in 2.087014 seconds, throughput 958306.939963
+434866	[1728020144]	2000000 OPS in 2.110606 seconds, throughput 947595.145660
+434866	[1728020145]	2000000 OPS in 2.081759 seconds, throughput 960726.001425
+434866	[1728020145]	2000000 OPS in 2.075933 seconds, throughput 963422.229908
+434866	[1728020146]	2000000 OPS in 2.093417 seconds, throughput 955375.828132
+434866	[1728020146]	2000000 OPS in 2.103062 seconds, throughput 950994.312103
+434866	[1728020147]	2000000 OPS in 2.080562 seconds, throughput 961278.731420
+434866	[1728020147]	2000000 OPS in 2.082798 seconds, throughput 960246.745004
+434866	[1728020148]	2000000 OPS in 2.086486 seconds, throughput 958549.446294
+434866	[1728020148]	2000000 OPS in 2.108865 seconds, throughput 948377.444739
+434866	[1728020149]	2000000 OPS in 2.082435 seconds, throughput 960414.130573
+434866	[1728020149]	2000000 OPS in 2.077911 seconds, throughput 962505.131355
+434866	[1728020150]	2000000 OPS in 2.083315 seconds, throughput 960008.448074
+434866	[1728020150]	2000000 OPS in 2.107351 seconds, throughput 949058.794667
+434866	[1728020151]	2000000 OPS in 2.089336 seconds, throughput 957241.918006
+434866	[1728020151]	2000000 OPS in 2.075729 seconds, throughput 963516.913817
+434866	[1728020152]	2000000 OPS in 2.084777 seconds, throughput 959335.219067
+434866	[1728020152]	2000000 OPS in 2.105465 seconds, throughput 949908.927482
+434866	[1728020153]	2000000 OPS in 2.080050 seconds, throughput 961515.348189
+434866	[1728020153]	2000000 OPS in 2.075729 seconds, throughput 963516.913817
+434866	[1728020154]	2000000 OPS in 2.087118 seconds, throughput 958259.188029
+434866	[1728020154]	2000000 OPS in 2.113712 seconds, throughput 946202.699327
+434866	[1728020155]	2000000 OPS in 2.085337 seconds, throughput 959077.597530
+434866	[1728020155]	2000000 OPS in 2.077697 seconds, throughput 962604.268091
+434866	[1728020156]	2000000 OPS in 2.090493 seconds, throughput 956712.124843
+434866	[1728020156]	2000000 OPS in 2.105797 seconds, throughput 949759.164820
+434866	[1728020157]	2000000 OPS in 2.082181 seconds, throughput 960531.289067
+434866	[1728020158]	2000000 OPS in 2.083128 seconds, throughput 960094.626926
+434866	[1728020158]	2000000 OPS in 2.090973 seconds, throughput 956492.503729
+434866	[1728020159]	2000000 OPS in 2.102364 seconds, throughput 951310.049069
+434866	[1728020159]	2000000 OPS in 2.085934 seconds, throughput 958803.106906
+434866	[1728020160]	2000000 OPS in 2.080655 seconds, throughput 961235.764699
+434866	[1728020160]	2000000 OPS in 2.090046 seconds, throughput 956916.737718
+434866	[1728020161]	2000000 OPS in 2.104474 seconds, throughput 950356.241037
+434866	[1728020161]	2000000 OPS in 2.084262 seconds, throughput 959572.261069
+434866	[1728020162]	2000000 OPS in 2.075692 seconds, throughput 963534.088873
+434866	[1728020162]	2000000 OPS in 2.086443 seconds, throughput 958569.201267
+434866	[1728020163]	2000000 OPS in 2.107347 seconds, throughput 949060.596095
+434866	[1728020163]	2000000 OPS in 2.081369 seconds, throughput 960906.019067
+434866	[1728020164]	2000000 OPS in 2.078539 seconds, throughput 962214.324581
+434866	[1728020164]	2000000 OPS in 2.091953 seconds, throughput 956044.423560
+434866	[1728020165]	2000000 OPS in 2.104125 seconds, throughput 950513.871562
+434866	[1728020165]	2000000 OPS in 2.086766 seconds, throughput 958420.829168
+434866	[1728020166]	2000000 OPS in 2.074849 seconds, throughput 963925.567596
+434866	[1728020166]	2000000 OPS in 2.091584 seconds, throughput 956213.090175
+434866	[1728020167]	2000000 OPS in 2.105370 seconds, throughput 949951.789947
+434866	[1728020167]	2000000 OPS in 2.081450 seconds, throughput 960868.625237
+434866	[1728020168]	2000000 OPS in 2.082811 seconds, throughput 960240.751561
+434866	[1728020169]	2000000 OPS in 2.089642 seconds, throughput 957101.742787
+434866	[1728020169]	2000000 OPS in 2.104733 seconds, throughput 950239.294010
+434866	[1728020170]	2000000 OPS in 2.090218 seconds, throughput 956837.994889
+434866	[1728020170]	2000000 OPS in 2.076547 seconds, throughput 963137.362169
+434866	[1728020171]	2000000 OPS in 2.085908 seconds, throughput 958815.057999
+434866	[1728020171]	2000000 OPS in 2.106329 seconds, throughput 949519.282125
+434866	[1728020172]	2000000 OPS in 2.083678 seconds, throughput 959841.203871
+434866	[1728020172]	2000000 OPS in 2.078409 seconds, throughput 962274.509011
+434866	[1728020173]	2000000 OPS in 2.087924 seconds, throughput 957889.271832
+434866	[1728020173]	2000000 OPS in 2.109362 seconds, throughput 948153.991586
+434866	[1728020174]	2000000 OPS in 2.085153 seconds, throughput 959162.229342
+434866	[1728020174]	2000000 OPS in 2.077054 seconds, throughput 962902.264457
+434866	[1728020175]	2000000 OPS in 2.092097 seconds, throughput 955978.618582
+434866	[1728020175]	2000000 OPS in 2.104313 seconds, throughput 950428.952347
+434866	[1728020176]	2000000 OPS in 2.081499 seconds, throughput 960846.005691
+434866	[1728020176]	2000000 OPS in 2.078878 seconds, throughput 962057.417511
+434866	[1728020177]	2000000 OPS in 2.087130 seconds, throughput 958253.678496
+434866	[1728020177]	2000000 OPS in 2.103877 seconds, throughput 950625.915869
+434866	[1728020178]	2000000 OPS in 2.079513 seconds, throughput 961763.643699
+434866	[1728020178]	2000000 OPS in 2.083082 seconds, throughput 960115.828374
+434866	[1728020179]	2000000 OPS in 2.087345 seconds, throughput 958154.976777
+434866	[1728020180]	2000000 OPS in 2.102349 seconds, throughput 951316.836548
+434866	[1728020180]	2000000 OPS in 2.088040 seconds, throughput 957836.056781
+434866	[1728020180]	2000000 OPS in 2.076649 seconds, throughput 963090.055180
+434866	[1728020181]	2000000 OPS in 2.086135 seconds, throughput 958710.725816
+434866	[1728020182]	2000000 OPS in 2.109161 seconds, throughput 948244.349293
+434866	[1728020182]	2000000 OPS in 2.084324 seconds, throughput 959543.717771
+434866	[1728020182]	2000000 OPS in 2.076837 seconds, throughput 963002.874082
+434866	[1728020183]	2000000 OPS in 2.091225 seconds, throughput 956377.243004
+434866	[1728020184]	2000000 OPS in 2.099541 seconds, throughput 952589.161155
+434866	[1728020184]	2000000 OPS in 2.077525 seconds, throughput 962683.962889
+434866	[1728020185]	2000000 OPS in 2.078258 seconds, throughput 962344.424994
+434866	[1728020185]	2000000 OPS in 2.089001 seconds, throughput 957395.424894
+434866	[1728020186]	2000000 OPS in 2.106591 seconds, throughput 949401.188935
+434866	[1728020186]	2000000 OPS in 2.085065 seconds, throughput 959202.710707
+434866	[1728020187]	2000000 OPS in 2.082769 seconds, throughput 960260.115260
+434866	[1728020187]	2000000 OPS in 2.085864 seconds, throughput 958835.283604
+434866	[1728020188]	2000000 OPS in 2.114205 seconds, throughput 945982.059450
+434866	[1728020188]	2000000 OPS in 2.080419 seconds, throughput 961344.806022
+434866	[1728020189]	2000000 OPS in 2.080530 seconds, throughput 961293.516556
+434866	[1728020189]	2000000 OPS in 2.091930 seconds, throughput 956054.934917
+434866	[1728020190]	2000000 OPS in 2.110706 seconds, throughput 947550.250959
+434866	[1728020190]	2000000 OPS in 2.077753 seconds, throughput 962578.323795
+434866	[1728020191]	2000000 OPS in 2.079728 seconds, throughput 961664.217628
+434866	[1728020192]	2000000 OPS in 2.088893 seconds, throughput 957444.924178
+434866	[1728020192]	2000000 OPS in 2.104713 seconds, throughput 950248.323643
+434866	[1728020192]	2000000 OPS in 2.084352 seconds, throughput 959530.827806
+434866	[1728020193]	2000000 OPS in 2.085428 seconds, throughput 959035.747098
+434866	[1728020194]	2000000 OPS in 2.087263 seconds, throughput 958192.618755
+434866	[1728020194]	2000000 OPS in 2.103638 seconds, throughput 950733.919049
+434866	[1728020195]	2000000 OPS in 2.085476 seconds, throughput 959013.673617
+434866	[1728020195]	2000000 OPS in 2.078642 seconds, throughput 962166.645339
+434866	[1728020196]	2000000 OPS in 2.088295 seconds, throughput 957719.096200
+434866	[1728020196]	2000000 OPS in 2.112127 seconds, throughput 946912.756667
+434866	[1728020197]	2000000 OPS in 2.081894 seconds, throughput 960663.703339
+434866	[1728020197]	2000000 OPS in 2.078489 seconds, throughput 962237.471548
+434866	[1728020198]	2000000 OPS in 2.089448 seconds, throughput 957190.607280
+434866	[1728020199]	2000000 OPS in 2.104678 seconds, throughput 950264.125914
+434866	[1728020199]	2000000 OPS in 2.083151 seconds, throughput 960084.026554
+434866	[1728020199]	2000000 OPS in 2.080539 seconds, throughput 961289.358190
+434866	[1728020200]	2000000 OPS in 2.087729 seconds, throughput 957978.741494
+434866	[1728020201]	2000000 OPS in 2.104431 seconds, throughput 950375.659739
+434866	[1728020201]	2000000 OPS in 2.075990 seconds, throughput 963395.777436
+434866	[1728020201]	2000000 OPS in 2.081227 seconds, throughput 960971.580707
+434866	[1728020202]	2000000 OPS in 2.088721 seconds, throughput 957523.766937
+434866	[1728020203]	2000000 OPS in 2.102109 seconds, throughput 951425.449394
+434866	[1728020203]	2000000 OPS in 2.087787 seconds, throughput 957952.128258
+434866	[1728020203]	2000000 OPS in 2.076148 seconds, throughput 963322.460634
+434866	[1728020204]	2000000 OPS in 2.087188 seconds, throughput 958227.049983
+434866	[1728020205]	2000000 OPS in 2.110776 seconds, throughput 947518.827199
+434866	[1728020205]	2000000 OPS in 2.081073 seconds, throughput 961042.692880
+434866	[1728020205]	2000000 OPS in 2.074758 seconds, throughput 963967.845889
+434866	[1728020206]	2000000 OPS in 2.093769 seconds, throughput 955215.212375
+434866	[1728020207]	2000000 OPS in 2.107144 seconds, throughput 949152.027579
+434866	[1728020207]	2000000 OPS in 2.081655 seconds, throughput 960773.999534
+434866	[1728020207]	2000000 OPS in 2.075552 seconds, throughput 963599.081112
+434866	[1728020208]	2000000 OPS in 2.087503 seconds, throughput 958082.455450
+434866	[1728020209]	2000000 OPS in 2.101766 seconds, throughput 951580.718310
+434866	[1728020209]	2000000 OPS in 2.077937 seconds, throughput 962493.088097
+434866	[1728020209]	2000000 OPS in 2.085381 seconds, throughput 959057.361700
+434866	[1728020210]	2000000 OPS in 2.089427 seconds, throughput 957200.227622
+434866	[1728020211]	2000000 OPS in 2.112412 seconds, throughput 946785.002168
+434866	[1728020211]	2000000 OPS in 2.084276 seconds, throughput 959565.815660
+434866	[1728020212]	2000000 OPS in 2.083458 seconds, throughput 959942.557037
+434866	[1728020212]	2000000 OPS in 2.090258 seconds, throughput 956819.684460
+434866	[1728020213]	2000000 OPS in 2.108521 seconds, throughput 948532.170180
+434866	[1728020213]	2000000 OPS in 2.079790 seconds, throughput 961635.549743
+434866	[1728020214]	2000000 OPS in 2.076423 seconds, throughput 963194.878885
+434866	[1728020215]	2000000 OPS in 2.091273 seconds, throughput 956355.291729
+434866	[1728020215]	2000000 OPS in 2.081881 seconds, throughput 960669.702063
+434866	[1728020215]	2000000 OPS in 2.104962 seconds, throughput 950135.916943
+434866	[1728020216]	2000000 OPS in 2.077130 seconds, throughput 962867.032877
+434866	[1728020217]	2000000 OPS in 2.090573 seconds, throughput 956675.514321
+434866	[1728020217]	2000000 OPS in 2.079260 seconds, throughput 961880.669084
+434866	[1728020217]	2000000 OPS in 2.104728 seconds, throughput 950241.551402
+434866	[1728020218]	2000000 OPS in 2.084621 seconds, throughput 959407.009715
+434866	[1728020219]	2000000 OPS in 2.087832 seconds, throughput 957931.481077
+434866	[1728020220]	2000000 OPS in 2.086516 seconds, throughput 958535.664236
+434866	[1728020220]	2000000 OPS in 2.112774 seconds, throughput 946622.781235
+434866	[1728020220]	2000000 OPS in 2.084557 seconds, throughput 959436.465398
+434866	[1728020221]	2000000 OPS in 2.088224 seconds, throughput 957751.658826
+434866	[1728020222]	2000000 OPS in 2.082030 seconds, throughput 960600.951956
+434866	[1728020222]	2000000 OPS in 2.108121 seconds, throughput 948712.146978
+434866	[1728020222]	2000000 OPS in 2.076514 seconds, throughput 963152.668366
+434866	[1728020223]	2000000 OPS in 2.092571 seconds, throughput 955762.074501
+434866	[1728020224]	2000000 OPS in 2.076511 seconds, throughput 963154.059863
+434866	[1728020224]	2000000 OPS in 2.104181 seconds, throughput 950488.574890
+434866	[1728020224]	2000000 OPS in 2.082257 seconds, throughput 960496.230773
+434866	[1728020225]	2000000 OPS in 2.088521 seconds, throughput 957615.460893
+434866	[1728020226]	2000000 OPS in 2.081041 seconds, throughput 961057.470756
+434866	[1728020226]	2000000 OPS in 2.101343 seconds, throughput 951772.271352
+434866	[1728020226]	2000000 OPS in 2.081422 seconds, throughput 960881.551170
+434866	[1728020227]	2000000 OPS in 2.088590 seconds, throughput 957583.824494
+434866	[1728020228]	2000000 OPS in 2.082284 seconds, throughput 960483.776469
+434866	[1728020228]	2000000 OPS in 2.111555 seconds, throughput 947169.266252
+434866	[1728020228]	2000000 OPS in 2.082872 seconds, throughput 960212.629485
+434866	[1728020229]	2000000 OPS in 2.088980 seconds, throughput 957405.049354
+434866	[1728020230]	2000000 OPS in 2.082202 seconds, throughput 960521.601651
+434866	[1728020230]	2000000 OPS in 2.106930 seconds, throughput 949248.432554
+434866	[1728020230]	2000000 OPS in 2.076162 seconds, throughput 963315.964746
+434866	[1728020231]	2000000 OPS in 2.089752 seconds, throughput 957051.363033
+434866	[1728020232]	2000000 OPS in 2.078742 seconds, throughput 962120.359333
+434866	[1728020232]	2000000 OPS in 2.104449 seconds, throughput 950367.530883
+434866	[1728020232]	2000000 OPS in 2.080293 seconds, throughput 961403.033130
+434866	[1728020233]	2000000 OPS in 2.087742 seconds, throughput 957972.776330
+434866	[1728020234]	2000000 OPS in 2.079574 seconds, throughput 961735.432353
+434866	[1728020234]	2000000 OPS in 2.106300 seconds, throughput 949532.355315
+434866	[1728020234]	2000000 OPS in 2.080312 seconds, throughput 961394.252401
+434866	[1728020235]	2000000 OPS in 2.086447 seconds, throughput 958567.363561
+434866	[1728020236]	2000000 OPS in 2.084621 seconds, throughput 959407.009715
+434866	[1728020236]	2000000 OPS in 2.112976 seconds, throughput 946532.284323
+434866	[1728020237]	2000000 OPS in 2.088348 seconds, throughput 957694.790332
+434866	[1728020238]	2000000 OPS in 2.085284 seconds, throughput 959101.973640
+434866	[1728020238]	2000000 OPS in 2.083695 seconds, throughput 959833.372926
+434866	[1728020239]	2000000 OPS in 2.107589 seconds, throughput 948951.621972
+434866	[1728020239]	2000000 OPS in 2.080218 seconds, throughput 961437.695472
+434866	[1728020240]	2000000 OPS in 2.092139 seconds, throughput 955959.427170
+434866	[1728020240]	2000000 OPS in 2.080765 seconds, throughput 961184.948805
+434866	[1728020241]	2000000 OPS in 2.103660 seconds, throughput 950723.976308
+434866	[1728020241]	2000000 OPS in 2.076635 seconds, throughput 963096.548021
+434866	[1728020242]	2000000 OPS in 2.089314 seconds, throughput 957251.997546
+434866	[1728020242]	2000000 OPS in 2.083629 seconds, throughput 959863.776133
+434866	[1728020243]	2000000 OPS in 2.103076 seconds, throughput 950987.981414
+434866	[1728020243]	2000000 OPS in 2.077739 seconds, throughput 962584.809738
+434866	[1728020244]	2000000 OPS in 2.088939 seconds, throughput 957423.840524
+434866	[1728020245]	2000000 OPS in 2.087075 seconds, throughput 958278.931040
+434866	[1728020245]	2000000 OPS in 2.078853 seconds, throughput 962068.987081
+434866	[1728020245]	2000000 OPS in 2.116301 seconds, throughput 945045.151895
+434866	[1728020246]	2000000 OPS in 2.084330 seconds, throughput 959540.955607
+434866	[1728020247]	2000000 OPS in 2.084487 seconds, throughput 959468.684621
+434866	[1728020247]	2000000 OPS in 2.069929 seconds, throughput 966216.715646
+434866	[1728020247]	2000000 OPS in 2.107152 seconds, throughput 949148.424034
+434866	[1728020248]	2000000 OPS in 2.091091 seconds, throughput 956438.528978
+434866	[1728020249]	2000000 OPS in 2.082695 seconds, throughput 960294.234153
+434866	[1728020249]	2000000 OPS in 2.074924 seconds, throughput 963890.725636
+434866	[1728020249]	2000000 OPS in 2.103346 seconds, throughput 950865.906037
+434866	[1728020250]	2000000 OPS in 2.086120 seconds, throughput 958717.619312
+434866	[1728020251]	2000000 OPS in 2.079451 seconds, throughput 961792.319223
+434866	[1728020251]	2000000 OPS in 2.074125 seconds, throughput 964262.038209
+434866	[1728020251]	2000000 OPS in 2.111353 seconds, throughput 947259.885012
+434866	[1728020252]	2000000 OPS in 2.088615 seconds, throughput 957572.362546
+434866	[1728020253]	2000000 OPS in 2.082263 seconds, throughput 960493.463122
+434866	[1728020253]	2000000 OPS in 2.076661 seconds, throughput 963084.489958
+434866	[1728020253]	2000000 OPS in 2.112172 seconds, throughput 946892.582612
+434866	[1728020254]	2000000 OPS in 2.089524 seconds, throughput 957155.792420
+434866	[1728020255]	2000000 OPS in 2.086722 seconds, throughput 958441.038145
+434866	[1728020255]	2000000 OPS in 2.071402 seconds, throughput 965529.626794
+434866	[1728020255]	2000000 OPS in 2.104801 seconds, throughput 950208.594542
+434866	[1728020256]	2000000 OPS in 2.094435 seconds, throughput 954911.467771
+434866	[1728020257]	2000000 OPS in 2.077598 seconds, throughput 962650.137322
+434866	[1728020257]	2000000 OPS in 2.071885 seconds, throughput 965304.541517
+434866	[1728020258]	2000000 OPS in 2.102740 seconds, throughput 951139.941220
+434866	[1728020258]	2000000 OPS in 2.089088 seconds, throughput 957355.554194
+434866	[1728020259]	2000000 OPS in 2.080309 seconds, throughput 961395.638821
+434866	[1728020259]	2000000 OPS in 2.070145 seconds, throughput 966115.900094
+434866	[1728020260]	2000000 OPS in 2.108821 seconds, throughput 948397.232387
+434866	[1728020260]	2000000 OPS in 2.088132 seconds, throughput 957793.855944
+434866	[1728020261]	2000000 OPS in 2.079213 seconds, throughput 961902.412115
+434866	[1728020261]	2000000 OPS in 2.079696 seconds, throughput 961679.014625
+434866	[1728020262]	2000000 OPS in 2.105743 seconds, throughput 949783.520591
+434866	[1728020263]	2000000 OPS in 2.086031 seconds, throughput 958758.522764
+434866	[1728020263]	2000000 OPS in 2.083948 seconds, throughput 959716.845142
+434866	[1728020264]	2000000 OPS in 2.070806 seconds, throughput 965807.516494
+434866	[1728020264]	2000000 OPS in 2.105879 seconds, throughput 949722.182519
+434866	[1728020265]	2000000 OPS in 2.088154 seconds, throughput 957783.764991
+434866	[1728020265]	2000000 OPS in 2.084714 seconds, throughput 959364.210151
+434866	[1728020266]	2000000 OPS in 2.074263 seconds, throughput 964197.886189
+434866	[1728020266]	2000000 OPS in 2.103270 seconds, throughput 950900.264826
+434866	[1728020267]	2000000 OPS in 2.089620 seconds, throughput 957111.819374
+434866	[1728020267]	2000000 OPS in 2.081137 seconds, throughput 961013.138491
+434866	[1728020268]	2000000 OPS in 2.075943 seconds, throughput 963417.589019
+434866	[1728020268]	2000000 OPS in 2.111598 seconds, throughput 947149.978358
+434866	[1728020269]	2000000 OPS in 2.085876 seconds, throughput 958829.767445
+434866	[1728020270]	2000000 OPS in 2.079288 seconds, throughput 961867.716257
+434866	[1728020270]	2000000 OPS in 2.077888 seconds, throughput 962515.785259
+434866	[1728020270]	2000000 OPS in 2.106668 seconds, throughput 949366.487743
+434866	[1728020271]	2000000 OPS in 2.087945 seconds, throughput 957879.637634
+434866	[1728020272]	2000000 OPS in 2.082503 seconds, throughput 960382.770157
+434866	[1728020272]	2000000 OPS in 2.074747 seconds, throughput 963972.956703
+434866	[1728020272]	2000000 OPS in 2.109823 seconds, throughput 947946.818288
+434866	[1728020273]	2000000 OPS in 2.094298 seconds, throughput 954973.933986
+434866	[1728020274]	2000000 OPS in 2.081387 seconds, throughput 960897.709076
+434866	[1728020274]	2000000 OPS in 2.074558 seconds, throughput 964060.778248
+434866	[1728020274]	2000000 OPS in 2.111741 seconds, throughput 947085.840546
+434866	[1728020275]	2000000 OPS in 2.090137 seconds, throughput 956875.075653
+434866	[1728020276]	2000000 OPS in 2.080586 seconds, throughput 961267.642866
+434866	[1728020276]	2000000 OPS in 2.074301 seconds, throughput 964180.222639
+434866	[1728020277]	2000000 OPS in 2.116450 seconds, throughput 944978.619859
+434866	[1728020277]	2000000 OPS in 2.089263 seconds, throughput 957275.364566
+434866	[1728020278]	2000000 OPS in 2.082636 seconds, throughput 960321.438792
+434866	[1728020279]	2000000 OPS in 2.092770 seconds, throughput 955671.191770
+434866	[1728020279]	2000000 OPS in 2.098066 seconds, throughput 953258.858396
+434866	[1728020281]	2000000 OPS in 2.053583 seconds, throughput 973907.555721
+434866	[1728020281]	2000000 OPS in 2.063334 seconds, throughput 969305.017995
+434866	[1728020283]	2000000 OPS in 2.064765 seconds, throughput 968633.234291
+434866	[1728020285]	2000000 OPS in 1.865513 seconds, throughput 1072091.162056
+434866	[1728020286]	2000000 OPS in 1.788762 seconds, throughput 1118091.730482
+434866	[1728020288]	2000000 OPS in 1.784213 seconds, throughput 1120942.398693
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     261103 ms      1044329 ms            4 CompactionCPUUsage=0.308732 CompactionThroughput=2.91704G Lat_Get_Avg=918.823 Lat_Get_P50=906.265 Lat_Get_P95=1.5324k Lat_Get_P99=3.13276k Lat_Put_Avg=1.18309k Lat_Put_P50=1.13948k Lat_Put_P95=1.83893k Lat_Put_P99=2.5127k items_per_second=3.8299M/s
+4630.95user 51.80system 18:07.95elapsed 430%CPU (0avgtext+0avgdata 9175188maxresident)k
+316376inputs+16649936outputs (5789major+11295823minor)pagefaults 0swaps

@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-03T23:31:27-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 4.14, 4.62, 4.46
+[1728016287]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728016287]	Setup starts!
+[1728016287]	Setup starts!
+[1728016287]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f85b4200000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728016287]	Initializing log segments...
+Log: pool_start 0x7f85b4200000 total segments: 2028  cleaners: 2
+[1728016291]Initialized 2026 free log segments...
+[1728016291]	DB init finished in 4.354920 seconds
+[1728016291]	DB init finished in 4.355086 seconds
+[1728016291]	DB init finished in 4.355129 seconds
+[1728016291]	DB init finished in 4.355192 seconds
+[1728016297]	DB load finished in 5.337860 seconds
+[1728016297]	DB load finished in 5.340298 seconds
+[1728016297]	DB load finished in 5.347843 seconds
+[1728016297]	DB load finished in 5.355932 seconds
+[1728016297]	DB warmup finished in 0.000010 seconds
+[1728016297]	DB warmup finished in 0.018093 seconds
+[1728016297]	DB warmup finished in 0.015657 seconds
+[1728016297]	DB warmup finished in 0.008104 seconds
+[1728016297]	ETC init!
+[1728016297]	ETC starts!
+[1728016297]	ETC init!
+[1728016297]	ETC init!
+[1728016297]	ETC starts!
+[1728016297]	ETC starts!
+[1728016297]	ETC init!
+[1728016297]	ETC starts!
+405207	[1728016299]	2000000 OPS in 2.171669 seconds, throughput 920950.660529
+405207	[1728016299]	2000000 OPS in 2.173538 seconds, throughput 920158.745787
+405207	[1728016299]	2000000 OPS in 2.190630 seconds, throughput 912979.371231
+405207	[1728016299]	2000000 OPS in 2.203846 seconds, throughput 907504.426353
+405207	[1728016301]	2000000 OPS in 2.104845 seconds, throughput 950188.731237
+405207	[1728016301]	2000000 OPS in 2.115519 seconds, throughput 945394.487121
+405207	[1728016301]	2000000 OPS in 2.119871 seconds, throughput 943453.634679
+405207	[1728016301]	2000000 OPS in 2.125027 seconds, throughput 941164.512263
+405207	[1728016303]	2000000 OPS in 2.098822 seconds, throughput 952915.492595
+405207	[1728016303]	2000000 OPS in 2.117853 seconds, throughput 944352.606153
+405207	[1728016303]	2000000 OPS in 2.115531 seconds, throughput 945389.124527
+405207	[1728016303]	2000000 OPS in 2.143239 seconds, throughput 933167.042966
+405207	[1728016305]	2000000 OPS in 2.110491 seconds, throughput 947646.779825
+405207	[1728016305]	2000000 OPS in 2.135996 seconds, throughput 936331.341444
+405207	[1728016305]	2000000 OPS in 2.125519 seconds, throughput 940946.658204
+405207	[1728016305]	2000000 OPS in 2.126010 seconds, throughput 940729.347463
+405207	[1728016307]	2000000 OPS in 2.121152 seconds, throughput 942883.866880
+405207	[1728016307]	2000000 OPS in 2.124637 seconds, throughput 941337.273144
+405207	[1728016307]	2000000 OPS in 2.134870 seconds, throughput 936825.193103
+405207	[1728016307]	2000000 OPS in 2.139360 seconds, throughput 934859.023259
+405207	[1728016309]	2000000 OPS in 1.819387 seconds, throughput 1099271.347987
+405207	[1728016309]	2000000 OPS in 1.822797 seconds, throughput 1097214.884598
+405207	[1728016309]	2000000 OPS in 1.831865 seconds, throughput 1091783.510248
+405207	[1728016309]	2000000 OPS in 1.821023 seconds, throughput 1098283.766872
+405207	[1728016311]	2000000 OPS in 1.832240 seconds, throughput 1091560.057634
+405207	[1728016311]	2000000 OPS in 1.837054 seconds, throughput 1088699.624507
+405207	[1728016311]	2000000 OPS in 1.845792 seconds, throughput 1083545.708292
+405207	[1728016311]	2000000 OPS in 1.858245 seconds, throughput 1076284.343561
+405207	[1728016313]	2000000 OPS in 1.986096 seconds, throughput 1007000.668648
+405207	[1728016313]	2000000 OPS in 1.991213 seconds, throughput 1004412.888024
+405207	[1728016313]	2000000 OPS in 2.119097 seconds, throughput 943798.231039
+405207	[1728016313]	2000000 OPS in 2.243604 seconds, throughput 891422.907073
+405207	[1728016315]	2000000 OPS in 2.401706 seconds, throughput 832741.392993
+405207	[1728016315]	2000000 OPS in 2.397216 seconds, throughput 834301.122636
+405207	[1728016316]	2000000 OPS in 2.475626 seconds, throughput 807876.472456
+405207	[1728016316]	2000000 OPS in 2.562230 seconds, throughput 780570.050308
+405207	[1728016318]	2000000 OPS in 2.316718 seconds, throughput 863290.223497
+405207	[1728016318]	2000000 OPS in 2.449381 seconds, throughput 816532.830131
+405207	[1728016318]	2000000 OPS in 2.389811 seconds, throughput 836886.264228
+405207	[1728016318]	2000000 OPS in 2.435252 seconds, throughput 821270.242258
+405207	[1728016320]	2000000 OPS in 2.194671 seconds, throughput 911298.322163
+405207	[1728016320]	2000000 OPS in 2.233325 seconds, throughput 895525.729574
+405207	[1728016320]	2000000 OPS in 2.313881 seconds, throughput 864348.685174
+405207	[1728016320]	2000000 OPS in 2.205772 seconds, throughput 906712.026447
+405207	[1728016322]	2000000 OPS in 2.173551 seconds, throughput 920153.242321
+405207	[1728016322]	2000000 OPS in 2.115646 seconds, throughput 945337.736086
+405207	[1728016322]	2000000 OPS in 2.086561 seconds, throughput 958514.991893
+405207	[1728016323]	2000000 OPS in 2.171942 seconds, throughput 920834.902589
+405207	[1728016324]	2000000 OPS in 2.005760 seconds, throughput 997128.270581
+405207	[1728016324]	2000000 OPS in 1.972616 seconds, throughput 1013882.073348
+405207	[1728016324]	2000000 OPS in 2.058263 seconds, throughput 971693.121822
+405207	[1728016325]	2000000 OPS in 2.143508 seconds, throughput 933049.934966
+405207	[1728016326]	2000000 OPS in 1.914699 seconds, throughput 1044550.605604
+405207	[1728016326]	2000000 OPS in 1.909034 seconds, throughput 1047650.277575
+405207	[1728016326]	2000000 OPS in 1.856973 seconds, throughput 1077021.582974
+405207	[1728016327]	2000000 OPS in 1.847475 seconds, throughput 1082558.627316
+405207	[1728016328]	2000000 OPS in 1.823209 seconds, throughput 1096966.941256
+405207	[1728016328]	2000000 OPS in 1.834006 seconds, throughput 1090508.973253
+405207	[1728016328]	2000000 OPS in 1.839912 seconds, throughput 1087008.509103
+405207	[1728016328]	2000000 OPS in 1.839069 seconds, throughput 1087506.776527
+405207	[1728016330]	2000000 OPS in 1.819063 seconds, throughput 1099467.143249
+405207	[1728016330]	2000000 OPS in 1.829344 seconds, throughput 1093288.085784
+405207	[1728016330]	2000000 OPS in 1.838718 seconds, throughput 1087714.374907
+405207	[1728016330]	2000000 OPS in 1.838863 seconds, throughput 1087628.605285
+405207	[1728016331]	2000000 OPS in 1.823723 seconds, throughput 1096657.770944
+405207	[1728016331]	2000000 OPS in 1.830331 seconds, throughput 1092698.533762
+405207	[1728016332]	2000000 OPS in 1.837932 seconds, throughput 1088179.540919
+405207	[1728016332]	2000000 OPS in 1.854873 seconds, throughput 1078240.936172
+405207	[1728016333]	2000000 OPS in 1.822729 seconds, throughput 1097255.818062
+405207	[1728016333]	2000000 OPS in 1.832444 seconds, throughput 1091438.537822
+405207	[1728016334]	2000000 OPS in 1.840134 seconds, throughput 1086877.368713
+405207	[1728016334]	2000000 OPS in 1.841808 seconds, throughput 1085889.517257
+405207	[1728016335]	2000000 OPS in 1.825895 seconds, throughput 1095353.237727
+405207	[1728016335]	2000000 OPS in 1.834922 seconds, throughput 1089964.587051
+405207	[1728016335]	2000000 OPS in 1.841396 seconds, throughput 1086132.477751
+405207	[1728016336]	2000000 OPS in 1.845025 seconds, throughput 1083996.151814
+405207	[1728016337]	2000000 OPS in 1.825677 seconds, throughput 1095484.031403
+405207	[1728016337]	2000000 OPS in 1.834181 seconds, throughput 1090404.927322
+405207	[1728016337]	2000000 OPS in 1.844995 seconds, throughput 1084013.777815
+405207	[1728016338]	2000000 OPS in 1.848671 seconds, throughput 1081858.264667
+405207	[1728016339]	2000000 OPS in 1.826389 seconds, throughput 1095056.967601
+405207	[1728016339]	2000000 OPS in 1.834908 seconds, throughput 1089972.903274
+405207	[1728016339]	2000000 OPS in 1.844683 seconds, throughput 1084197.122216
+405207	[1728016339]	2000000 OPS in 1.847445 seconds, throughput 1082576.206599
+405207	[1728016340]	2000000 OPS in 1.828465 seconds, throughput 1093813.663373
+405207	[1728016341]	2000000 OPS in 1.838511 seconds, throughput 1087836.841879
+405207	[1728016341]	2000000 OPS in 1.840941 seconds, throughput 1086400.922137
+405207	[1728016341]	2000000 OPS in 1.845386 seconds, throughput 1083784.097202
+405207	[1728016342]	2000000 OPS in 1.828547 seconds, throughput 1093764.612012
+405207	[1728016342]	2000000 OPS in 1.837303 seconds, throughput 1088552.078781
+405207	[1728016343]	2000000 OPS in 1.843266 seconds, throughput 1085030.592438
+405207	[1728016343]	2000000 OPS in 1.856266 seconds, throughput 1077431.790487
+405207	[1728016344]	2000000 OPS in 1.919304 seconds, throughput 1042044.407764
+405207	[1728016344]	2000000 OPS in 1.925789 seconds, throughput 1038535.374332
+405207	[1728016345]	2000000 OPS in 1.991261 seconds, throughput 1004388.676321
+405207	[1728016345]	2000000 OPS in 2.038262 seconds, throughput 981228.124745
+405207	[1728016346]	2000000 OPS in 1.922605 seconds, throughput 1040255.278645
+405207	[1728016346]	2000000 OPS in 1.995254 seconds, throughput 1002378.644523
+405207	[1728016347]	2000000 OPS in 1.922662 seconds, throughput 1040224.438825
+405207	[1728016347]	2000000 OPS in 1.908667 seconds, throughput 1047851.720599
+405207	[1728016348]	2000000 OPS in 1.878798 seconds, throughput 1064510.394412
+405207	[1728016348]	2000000 OPS in 1.891113 seconds, throughput 1057578.262113
+405207	[1728016349]	2000000 OPS in 1.933412 seconds, throughput 1034440.667587
+405207	[1728016349]	2000000 OPS in 1.905799 seconds, throughput 1049428.612356
+405207	[1728016350]	2000000 OPS in 1.923919 seconds, throughput 1039544.804121
+405207	[1728016350]	2000000 OPS in 1.889970 seconds, throughput 1058217.855310
+405207	[1728016351]	2000000 OPS in 1.940984 seconds, throughput 1030405.196539
+405207	[1728016351]	2000000 OPS in 1.985349 seconds, throughput 1007379.558959
+405207	[1728016352]	2000000 OPS in 1.905602 seconds, throughput 1049537.101661
+405207	[1728016352]	2000000 OPS in 1.901387 seconds, throughput 1051863.718433
+405207	[1728016352]	2000000 OPS in 1.905554 seconds, throughput 1049563.539002
+405207	[1728016353]	2000000 OPS in 1.911131 seconds, throughput 1046500.736998
+405207	[1728016354]	2000000 OPS in 1.878269 seconds, throughput 1064810.205567
+405207	[1728016354]	2000000 OPS in 1.883252 seconds, throughput 1061992.765705
+405207	[1728016354]	2000000 OPS in 1.946984 seconds, throughput 1027229.807744
+405207	[1728016355]	2000000 OPS in 1.882568 seconds, throughput 1062378.623242
+405207	[1728016356]	2000000 OPS in 1.892637 seconds, throughput 1056726.672891
+405207	[1728016356]	2000000 OPS in 1.858851 seconds, throughput 1075933.466426
+405207	[1728016356]	2000000 OPS in 1.877721 seconds, throughput 1065120.963125
+405207	[1728016357]	2000000 OPS in 1.907935 seconds, throughput 1048253.740300
+405207	[1728016358]	2000000 OPS in 1.894217 seconds, throughput 1055845.238428
+405207	[1728016358]	2000000 OPS in 1.918487 seconds, throughput 1042488.169062
+405207	[1728016358]	2000000 OPS in 1.875239 seconds, throughput 1066530.719551
+405207	[1728016359]	2000000 OPS in 1.868654 seconds, throughput 1070289.095788
+405207	[1728016359]	2000000 OPS in 1.824381 seconds, throughput 1096262.239083
+405207	[1728016359]	2000000 OPS in 1.837004 seconds, throughput 1088729.256986
+405207	[1728016360]	2000000 OPS in 1.847599 seconds, throughput 1082485.972335
+405207	[1728016360]	2000000 OPS in 1.844902 seconds, throughput 1084068.422063
+405207	[1728016361]	2000000 OPS in 1.833085 seconds, throughput 1091056.879523
+405207	[1728016361]	2000000 OPS in 1.836377 seconds, throughput 1089100.985255
+405207	[1728016362]	2000000 OPS in 1.843437 seconds, throughput 1084929.943361
+405207	[1728016362]	2000000 OPS in 1.846619 seconds, throughput 1083060.447228
+405207	[1728016363]	2000000 OPS in 1.827580 seconds, throughput 1094343.339279
+405207	[1728016363]	2000000 OPS in 1.836933 seconds, throughput 1088771.337877
+405207	[1728016364]	2000000 OPS in 1.844930 seconds, throughput 1084051.969451
+405207	[1728016364]	2000000 OPS in 1.847457 seconds, throughput 1082569.174817
+405207	[1728016365]	2000000 OPS in 1.826895 seconds, throughput 1094753.666741
+405207	[1728016365]	2000000 OPS in 1.836213 seconds, throughput 1089198.257501
+405207	[1728016366]	2000000 OPS in 1.843309 seconds, throughput 1085005.281263
+405207	[1728016366]	2000000 OPS in 1.845953 seconds, throughput 1083451.203796
+405207	[1728016367]	2000000 OPS in 1.828329 seconds, throughput 1093895.026552
+405207	[1728016367]	2000000 OPS in 1.836960 seconds, throughput 1088755.334901
+405207	[1728016367]	2000000 OPS in 1.844158 seconds, throughput 1084505.774451
+405207	[1728016368]	2000000 OPS in 1.843438 seconds, throughput 1084929.354825
+405207	[1728016368]	2000000 OPS in 1.827208 seconds, throughput 1094566.135875
+405207	[1728016369]	2000000 OPS in 1.836584 seconds, throughput 1088978.233503
+405207	[1728016369]	2000000 OPS in 1.845460 seconds, throughput 1083740.639190
+405207	[1728016370]	2000000 OPS in 1.845881 seconds, throughput 1083493.464638
+405207	[1728016370]	2000000 OPS in 1.830454 seconds, throughput 1092625.108306
+405207	[1728016371]	2000000 OPS in 1.852198 seconds, throughput 1079798.164127
+405207	[1728016371]	2000000 OPS in 1.854473 seconds, throughput 1078473.507029
+405207	[1728016372]	2000000 OPS in 1.865320 seconds, throughput 1072202.088650
+405207	[1728016372]	2000000 OPS in 1.839593 seconds, throughput 1087197.004990
+405207	[1728016372]	2000000 OPS in 1.862751 seconds, throughput 1073680.808653
+405207	[1728016373]	2000000 OPS in 1.856967 seconds, throughput 1077025.062912
+405207	[1728016373]	2000000 OPS in 1.869546 seconds, throughput 1069778.438188
+405207	[1728016374]	2000000 OPS in 1.876582 seconds, throughput 1065767.443149
+405207	[1728016374]	2000000 OPS in 1.894749 seconds, throughput 1055548.782451
+405207	[1728016375]	2000000 OPS in 1.923066 seconds, throughput 1040005.907234
+405207	[1728016375]	2000000 OPS in 1.927084 seconds, throughput 1037837.478802
+405207	[1728016376]	2000000 OPS in 1.906638 seconds, throughput 1048966.820131
+405207	[1728016376]	2000000 OPS in 1.881020 seconds, throughput 1063252.915971
+405207	[1728016377]	2000000 OPS in 1.867800 seconds, throughput 1070778.455937
+405207	[1728016377]	2000000 OPS in 1.844482 seconds, throughput 1084315.271171
+405207	[1728016378]	2000000 OPS in 1.828250 seconds, throughput 1093942.294544
+405207	[1728016378]	2000000 OPS in 1.837074 seconds, throughput 1088687.771968
+405207	[1728016379]	2000000 OPS in 1.861473 seconds, throughput 1074417.947507
+405207	[1728016379]	2000000 OPS in 1.866256 seconds, throughput 1071664.337583
+405207	[1728016380]	2000000 OPS in 1.883788 seconds, throughput 1061690.593634
+405207	[1728016380]	2000000 OPS in 1.901488 seconds, throughput 1051807.847328
+405207	[1728016381]	2000000 OPS in 1.896955 seconds, throughput 1054321.267505
+405207	[1728016381]	2000000 OPS in 1.875922 seconds, throughput 1066142.408906
+405207	[1728016381]	2000000 OPS in 1.858367 seconds, throughput 1076213.686532
+405207	[1728016382]	2000000 OPS in 1.899596 seconds, throughput 1052855.449264
+405207	[1728016382]	2000000 OPS in 1.956226 seconds, throughput 1022376.760149
+405207	[1728016383]	2000000 OPS in 1.981920 seconds, throughput 1009122.467103
+405207	[1728016383]	2000000 OPS in 1.907283 seconds, throughput 1048612.083262
+405207	[1728016384]	2000000 OPS in 1.917250 seconds, throughput 1043160.777155
+405207	[1728016384]	2000000 OPS in 1.893453 seconds, throughput 1056271.267362
+405207	[1728016385]	2000000 OPS in 1.877971 seconds, throughput 1064979.171670
+405207	[1728016385]	2000000 OPS in 1.881779 seconds, throughput 1062824.061699
+405207	[1728016386]	2000000 OPS in 1.867489 seconds, throughput 1070956.776720
+405207	[1728016386]	2000000 OPS in 1.851360 seconds, throughput 1080286.924207
+405207	[1728016387]	2000000 OPS in 1.861465 seconds, throughput 1074422.565023
+405207	[1728016387]	2000000 OPS in 1.849288 seconds, throughput 1081497.311398
+405207	[1728016387]	2000000 OPS in 1.858389 seconds, throughput 1076200.946088
+405207	[1728016388]	2000000 OPS in 1.842625 seconds, throughput 1085408.045587
+405207	[1728016389]	2000000 OPS in 1.869530 seconds, throughput 1069787.593673
+405207	[1728016389]	2000000 OPS in 1.909372 seconds, throughput 1047464.820894
+405207	[1728016389]	2000000 OPS in 1.882490 seconds, throughput 1062422.642351
+405207	[1728016390]	2000000 OPS in 1.896846 seconds, throughput 1054381.852823
+405207	[1728016390]	2000000 OPS in 1.911473 seconds, throughput 1046313.497496
+405207	[1728016391]	2000000 OPS in 1.881836 seconds, throughput 1062791.869217
+405207	[1728016391]	2000000 OPS in 1.846555 seconds, throughput 1083097.985167
+405207	[1728016392]	2000000 OPS in 1.885302 seconds, throughput 1060837.998368
+405207	[1728016392]	2000000 OPS in 1.904703 seconds, throughput 1050032.472254
+405207	[1728016393]	2000000 OPS in 1.858631 seconds, throughput 1076060.821110
+405207	[1728016393]	2000000 OPS in 1.871856 seconds, throughput 1068458.257473
+405207	[1728016394]	2000000 OPS in 1.843244 seconds, throughput 1085043.542797
+405207	[1728016394]	2000000 OPS in 1.846151 seconds, throughput 1083335.003475
+405207	[1728016395]	2000000 OPS in 1.842850 seconds, throughput 1085275.524324
+405207	[1728016395]	2000000 OPS in 1.846505 seconds, throughput 1083127.313492
+405207	[1728016396]	2000000 OPS in 1.865964 seconds, throughput 1071832.039632
+405207	[1728016396]	2000000 OPS in 1.847235 seconds, throughput 1082699.277569
+405207	[1728016396]	2000000 OPS in 1.829795 seconds, throughput 1093018.616840
+405207	[1728016397]	2000000 OPS in 1.850794 seconds, throughput 1080617.291822
+405207	[1728016397]	2000000 OPS in 1.841353 seconds, throughput 1086157.841544
+405207	[1728016398]	2000000 OPS in 1.852826 seconds, throughput 1079432.175498
+405207	[1728016398]	2000000 OPS in 1.834814 seconds, throughput 1090028.744058
+405207	[1728016399]	2000000 OPS in 1.863644 seconds, throughput 1073166.334343
+405207	[1728016399]	2000000 OPS in 1.854908 seconds, throughput 1078220.590994
+405207	[1728016400]	2000000 OPS in 1.856391 seconds, throughput 1077359.241668
+405207	[1728016400]	2000000 OPS in 1.848187 seconds, throughput 1082141.579829
+405207	[1728016400]	2000000 OPS in 1.839336 seconds, throughput 1087348.912869
+405207	[1728016401]	2000000 OPS in 1.862886 seconds, throughput 1073603.000935
+405207	[1728016402]	2000000 OPS in 1.864867 seconds, throughput 1072462.540224
+405207	[1728016402]	2000000 OPS in 1.862024 seconds, throughput 1074100.011600
+405207	[1728016402]	2000000 OPS in 1.879956 seconds, throughput 1063854.685961
+405207	[1728016403]	2000000 OPS in 1.897431 seconds, throughput 1054056.774660
+405207	[1728016403]	2000000 OPS in 1.887649 seconds, throughput 1059519.010155
+405207	[1728016404]	2000000 OPS in 1.875429 seconds, throughput 1066422.669160
+405207	[1728016404]	2000000 OPS in 1.870190 seconds, throughput 1069410.059940
+405207	[1728016405]	2000000 OPS in 1.842530 seconds, throughput 1085464.008727
+405207	[1728016405]	2000000 OPS in 1.844964 seconds, throughput 1084031.991952
+405207	[1728016406]	2000000 OPS in 1.827297 seconds, throughput 1094512.824133
+405207	[1728016406]	2000000 OPS in 1.841128 seconds, throughput 1086290.578385
+405207	[1728016407]	2000000 OPS in 1.849580 seconds, throughput 1081326.571438
+405207	[1728016407]	2000000 OPS in 1.855823 seconds, throughput 1077688.982193
+405207	[1728016408]	2000000 OPS in 1.844654 seconds, throughput 1084214.166993
+405207	[1728016408]	2000000 OPS in 1.865117 seconds, throughput 1072318.787508
+405207	[1728016409]	2000000 OPS in 1.881166 seconds, throughput 1063170.395382
+405207	[1728016409]	2000000 OPS in 1.904204 seconds, throughput 1050307.635106
+405207	[1728016409]	2000000 OPS in 1.892972 seconds, throughput 1056539.663556
+405207	[1728016410]	2000000 OPS in 1.900947 seconds, throughput 1052107.186576
+405207	[1728016410]	2000000 OPS in 1.892739 seconds, throughput 1056669.725726
+405207	[1728016411]	2000000 OPS in 1.887686 seconds, throughput 1059498.242822
+405207	[1728016411]	2000000 OPS in 1.848383 seconds, throughput 1082026.831019
+405207	[1728016412]	2000000 OPS in 1.860497 seconds, throughput 1074981.577503
+405207	[1728016412]	2000000 OPS in 1.856977 seconds, throughput 1077019.263028
+405207	[1728016413]	2000000 OPS in 1.881643 seconds, throughput 1062900.879710
+405207	[1728016413]	2000000 OPS in 1.850414 seconds, throughput 1080839.206794
+405207	[1728016414]	2000000 OPS in 1.860921 seconds, throughput 1074736.649218
+405207	[1728016414]	2000000 OPS in 1.872252 seconds, throughput 1068232.267878
+405207	[1728016415]	2000000 OPS in 1.864327 seconds, throughput 1072773.177667
+405207	[1728016415]	2000000 OPS in 1.870440 seconds, throughput 1069267.124313
+405207	[1728016415]	2000000 OPS in 1.872280 seconds, throughput 1068216.292435
+405207	[1728016416]	2000000 OPS in 1.886612 seconds, throughput 1060101.388097
+405207	[1728016417]	2000000 OPS in 1.887713 seconds, throughput 1059483.088796
+405207	[1728016417]	2000000 OPS in 1.893880 seconds, throughput 1056033.117199
+405207	[1728016417]	2000000 OPS in 1.907294 seconds, throughput 1048606.035567
+405207	[1728016418]	2000000 OPS in 1.913959 seconds, throughput 1044954.463497
+405207	[1728016418]	2000000 OPS in 1.867445 seconds, throughput 1070982.010180
+405207	[1728016419]	2000000 OPS in 1.847566 seconds, throughput 1082505.306982
+405207	[1728016419]	2000000 OPS in 1.850629 seconds, throughput 1080713.638444
+405207	[1728016420]	2000000 OPS in 1.841869 seconds, throughput 1085853.554189
+405207	[1728016420]	2000000 OPS in 1.845760 seconds, throughput 1083564.493759
+405207	[1728016421]	2000000 OPS in 1.828358 seconds, throughput 1093877.676035
+405207	[1728016421]	2000000 OPS in 1.868308 seconds, throughput 1070487.307232
+405207	[1728016422]	2000000 OPS in 1.884384 seconds, throughput 1061354.798173
+405207	[1728016422]	2000000 OPS in 1.916370 seconds, throughput 1043639.798160
+405207	[1728016423]	2000000 OPS in 1.936286 seconds, throughput 1032905.262962
+405207	[1728016423]	2000000 OPS in 1.914092 seconds, throughput 1044881.855209
+405207	[1728016424]	2000000 OPS in 1.917937 seconds, throughput 1042787.119702
+405207	[1728016424]	2000000 OPS in 1.910602 seconds, throughput 1046790.488024
+405207	[1728016424]	2000000 OPS in 1.877078 seconds, throughput 1065485.824244
+405207	[1728016425]	2000000 OPS in 1.938052 seconds, throughput 1031964.054628
+405207	[1728016426]	2000000 OPS in 1.868896 seconds, throughput 1070150.505967
+405207	[1728016426]	2000000 OPS in 1.848519 seconds, throughput 1081947.223696
+405207	[1728016426]	2000000 OPS in 1.859093 seconds, throughput 1075793.411088
+405207	[1728016427]	2000000 OPS in 1.859210 seconds, throughput 1075725.711458
+405207	[1728016427]	2000000 OPS in 1.878765 seconds, throughput 1064529.092249
+405207	[1728016428]	2000000 OPS in 1.880466 seconds, throughput 1063566.158601
+405207	[1728016428]	2000000 OPS in 1.860330 seconds, throughput 1075078.077545
+405207	[1728016429]	2000000 OPS in 1.869954 seconds, throughput 1069545.026241
+405207	[1728016429]	2000000 OPS in 1.870364 seconds, throughput 1069310.572701
+405207	[1728016430]	2000000 OPS in 1.860341 seconds, throughput 1075071.720722
+405207	[1728016430]	2000000 OPS in 1.848710 seconds, throughput 1081835.442011
+405207	[1728016430]	2000000 OPS in 1.846294 seconds, throughput 1083251.096521
+405207	[1728016431]	2000000 OPS in 1.847418 seconds, throughput 1082592.028442
+405207	[1728016432]	2000000 OPS in 1.847108 seconds, throughput 1082773.719782
+405207	[1728016432]	2000000 OPS in 1.829675 seconds, throughput 1093090.302923
+405207	[1728016432]	2000000 OPS in 1.860042 seconds, throughput 1075244.537489
+405207	[1728016433]	2000000 OPS in 1.881911 seconds, throughput 1062749.513659
+405207	[1728016433]	2000000 OPS in 1.871589 seconds, throughput 1068610.683222
+405207	[1728016434]	2000000 OPS in 1.865994 seconds, throughput 1071814.807550
+405207	[1728016434]	2000000 OPS in 1.857832 seconds, throughput 1076523.603857
+405207	[1728016435]	2000000 OPS in 1.881105 seconds, throughput 1063204.871605
+405207	[1728016435]	2000000 OPS in 1.925724 seconds, throughput 1038570.428576
+405207	[1728016436]	2000000 OPS in 1.900751 seconds, throughput 1052215.676856
+405207	[1728016436]	2000000 OPS in 1.913934 seconds, throughput 1044968.112798
+405207	[1728016437]	2000000 OPS in 1.871544 seconds, throughput 1068636.377237
+405207	[1728016437]	2000000 OPS in 1.875397 seconds, throughput 1066440.865587
+405207	[1728016437]	2000000 OPS in 1.859814 seconds, throughput 1075376.354840
+405207	[1728016438]	2000000 OPS in 1.888441 seconds, throughput 1059074.654702
+405207	[1728016439]	2000000 OPS in 1.870693 seconds, throughput 1069122.512352
+405207	[1728016439]	2000000 OPS in 1.863411 seconds, throughput 1073300.522536
+405207	[1728016439]	2000000 OPS in 1.855761 seconds, throughput 1077724.987215
+405207	[1728016440]	2000000 OPS in 1.838190 seconds, throughput 1088026.808981
+405207	[1728016440]	2000000 OPS in 1.855530 seconds, throughput 1077859.156144
+405207	[1728016441]	2000000 OPS in 1.878426 seconds, throughput 1064721.208075
+405207	[1728016441]	2000000 OPS in 1.860107 seconds, throughput 1075206.963900
+405207	[1728016442]	2000000 OPS in 1.890959 seconds, throughput 1057664.391454
+405207	[1728016442]	2000000 OPS in 1.880973 seconds, throughput 1063279.483544
+405207	[1728016443]	2000000 OPS in 1.877689 seconds, throughput 1065139.115157
+405207	[1728016443]	2000000 OPS in 1.860556 seconds, throughput 1074947.488815
+405207	[1728016444]	2000000 OPS in 1.834915 seconds, throughput 1089968.745146
+405207	[1728016444]	2000000 OPS in 1.844173 seconds, throughput 1084496.953377
+405207	[1728016445]	2000000 OPS in 1.864619 seconds, throughput 1072605.181005
+405207	[1728016445]	2000000 OPS in 1.841871 seconds, throughput 1085852.375112
+405207	[1728016445]	2000000 OPS in 1.857021 seconds, throughput 1076993.744282
+405207	[1728016446]	2000000 OPS in 1.909426 seconds, throughput 1047435.197803
+405207	[1728016447]	2000000 OPS in 1.851344 seconds, throughput 1080296.260446
+405207	[1728016447]	2000000 OPS in 1.843583 seconds, throughput 1084844.023838
+405207	[1728016447]	2000000 OPS in 1.834695 seconds, throughput 1090099.444322
+405207	[1728016448]	2000000 OPS in 1.855532 seconds, throughput 1077857.994365
+405207	[1728016449]	2000000 OPS in 1.901812 seconds, throughput 1051628.657302
+405207	[1728016449]	2000000 OPS in 1.899038 seconds, throughput 1053164.812921
+405207	[1728016449]	2000000 OPS in 1.902570 seconds, throughput 1051209.679539
+405207	[1728016450]	2000000 OPS in 1.881141 seconds, throughput 1063184.524711
+405207	[1728016450]	2000000 OPS in 1.903208 seconds, throughput 1050857.289377
+405207	[1728016450]	2000000 OPS in 1.880468 seconds, throughput 1063565.027429
+405207	[1728016451]	2000000 OPS in 1.859941 seconds, throughput 1075302.926276
+405207	[1728016452]	2000000 OPS in 1.864337 seconds, throughput 1072767.423486
+405207	[1728016452]	2000000 OPS in 1.888498 seconds, throughput 1059042.688952
+405207	[1728016452]	2000000 OPS in 1.872137 seconds, throughput 1068297.886319
+405207	[1728016453]	2000000 OPS in 1.877339 seconds, throughput 1065337.693405
+405207	[1728016454]	2000000 OPS in 1.853769 seconds, throughput 1078883.075507
+405207	[1728016454]	2000000 OPS in 1.852571 seconds, throughput 1079580.755609
+405207	[1728016454]	2000000 OPS in 1.889642 seconds, throughput 1058401.538492
+405207	[1728016455]	2000000 OPS in 1.870221 seconds, throughput 1069392.333847
+405207	[1728016455]	2000000 OPS in 1.915572 seconds, throughput 1044074.563629
+405207	[1728016456]	2000000 OPS in 1.889576 seconds, throughput 1058438.506840
+405207	[1728016456]	2000000 OPS in 1.925456 seconds, throughput 1038714.984918
+405207	[1728016457]	2000000 OPS in 1.920684 seconds, throughput 1041295.705072
+405207	[1728016457]	2000000 OPS in 1.941932 seconds, throughput 1029902.179891
+405207	[1728016458]	2000000 OPS in 1.915339 seconds, throughput 1044201.574760
+405207	[1728016458]	2000000 OPS in 1.916411 seconds, throughput 1043617.470365
+405207	[1728016459]	2000000 OPS in 1.867002 seconds, throughput 1071236.131509
+405207	[1728016459]	2000000 OPS in 1.843143 seconds, throughput 1085103.000690
+405207	[1728016460]	2000000 OPS in 1.828436 seconds, throughput 1093831.011859
+405207	[1728016460]	2000000 OPS in 1.844733 seconds, throughput 1084167.735927
+405207	[1728016460]	2000000 OPS in 1.837841 seconds, throughput 1088233.421716
+405207	[1728016461]	2000000 OPS in 1.842352 seconds, throughput 1085568.881517
+405207	[1728016462]	2000000 OPS in 1.850562 seconds, throughput 1080752.765917
+405207	[1728016462]	2000000 OPS in 1.860845 seconds, throughput 1074780.543248
+405207	[1728016462]	2000000 OPS in 1.852710 seconds, throughput 1079499.759811
+405207	[1728016463]	2000000 OPS in 1.868604 seconds, throughput 1070317.734523
+405207	[1728016464]	2000000 OPS in 1.844234 seconds, throughput 1084461.082487
+405207	[1728016464]	2000000 OPS in 1.847518 seconds, throughput 1082533.431339
+405207	[1728016464]	2000000 OPS in 1.836021 seconds, throughput 1089312.159284
+405207	[1728016465]	2000000 OPS in 1.843416 seconds, throughput 1084942.302768
+405207	[1728016465]	2000000 OPS in 1.829379 seconds, throughput 1093267.168804
+405207	[1728016465]	2000000 OPS in 1.845932 seconds, throughput 1083463.529534
+405207	[1728016466]	2000000 OPS in 1.851868 seconds, throughput 1079990.582482
+405207	[1728016467]	2000000 OPS in 1.852512 seconds, throughput 1079615.138795
+405207	[1728016467]	2000000 OPS in 1.854973 seconds, throughput 1078182.809130
+405207	[1728016467]	2000000 OPS in 1.904053 seconds, throughput 1050390.929244
+405207	[1728016468]	2000000 OPS in 1.874266 seconds, throughput 1067084.394638
+405207	[1728016469]	2000000 OPS in 1.858268 seconds, throughput 1076271.022264
+405207	[1728016469]	2000000 OPS in 1.864267 seconds, throughput 1072807.704047
+405207	[1728016469]	2000000 OPS in 1.853717 seconds, throughput 1078913.340062
+405207	[1728016470]	2000000 OPS in 1.867345 seconds, throughput 1071039.363374
+405207	[1728016470]	2000000 OPS in 1.873866 seconds, throughput 1067312.177071
+405207	[1728016471]	2000000 OPS in 1.840546 seconds, throughput 1086634.074889
+405207	[1728016471]	2000000 OPS in 1.869950 seconds, throughput 1069547.314099
+405207	[1728016471]	2000000 OPS in 1.836308 seconds, throughput 1089141.908656
+405207	[1728016472]	2000000 OPS in 1.844212 seconds, throughput 1084474.019256
+405207	[1728016473]	2000000 OPS in 1.827659 seconds, throughput 1094296.036624
+405207	[1728016473]	2000000 OPS in 1.848046 seconds, throughput 1082224.143771
+405207	[1728016473]	2000000 OPS in 1.837059 seconds, throughput 1088696.661348
+405207	[1728016474]	2000000 OPS in 1.900872 seconds, throughput 1052148.698071
+405207	[1728016475]	2000000 OPS in 1.857288 seconds, throughput 1076838.917820
+405207	[1728016475]	2000000 OPS in 1.896308 seconds, throughput 1054680.990641
+405207	[1728016475]	2000000 OPS in 1.914593 seconds, throughput 1044608.436362
+405207	[1728016476]	2000000 OPS in 1.879992 seconds, throughput 1063834.314189
+405207	[1728016476]	2000000 OPS in 1.885425 seconds, throughput 1060768.792182
+405207	[1728016477]	2000000 OPS in 1.875243 seconds, throughput 1066528.444580
+405207	[1728016477]	2000000 OPS in 1.898797 seconds, throughput 1053298.483198
+405207	[1728016478]	2000000 OPS in 1.930171 seconds, throughput 1036177.623641
+405207	[1728016478]	2000000 OPS in 1.906356 seconds, throughput 1049121.989807
+405207	[1728016479]	2000000 OPS in 1.916704 seconds, throughput 1043457.936124
+405207	[1728016479]	2000000 OPS in 1.904683 seconds, throughput 1050043.498052
+405207	[1728016480]	2000000 OPS in 1.902665 seconds, throughput 1051157.192674
+405207	[1728016480]	2000000 OPS in 1.884693 seconds, throughput 1061180.786473
+405207	[1728016480]	2000000 OPS in 1.904952 seconds, throughput 1049895.220457
+405207	[1728016481]	2000000 OPS in 1.887212 seconds, throughput 1059764.350799
+405207	[1728016482]	2000000 OPS in 1.876214 seconds, throughput 1065976.482427
+405207	[1728016482]	2000000 OPS in 1.855828 seconds, throughput 1077686.078667
+405207	[1728016482]	2000000 OPS in 1.864125 seconds, throughput 1072889.425334
+405207	[1728016483]	2000000 OPS in 1.841225 seconds, throughput 1086233.350079
+405207	[1728016484]	2000000 OPS in 1.867576 seconds, throughput 1070906.886788
+405207	[1728016484]	2000000 OPS in 1.860256 seconds, throughput 1075120.843583
+405207	[1728016484]	2000000 OPS in 1.858102 seconds, throughput 1076367.174676
+405207	[1728016485]	2000000 OPS in 1.851984 seconds, throughput 1079922.936699
+405207	[1728016485]	2000000 OPS in 1.863009 seconds, throughput 1073532.119276
+405207	[1728016486]	2000000 OPS in 1.849013 seconds, throughput 1081658.160327
+405207	[1728016486]	2000000 OPS in 1.880095 seconds, throughput 1063776.032594
+405207	[1728016487]	2000000 OPS in 1.881001 seconds, throughput 1063263.655894
+405207	[1728016487]	2000000 OPS in 1.926473 seconds, throughput 1038166.639242
+405207	[1728016488]	2000000 OPS in 1.916119 seconds, throughput 1043776.508662
+405207	[1728016488]	2000000 OPS in 1.943557 seconds, throughput 1029041.082922
+405207	[1728016488]	2000000 OPS in 1.917701 seconds, throughput 1042915.449280
+405207	[1728016489]	2000000 OPS in 1.859746 seconds, throughput 1075415.675044
+405207	[1728016490]	2000000 OPS in 1.848277 seconds, throughput 1082088.886027
+405207	[1728016490]	2000000 OPS in 1.859650 seconds, throughput 1075471.190815
+405207	[1728016490]	2000000 OPS in 1.886420 seconds, throughput 1060209.285313
+405207	[1728016491]	2000000 OPS in 1.888806 seconds, throughput 1058869.995119
+405207	[1728016491]	2000000 OPS in 1.866916 seconds, throughput 1071285.478297
+405207	[1728016492]	2000000 OPS in 1.869403 seconds, throughput 1069860.270899
+405207	[1728016492]	2000000 OPS in 1.846226 seconds, throughput 1083290.994710
+405207	[1728016493]	2000000 OPS in 1.849278 seconds, throughput 1081503.159611
+405207	[1728016493]	2000000 OPS in 1.826529 seconds, throughput 1094973.033552
+405207	[1728016494]	2000000 OPS in 1.844699 seconds, throughput 1084187.718430
+405207	[1728016494]	2000000 OPS in 1.836505 seconds, throughput 1089025.077525
+405207	[1728016495]	2000000 OPS in 1.845795 seconds, throughput 1083543.947188
+405207	[1728016495]	2000000 OPS in 1.836772 seconds, throughput 1088866.772795
+405207	[1728016495]	2000000 OPS in 1.873305 seconds, throughput 1067631.805819
+405207	[1728016496]	2000000 OPS in 1.848232 seconds, throughput 1082115.232287
+405207	[1728016497]	2000000 OPS in 1.865242 seconds, throughput 1072246.925600
+405207	[1728016497]	2000000 OPS in 1.832802 seconds, throughput 1091225.347855
+405207	[1728016497]	2000000 OPS in 1.847034 seconds, throughput 1082817.100281
+405207	[1728016498]	2000000 OPS in 1.844473 seconds, throughput 1084320.562025
+405207	[1728016499]	2000000 OPS in 1.860211 seconds, throughput 1075146.851621
+405207	[1728016499]	2000000 OPS in 1.829134 seconds, throughput 1093413.604471
+405207	[1728016499]	2000000 OPS in 1.848379 seconds, throughput 1082029.172589
+405207	[1728016500]	2000000 OPS in 1.840422 seconds, throughput 1086707.287785
+405207	[1728016500]	2000000 OPS in 1.845631 seconds, throughput 1083640.229277
+405207	[1728016501]	2000000 OPS in 1.844823 seconds, throughput 1084114.844622
+405207	[1728016501]	2000000 OPS in 1.846638 seconds, throughput 1083049.303653
+405207	[1728016501]	2000000 OPS in 1.857042 seconds, throughput 1076981.565307
+405207	[1728016502]	2000000 OPS in 1.858797 seconds, throughput 1075964.723421
+405207	[1728016502]	2000000 OPS in 1.824469 seconds, throughput 1096209.362834
+405207	[1728016503]	2000000 OPS in 1.856623 seconds, throughput 1077224.616952
+405207	[1728016503]	2000000 OPS in 1.838159 seconds, throughput 1088045.158226
+405207	[1728016504]	2000000 OPS in 1.844225 seconds, throughput 1084466.374764
+405207	[1728016504]	2000000 OPS in 1.867596 seconds, throughput 1070895.418495
+405207	[1728016505]	2000000 OPS in 1.894247 seconds, throughput 1055828.516556
+405207	[1728016505]	2000000 OPS in 1.857976 seconds, throughput 1076440.169303
+405207	[1728016506]	2000000 OPS in 1.934989 seconds, throughput 1033597.607015
+405207	[1728016506]	2000000 OPS in 1.878058 seconds, throughput 1064929.837098
+405207	[1728016507]	2000000 OPS in 1.885431 seconds, throughput 1060765.416502
+405207	[1728016507]	2000000 OPS in 1.917543 seconds, throughput 1043001.382498
+405207	[1728016508]	2000000 OPS in 1.910526 seconds, throughput 1046832.128953
+405207	[1728016508]	2000000 OPS in 1.894233 seconds, throughput 1055836.320030
+405207	[1728016509]	2000000 OPS in 1.898960 seconds, throughput 1053208.071787
+405207	[1728016509]	2000000 OPS in 1.883458 seconds, throughput 1061876.612061
+405207	[1728016510]	2000000 OPS in 1.894196 seconds, throughput 1055856.944054
+405207	[1728016510]	2000000 OPS in 1.864580 seconds, throughput 1072627.615871
+405207	[1728016510]	2000000 OPS in 1.861207 seconds, throughput 1074571.501182
+405207	[1728016511]	2000000 OPS in 1.860510 seconds, throughput 1074974.066251
+405207	[1728016512]	2000000 OPS in 1.859005 seconds, throughput 1075844.336083
+405207	[1728016512]	2000000 OPS in 1.847037 seconds, throughput 1082815.341544
+405207	[1728016512]	2000000 OPS in 1.878778 seconds, throughput 1064521.726356
+405207	[1728016513]	2000000 OPS in 1.852791 seconds, throughput 1079452.566425
+405207	[1728016514]	2000000 OPS in 1.901658 seconds, throughput 1051713.820256
+405207	[1728016514]	2000000 OPS in 1.874118 seconds, throughput 1067168.662806
+405207	[1728016514]	2000000 OPS in 1.861182 seconds, throughput 1074585.935175
+405207	[1728016514]	2000000 OPS in 1.856024 seconds, throughput 1077572.272772
+405207	[1728016515]	2000000 OPS in 1.861996 seconds, throughput 1074116.163515
+405207	[1728016516]	2000000 OPS in 1.826212 seconds, throughput 1095163.102641
+405207	[1728016516]	2000000 OPS in 1.869651 seconds, throughput 1069718.359202
+405207	[1728016516]	2000000 OPS in 1.849951 seconds, throughput 1081109.715879
+405207	[1728016517]	2000000 OPS in 1.869645 seconds, throughput 1069721.792105
+405207	[1728016517]	2000000 OPS in 1.866346 seconds, throughput 1071612.659175
+405207	[1728016518]	2000000 OPS in 1.872950 seconds, throughput 1067834.165354
+405207	[1728016518]	2000000 OPS in 1.862893 seconds, throughput 1073598.966768
+405207	[1728016519]	2000000 OPS in 1.842352 seconds, throughput 1085568.881517
+405207	[1728016519]	2000000 OPS in 1.828184 seconds, throughput 1093981.787391
+405207	[1728016520]	2000000 OPS in 1.845257 seconds, throughput 1083859.863423
+405207	[1728016520]	2000000 OPS in 1.833211 seconds, throughput 1090981.889155
+405207	[1728016521]	2000000 OPS in 1.840357 seconds, throughput 1086745.669454
+405207	[1728016521]	2000000 OPS in 1.831033 seconds, throughput 1092279.603918
+405207	[1728016522]	2000000 OPS in 1.855016 seconds, throughput 1078157.816429
+405207	[1728016522]	2000000 OPS in 1.946849 seconds, throughput 1027301.038755
+405207	[1728016523]	2000000 OPS in 1.867466 seconds, throughput 1070969.966789
+405207	[1728016523]	2000000 OPS in 1.899621 seconds, throughput 1052841.593139
+405207	[1728016523]	2000000 OPS in 1.865270 seconds, throughput 1072230.829853
+405207	[1728016524]	2000000 OPS in 1.848564 seconds, throughput 1081920.885617
+405207	[1728016525]	2000000 OPS in 1.833995 seconds, throughput 1090515.513946
+405207	[1728016525]	2000000 OPS in 1.858966 seconds, throughput 1075866.906657
+405207	[1728016525]	2000000 OPS in 1.885074 seconds, throughput 1060966.306893
+405207	[1728016526]	2000000 OPS in 1.874697 seconds, throughput 1066839.067860
+405207	[1728016527]	2000000 OPS in 1.872264 seconds, throughput 1068225.421201
+405207	[1728016527]	2000000 OPS in 1.886240 seconds, throughput 1060310.458902
+405207	[1728016527]	2000000 OPS in 1.891647 seconds, throughput 1057279.714450
+405207	[1728016528]	2000000 OPS in 1.873885 seconds, throughput 1067301.355206
+405207	[1728016528]	2000000 OPS in 1.865401 seconds, throughput 1072155.531170
+405207	[1728016529]	2000000 OPS in 1.909593 seconds, throughput 1047343.596253
+405207	[1728016529]	2000000 OPS in 1.902805 seconds, throughput 1051079.853164
+405207	[1728016529]	2000000 OPS in 1.884459 seconds, throughput 1061312.557079
+405207	[1728016530]	2000000 OPS in 1.893348 seconds, throughput 1056329.845332
+405207	[1728016530]	2000000 OPS in 1.897583 seconds, throughput 1053972.342712
+405207	[1728016531]	2000000 OPS in 1.908186 seconds, throughput 1048115.854534
+405207	[1728016531]	2000000 OPS in 1.901108 seconds, throughput 1052018.086295
+405207	[1728016532]	2000000 OPS in 1.885297 seconds, throughput 1060840.811819
+405207	[1728016532]	2000000 OPS in 1.863294 seconds, throughput 1073367.917248
+405207	[1728016533]	2000000 OPS in 1.863440 seconds, throughput 1073283.819173
+405207	[1728016533]	2000000 OPS in 1.879457 seconds, throughput 1064137.141738
+405207	[1728016534]	2000000 OPS in 1.878971 seconds, throughput 1064412.383161
+405207	[1728016534]	2000000 OPS in 1.890197 seconds, throughput 1058090.770433
+405207	[1728016535]	2000000 OPS in 1.886999 seconds, throughput 1059883.974501
+405207	[1728016535]	2000000 OPS in 1.898050 seconds, throughput 1053713.021259
+405207	[1728016536]	2000000 OPS in 1.867940 seconds, throughput 1070698.202298
+405207	[1728016536]	2000000 OPS in 1.896657 seconds, throughput 1054486.920935
+405207	[1728016537]	2000000 OPS in 1.870129 seconds, throughput 1069444.942033
+405207	[1728016537]	2000000 OPS in 1.845988 seconds, throughput 1083430.661521
+405207	[1728016538]	2000000 OPS in 1.836953 seconds, throughput 1088759.483776
+405207	[1728016538]	2000000 OPS in 1.855687 seconds, throughput 1077767.964102
+405207	[1728016539]	2000000 OPS in 1.846682 seconds, throughput 1083023.498361
+405207	[1728016539]	2000000 OPS in 1.835586 seconds, throughput 1089570.306158
+405207	[1728016540]	2000000 OPS in 1.825129 seconds, throughput 1095812.953495
+405207	[1728016540]	2000000 OPS in 1.853923 seconds, throughput 1078793.455823
+405207	[1728016540]	2000000 OPS in 1.846357 seconds, throughput 1083214.134645
+405207	[1728016541]	2000000 OPS in 1.837153 seconds, throughput 1088640.956959
+405207	[1728016542]	2000000 OPS in 1.845931 seconds, throughput 1083464.116481
+405207	[1728016542]	2000000 OPS in 1.858304 seconds, throughput 1076250.172200
+405207	[1728016542]	2000000 OPS in 1.854877 seconds, throughput 1078238.610970
+405207	[1728016542]	2000000 OPS in 1.856353 seconds, throughput 1077381.295476
+405207	[1728016543]	2000000 OPS in 1.877867 seconds, throughput 1065038.152329
+405207	[1728016544]	2000000 OPS in 1.883825 seconds, throughput 1061669.741085
+405207	[1728016544]	2000000 OPS in 1.860305 seconds, throughput 1075092.525150
+405207	[1728016544]	2000000 OPS in 1.868847 seconds, throughput 1070178.564644
+405207	[1728016545]	2000000 OPS in 1.858627 seconds, throughput 1076063.136928
+405207	[1728016545]	2000000 OPS in 1.880111 seconds, throughput 1063766.979716
+405207	[1728016546]	2000000 OPS in 1.892768 seconds, throughput 1056653.535985
+405207	[1728016546]	2000000 OPS in 1.896841 seconds, throughput 1054384.632133
+405207	[1728016547]	2000000 OPS in 1.946072 seconds, throughput 1027711.204930
+405207	[1728016547]	2000000 OPS in 1.951137 seconds, throughput 1025043.346521
+405207	[1728016548]	2000000 OPS in 1.905922 seconds, throughput 1049360.886752
+405207	[1728016548]	2000000 OPS in 1.905069 seconds, throughput 1049830.741039
+405207	[1728016549]	2000000 OPS in 1.832394 seconds, throughput 1091468.319586
+405207	[1728016549]	2000000 OPS in 1.852817 seconds, throughput 1079437.418806
+405207	[1728016550]	2000000 OPS in 1.844111 seconds, throughput 1084533.414746
+405207	[1728016550]	2000000 OPS in 1.839558 seconds, throughput 1087217.690336
+405207	[1728016551]	2000000 OPS in 1.832399 seconds, throughput 1091465.341337
+405207	[1728016551]	2000000 OPS in 1.868489 seconds, throughput 1070383.609430
+405207	[1728016552]	2000000 OPS in 1.852952 seconds, throughput 1079358.774539
+405207	[1728016552]	2000000 OPS in 1.848727 seconds, throughput 1081825.493975
+405207	[1728016553]	2000000 OPS in 1.840010 seconds, throughput 1086950.614399
+405207	[1728016553]	2000000 OPS in 1.854798 seconds, throughput 1078284.535567
+405207	[1728016553]	2000000 OPS in 1.845332 seconds, throughput 1083815.812006
+405207	[1728016554]	2000000 OPS in 1.835504 seconds, throughput 1089618.982034
+405207	[1728016555]	2000000 OPS in 1.838287 seconds, throughput 1087969.397597
+405207	[1728016555]	2000000 OPS in 1.862084 seconds, throughput 1074065.401990
+405207	[1728016555]	2000000 OPS in 1.846165 seconds, throughput 1083326.788234
+405207	[1728016556]	2000000 OPS in 1.839883 seconds, throughput 1087025.642391
+405207	[1728016556]	2000000 OPS in 1.920205 seconds, throughput 1041555.458922
+405207	[1728016557]	2000000 OPS in 1.932391 seconds, throughput 1034987.225670
+405207	[1728016557]	2000000 OPS in 1.892783 seconds, throughput 1056645.162177
+405207	[1728016557]	2000000 OPS in 1.927580 seconds, throughput 1037570.425093
+405207	[1728016558]	2000000 OPS in 1.858966 seconds, throughput 1075866.906657
+405207	[1728016559]	2000000 OPS in 1.875738 seconds, throughput 1066246.991851
+405207	[1728016559]	2000000 OPS in 1.890338 seconds, throughput 1058011.847617
+405207	[1728016559]	2000000 OPS in 1.863908 seconds, throughput 1073014.333325
+405207	[1728016560]	2000000 OPS in 1.870710 seconds, throughput 1069112.796746
+405207	[1728016561]	2000000 OPS in 1.911256 seconds, throughput 1046432.293738
+405207	[1728016561]	2000000 OPS in 1.852511 seconds, throughput 1079615.721580
+405207	[1728016561]	2000000 OPS in 1.852387 seconds, throughput 1079687.991764
+405207	[1728016562]	2000000 OPS in 1.833665 seconds, throughput 1090711.771234
+405207	[1728016562]	2000000 OPS in 1.857044 seconds, throughput 1076980.405419
+405207	[1728016563]	2000000 OPS in 1.845702 seconds, throughput 1083598.544077
+405207	[1728016563]	2000000 OPS in 1.834956 seconds, throughput 1089944.391037
+405207	[1728016564]	2000000 OPS in 1.843640 seconds, throughput 1084810.483609
+405207	[1728016564]	2000000 OPS in 1.883856 seconds, throughput 1061652.270662
+405207	[1728016565]	2000000 OPS in 1.870414 seconds, throughput 1069281.987838
+405207	[1728016565]	2000000 OPS in 1.859225 seconds, throughput 1075717.032635
+405207	[1728016566]	2000000 OPS in 1.863675 seconds, throughput 1073148.483507
+405207	[1728016566]	2000000 OPS in 1.859422 seconds, throughput 1075603.063748
+405207	[1728016566]	2000000 OPS in 1.851657 seconds, throughput 1080113.649558
+405207	[1728016567]	2000000 OPS in 1.851501 seconds, throughput 1080204.655574
+405207	[1728016568]	2000000 OPS in 1.874949 seconds, throughput 1066695.680789
+405207	[1728016568]	2000000 OPS in 1.921216 seconds, throughput 1041007.362004
+405207	[1728016568]	2000000 OPS in 1.922383 seconds, throughput 1040375.409063
+405207	[1728016569]	2000000 OPS in 1.914325 seconds, throughput 1044754.678542
+405207	[1728016569]	2000000 OPS in 1.851137 seconds, throughput 1080417.062595
+405207	[1728016570]	2000000 OPS in 1.867322 seconds, throughput 1071052.555478
+405207	[1728016570]	2000000 OPS in 1.852400 seconds, throughput 1079680.414597
+405207	[1728016570]	2000000 OPS in 1.863153 seconds, throughput 1073449.147762
+405207	[1728016571]	2000000 OPS in 1.846412 seconds, throughput 1083181.868402
+405207	[1728016572]	2000000 OPS in 1.862257 seconds, throughput 1073965.623434
+405207	[1728016572]	2000000 OPS in 1.843811 seconds, throughput 1084709.875361
+405207	[1728016572]	2000000 OPS in 1.853568 seconds, throughput 1079000.069056
+405207	[1728016573]	2000000 OPS in 1.871562 seconds, throughput 1068626.099483
+405207	[1728016574]	2000000 OPS in 1.907825 seconds, throughput 1048314.179760
+405207	[1728016574]	2000000 OPS in 1.886401 seconds, throughput 1060219.963836
+405207	[1728016574]	2000000 OPS in 1.866625 seconds, throughput 1071452.487779
+405207	[1728016575]	2000000 OPS in 1.844617 seconds, throughput 1084235.914556
+405207	[1728016576]	2000000 OPS in 1.854992 seconds, throughput 1078171.765700
+405207	[1728016576]	2000000 OPS in 1.859611 seconds, throughput 1075493.745735
+405207	[1728016576]	2000000 OPS in 1.840475 seconds, throughput 1086675.993969
+405207	[1728016577]	2000000 OPS in 1.853786 seconds, throughput 1078873.181694
+405207	[1728016577]	2000000 OPS in 1.861508 seconds, throughput 1074397.746343
+405207	[1728016578]	2000000 OPS in 1.890590 seconds, throughput 1057870.823394
+405207	[1728016578]	2000000 OPS in 1.877760 seconds, throughput 1065098.841172
+405207	[1728016579]	2000000 OPS in 1.910006 seconds, throughput 1047117.129475
+405207	[1728016579]	2000000 OPS in 1.920624 seconds, throughput 1041328.234990
+405207	[1728016580]	2000000 OPS in 1.896915 seconds, throughput 1054343.499841
+405207	[1728016580]	2000000 OPS in 1.914524 seconds, throughput 1044646.084353
+405207	[1728016581]	2000000 OPS in 1.844054 seconds, throughput 1084566.937845
+405207	[1728016581]	2000000 OPS in 1.855901 seconds, throughput 1077643.688968
+405207	[1728016581]	2000000 OPS in 1.846247 seconds, throughput 1083278.672897
+405207	[1728016582]	2000000 OPS in 1.836778 seconds, throughput 1088863.215914
+405207	[1728016582]	2000000 OPS in 1.826012 seconds, throughput 1095283.054000
+405207	[1728016583]	2000000 OPS in 1.855114 seconds, throughput 1078100.860648
+405207	[1728016583]	2000000 OPS in 1.842634 seconds, throughput 1085402.744115
+405207	[1728016584]	2000000 OPS in 1.837038 seconds, throughput 1088709.106725
+405207	[1728016584]	2000000 OPS in 1.826810 seconds, throughput 1094804.604748
+405207	[1728016585]	2000000 OPS in 1.904063 seconds, throughput 1050385.412668
+405207	[1728016585]	2000000 OPS in 1.902632 seconds, throughput 1051175.424360
+405207	[1728016585]	2000000 OPS in 1.875697 seconds, throughput 1066270.298454
+405207	[1728016586]	2000000 OPS in 1.851920 seconds, throughput 1079960.257463
+405207	[1728016587]	2000000 OPS in 1.856447 seconds, throughput 1077326.742967
+405207	[1728016587]	2000000 OPS in 1.855457 seconds, throughput 1077901.562796
+405207	[1728016587]	2000000 OPS in 1.844641 seconds, throughput 1084221.807929
+405207	[1728016588]	2000000 OPS in 1.863050 seconds, throughput 1073508.494136
+405207	[1728016589]	2000000 OPS in 1.871701 seconds, throughput 1068546.739036
+405207	[1728016589]	2000000 OPS in 1.904209 seconds, throughput 1050304.877248
+405207	[1728016589]	2000000 OPS in 1.905140 seconds, throughput 1049791.616364
+405207	[1728016590]	2000000 OPS in 1.882145 seconds, throughput 1062617.386014
+405207	[1728016591]	2000000 OPS in 1.903814 seconds, throughput 1050522.792668
+405207	[1728016591]	2000000 OPS in 1.863332 seconds, throughput 1073346.027439
+405207	[1728016591]	2000000 OPS in 1.837984 seconds, throughput 1088148.754287
+405207	[1728016592]	2000000 OPS in 1.848657 seconds, throughput 1081866.457650
+405207	[1728016592]	2000000 OPS in 1.854801 seconds, throughput 1078282.791523
+405207	[1728016593]	2000000 OPS in 1.860613 seconds, throughput 1074914.557729
+405207	[1728016593]	2000000 OPS in 1.849257 seconds, throughput 1081515.441066
+405207	[1728016594]	2000000 OPS in 1.825691 seconds, throughput 1095475.630871
+405207	[1728016594]	2000000 OPS in 1.854717 seconds, throughput 1078331.626874
+405207	[1728016595]	2000000 OPS in 1.850949 seconds, throughput 1080526.800036
+405207	[1728016595]	2000000 OPS in 1.836210 seconds, throughput 1089200.037033
+405207	[1728016595]	2000000 OPS in 1.837862 seconds, throughput 1088220.987212
+405207	[1728016596]	2000000 OPS in 1.901798 seconds, throughput 1051636.398818
+405207	[1728016596]	2000000 OPS in 1.883664 seconds, throughput 1061760.483823
+405207	[1728016597]	2000000 OPS in 1.855486 seconds, throughput 1077884.715918
+405207	[1728016597]	2000000 OPS in 1.866436 seconds, throughput 1071560.985750
+405207	[1728016598]	2000000 OPS in 1.875795 seconds, throughput 1066214.591680
+405207	[1728016598]	2000000 OPS in 1.864590 seconds, throughput 1072621.863251
+405207	[1728016598]	2000000 OPS in 1.861525 seconds, throughput 1074387.934623
+405207	[1728016599]	2000000 OPS in 1.926951 seconds, throughput 1037909.111337
+405207	[1728016600]	2000000 OPS in 1.968994 seconds, throughput 1015747.127721
+405207	[1728016600]	2000000 OPS in 1.911471 seconds, throughput 1046314.592270
+405207	[1728016600]	2000000 OPS in 1.915562 seconds, throughput 1044080.014116
+405207	[1728016601]	2000000 OPS in 1.875446 seconds, throughput 1066413.002560
+405207	[1728016602]	2000000 OPS in 1.900237 seconds, throughput 1052500.293384
+405207	[1728016602]	2000000 OPS in 1.867015 seconds, throughput 1071228.672507
+405207	[1728016602]	2000000 OPS in 1.882702 seconds, throughput 1062303.009186
+405207	[1728016603]	2000000 OPS in 1.893268 seconds, throughput 1056374.480528
+405207	[1728016604]	2000000 OPS in 1.880244 seconds, throughput 1063691.733626
+405207	[1728016604]	2000000 OPS in 1.885248 seconds, throughput 1060868.384425
+405207	[1728016604]	2000000 OPS in 1.865045 seconds, throughput 1072360.184339
+405207	[1728016605]	2000000 OPS in 1.877092 seconds, throughput 1065477.877483
+405207	[1728016606]	2000000 OPS in 1.883147 seconds, throughput 1062051.980010
+405207	[1728016606]	2000000 OPS in 1.913536 seconds, throughput 1045185.457708
+405207	[1728016606]	2000000 OPS in 1.872837 seconds, throughput 1067898.594485
+405207	[1728016607]	2000000 OPS in 1.841707 seconds, throughput 1085949.067903
+405207	[1728016608]	2000000 OPS in 1.853760 seconds, throughput 1078888.313482
+405207	[1728016608]	2000000 OPS in 1.858919 seconds, throughput 1075894.108350
+405207	[1728016608]	2000000 OPS in 1.855359 seconds, throughput 1077958.497520
+405207	[1728016609]	2000000 OPS in 1.856525 seconds, throughput 1077281.480185
+405207	[1728016609]	2000000 OPS in 1.903754 seconds, throughput 1050555.901655
+405207	[1728016610]	2000000 OPS in 1.865650 seconds, throughput 1072012.435344
+405207	[1728016610]	2000000 OPS in 1.892312 seconds, throughput 1056908.163136
+405207	[1728016610]	2000000 OPS in 1.862477 seconds, throughput 1073838.764183
+405207	[1728016611]	2000000 OPS in 1.856611 seconds, throughput 1077231.579475
+405207	[1728016611]	2000000 OPS in 1.836958 seconds, throughput 1088756.520291
+405207	[1728016611]	2000000 OPS in 1.844877 seconds, throughput 1084083.112316
+405207	[1728016612]	2000000 OPS in 1.828187 seconds, throughput 1093979.992200
+405207	[1728016613]	2000000 OPS in 1.855431 seconds, throughput 1077916.667340
+405207	[1728016613]	2000000 OPS in 1.840292 seconds, throughput 1086784.053835
+405207	[1728016613]	2000000 OPS in 1.843927 seconds, throughput 1084641.637115
+405207	[1728016614]	2000000 OPS in 1.839099 seconds, throughput 1087489.036751
+405207	[1728016615]	2000000 OPS in 1.865603 seconds, throughput 1072039.442475
+405207	[1728016615]	2000000 OPS in 1.843894 seconds, throughput 1084661.048846
+405207	[1728016615]	2000000 OPS in 1.859818 seconds, throughput 1075374.041976
+405207	[1728016616]	2000000 OPS in 1.866393 seconds, throughput 1071585.673542
+405207	[1728016617]	2000000 OPS in 1.883962 seconds, throughput 1061592.537429
+405207	[1728016617]	2000000 OPS in 1.897030 seconds, throughput 1054279.584403
+405207	[1728016617]	2000000 OPS in 1.891874 seconds, throughput 1057152.854788
+405207	[1728016618]	2000000 OPS in 1.854129 seconds, throughput 1078673.598223
+405207	[1728016619]	2000000 OPS in 1.892713 seconds, throughput 1056684.241087
+405207	[1728016619]	2000000 OPS in 1.863482 seconds, throughput 1073259.629017
+405207	[1728016619]	2000000 OPS in 1.879808 seconds, throughput 1063938.444777
+405207	[1728016620]	2000000 OPS in 1.844841 seconds, throughput 1084104.266980
+405207	[1728016621]	2000000 OPS in 1.886331 seconds, throughput 1060259.307619
+405207	[1728016621]	2000000 OPS in 1.844201 seconds, throughput 1084480.487756
+405207	[1728016621]	2000000 OPS in 1.874443 seconds, throughput 1066983.631938
+405207	[1728016621]	2000000 OPS in 1.842426 seconds, throughput 1085525.280255
+405207	[1728016623]	2000000 OPS in 1.836806 seconds, throughput 1088846.617444
+405207	[1728016623]	2000000 OPS in 1.877086 seconds, throughput 1065481.283223
+405207	[1728016623]	2000000 OPS in 1.852042 seconds, throughput 1079889.116985
+405207	[1728016623]	2000000 OPS in 1.856321 seconds, throughput 1077399.867803
+405207	[1728016624]	2000000 OPS in 1.854975 seconds, throughput 1078181.646653
+405207	[1728016624]	2000000 OPS in 1.888092 seconds, throughput 1059270.416908
+405207	[1728016625]	2000000 OPS in 1.879115 seconds, throughput 1064330.815304
+405207	[1728016625]	2000000 OPS in 1.866316 seconds, throughput 1071629.884757
+405207	[1728016626]	2000000 OPS in 1.859762 seconds, throughput 1075406.422972
+405207	[1728016626]	2000000 OPS in 1.892855 seconds, throughput 1056604.969741
+405207	[1728016626]	2000000 OPS in 1.882542 seconds, throughput 1062393.295873
+405207	[1728016627]	2000000 OPS in 1.848394 seconds, throughput 1082020.391756
+405207	[1728016628]	2000000 OPS in 1.880988 seconds, throughput 1063271.004387
+405207	[1728016628]	2000000 OPS in 1.897494 seconds, throughput 1054021.778198
+405207	[1728016628]	2000000 OPS in 1.886298 seconds, throughput 1060277.856415
+405207	[1728016629]	2000000 OPS in 1.909426 seconds, throughput 1047435.197803
+405207	[1728016630]	2000000 OPS in 1.876965 seconds, throughput 1065549.970298
+405207	[1728016630]	2000000 OPS in 1.909230 seconds, throughput 1047542.726649
+405207	[1728016630]	2000000 OPS in 1.871007 seconds, throughput 1068943.087867
+405207	[1728016631]	2000000 OPS in 1.846737 seconds, throughput 1082991.243474
+405207	[1728016632]	2000000 OPS in 1.853944 seconds, throughput 1078781.236111
+405207	[1728016632]	2000000 OPS in 1.884815 seconds, throughput 1061112.098535
+405207	[1728016632]	2000000 OPS in 1.875383 seconds, throughput 1066448.826720
+405207	[1728016633]	2000000 OPS in 1.846448 seconds, throughput 1083160.749721
+405207	[1728016634]	2000000 OPS in 1.838560 seconds, throughput 1087807.849621
+405207	[1728016634]	2000000 OPS in 1.844989 seconds, throughput 1084017.303084
+405207	[1728016634]	2000000 OPS in 1.856756 seconds, throughput 1077147.455024
+405207	[1728016634]	2000000 OPS in 1.825688 seconds, throughput 1095477.430974
+405207	[1728016636]	2000000 OPS in 1.838763 seconds, throughput 1087687.755301
+405207	[1728016636]	2000000 OPS in 1.850424 seconds, throughput 1080833.365758
+405207	[1728016636]	2000000 OPS in 1.869598 seconds, throughput 1069748.683942
+405207	[1728016636]	2000000 OPS in 1.828353 seconds, throughput 1093880.667464
+405207	[1728016638]	2000000 OPS in 1.905829 seconds, throughput 1049412.093110
+405207	[1728016638]	2000000 OPS in 1.895618 seconds, throughput 1055064.891766
+405207	[1728016638]	2000000 OPS in 1.889723 seconds, throughput 1058356.171778
+405207	[1728016638]	2000000 OPS in 1.855338 seconds, throughput 1077970.698600
+405207	[1728016639]	2000000 OPS in 1.833865 seconds, throughput 1090592.818992
+405207	[1728016640]	2000000 OPS in 1.844847 seconds, throughput 1084100.741145
+405207	[1728016640]	2000000 OPS in 1.864963 seconds, throughput 1072407.334623
+405207	[1728016640]	2000000 OPS in 1.831342 seconds, throughput 1092095.304973
+405207	[1728016641]	2000000 OPS in 1.875117 seconds, throughput 1066600.110820
+405207	[1728016641]	2000000 OPS in 1.874599 seconds, throughput 1066894.839910
+405207	[1728016641]	2000000 OPS in 1.884749 seconds, throughput 1061149.256479
+405207	[1728016642]	2000000 OPS in 1.882217 seconds, throughput 1062576.737964
+405207	[1728016643]	2000000 OPS in 1.874725 seconds, throughput 1066823.134060
+405207	[1728016643]	2000000 OPS in 1.884322 seconds, throughput 1061389.720016
+405207	[1728016643]	2000000 OPS in 1.905759 seconds, throughput 1049450.638827
+405207	[1728016644]	2000000 OPS in 1.872640 seconds, throughput 1068010.936432
+405207	[1728016645]	2000000 OPS in 1.889441 seconds, throughput 1058514.131958
+405207	[1728016645]	2000000 OPS in 1.873808 seconds, throughput 1067345.213597
+405207	[1728016645]	2000000 OPS in 1.892935 seconds, throughput 1056560.315066
+405207	[1728016646]	2000000 OPS in 1.907345 seconds, throughput 1048577.997164
+405207	[1728016647]	2000000 OPS in 1.861210 seconds, throughput 1074569.769129
+405207	[1728016647]	2000000 OPS in 1.927526 seconds, throughput 1037599.492821
+405207	[1728016647]	2000000 OPS in 1.908945 seconds, throughput 1047699.121766
+405207	[1728016647]	2000000 OPS in 1.867089 seconds, throughput 1071186.215547
+405207	[1728016649]	2000000 OPS in 1.880557 seconds, throughput 1063514.692721
+405207	[1728016649]	2000000 OPS in 1.858286 seconds, throughput 1076260.597131
+405207	[1728016649]	2000000 OPS in 1.866106 seconds, throughput 1071750.479340
+405207	[1728016649]	2000000 OPS in 1.843487 seconds, throughput 1084900.517335
+405207	[1728016651]	2000000 OPS in 1.852075 seconds, throughput 1079869.875680
+405207	[1728016651]	2000000 OPS in 1.846927 seconds, throughput 1082879.832284
+405207	[1728016651]	2000000 OPS in 1.856731 seconds, throughput 1077161.958302
+405207	[1728016651]	2000000 OPS in 1.869998 seconds, throughput 1069519.860449
+405207	[1728016652]	2000000 OPS in 1.900434 seconds, throughput 1052391.190644
+405207	[1728016653]	2000000 OPS in 1.890993 seconds, throughput 1057645.374679
+405207	[1728016653]	2000000 OPS in 1.895230 seconds, throughput 1055280.889391
+405207	[1728016653]	2000000 OPS in 1.867750 seconds, throughput 1070807.120867
+405207	[1728016654]	2000000 OPS in 1.876772 seconds, throughput 1065659.547350
+405207	[1728016655]	2000000 OPS in 1.937318 seconds, throughput 1032355.039286
+405207	[1728016655]	2000000 OPS in 1.995554 seconds, throughput 1002227.952739
+405207	[1728016655]	2000000 OPS in 1.892844 seconds, throughput 1056611.110054
+405207	[1728016656]	2000000 OPS in 1.904513 seconds, throughput 1050137.226682
+405207	[1728016656]	2000000 OPS in 1.859655 seconds, throughput 1075468.299228
+405207	[1728016657]	2000000 OPS in 1.893261 seconds, throughput 1056378.386287
+405207	[1728016657]	2000000 OPS in 1.894726 seconds, throughput 1055561.595714
+405207	[1728016658]	2000000 OPS in 1.862033 seconds, throughput 1074094.820017
+405207	[1728016658]	2000000 OPS in 1.901549 seconds, throughput 1051774.106268
+405207	[1728016659]	2000000 OPS in 1.873484 seconds, throughput 1067529.800094
+405207	[1728016659]	2000000 OPS in 1.871499 seconds, throughput 1068662.072488
+405207	[1728016660]	2000000 OPS in 1.847875 seconds, throughput 1082324.291416
+405207	[1728016660]	2000000 OPS in 1.857173 seconds, throughput 1076905.597917
+405207	[1728016660]	2000000 OPS in 1.855440 seconds, throughput 1077911.438796
+405207	[1728016661]	2000000 OPS in 1.845099 seconds, throughput 1083952.676794
+405207	[1728016662]	2000000 OPS in 1.839680 seconds, throughput 1087145.590537
+405207	[1728016662]	2000000 OPS in 1.858179 seconds, throughput 1076322.571722
+405207	[1728016662]	2000000 OPS in 1.864476 seconds, throughput 1072687.446768
+405207	[1728016662]	2000000 OPS in 1.866875 seconds, throughput 1071309.005691
+405207	[1728016664]	2000000 OPS in 1.860736 seconds, throughput 1074843.502786
+405207	[1728016664]	2000000 OPS in 1.882818 seconds, throughput 1062237.560933
+405207	[1728016664]	2000000 OPS in 1.928079 seconds, throughput 1037301.894788
+405207	[1728016664]	2000000 OPS in 1.839792 seconds, throughput 1087079.408977
+405207	[1728016666]	2000000 OPS in 1.851469 seconds, throughput 1080223.325370
+405207	[1728016666]	2000000 OPS in 1.860960 seconds, throughput 1074714.126042
+405207	[1728016666]	2000000 OPS in 1.872225 seconds, throughput 1068247.673223
+405207	[1728016666]	2000000 OPS in 1.841888 seconds, throughput 1085842.353064
+405207	[1728016667]	2000000 OPS in 1.843647 seconds, throughput 1084806.364776
+405207	[1728016668]	2000000 OPS in 1.865672 seconds, throughput 1071999.794176
+405207	[1728016668]	2000000 OPS in 1.856956 seconds, throughput 1077031.442856
+405207	[1728016668]	2000000 OPS in 1.825949 seconds, throughput 1095320.844120
+405207	[1728016669]	2000000 OPS in 1.833891 seconds, throughput 1090577.357106
+405207	[1728016670]	2000000 OPS in 1.845811 seconds, throughput 1083534.554730
+405207	[1728016670]	2000000 OPS in 1.855362 seconds, throughput 1077956.754531
+405207	[1728016670]	2000000 OPS in 1.831531 seconds, throughput 1091982.609085
+405207	[1728016671]	2000000 OPS in 1.863911 seconds, throughput 1073012.606289
+405207	[1728016671]	2000000 OPS in 1.879162 seconds, throughput 1064304.195168
+405207	[1728016672]	2000000 OPS in 1.902228 seconds, throughput 1051398.675658
+405207	[1728016672]	2000000 OPS in 1.890800 seconds, throughput 1057753.331923
+405207	[1728016673]	2000000 OPS in 1.920414 seconds, throughput 1041442.105713
+405207	[1728016673]	2000000 OPS in 1.920983 seconds, throughput 1041133.627939
+405207	[1728016674]	2000000 OPS in 1.891607 seconds, throughput 1057302.071731
+405207	[1728016674]	2000000 OPS in 1.885937 seconds, throughput 1060480.811395
+405207	[1728016675]	2000000 OPS in 1.835410 seconds, throughput 1089674.786560
+405207	[1728016675]	2000000 OPS in 1.870306 seconds, throughput 1069343.733058
+405207	[1728016675]	2000000 OPS in 1.869038 seconds, throughput 1070069.201375
+405207	[1728016675]	2000000 OPS in 1.924775 seconds, throughput 1039082.490161
+405207	[1728016677]	2000000 OPS in 1.874353 seconds, throughput 1067034.864831
+405207	[1728016677]	2000000 OPS in 1.845336 seconds, throughput 1083813.462697
+405207	[1728016677]	2000000 OPS in 1.847616 seconds, throughput 1082476.012332
+405207	[1728016677]	2000000 OPS in 1.857298 seconds, throughput 1076833.119941
+405207	[1728016679]	2000000 OPS in 1.910086 seconds, throughput 1047073.273141
+405207	[1728016679]	2000000 OPS in 1.879486 seconds, throughput 1064120.722368
+405207	[1728016679]	2000000 OPS in 1.876513 seconds, throughput 1065806.631769
+405207	[1728016679]	2000000 OPS in 1.889394 seconds, throughput 1058540.463238
+405207	[1728016680]	2000000 OPS in 1.834784 seconds, throughput 1090046.566789
+405207	[1728016681]	2000000 OPS in 1.845821 seconds, throughput 1083528.684526
+405207	[1728016681]	2000000 OPS in 1.825028 seconds, throughput 1095873.597556
+405207	[1728016681]	2000000 OPS in 1.855904 seconds, throughput 1077641.946997
+405207	[1728016682]	2000000 OPS in 1.837637 seconds, throughput 1088354.228828
+405207	[1728016683]	2000000 OPS in 1.847333 seconds, throughput 1082641.840967
+405207	[1728016683]	2000000 OPS in 1.825912 seconds, throughput 1095343.039533
+405207	[1728016683]	2000000 OPS in 1.860074 seconds, throughput 1075226.039394
+405207	[1728016684]	2000000 OPS in 1.873046 seconds, throughput 1067779.435209
+405207	[1728016684]	2000000 OPS in 1.861273 seconds, throughput 1074533.397304
+405207	[1728016685]	2000000 OPS in 1.870150 seconds, throughput 1069432.933187
+405207	[1728016685]	2000000 OPS in 1.863167 seconds, throughput 1073441.081771
+405207	[1728016686]	2000000 OPS in 1.859952 seconds, throughput 1075296.566793
+405207	[1728016686]	2000000 OPS in 1.889138 seconds, throughput 1058683.907687
+405207	[1728016687]	2000000 OPS in 1.867358 seconds, throughput 1071031.907112
+405207	[1728016687]	2000000 OPS in 1.902342 seconds, throughput 1051335.669401
+405207	[1728016688]	2000000 OPS in 1.903232 seconds, throughput 1050844.037931
+405207	[1728016688]	2000000 OPS in 1.873013 seconds, throughput 1067798.248063
+405207	[1728016688]	2000000 OPS in 1.855681 seconds, throughput 1077771.448864
+405207	[1728016689]	2000000 OPS in 1.889512 seconds, throughput 1058474.357400
+405207	[1728016690]	2000000 OPS in 1.879839 seconds, throughput 1063920.899609
+405207	[1728016690]	2000000 OPS in 1.889506 seconds, throughput 1058477.718515
+405207	[1728016690]	2000000 OPS in 1.862921 seconds, throughput 1073582.830405
+405207	[1728016691]	2000000 OPS in 1.906673 seconds, throughput 1048947.564685
+405207	[1728016692]	2000000 OPS in 1.871061 seconds, throughput 1068912.237495
+405207	[1728016692]	2000000 OPS in 1.892301 seconds, throughput 1056914.306973
+405207	[1728016692]	2000000 OPS in 1.887889 seconds, throughput 1059384.317616
+405207	[1728016692]	2000000 OPS in 1.897237 seconds, throughput 1054164.556141
+405207	[1728016694]	2000000 OPS in 1.850110 seconds, throughput 1081016.804406
+405207	[1728016694]	2000000 OPS in 1.844823 seconds, throughput 1084114.844622
+405207	[1728016694]	2000000 OPS in 1.842686 seconds, throughput 1085372.114403
+405207	[1728016694]	2000000 OPS in 1.845577 seconds, throughput 1083671.935660
+405207	[1728016695]	2000000 OPS in 1.836834 seconds, throughput 1088830.019479
+405207	[1728016696]	2000000 OPS in 1.853929 seconds, throughput 1078789.964448
+405207	[1728016696]	2000000 OPS in 1.849538 seconds, throughput 1081351.126606
+405207	[1728016696]	2000000 OPS in 1.877600 seconds, throughput 1065189.603749
+405207	[1728016697]	2000000 OPS in 1.863843 seconds, throughput 1073051.753823
+405207	[1728016698]	2000000 OPS in 1.893961 seconds, throughput 1055987.953289
+405207	[1728016698]	2000000 OPS in 1.866511 seconds, throughput 1071517.928370
+405207	[1728016698]	2000000 OPS in 1.878355 seconds, throughput 1064761.453506
+405207	[1728016699]	2000000 OPS in 1.870629 seconds, throughput 1069159.090338
+405207	[1728016699]	2000000 OPS in 1.870256 seconds, throughput 1069372.321222
+405207	[1728016700]	2000000 OPS in 1.858346 seconds, throughput 1076225.848147
+405207	[1728016700]	2000000 OPS in 1.870821 seconds, throughput 1069049.363889
+405207	[1728016701]	2000000 OPS in 1.871056 seconds, throughput 1068915.093936
+405207	[1728016701]	2000000 OPS in 1.879476 seconds, throughput 1064126.384162
+405207	[1728016701]	2000000 OPS in 1.884281 seconds, throughput 1061412.814755
+405207	[1728016702]	2000000 OPS in 1.879523 seconds, throughput 1064099.774251
+405207	[1728016703]	2000000 OPS in 1.833345 seconds, throughput 1090902.148805
+405207	[1728016703]	2000000 OPS in 1.855467 seconds, throughput 1077895.753468
+405207	[1728016703]	2000000 OPS in 1.835903 seconds, throughput 1089382.173241
+405207	[1728016704]	2000000 OPS in 1.867783 seconds, throughput 1070788.201841
+405207	[1728016705]	2000000 OPS in 1.893367 seconds, throughput 1056319.245028
+405207	[1728016705]	2000000 OPS in 1.903887 seconds, throughput 1050482.512880
+405207	[1728016705]	2000000 OPS in 1.865196 seconds, throughput 1072273.369662
+405207	[1728016706]	2000000 OPS in 1.910063 seconds, throughput 1047085.881460
+405207	[1728016707]	2000000 OPS in 1.897654 seconds, throughput 1053932.908739
+405207	[1728016707]	2000000 OPS in 1.873938 seconds, throughput 1067271.169057
+405207	[1728016707]	2000000 OPS in 1.907802 seconds, throughput 1048326.817982
+405207	[1728016707]	2000000 OPS in 1.953131 seconds, throughput 1023996.854282
+405207	[1728016708]	2000000 OPS in 1.842276 seconds, throughput 1085613.664836
+405207	[1728016709]	2000000 OPS in 1.824808 seconds, throughput 1096005.716766
+405207	[1728016709]	2000000 OPS in 1.850989 seconds, throughput 1080503.449777
+405207	[1728016709]	2000000 OPS in 1.854366 seconds, throughput 1078535.736742
+405207	[1728016710]	2000000 OPS in 1.837963 seconds, throughput 1088161.187140
+405207	[1728016711]	2000000 OPS in 1.823695 seconds, throughput 1096674.608419
+405207	[1728016711]	2000000 OPS in 1.844408 seconds, throughput 1084358.775282
+405207	[1728016711]	2000000 OPS in 1.856399 seconds, throughput 1077354.598877
+405207	[1728016712]	2000000 OPS in 1.856785 seconds, throughput 1077130.631710
+405207	[1728016713]	2000000 OPS in 1.859293 seconds, throughput 1075677.690391
+405207	[1728016713]	2000000 OPS in 1.880926 seconds, throughput 1063306.052444
+405207	[1728016713]	2000000 OPS in 1.917130 seconds, throughput 1043226.072306
+405207	[1728016714]	2000000 OPS in 1.908272 seconds, throughput 1048068.619149
+405207	[1728016714]	2000000 OPS in 1.891323 seconds, throughput 1057460.835616
+405207	[1728016715]	2000000 OPS in 1.895181 seconds, throughput 1055308.173731
+405207	[1728016715]	2000000 OPS in 1.872757 seconds, throughput 1067944.212730
+405207	[1728016716]	2000000 OPS in 1.839833 seconds, throughput 1087055.183813
+405207	[1728016716]	2000000 OPS in 1.852525 seconds, throughput 1079607.562651
+405207	[1728016716]	2000000 OPS in 1.854657 seconds, throughput 1078366.511975
+405207	[1728016717]	2000000 OPS in 1.870431 seconds, throughput 1069272.269333
+405207	[1728016718]	2000000 OPS in 1.863154 seconds, throughput 1073448.571616
+405207	[1728016718]	2000000 OPS in 1.840242 seconds, throughput 1086813.582127
+405207	[1728016718]	2000000 OPS in 1.845889 seconds, throughput 1083488.768826
+405207	[1728016719]	2000000 OPS in 1.857378 seconds, throughput 1076786.739156
+405207	[1728016720]	2000000 OPS in 1.837639 seconds, throughput 1088353.044314
+405207	[1728016720]	2000000 OPS in 1.825237 seconds, throughput 1095748.113807
+405207	[1728016720]	2000000 OPS in 1.845181 seconds, throughput 1083904.505845
+405207	[1728016721]	2000000 OPS in 1.860867 seconds, throughput 1074767.836713
+405207	[1728016721]	2000000 OPS in 1.875769 seconds, throughput 1066229.370461
+405207	[1728016722]	2000000 OPS in 1.879475 seconds, throughput 1064126.950345
+405207	[1728016722]	2000000 OPS in 1.921360 seconds, throughput 1040929.341716
+405207	[1728016722]	2000000 OPS in 1.906051 seconds, throughput 1049289.866850
+405207	[1728016723]	2000000 OPS in 1.926557 seconds, throughput 1038121.374037
+405207	[1728016724]	2000000 OPS in 1.881790 seconds, throughput 1062817.848963
+405207	[1728016724]	2000000 OPS in 1.914307 seconds, throughput 1044764.502245
+405207	[1728016724]	2000000 OPS in 1.902611 seconds, throughput 1051187.026670
+405207	[1728016725]	2000000 OPS in 1.881874 seconds, throughput 1062770.408646
+405207	[1728016726]	2000000 OPS in 1.893503 seconds, throughput 1056243.375374
+405207	[1728016726]	2000000 OPS in 1.911944 seconds, throughput 1046055.742218
+405207	[1728016726]	2000000 OPS in 1.900911 seconds, throughput 1052127.111685
+405207	[1728016727]	2000000 OPS in 1.878955 seconds, throughput 1064421.447028
+405207	[1728016727]	2000000 OPS in 1.849811 seconds, throughput 1081191.537946
+405207	[1728016728]	2000000 OPS in 1.876961 seconds, throughput 1065552.241096
+405207	[1728016728]	2000000 OPS in 1.888139 seconds, throughput 1059244.049299
+405207	[1728016729]	2000000 OPS in 1.854062 seconds, throughput 1078712.578112
+405207	[1728016729]	2000000 OPS in 1.824969 seconds, throughput 1095909.026400
+405207	[1728016730]	2000000 OPS in 1.856213 seconds, throughput 1077462.554136
+405207	[1728016730]	2000000 OPS in 1.862224 seconds, throughput 1073984.654907
+405207	[1728016731]	2000000 OPS in 1.853148 seconds, throughput 1079244.615109
+405207	[1728016731]	2000000 OPS in 1.861481 seconds, throughput 1074413.330031
+405207	[1728016731]	2000000 OPS in 1.863995 seconds, throughput 1072964.251514
+405207	[1728016732]	2000000 OPS in 1.871803 seconds, throughput 1068488.510810
+405207	[1728016733]	2000000 OPS in 1.895665 seconds, throughput 1055038.733109
+405207	[1728016733]	2000000 OPS in 1.877296 seconds, throughput 1065362.095269
+405207	[1728016733]	2000000 OPS in 1.869810 seconds, throughput 1069627.395297
+405207	[1728016734]	2000000 OPS in 1.870979 seconds, throughput 1068959.085057
+405207	[1728016735]	2000000 OPS in 1.856893 seconds, throughput 1077067.983993
+405207	[1728016735]	2000000 OPS in 1.824669 seconds, throughput 1096089.208509
+405207	[1728016735]	2000000 OPS in 1.853015 seconds, throughput 1079322.077803
+405207	[1728016736]	2000000 OPS in 1.856760 seconds, throughput 1077145.134535
+405207	[1728016736]	2000000 OPS in 1.838319 seconds, throughput 1087950.459088
+405207	[1728016737]	2000000 OPS in 1.824927 seconds, throughput 1095934.248329
+405207	[1728016737]	2000000 OPS in 1.843013 seconds, throughput 1085179.540242
+405207	[1728016737]	2000000 OPS in 1.854710 seconds, throughput 1078335.696686
+405207	[1728016738]	2000000 OPS in 1.835088 seconds, throughput 1089865.990078
+405207	[1728016738]	2000000 OPS in 1.834276 seconds, throughput 1090348.453559
+405207	[1728016739]	2000000 OPS in 1.862858 seconds, throughput 1073619.137905
+405207	[1728016739]	2000000 OPS in 1.862263 seconds, throughput 1073962.163239
+405207	[1728016740]	2000000 OPS in 1.845320 seconds, throughput 1083822.859992
+405207	[1728016740]	2000000 OPS in 1.846809 seconds, throughput 1082949.021799
+405207	[1728016741]	2000000 OPS in 1.866012 seconds, throughput 1071804.468567
+405207	[1728016741]	2000000 OPS in 1.857272 seconds, throughput 1076848.194556
+405207	[1728016742]	2000000 OPS in 1.876333 seconds, throughput 1065908.876516
+405207	[1728016742]	2000000 OPS in 1.878984 seconds, throughput 1064405.018883
+405207	[1728016743]	2000000 OPS in 1.877564 seconds, throughput 1065210.027461
+405207	[1728016743]	2000000 OPS in 1.882542 seconds, throughput 1062393.295873
+405207	[1728016744]	2000000 OPS in 1.840046 seconds, throughput 1086929.348505
+405207	[1728016744]	2000000 OPS in 1.849764 seconds, throughput 1081219.009560
+405207	[1728016744]	2000000 OPS in 1.877638 seconds, throughput 1065168.046237
+405207	[1728016745]	2000000 OPS in 1.873835 seconds, throughput 1067329.834270
+405207	[1728016746]	2000000 OPS in 1.844491 seconds, throughput 1084309.980369
+405207	[1728016746]	2000000 OPS in 1.832556 seconds, throughput 1091371.832566
+405207	[1728016746]	2000000 OPS in 1.844815 seconds, throughput 1084119.545862
+405207	[1728016747]	2000000 OPS in 1.871157 seconds, throughput 1068857.396787
+405207	[1728016748]	2000000 OPS in 1.849628 seconds, throughput 1081298.509754
+405207	[1728016748]	2000000 OPS in 1.843828 seconds, throughput 1084699.874392
+405207	[1728016748]	2000000 OPS in 1.890688 seconds, throughput 1057815.990793
+405207	[1728016749]	2000000 OPS in 1.911136 seconds, throughput 1046497.999096
+405207	[1728016749]	2000000 OPS in 1.866570 seconds, throughput 1071484.058996
+405207	[1728016750]	2000000 OPS in 1.839674 seconds, throughput 1087149.136206
+405207	[1728016750]	2000000 OPS in 1.843487 seconds, throughput 1084900.517335
+405207	[1728016751]	2000000 OPS in 1.896296 seconds, throughput 1054687.664795
+405207	[1728016751]	2000000 OPS in 1.861709 seconds, throughput 1074281.748651
+405207	[1728016751]	2000000 OPS in 1.896999 seconds, throughput 1054296.813019
+405207	[1728016752]	2000000 OPS in 1.882377 seconds, throughput 1062486.420095
+405207	[1728016752]	2000000 OPS in 1.853420 seconds, throughput 1079086.229781
+405207	[1728016753]	2000000 OPS in 1.838209 seconds, throughput 1088015.562975
+405207	[1728016753]	2000000 OPS in 1.846233 seconds, throughput 1083286.887408
+405207	[1728016754]	2000000 OPS in 1.866336 seconds, throughput 1071618.400974
+405207	[1728016754]	2000000 OPS in 1.890869 seconds, throughput 1057714.733279
+405207	[1728016755]	2000000 OPS in 1.878864 seconds, throughput 1064473.000707
+405207	[1728016755]	2000000 OPS in 1.888652 seconds, throughput 1058956.334994
+405207	[1728016756]	2000000 OPS in 1.882116 seconds, throughput 1062633.759024
+405207	[1728016756]	2000000 OPS in 1.877667 seconds, throughput 1065151.595038
+405207	[1728016757]	2000000 OPS in 1.862602 seconds, throughput 1073766.698414
+405207	[1728016757]	2000000 OPS in 1.841635 seconds, throughput 1085991.523836
+405207	[1728016758]	2000000 OPS in 1.865470 seconds, throughput 1072115.874284
+405207	[1728016758]	2000000 OPS in 1.905674 seconds, throughput 1049497.448147
+405207	[1728016759]	2000000 OPS in 1.884055 seconds, throughput 1061540.135506
+405207	[1728016759]	2000000 OPS in 1.860424 seconds, throughput 1075023.758025
+405207	[1728016759]	2000000 OPS in 1.875876 seconds, throughput 1066168.552719
+405207	[1728016760]	2000000 OPS in 1.886887 seconds, throughput 1059946.886062
+405207	[1728016761]	2000000 OPS in 1.896516 seconds, throughput 1054565.318721
+405207	[1728016761]	2000000 OPS in 1.920945 seconds, throughput 1041154.223572
+405207	[1728016761]	2000000 OPS in 1.979497 seconds, throughput 1010357.681775
+405207	[1728016762]	2000000 OPS in 1.892815 seconds, throughput 1056627.298495
+405207	[1728016762]	2000000 OPS in 1.901505 seconds, throughput 1051798.443864
+405207	[1728016763]	2000000 OPS in 1.870322 seconds, throughput 1069334.585168
+405207	[1728016763]	2000000 OPS in 1.868320 seconds, throughput 1070480.431618
+405207	[1728016764]	2000000 OPS in 1.893143 seconds, throughput 1056444.230573
+405207	[1728016764]	2000000 OPS in 1.857248 seconds, throughput 1076862.109961
+405207	[1728016765]	2000000 OPS in 1.858971 seconds, throughput 1075864.012940
+405207	[1728016765]	2000000 OPS in 1.851465 seconds, throughput 1080225.659140
+405207	[1728016766]	2000000 OPS in 1.869012 seconds, throughput 1070084.087208
+405207	[1728016766]	2000000 OPS in 1.865251 seconds, throughput 1072241.751914
+405207	[1728016766]	2000000 OPS in 1.879155 seconds, throughput 1064308.159785
+405207	[1728016767]	2000000 OPS in 1.917549 seconds, throughput 1042998.118953
+405207	[1728016768]	2000000 OPS in 1.917684 seconds, throughput 1042924.694580
+405207	[1728016768]	2000000 OPS in 1.889435 seconds, throughput 1058517.493325
+405207	[1728016768]	2000000 OPS in 1.884114 seconds, throughput 1061506.893957
+405207	[1728016769]	2000000 OPS in 1.883159 seconds, throughput 1062045.212327
+405207	[1728016769]	2000000 OPS in 1.867050 seconds, throughput 1071208.591093
+405207	[1728016770]	2000000 OPS in 1.837845 seconds, throughput 1088231.053217
+405207	[1728016770]	2000000 OPS in 1.835430 seconds, throughput 1089662.912778
+405207	[1728016771]	2000000 OPS in 1.845661 seconds, throughput 1083622.615421
+405207	[1728016771]	2000000 OPS in 1.854379 seconds, throughput 1078528.175740
+405207	[1728016772]	2000000 OPS in 1.841442 seconds, throughput 1086105.345702
+405207	[1728016772]	2000000 OPS in 1.831878 seconds, throughput 1091775.762360
+405207	[1728016773]	2000000 OPS in 1.866534 seconds, throughput 1071504.724800
+405207	[1728016773]	2000000 OPS in 1.892548 seconds, throughput 1056776.367099
+405207	[1728016774]	2000000 OPS in 1.901122 seconds, throughput 1052010.339158
+405207	[1728016774]	2000000 OPS in 1.864657 seconds, throughput 1072583.322295
+405207	[1728016774]	2000000 OPS in 1.848660 seconds, throughput 1081864.702000
+405207	[1728016775]	2000000 OPS in 1.854703 seconds, throughput 1078339.766529
+405207	[1728016776]	2000000 OPS in 1.834801 seconds, throughput 1090036.467170
+405207	[1728016776]	2000000 OPS in 1.827310 seconds, throughput 1094505.037459
+405207	[1728016776]	2000000 OPS in 1.846371 seconds, throughput 1083205.921237
+405207	[1728016777]	2000000 OPS in 1.882809 seconds, throughput 1062242.638526
+405207	[1728016777]	2000000 OPS in 1.881032 seconds, throughput 1063246.132974
+405207	[1728016778]	2000000 OPS in 1.872087 seconds, throughput 1068326.418591
+405207	[1728016778]	2000000 OPS in 1.885947 seconds, throughput 1060475.188327
+405207	[1728016779]	2000000 OPS in 1.875200 seconds, throughput 1066552.901024
+405207	[1728016779]	2000000 OPS in 1.834237 seconds, throughput 1090371.636817
+405207	[1728016779]	2000000 OPS in 1.825100 seconds, throughput 1095830.365459
+405207	[1728016780]	2000000 OPS in 1.845113 seconds, throughput 1083944.452183
+405207	[1728016781]	2000000 OPS in 1.856999 seconds, throughput 1077006.503504
+405207	[1728016781]	2000000 OPS in 1.837139 seconds, throughput 1088649.252996
+405207	[1728016781]	2000000 OPS in 1.825313 seconds, throughput 1095702.490477
+405207	[1728016782]	2000000 OPS in 1.889918 seconds, throughput 1058246.971562
+405207	[1728016783]	2000000 OPS in 1.884370 seconds, throughput 1061362.683549
+405207	[1728016783]	2000000 OPS in 1.856729 seconds, throughput 1077163.118581
+405207	[1728016783]	2000000 OPS in 1.847862 seconds, throughput 1082331.905738
+405207	[1728016784]	2000000 OPS in 1.869862 seconds, throughput 1069597.649452
+405207	[1728016784]	2000000 OPS in 1.876679 seconds, throughput 1065712.356775
+405207	[1728016785]	2000000 OPS in 1.848065 seconds, throughput 1082213.017399
+405207	[1728016785]	2000000 OPS in 1.883249 seconds, throughput 1061994.457451
+405207	[1728016786]	2000000 OPS in 1.897992 seconds, throughput 1053745.221265
+405207	[1728016786]	2000000 OPS in 1.892823 seconds, throughput 1056622.832668
+405207	[1728016787]	2000000 OPS in 1.877780 seconds, throughput 1065087.496938
+405207	[1728016787]	2000000 OPS in 1.852877 seconds, throughput 1079402.464384
+405207	[1728016788]	2000000 OPS in 1.855115 seconds, throughput 1078100.279497
+405207	[1728016788]	2000000 OPS in 1.880747 seconds, throughput 1063407.252544
+405207	[1728016789]	2000000 OPS in 1.857513 seconds, throughput 1076708.480641
+405207	[1728016789]	2000000 OPS in 1.841456 seconds, throughput 1086097.088391
+405207	[1728016789]	2000000 OPS in 1.892416 seconds, throughput 1056850.079475
+405207	[1728016790]	2000000 OPS in 1.891443 seconds, throughput 1057393.746468
+405207	[1728016790]	2000000 OPS in 1.897991 seconds, throughput 1053745.776455
+405207	[1728016791]	2000000 OPS in 1.882783 seconds, throughput 1062257.307401
+405207	[1728016791]	2000000 OPS in 1.884437 seconds, throughput 1061324.947451
+405207	[1728016792]	2000000 OPS in 1.901563 seconds, throughput 1051766.362724
+405207	[1728016792]	2000000 OPS in 1.875687 seconds, throughput 1066275.983146
+405207	[1728016792]	2000000 OPS in 1.909846 seconds, throughput 1047204.853166
+405207	[1728016793]	2000000 OPS in 1.877465 seconds, throughput 1065266.196707
+405207	[1728016794]	2000000 OPS in 1.902136 seconds, throughput 1051449.528320
+405207	[1728016794]	2000000 OPS in 1.881892 seconds, throughput 1062760.243415
+405207	[1728016794]	2000000 OPS in 1.861700 seconds, throughput 1074286.942042
+405207	[1728016795]	2000000 OPS in 1.855671 seconds, throughput 1077777.256852
+405207	[1728016796]	2000000 OPS in 1.913045 seconds, throughput 1045453.713844
+405207	[1728016796]	2000000 OPS in 1.891207 seconds, throughput 1057525.696553
+405207	[1728016796]	2000000 OPS in 1.896791 seconds, throughput 1054412.426040
+405207	[1728016797]	2000000 OPS in 1.874088 seconds, throughput 1067185.745813
+405207	[1728016798]	2000000 OPS in 1.888315 seconds, throughput 1059145.322682
+405207	[1728016798]	2000000 OPS in 1.856954 seconds, throughput 1077032.602854
+405207	[1728016798]	2000000 OPS in 1.859492 seconds, throughput 1075562.573004
+405207	[1728016799]	2000000 OPS in 1.857833 seconds, throughput 1076523.024405
+405207	[1728016800]	2000000 OPS in 1.871207 seconds, throughput 1068828.836147
+405207	[1728016800]	2000000 OPS in 1.850381 seconds, throughput 1080858.482658
+405207	[1728016800]	2000000 OPS in 1.835260 seconds, throughput 1089763.848174
+405207	[1728016801]	2000000 OPS in 1.861811 seconds, throughput 1074222.893731
+405207	[1728016801]	2000000 OPS in 1.876022 seconds, throughput 1066085.578954
+405207	[1728016802]	2000000 OPS in 1.859786 seconds, throughput 1075392.545164
+405207	[1728016802]	2000000 OPS in 1.863686 seconds, throughput 1073142.149482
+405207	[1728016803]	2000000 OPS in 1.856141 seconds, throughput 1077504.349077
+405207	[1728016803]	2000000 OPS in 1.881011 seconds, throughput 1063258.003276
+405207	[1728016803]	2000000 OPS in 1.853644 seconds, throughput 1078955.829706
+405207	[1728016804]	2000000 OPS in 1.852284 seconds, throughput 1079748.030000
+405207	[1728016804]	2000000 OPS in 1.874296 seconds, throughput 1067067.314874
+405207	[1728016805]	2000000 OPS in 1.875960 seconds, throughput 1066120.812811
+405207	[1728016805]	2000000 OPS in 1.848004 seconds, throughput 1082248.739721
+405207	[1728016805]	2000000 OPS in 1.844124 seconds, throughput 1084525.769417
+405207	[1728016806]	2000000 OPS in 1.856163 seconds, throughput 1077491.578056
+405207	[1728016807]	2000000 OPS in 1.900772 seconds, throughput 1052204.051827
+405207	[1728016807]	2000000 OPS in 1.852100 seconds, throughput 1079855.299390
+405207	[1728016807]	2000000 OPS in 1.867909 seconds, throughput 1070715.971710
+405207	[1728016808]	2000000 OPS in 1.891686 seconds, throughput 1057257.917012
+405207	[1728016809]	2000000 OPS in 1.885414 seconds, throughput 1060774.980986
+405207	[1728016809]	2000000 OPS in 1.870729 seconds, throughput 1069101.938335
+405207	[1728016809]	2000000 OPS in 1.845277 seconds, throughput 1083848.116028
+405207	[1728016810]	2000000 OPS in 1.847105 seconds, throughput 1082775.478384
+405207	[1728016811]	2000000 OPS in 1.835941 seconds, throughput 1089359.625391
+405207	[1728016811]	2000000 OPS in 1.855293 seconds, throughput 1077996.844703
+405207	[1728016811]	2000000 OPS in 1.826319 seconds, throughput 1095098.939451
+405207	[1728016812]	2000000 OPS in 1.881745 seconds, throughput 1062843.265161
+405207	[1728016813]	2000000 OPS in 1.869937 seconds, throughput 1069554.749705
+405207	[1728016813]	2000000 OPS in 1.901279 seconds, throughput 1051923.468360
+405207	[1728016813]	2000000 OPS in 1.859959 seconds, throughput 1075292.519889
+405207	[1728016814]	2000000 OPS in 1.848154 seconds, throughput 1082160.902176
+405207	[1728016815]	2000000 OPS in 1.832506 seconds, throughput 1091401.610690
+405207	[1728016815]	2000000 OPS in 1.857131 seconds, throughput 1076929.952707
+405207	[1728016815]	2000000 OPS in 1.825305 seconds, throughput 1095707.292754
+405207	[1728016816]	2000000 OPS in 1.850090 seconds, throughput 1081028.490506
+405207	[1728016816]	2000000 OPS in 1.845620 seconds, throughput 1083646.687834
+405207	[1728016817]	2000000 OPS in 1.831538 seconds, throughput 1091978.435610
+405207	[1728016817]	2000000 OPS in 1.858344 seconds, throughput 1076227.006410
+405207	[1728016817]	2000000 OPS in 1.910002 seconds, throughput 1047119.322388
+405207	[1728016818]	2000000 OPS in 1.904036 seconds, throughput 1050400.307557
+405207	[1728016818]	2000000 OPS in 1.903828 seconds, throughput 1050515.067538
+405207	[1728016818]	2000000 OPS in 1.929867 seconds, throughput 1036340.846286
+405207	[1728016819]	2000000 OPS in 1.898251 seconds, throughput 1053601.446806
+405207	[1728016820]	2000000 OPS in 1.863422 seconds, throughput 1073294.186717
+405207	[1728016820]	2000000 OPS in 1.866959 seconds, throughput 1071260.804335
+405207	[1728016820]	2000000 OPS in 1.854471 seconds, throughput 1078474.670135
+405207	[1728016821]	2000000 OPS in 1.864611 seconds, throughput 1072609.782952
+405207	[1728016822]	2000000 OPS in 1.886887 seconds, throughput 1059946.886062
+405207	[1728016822]	2000000 OPS in 1.885738 seconds, throughput 1060592.722849
+405207	[1728016822]	2000000 OPS in 1.912316 seconds, throughput 1045852.254544
+405207	[1728016823]	2000000 OPS in 1.881014 seconds, throughput 1063256.307502
+405207	[1728016824]	2000000 OPS in 1.890477 seconds, throughput 1057934.055797
+405207	[1728016824]	2000000 OPS in 1.872231 seconds, throughput 1068244.249775
+405207	[1728016824]	2000000 OPS in 1.904162 seconds, throughput 1050330.801686
+405207	[1728016825]	2000000 OPS in 1.915528 seconds, throughput 1044098.546197
+405207	[1728016826]	2000000 OPS in 1.881167 seconds, throughput 1063169.830217
+405207	[1728016826]	2000000 OPS in 1.863500 seconds, throughput 1073249.262141
+405207	[1728016826]	2000000 OPS in 1.887586 seconds, throughput 1059554.372622
+405207	[1728016827]	2000000 OPS in 1.860858 seconds, throughput 1074773.034804
+405207	[1728016828]	2000000 OPS in 1.842387 seconds, throughput 1085548.258862
+405207	[1728016828]	2000000 OPS in 1.838561 seconds, throughput 1087807.257959
+405207	[1728016828]	2000000 OPS in 1.871846 seconds, throughput 1068463.965519
+405207	[1728016829]	2000000 OPS in 1.851443 seconds, throughput 1080238.495055
+405207	[1728016830]	2000000 OPS in 1.842259 seconds, throughput 1085623.682664
+405207	[1728016830]	2000000 OPS in 1.859753 seconds, throughput 1075411.627243
+405207	[1728016830]	2000000 OPS in 1.898479 seconds, throughput 1053474.913339
+405207	[1728016831]	2000000 OPS in 1.867006 seconds, throughput 1071233.836420
+405207	[1728016831]	2000000 OPS in 1.832631 seconds, throughput 1091327.168426
+405207	[1728016831]	2000000 OPS in 1.835104 seconds, throughput 1089856.487698
+405207	[1728016832]	2000000 OPS in 1.854721 seconds, throughput 1078329.301280
+405207	[1728016832]	2000000 OPS in 1.878880 seconds, throughput 1064463.935962
+405207	[1728016833]	2000000 OPS in 1.892967 seconds, throughput 1056542.454253
+405207	[1728016833]	2000000 OPS in 1.865140 seconds, throughput 1072305.564194
+405207	[1728016834]	2000000 OPS in 1.892623 seconds, throughput 1056734.489647
+405207	[1728016834]	2000000 OPS in 1.876356 seconds, throughput 1065895.810816
+405207	[1728016835]	2000000 OPS in 1.851200 seconds, throughput 1080380.293863
+405207	[1728016835]	2000000 OPS in 1.848299 seconds, throughput 1082076.006101
+405207	[1728016835]	2000000 OPS in 1.891057 seconds, throughput 1057609.580251
+405207	[1728016836]	2000000 OPS in 1.879842 seconds, throughput 1063919.201720
+405207	[1728016837]	2000000 OPS in 1.846087 seconds, throughput 1083372.560448
+405207	[1728016837]	2000000 OPS in 1.850948 seconds, throughput 1080527.383805
+405207	[1728016837]	2000000 OPS in 1.911039 seconds, throughput 1046551.116958
+405207	[1728016838]	2000000 OPS in 1.863316 seconds, throughput 1073355.244092
+405207	[1728016839]	2000000 OPS in 1.835538 seconds, throughput 1089598.798826
+405207	[1728016839]	2000000 OPS in 1.836771 seconds, throughput 1088867.365611
+405207	[1728016839]	2000000 OPS in 1.862949 seconds, throughput 1073566.694526
+405207	[1728016840]	2000000 OPS in 1.844652 seconds, throughput 1084215.342514
+405207	[1728016841]	2000000 OPS in 1.863891 seconds, throughput 1073024.119973
+405207	[1728016841]	2000000 OPS in 1.904048 seconds, throughput 1050393.687554
+405207	[1728016841]	2000000 OPS in 1.907327 seconds, throughput 1048587.892899
+405207	[1728016842]	2000000 OPS in 1.899286 seconds, throughput 1053027.295521
+405207	[1728016843]	2000000 OPS in 1.833350 seconds, throughput 1090899.173644
+405207	[1728016843]	2000000 OPS in 1.828542 seconds, throughput 1093767.602822
+405207	[1728016843]	2000000 OPS in 1.856844 seconds, throughput 1077096.406591
+405207	[1728016844]	2000000 OPS in 1.845854 seconds, throughput 1083509.313304
+405207	[1728016844]	2000000 OPS in 1.861489 seconds, throughput 1074408.712595
+405207	[1728016844]	2000000 OPS in 1.836550 seconds, throughput 1088998.393727
+405207	[1728016845]	2000000 OPS in 1.902955 seconds, throughput 1050997.002031
+405207	[1728016846]	2000000 OPS in 1.895251 seconds, throughput 1055269.196534
+405207	[1728016846]	2000000 OPS in 1.836275 seconds, throughput 1089161.481804
+405207	[1728016846]	2000000 OPS in 1.842790 seconds, throughput 1085310.860163
+405207	[1728016847]	2000000 OPS in 1.855124 seconds, throughput 1078095.049172
+405207	[1728016847]	2000000 OPS in 1.846352 seconds, throughput 1083217.068035
+405207	[1728016848]	2000000 OPS in 1.833343 seconds, throughput 1090903.338873
+405207	[1728016848]	2000000 OPS in 1.826320 seconds, throughput 1095098.339831
+405207	[1728016849]	2000000 OPS in 1.858498 seconds, throughput 1076137.827428
+405207	[1728016849]	2000000 OPS in 1.860485 seconds, throughput 1074988.511060
+405207	[1728016850]	2000000 OPS in 1.836321 seconds, throughput 1089134.198215
+405207	[1728016850]	2000000 OPS in 1.836938 seconds, throughput 1088768.374327
+405207	[1728016850]	2000000 OPS in 1.883811 seconds, throughput 1061677.631142
+405207	[1728016851]	2000000 OPS in 1.889463 seconds, throughput 1058501.807127
+405207	[1728016852]	2000000 OPS in 1.882380 seconds, throughput 1062484.726782
+405207	[1728016852]	2000000 OPS in 1.880977 seconds, throughput 1063277.222422
+405207	[1728016852]	2000000 OPS in 1.898523 seconds, throughput 1053450.498098
+405207	[1728016853]	2000000 OPS in 1.860888 seconds, throughput 1074755.708028
+405207	[1728016854]	2000000 OPS in 1.844817 seconds, throughput 1084118.370548
+405207	[1728016854]	2000000 OPS in 1.825401 seconds, throughput 1095649.668210
+405207	[1728016854]	2000000 OPS in 1.856792 seconds, throughput 1077126.570989
+405207	[1728016855]	2000000 OPS in 1.845126 seconds, throughput 1083936.815155
+405207	[1728016855]	2000000 OPS in 1.840026 seconds, throughput 1086941.162788
+405207	[1728016855]	2000000 OPS in 1.844844 seconds, throughput 1084102.504060
+405207	[1728016856]	2000000 OPS in 1.866972 seconds, throughput 1071253.344989
+405207	[1728016857]	2000000 OPS in 1.907490 seconds, throughput 1048498.288327
+405207	[1728016857]	2000000 OPS in 1.914047 seconds, throughput 1044906.420793
+405207	[1728016857]	2000000 OPS in 1.913775 seconds, throughput 1045054.930700
+405207	[1728016858]	2000000 OPS in 1.941119 seconds, throughput 1030333.534420
+405207	[1728016859]	2000000 OPS in 1.894937 seconds, throughput 1055444.059618
+405207	[1728016859]	2000000 OPS in 1.877713 seconds, throughput 1065125.501075
+405207	[1728016859]	2000000 OPS in 1.882938 seconds, throughput 1062169.864329
+405207	[1728016860]	2000000 OPS in 1.884323 seconds, throughput 1061389.156742
+405207	[1728016861]	2000000 OPS in 1.855986 seconds, throughput 1077594.335302
+405207	[1728016861]	2000000 OPS in 1.869361 seconds, throughput 1069884.308060
+405207	[1728016861]	2000000 OPS in 1.864276 seconds, throughput 1072802.524948
+405207	[1728016862]	2000000 OPS in 1.890819 seconds, throughput 1057742.703030
+405207	[1728016862]	2000000 OPS in 1.896950 seconds, throughput 1054324.046496
+405207	[1728016863]	2000000 OPS in 1.928308 seconds, throughput 1037178.707966
+405207	[1728016863]	2000000 OPS in 1.954837 seconds, throughput 1023103.205024
+405207	[1728016864]	2000000 OPS in 1.935315 seconds, throughput 1033423.499534
+405207	[1728016864]	2000000 OPS in 1.924427 seconds, throughput 1039270.390615
+405207	[1728016865]	2000000 OPS in 1.862404 seconds, throughput 1073880.855067
+405207	[1728016865]	2000000 OPS in 1.868888 seconds, throughput 1070155.086875
+405207	[1728016866]	2000000 OPS in 1.863220 seconds, throughput 1073410.547332
+405207	[1728016866]	2000000 OPS in 1.844591 seconds, throughput 1084251.197149
+405207	[1728016867]	2000000 OPS in 1.833361 seconds, throughput 1090892.628348
+405207	[1728016867]	2000000 OPS in 1.825729 seconds, throughput 1095452.830075
+405207	[1728016867]	2000000 OPS in 1.857153 seconds, throughput 1076917.195298
+405207	[1728016868]	2000000 OPS in 1.846698 seconds, throughput 1083014.114923
+405207	[1728016869]	2000000 OPS in 1.838704 seconds, throughput 1087722.656828
+405207	[1728016869]	2000000 OPS in 1.842061 seconds, throughput 1085740.374504
+405207	[1728016869]	2000000 OPS in 1.865018 seconds, throughput 1072375.708974
+405207	[1728016870]	2000000 OPS in 1.844173 seconds, throughput 1084496.953377
+405207	[1728016870]	2000000 OPS in 1.850349 seconds, throughput 1080877.175063
+405207	[1728016870]	2000000 OPS in 1.835894 seconds, throughput 1089387.513658
+405207	[1728016871]	2000000 OPS in 1.867943 seconds, throughput 1070696.482709
+405207	[1728016872]	2000000 OPS in 1.849471 seconds, throughput 1081390.300253
+405207	[1728016872]	2000000 OPS in 1.845793 seconds, throughput 1083545.121257
+405207	[1728016872]	2000000 OPS in 1.842347 seconds, throughput 1085571.827674
+405207	[1728016873]	2000000 OPS in 1.903940 seconds, throughput 1050453.270586
+405207	[1728016874]	2000000 OPS in 1.922829 seconds, throughput 1040134.094087
+405207	[1728016874]	2000000 OPS in 1.894892 seconds, throughput 1055469.124362
+405207	[1728016874]	2000000 OPS in 1.890724 seconds, throughput 1057795.849632
+405207	[1728016875]	2000000 OPS in 1.875263 seconds, throughput 1066517.069872
+405207	[1728016876]	2000000 OPS in 1.877831 seconds, throughput 1065058.570233
+405207	[1728016876]	2000000 OPS in 1.863768 seconds, throughput 1073094.934563
+405207	[1728016876]	2000000 OPS in 1.862538 seconds, throughput 1073803.594880
+405207	[1728016877]	2000000 OPS in 1.890433 seconds, throughput 1057958.679308
+405207	[1728016877]	2000000 OPS in 1.855462 seconds, throughput 1077898.658124
+405207	[1728016878]	2000000 OPS in 1.845762 seconds, throughput 1083563.319648
+405207	[1728016878]	2000000 OPS in 1.835628 seconds, throughput 1089545.376296
+405207	[1728016879]	2000000 OPS in 1.854630 seconds, throughput 1078382.211007
+405207	[1728016879]	2000000 OPS in 1.845605 seconds, throughput 1083655.495082
+405207	[1728016880]	2000000 OPS in 1.836004 seconds, throughput 1089322.245485
+405207	[1728016880]	2000000 OPS in 1.826829 seconds, throughput 1094793.218194
+405207	[1728016881]	2000000 OPS in 1.856338 seconds, throughput 1077390.001174
+405207	[1728016881]	2000000 OPS in 1.860179 seconds, throughput 1075165.346991
+405207	[1728016882]	2000000 OPS in 1.890684 seconds, throughput 1057818.228747
+405207	[1728016882]	2000000 OPS in 1.879309 seconds, throughput 1064220.945039
+405207	[1728016882]	2000000 OPS in 1.917108 seconds, throughput 1043238.043970
+405207	[1728016883]	2000000 OPS in 1.903220 seconds, throughput 1050850.663612
+405207	[1728016883]	2000000 OPS in 1.853254 seconds, throughput 1079182.885886
+405207	[1728016883]	2000000 OPS in 1.868363 seconds, throughput 1070455.794725
+405207	[1728016884]	2000000 OPS in 1.874483 seconds, throughput 1066960.863342
+405207	[1728016885]	2000000 OPS in 1.863866 seconds, throughput 1073038.512425
+405207	[1728016885]	2000000 OPS in 1.857878 seconds, throughput 1076496.949746
+405207	[1728016885]	2000000 OPS in 1.852702 seconds, throughput 1079504.421110
+405207	[1728016886]	2000000 OPS in 1.905092 seconds, throughput 1049818.066529
+405207	[1728016887]	2000000 OPS in 1.867338 seconds, throughput 1071043.378328
+405207	[1728016887]	2000000 OPS in 1.865763 seconds, throughput 1071947.508874
+405207	[1728016887]	2000000 OPS in 1.875101 seconds, throughput 1066609.211984
+405207	[1728016888]	2000000 OPS in 1.856644 seconds, throughput 1077212.432755
+405207	[1728016889]	2000000 OPS in 1.887100 seconds, throughput 1059827.248159
+405207	[1728016889]	2000000 OPS in 1.881495 seconds, throughput 1062984.488399
+405207	[1728016889]	2000000 OPS in 1.871714 seconds, throughput 1068539.317438
+405207	[1728016890]	2000000 OPS in 1.898615 seconds, throughput 1053399.451706
+405207	[1728016891]	2000000 OPS in 1.871635 seconds, throughput 1068584.419505
+405207	[1728016891]	2000000 OPS in 1.837103 seconds, throughput 1088670.586244
+405207	[1728016891]	2000000 OPS in 1.858010 seconds, throughput 1076420.471365
+405207	[1728016892]	2000000 OPS in 1.858789 seconds, throughput 1075969.354241
+405207	[1728016892]	2000000 OPS in 1.872662 seconds, throughput 1067998.389458
+405207	[1728016893]	2000000 OPS in 1.851282 seconds, throughput 1080332.439898
+405207	[1728016893]	2000000 OPS in 1.849901 seconds, throughput 1081138.936624
+405207	[1728016894]	2000000 OPS in 1.874629 seconds, throughput 1066877.766214
+405207	[1728016894]	2000000 OPS in 1.883197 seconds, throughput 1062023.781899
+405207	[1728016895]	2000000 OPS in 1.860248 seconds, throughput 1075125.467142
+405207	[1728016895]	2000000 OPS in 1.864393 seconds, throughput 1072735.201216
+405207	[1728016896]	2000000 OPS in 1.887220 seconds, throughput 1059759.858416
+405207	[1728016896]	2000000 OPS in 1.874768 seconds, throughput 1066798.665222
+405207	[1728016896]	2000000 OPS in 1.853909 seconds, throughput 1078801.602452
+405207	[1728016897]	2000000 OPS in 1.887070 seconds, throughput 1059844.096933
+405207	[1728016898]	2000000 OPS in 1.893450 seconds, throughput 1056272.940928
+405207	[1728016898]	2000000 OPS in 1.868250 seconds, throughput 1070520.540613
+405207	[1728016898]	2000000 OPS in 1.871229 seconds, throughput 1068816.269949
+405207	[1728016898]	2000000 OPS in 1.863560 seconds, throughput 1073214.707334
+405207	[1728016899]	2000000 OPS in 1.860445 seconds, throughput 1075011.623563
+405207	[1728016900]	2000000 OPS in 1.851418 seconds, throughput 1080253.081692
+405207	[1728016900]	2000000 OPS in 1.838501 seconds, throughput 1087842.758856
+405207	[1728016900]	2000000 OPS in 1.868191 seconds, throughput 1070554.349100
+405207	[1728016901]	2000000 OPS in 1.882891 seconds, throughput 1062196.377804
+405207	[1728016902]	2000000 OPS in 1.885652 seconds, throughput 1060641.093903
+405207	[1728016902]	2000000 OPS in 1.857507 seconds, throughput 1076711.958555
+405207	[1728016902]	2000000 OPS in 1.870407 seconds, throughput 1069285.989627
+405207	[1728016903]	2000000 OPS in 1.865681 seconds, throughput 1071994.622875
+405207	[1728016904]	2000000 OPS in 1.845101 seconds, throughput 1083951.501842
+405207	[1728016904]	2000000 OPS in 1.825260 seconds, throughput 1095734.306345
+405207	[1728016904]	2000000 OPS in 1.836126 seconds, throughput 1089249.866295
+405207	[1728016905]	2000000 OPS in 1.880672 seconds, throughput 1063449.660547
+405207	[1728016905]	2000000 OPS in 1.859875 seconds, throughput 1075341.084750
+405207	[1728016906]	2000000 OPS in 1.842787 seconds, throughput 1085312.627015
+405207	[1728016906]	2000000 OPS in 1.859700 seconds, throughput 1075442.275636
+405207	[1728016907]	2000000 OPS in 1.908748 seconds, throughput 1047807.253760
+405207	[1728016907]	2000000 OPS in 1.896885 seconds, throughput 1054360.174707
+405207	[1728016908]	2000000 OPS in 1.885041 seconds, throughput 1060984.880435
+405207	[1728016908]	2000000 OPS in 1.883557 seconds, throughput 1061820.799689
+405207	[1728016909]	2000000 OPS in 1.954962 seconds, throughput 1023037.787947
+405207	[1728016909]	2000000 OPS in 1.873359 seconds, throughput 1067601.031089
+405207	[1728016909]	2000000 OPS in 1.855286 seconds, throughput 1078000.911989
+405207	[1728016910]	2000000 OPS in 1.844675 seconds, throughput 1084201.824170
+405207	[1728016911]	2000000 OPS in 1.869265 seconds, throughput 1069939.254199
+405207	[1728016911]	2000000 OPS in 1.873562 seconds, throughput 1067485.356770
+405207	[1728016911]	2000000 OPS in 1.866807 seconds, throughput 1071348.029014
+405207	[1728016911]	2000000 OPS in 1.861930 seconds, throughput 1074154.237807
+405207	[1728016913]	2000000 OPS in 1.866341 seconds, throughput 1071615.530067
+405207	[1728016913]	2000000 OPS in 1.856609 seconds, throughput 1077232.739904
+405207	[1728016913]	2000000 OPS in 1.829485 seconds, throughput 1093203.825120
+405207	[1728016913]	2000000 OPS in 1.836119 seconds, throughput 1089254.018939
+405207	[1728016914]	2000000 OPS in 1.865723 seconds, throughput 1071970.490796
+405207	[1728016915]	2000000 OPS in 1.851203 seconds, throughput 1080378.543034
+405207	[1728016915]	2000000 OPS in 1.849865 seconds, throughput 1081159.976539
+405207	[1728016915]	2000000 OPS in 1.860234 seconds, throughput 1075133.558466
+405207	[1728016916]	2000000 OPS in 1.909150 seconds, throughput 1047586.622319
+405207	[1728016917]	2000000 OPS in 1.866604 seconds, throughput 1071464.542024
+405207	[1728016917]	2000000 OPS in 1.873692 seconds, throughput 1067411.292785
+405207	[1728016917]	2000000 OPS in 1.869574 seconds, throughput 1069762.416465
+405207	[1728016918]	2000000 OPS in 1.856409 seconds, throughput 1077348.795443
+405207	[1728016919]	2000000 OPS in 1.844807 seconds, throughput 1084124.247143
+405207	[1728016919]	2000000 OPS in 1.826706 seconds, throughput 1094866.935347
+405207	[1728016919]	2000000 OPS in 1.833546 seconds, throughput 1090782.560132
+405207	[1728016920]	2000000 OPS in 1.856708 seconds, throughput 1077175.301663
+405207	[1728016920]	2000000 OPS in 1.847273 seconds, throughput 1082677.005510
+405207	[1728016921]	2000000 OPS in 1.827947 seconds, throughput 1094123.626123
+405207	[1728016921]	2000000 OPS in 1.835673 seconds, throughput 1089518.666996
+405207	[1728016922]	2000000 OPS in 1.882462 seconds, throughput 1062438.444973
+405207	[1728016922]	2000000 OPS in 1.880570 seconds, throughput 1063507.340859
+405207	[1728016922]	2000000 OPS in 1.859239 seconds, throughput 1075708.932526
+405207	[1728016923]	2000000 OPS in 1.871274 seconds, throughput 1068790.567282
+405207	[1728016924]	2000000 OPS in 1.881251 seconds, throughput 1063122.358473
+405207	[1728016924]	2000000 OPS in 1.887595 seconds, throughput 1059549.320696
+405207	[1728016924]	2000000 OPS in 1.866430 seconds, throughput 1071564.430490
+405207	[1728016924]	2000000 OPS in 1.871375 seconds, throughput 1068732.883575
+405207	[1728016926]	2000000 OPS in 1.896735 seconds, throughput 1054443.556954
+405207	[1728016926]	2000000 OPS in 1.907855 seconds, throughput 1048297.695580
+405207	[1728016926]	2000000 OPS in 1.900287 seconds, throughput 1052472.600191
+405207	[1728016926]	2000000 OPS in 1.913602 seconds, throughput 1045149.409334
+405207	[1728016928]	2000000 OPS in 1.900363 seconds, throughput 1052430.509329
+405207	[1728016928]	2000000 OPS in 1.851634 seconds, throughput 1080127.066148
+405207	[1728016928]	2000000 OPS in 1.844193 seconds, throughput 1084485.192168
+405207	[1728016928]	2000000 OPS in 1.863582 seconds, throughput 1073202.037796
+405207	[1728016930]	2000000 OPS in 1.882509 seconds, throughput 1062411.919412
+405207	[1728016930]	2000000 OPS in 1.890019 seconds, throughput 1058190.420308
+405207	[1728016930]	2000000 OPS in 1.860365 seconds, throughput 1075057.851551
+405207	[1728016930]	2000000 OPS in 1.884541 seconds, throughput 1061266.377330
+405207	[1728016931]	2000000 OPS in 1.879708 seconds, throughput 1063995.046039
+405207	[1728016932]	2000000 OPS in 1.874504 seconds, throughput 1066948.910218
+405207	[1728016932]	2000000 OPS in 1.857996 seconds, throughput 1076428.582193
+405207	[1728016932]	2000000 OPS in 1.873433 seconds, throughput 1067558.861192
+405207	[1728016933]	2000000 OPS in 1.876701 seconds, throughput 1065699.863750
+405207	[1728016934]	2000000 OPS in 1.865623 seconds, throughput 1072027.949913
+405207	[1728016934]	2000000 OPS in 1.859490 seconds, throughput 1075563.729840
+405207	[1728016934]	2000000 OPS in 1.840314 seconds, throughput 1086771.061895
+405207	[1728016935]	2000000 OPS in 1.915146 seconds, throughput 1044306.804808
+405207	[1728016935]	2000000 OPS in 1.908538 seconds, throughput 1047922.545949
+405207	[1728016935]	2000000 OPS in 1.899939 seconds, throughput 1052665.375046
+405207	[1728016936]	2000000 OPS in 1.895037 seconds, throughput 1055388.364449
+405207	[1728016937]	2000000 OPS in 1.873208 seconds, throughput 1067687.090809
+405207	[1728016937]	2000000 OPS in 1.852026 seconds, throughput 1079898.446350
+405207	[1728016937]	2000000 OPS in 1.836399 seconds, throughput 1089087.937861
+405207	[1728016938]	2000000 OPS in 1.846135 seconds, throughput 1083344.392474
+405207	[1728016939]	2000000 OPS in 1.895112 seconds, throughput 1055346.596929
+405207	[1728016939]	2000000 OPS in 1.864347 seconds, throughput 1072761.669367
+405207	[1728016939]	2000000 OPS in 1.887141 seconds, throughput 1059804.222366
+405207	[1728016939]	2000000 OPS in 1.909602 seconds, throughput 1047338.660098
+405207	[1728016941]	2000000 OPS in 1.871779 seconds, throughput 1068502.210998
+405207	[1728016941]	2000000 OPS in 1.825166 seconds, throughput 1095790.739034
+405207	[1728016941]	2000000 OPS in 1.847025 seconds, throughput 1082822.376524
+405207	[1728016941]	2000000 OPS in 1.834383 seconds, throughput 1090284.853272
+405207	[1728016943]	2000000 OPS in 1.883103 seconds, throughput 1062076.795587
+405207	[1728016943]	2000000 OPS in 1.836542 seconds, throughput 1089003.137418
+405207	[1728016943]	2000000 OPS in 1.854683 seconds, throughput 1078351.394821
+405207	[1728016943]	2000000 OPS in 1.844951 seconds, throughput 1084039.630321
+405207	[1728016945]	2000000 OPS in 1.920105 seconds, throughput 1041609.703636
+405207	[1728016945]	2000000 OPS in 1.883348 seconds, throughput 1061938.632690
+405207	[1728016945]	2000000 OPS in 1.949914 seconds, throughput 1025686.261035
+405207	[1728016945]	2000000 OPS in 1.928550 seconds, throughput 1037048.559799
+405207	[1728016947]	2000000 OPS in 1.895229 seconds, throughput 1055281.446200
+405207	[1728016947]	2000000 OPS in 1.881873 seconds, throughput 1062770.973387
+405207	[1728016947]	2000000 OPS in 1.911553 seconds, throughput 1046269.708452
+405207	[1728016947]	2000000 OPS in 1.888913 seconds, throughput 1058810.014013
+405207	[1728016948]	2000000 OPS in 1.863066 seconds, throughput 1073499.274851
+405207	[1728016948]	2000000 OPS in 1.838857 seconds, throughput 1087632.154104
+405207	[1728016949]	2000000 OPS in 1.854429 seconds, throughput 1078499.095948
+405207	[1728016949]	2000000 OPS in 1.846724 seconds, throughput 1082998.867183
+405207	[1728016950]	2000000 OPS in 1.825475 seconds, throughput 1095605.253427
+405207	[1728016950]	2000000 OPS in 1.857225 seconds, throughput 1076875.445894
+405207	[1728016950]	2000000 OPS in 1.846393 seconds, throughput 1083193.014705
+405207	[1728016951]	2000000 OPS in 1.830043 seconds, throughput 1092870.495393
+405207	[1728016952]	2000000 OPS in 1.826751 seconds, throughput 1094839.964505
+405207	[1728016952]	2000000 OPS in 1.856719 seconds, throughput 1077168.920014
+405207	[1728016952]	2000000 OPS in 1.845109 seconds, throughput 1083946.802059
+405207	[1728016952]	2000000 OPS in 1.831255 seconds, throughput 1092147.188677
+405207	[1728016954]	2000000 OPS in 1.825128 seconds, throughput 1095813.553899
+405207	[1728016954]	2000000 OPS in 1.855187 seconds, throughput 1078058.438314
+405207	[1728016954]	2000000 OPS in 1.844225 seconds, throughput 1084466.374764
+405207	[1728016954]	2000000 OPS in 1.840869 seconds, throughput 1086443.413410
+405207	[1728016956]	2000000 OPS in 1.855213 seconds, throughput 1078043.329796
+405207	[1728016956]	2000000 OPS in 1.883624 seconds, throughput 1061783.031008
+405207	[1728016956]	2000000 OPS in 1.858147 seconds, throughput 1076341.107566
+405207	[1728016956]	2000000 OPS in 1.863150 seconds, throughput 1073450.876204
+405207	[1728016958]	2000000 OPS in 1.873024 seconds, throughput 1067791.977038
+405207	[1728016958]	2000000 OPS in 1.874886 seconds, throughput 1066731.523943
+405207	[1728016958]	2000000 OPS in 1.881603 seconds, throughput 1062923.475356
+405207	[1728016958]	2000000 OPS in 1.872211 seconds, throughput 1068255.661354
+405207	[1728016959]	2000000 OPS in 1.847389 seconds, throughput 1082609.022788
+405207	[1728016960]	2000000 OPS in 1.876352 seconds, throughput 1065898.083089
+405207	[1728016960]	2000000 OPS in 1.881492 seconds, throughput 1062986.183306
+405207	[1728016960]	2000000 OPS in 1.875474 seconds, throughput 1066397.081484
+405207	[1728016961]	2000000 OPS in 1.863831 seconds, throughput 1073058.662507
+405207	[1728016961]	2000000 OPS in 1.870443 seconds, throughput 1069265.409317
+405207	[1728016962]	2000000 OPS in 1.860692 seconds, throughput 1074868.919735
+405207	[1728016962]	2000000 OPS in 1.864476 seconds, throughput 1072687.446768
+405207	[1728016963]	2000000 OPS in 1.863467 seconds, throughput 1073268.268233
+405207	[1728016963]	2000000 OPS in 1.878746 seconds, throughput 1064539.857969
+405207	[1728016964]	2000000 OPS in 1.891653 seconds, throughput 1057276.360939
+405207	[1728016964]	2000000 OPS in 1.861574 seconds, throughput 1074359.654787
+405207	[1728016965]	2000000 OPS in 1.846287 seconds, throughput 1083255.203552
+405207	[1728016965]	2000000 OPS in 1.897891 seconds, throughput 1053801.298389
+405207	[1728016965]	2000000 OPS in 1.889984 seconds, throughput 1058210.016593
+405207	[1728016965]	2000000 OPS in 1.851362 seconds, throughput 1080285.757188
+405207	[1728016967]	2000000 OPS in 1.873406 seconds, throughput 1067574.247120
+405207	[1728016967]	2000000 OPS in 1.900360 seconds, throughput 1052432.170747
+405207	[1728016967]	2000000 OPS in 1.893777 seconds, throughput 1056090.553428
+405207	[1728016967]	2000000 OPS in 1.875608 seconds, throughput 1066320.894345
+405207	[1728016969]	2000000 OPS in 1.888270 seconds, throughput 1059170.563532
+405207	[1728016969]	2000000 OPS in 1.948790 seconds, throughput 1026277.844201
+405207	[1728016969]	2000000 OPS in 1.893976 seconds, throughput 1055979.590026
+405207	[1728016969]	2000000 OPS in 1.902260 seconds, throughput 1051380.988929
+405207	[1728016971]	2000000 OPS in 1.862318 seconds, throughput 1073930.445821
+405207	[1728016971]	2000000 OPS in 1.871468 seconds, throughput 1068679.774380
+405207	[1728016971]	2000000 OPS in 1.864528 seconds, throughput 1072657.530485
+405207	[1728016971]	2000000 OPS in 1.870849 seconds, throughput 1069033.363997
+405207	[1728016973]	2000000 OPS in 1.881259 seconds, throughput 1063117.837576
+405207	[1728016973]	2000000 OPS in 1.909161 seconds, throughput 1047580.586446
+405207	[1728016973]	2000000 OPS in 1.866819 seconds, throughput 1071341.142339
+405207	[1728016973]	2000000 OPS in 1.878890 seconds, throughput 1064458.270575
+405207	[1728016974]	2000000 OPS in 1.841989 seconds, throughput 1085782.814121
+405207	[1728016975]	2000000 OPS in 1.889708 seconds, throughput 1058364.572728
+405207	[1728016975]	2000000 OPS in 1.880483 seconds, throughput 1063556.543718
+405207	[1728016975]	2000000 OPS in 1.892170 seconds, throughput 1056987.479983
+405207	[1728016976]	2000000 OPS in 1.895208 seconds, throughput 1055293.139328
+405207	[1728016977]	2000000 OPS in 1.886806 seconds, throughput 1059992.389255
+405207	[1728016977]	2000000 OPS in 1.891924 seconds, throughput 1057124.916223
+405207	[1728016977]	2000000 OPS in 1.854868 seconds, throughput 1078243.842689
+405207	[1728016978]	2000000 OPS in 1.851708 seconds, throughput 1080083.900917
+405207	[1728016979]	2000000 OPS in 1.882950 seconds, throughput 1062163.095143
+405207	[1728016979]	2000000 OPS in 1.865973 seconds, throughput 1071826.869949
+405207	[1728016979]	2000000 OPS in 1.863646 seconds, throughput 1073165.182658
+405207	[1728016980]	2000000 OPS in 1.832472 seconds, throughput 1091421.860743
+405207	[1728016980]	2000000 OPS in 1.863619 seconds, throughput 1073180.730611
+405207	[1728016980]	2000000 OPS in 1.855237 seconds, throughput 1078029.383847
+405207	[1728016980]	2000000 OPS in 1.839431 seconds, throughput 1087292.755205
+405207	[1728016982]	2000000 OPS in 1.831030 seconds, throughput 1092281.393533
+405207	[1728016982]	2000000 OPS in 1.846633 seconds, throughput 1083052.236151
+405207	[1728016982]	2000000 OPS in 1.834161 seconds, throughput 1090416.817280
+405207	[1728016982]	2000000 OPS in 1.855102 seconds, throughput 1078107.834502
+405207	[1728016984]	2000000 OPS in 1.823555 seconds, throughput 1096758.803546
+405207	[1728016984]	2000000 OPS in 1.832300 seconds, throughput 1091524.313704
+405207	[1728016984]	2000000 OPS in 1.843819 seconds, throughput 1084705.169000
+405207	[1728016984]	2000000 OPS in 1.852456 seconds, throughput 1079647.775710
+405207	[1728016985]	2000000 OPS in 1.831411 seconds, throughput 1092054.159334
+405207	[1728016986]	2000000 OPS in 1.838189 seconds, throughput 1088027.400882
+405207	[1728016986]	2000000 OPS in 1.863814 seconds, throughput 1073068.449963
+405207	[1728016986]	2000000 OPS in 1.859064 seconds, throughput 1075810.192656
+405207	[1728016987]	2000000 OPS in 1.828575 seconds, throughput 1093747.863774
+405207	[1728016988]	2000000 OPS in 1.868517 seconds, throughput 1070367.569575
+405207	[1728016988]	2000000 OPS in 1.867492 seconds, throughput 1070955.056300
+405207	[1728016988]	2000000 OPS in 1.881567 seconds, throughput 1062943.812259
+405207	[1728016989]	2000000 OPS in 1.873201 seconds, throughput 1067691.080669
+405207	[1728016990]	2000000 OPS in 1.884415 seconds, throughput 1061337.338113
+405207	[1728016990]	2000000 OPS in 1.900606 seconds, throughput 1052295.951923
+405207	[1728016990]	2000000 OPS in 1.889151 seconds, throughput 1058676.622462
+405207	[1728016991]	2000000 OPS in 1.892618 seconds, throughput 1056737.281374
+405207	[1728016992]	2000000 OPS in 1.867851 seconds, throughput 1070749.219290
+405207	[1728016992]	2000000 OPS in 1.881723 seconds, throughput 1062855.691300
+405207	[1728016992]	2000000 OPS in 1.881915 seconds, throughput 1062747.254791
+405207	[1728016993]	2000000 OPS in 1.864864 seconds, throughput 1072464.265491
+405207	[1728016993]	2000000 OPS in 1.857949 seconds, throughput 1076455.812296
+405207	[1728016993]	2000000 OPS in 1.859228 seconds, throughput 1075715.296887
+405207	[1728016994]	2000000 OPS in 1.892663 seconds, throughput 1056712.156364
+405207	[1728016995]	2000000 OPS in 1.879371 seconds, throughput 1064185.836644
+405207	[1728016995]	2000000 OPS in 1.878003 seconds, throughput 1064961.025089
+405207	[1728016995]	2000000 OPS in 1.913379 seconds, throughput 1045271.219136
+405207	[1728016995]	2000000 OPS in 1.909741 seconds, throughput 1047262.429827
+405207	[1728016997]	2000000 OPS in 1.860620 seconds, throughput 1074910.513700
+405207	[1728016997]	2000000 OPS in 1.853768 seconds, throughput 1078883.657502
+405207	[1728016997]	2000000 OPS in 1.861675 seconds, throughput 1074301.368391
+405207	[1728016997]	2000000 OPS in 1.878840 seconds, throughput 1064486.598114
+405207	[1728016998]	2000000 OPS in 1.827114 seconds, throughput 1094622.448298
+405207	[1728016999]	2000000 OPS in 1.843117 seconds, throughput 1085118.307736
+405207	[1728016999]	2000000 OPS in 1.874237 seconds, throughput 1067100.905595
+405207	[1728016999]	2000000 OPS in 1.858329 seconds, throughput 1076235.693464
+405207	[1728017000]	2000000 OPS in 1.870894 seconds, throughput 1069007.650888
+405207	[1728017001]	2000000 OPS in 1.847080 seconds, throughput 1082790.133616
+405207	[1728017001]	2000000 OPS in 1.863673 seconds, throughput 1073149.635156
+405207	[1728017001]	2000000 OPS in 1.878809 seconds, throughput 1064504.161945
+405207	[1728017002]	2000000 OPS in 1.876860 seconds, throughput 1065609.581961
+405207	[1728017003]	2000000 OPS in 1.886586 seconds, throughput 1060115.997892
+405207	[1728017003]	2000000 OPS in 1.879708 seconds, throughput 1063995.046039
+405207	[1728017003]	2000000 OPS in 1.898294 seconds, throughput 1053577.580712
+405207	[1728017004]	2000000 OPS in 1.831980 seconds, throughput 1091714.975054
+405207	[1728017005]	2000000 OPS in 1.841889 seconds, throughput 1085841.763537
+405207	[1728017005]	2000000 OPS in 1.868301 seconds, throughput 1070491.318048
+405207	[1728017005]	2000000 OPS in 1.885341 seconds, throughput 1060816.053966
+405207	[1728017006]	2000000 OPS in 1.891465 seconds, throughput 1057381.447714
+405207	[1728017006]	2000000 OPS in 1.876207 seconds, throughput 1065980.459512
+405207	[1728017007]	2000000 OPS in 1.914424 seconds, throughput 1044700.651475
+405207	[1728017007]	2000000 OPS in 1.914471 seconds, throughput 1044675.004218
+405207	[1728017008]	2000000 OPS in 1.851123 seconds, throughput 1080425.233764
+405207	[1728017008]	2000000 OPS in 1.897789 seconds, throughput 1053857.936789
+405207	[1728017009]	2000000 OPS in 1.879982 seconds, throughput 1063839.972936
+405207	[1728017009]	2000000 OPS in 1.873817 seconds, throughput 1067340.087106
+405207	[1728017010]	2000000 OPS in 1.836868 seconds, throughput 1088809.865488
+405207	[1728017010]	2000000 OPS in 1.834531 seconds, throughput 1090196.895010
+405207	[1728017010]	2000000 OPS in 1.847263 seconds, throughput 1082682.866490
+405207	[1728017010]	2000000 OPS in 1.858048 seconds, throughput 1076398.456875
+405207	[1728017012]	2000000 OPS in 1.853619 seconds, throughput 1078970.381724
+405207	[1728017012]	2000000 OPS in 1.857229 seconds, throughput 1076873.126577
+405207	[1728017012]	2000000 OPS in 1.856412 seconds, throughput 1077347.054425
+405207	[1728017012]	2000000 OPS in 1.867846 seconds, throughput 1070752.085557
+405207	[1728017013]	2000000 OPS in 1.830368 seconds, throughput 1092676.445392
+405207	[1728017014]	2000000 OPS in 1.865799 seconds, throughput 1071926.825987
+405207	[1728017014]	2000000 OPS in 1.862316 seconds, throughput 1073931.599149
+405207	[1728017014]	2000000 OPS in 1.862811 seconds, throughput 1073646.226053
+405207	[1728017015]	2000000 OPS in 1.851743 seconds, throughput 1080063.486132
+405207	[1728017016]	2000000 OPS in 1.852353 seconds, throughput 1079707.809473
+405207	[1728017016]	2000000 OPS in 1.851991 seconds, throughput 1079918.854897
+405207	[1728017016]	2000000 OPS in 1.861968 seconds, throughput 1074132.315915
+405207	[1728017017]	2000000 OPS in 1.826240 seconds, throughput 1095146.311547
+405207	[1728017018]	2000000 OPS in 1.857804 seconds, throughput 1076539.828744
+405207	[1728017018]	2000000 OPS in 1.908399 seconds, throughput 1047998.872353
+405207	[1728017018]	2000000 OPS in 1.889965 seconds, throughput 1058220.654880
+405207	[1728017019]	2000000 OPS in 1.906266 seconds, throughput 1049171.521708
+405207	[1728017019]	2000000 OPS in 1.848729 seconds, throughput 1081824.323630
+405207	[1728017020]	2000000 OPS in 1.887002 seconds, throughput 1059882.289473
+405207	[1728017020]	2000000 OPS in 1.876537 seconds, throughput 1065793.000618
+405207	[1728017021]	2000000 OPS in 1.851055 seconds, throughput 1080464.924057
+405207	[1728017021]	2000000 OPS in 1.907212 seconds, throughput 1048651.120064
+405207	[1728017022]	2000000 OPS in 1.898997 seconds, throughput 1053187.551113
+405207	[1728017022]	2000000 OPS in 1.905354 seconds, throughput 1049673.708928
+405207	[1728017023]	2000000 OPS in 1.872512 seconds, throughput 1068083.942853
+405207	[1728017023]	2000000 OPS in 1.879829 seconds, throughput 1063926.559277
+405207	[1728017023]	2000000 OPS in 1.848515 seconds, throughput 1081949.564921
+405207	[1728017024]	2000000 OPS in 1.887611 seconds, throughput 1059540.339614
+405207	[1728017025]	2000000 OPS in 1.879007 seconds, throughput 1064391.990025
+405207	[1728017025]	2000000 OPS in 1.898702 seconds, throughput 1053351.184125
+405207	[1728017025]	2000000 OPS in 1.879724 seconds, throughput 1063985.989432
+405207	[1728017026]	2000000 OPS in 1.897128 seconds, throughput 1054225.123450
+405207	[1728017026]	2000000 OPS in 1.866316 seconds, throughput 1071629.884757
+405207	[1728017027]	2000000 OPS in 1.853065 seconds, throughput 1079292.955185
+405207	[1728017027]	2000000 OPS in 1.854663 seconds, throughput 1078363.023363
+405207	[1728017027]	2000000 OPS in 1.872510 seconds, throughput 1068085.083658
+405207	[1728017028]	2000000 OPS in 1.827972 seconds, throughput 1094108.662496
+405207	[1728017029]	2000000 OPS in 1.832055 seconds, throughput 1091670.282824
+405207	[1728017029]	2000000 OPS in 1.855353 seconds, throughput 1077961.983515
+405207	[1728017029]	2000000 OPS in 1.870454 seconds, throughput 1069259.121048
+405207	[1728017030]	2000000 OPS in 1.837731 seconds, throughput 1088298.559474
+405207	[1728017031]	2000000 OPS in 1.870211 seconds, throughput 1069398.051878
+405207	[1728017031]	2000000 OPS in 1.873152 seconds, throughput 1067719.010523
+405207	[1728017031]	2000000 OPS in 1.894575 seconds, throughput 1055645.725295
+405207	[1728017032]	2000000 OPS in 1.872098 seconds, throughput 1068320.141360
+405207	[1728017033]	2000000 OPS in 1.881628 seconds, throughput 1062909.352965
+405207	[1728017033]	2000000 OPS in 1.882550 seconds, throughput 1062388.781174
+405207	[1728017033]	2000000 OPS in 1.886493 seconds, throughput 1060168.259304
+405207	[1728017034]	2000000 OPS in 1.827533 seconds, throughput 1094371.483306
+405207	[1728017034]	2000000 OPS in 1.876158 seconds, throughput 1066008.299941
+405207	[1728017035]	2000000 OPS in 1.888533 seconds, throughput 1059023.061816
+405207	[1728017035]	2000000 OPS in 1.878728 seconds, throughput 1064550.057273
+405207	[1728017036]	2000000 OPS in 1.856673 seconds, throughput 1077195.607412
+405207	[1728017036]	2000000 OPS in 1.834420 seconds, throughput 1090262.862376
+405207	[1728017037]	2000000 OPS in 1.847581 seconds, throughput 1082496.518421
+405207	[1728017037]	2000000 OPS in 1.856488 seconds, throughput 1077302.950517
+405207	[1728017037]	2000000 OPS in 1.844087 seconds, throughput 1084547.529482
+405207	[1728017038]	2000000 OPS in 1.844474 seconds, throughput 1084319.974150
+405207	[1728017038]	2000000 OPS in 1.845486 seconds, throughput 1083725.370986
+405207	[1728017039]	2000000 OPS in 1.872509 seconds, throughput 1068085.654061
+405207	[1728017039]	2000000 OPS in 1.827218 seconds, throughput 1094560.145533
+405207	[1728017040]	2000000 OPS in 1.830989 seconds, throughput 1092305.852192
+405207	[1728017040]	2000000 OPS in 1.858031 seconds, throughput 1076408.305351
+405207	[1728017041]	2000000 OPS in 1.863197 seconds, throughput 1073423.797913
+405207	[1728017041]	2000000 OPS in 1.856513 seconds, throughput 1077288.443442
+405207	[1728017042]	2000000 OPS in 1.850259 seconds, throughput 1080929.750916
+405207	[1728017042]	2000000 OPS in 1.876430 seconds, throughput 1065853.775521
+405207	[1728017042]	2000000 OPS in 1.872263 seconds, throughput 1068225.991754
+405207	[1728017043]	2000000 OPS in 1.858209 seconds, throughput 1076305.194948
+405207	[1728017044]	2000000 OPS in 1.837152 seconds, throughput 1088641.549529
+405207	[1728017044]	2000000 OPS in 1.849958 seconds, throughput 1081105.625101
+405207	[1728017044]	2000000 OPS in 1.862190 seconds, throughput 1074004.263797
+405207	[1728017045]	2000000 OPS in 1.824129 seconds, throughput 1096413.685655
+405207	[1728017045]	2000000 OPS in 1.834346 seconds, throughput 1090306.845055
+405207	[1728017046]	2000000 OPS in 1.845482 seconds, throughput 1083727.719913
+405207	[1728017046]	2000000 OPS in 1.857152 seconds, throughput 1076917.775174
+405207	[1728017047]	2000000 OPS in 1.852424 seconds, throughput 1079666.426261
+405207	[1728017047]	2000000 OPS in 1.839965 seconds, throughput 1086977.197936
+405207	[1728017048]	2000000 OPS in 1.889849 seconds, throughput 1058285.609062
+405207	[1728017048]	2000000 OPS in 1.894798 seconds, throughput 1055521.485668
+405207	[1728017049]	2000000 OPS in 1.902742 seconds, throughput 1051114.654535
+405207	[1728017049]	2000000 OPS in 1.904422 seconds, throughput 1050187.405943
+405207	[1728017050]	2000000 OPS in 1.876698 seconds, throughput 1065701.567327
+405207	[1728017050]	2000000 OPS in 1.893465 seconds, throughput 1056264.573150
+405207	[1728017050]	2000000 OPS in 1.862967 seconds, throughput 1073556.321717
+405207	[1728017051]	2000000 OPS in 1.874982 seconds, throughput 1066676.906765
+405207	[1728017052]	2000000 OPS in 1.892717 seconds, throughput 1056682.007928
+405207	[1728017052]	2000000 OPS in 1.954896 seconds, throughput 1023072.327121
+405207	[1728017052]	2000000 OPS in 1.935111 seconds, throughput 1033532.443359
+405207	[1728017053]	2000000 OPS in 1.892350 seconds, throughput 1056886.939520
+405207	[1728017053]	2000000 OPS in 1.911459 seconds, throughput 1046321.160956
+405207	[1728017054]	2000000 OPS in 1.882543 seconds, throughput 1062392.731534
+405207	[1728017054]	2000000 OPS in 1.868286 seconds, throughput 1070499.912754
+405207	[1728017055]	2000000 OPS in 1.898257 seconds, throughput 1053598.116588
+405207	[1728017055]	2000000 OPS in 1.886914 seconds, throughput 1059931.719199
+405207	[1728017056]	2000000 OPS in 1.905887 seconds, throughput 1049380.157376
+405207	[1728017056]	2000000 OPS in 1.869752 seconds, throughput 1069660.575306
+405207	[1728017057]	2000000 OPS in 1.867159 seconds, throughput 1071146.056656
+405207	[1728017057]	2000000 OPS in 1.906937 seconds, throughput 1048802.346381
+405207	[1728017058]	2000000 OPS in 1.901127 seconds, throughput 1052007.572351
+405207	[1728017058]	2000000 OPS in 1.884464 seconds, throughput 1061309.741125
+405207	[1728017059]	2000000 OPS in 1.889731 seconds, throughput 1058351.691325
+405207	[1728017059]	2000000 OPS in 1.882617 seconds, throughput 1062350.972078
+405207	[1728017059]	2000000 OPS in 1.913870 seconds, throughput 1045003.056634
+405207	[1728017060]	2000000 OPS in 1.865192 seconds, throughput 1072275.669207
+405207	[1728017061]	2000000 OPS in 1.860620 seconds, throughput 1074910.513700
+405207	[1728017061]	2000000 OPS in 1.879323 seconds, throughput 1064213.017134
+405207	[1728017061]	2000000 OPS in 1.898476 seconds, throughput 1053476.578055
+405207	[1728017062]	2000000 OPS in 1.852737 seconds, throughput 1079484.028224
+405207	[1728017062]	2000000 OPS in 1.859858 seconds, throughput 1075350.913887
+405207	[1728017063]	2000000 OPS in 1.891891 seconds, throughput 1057143.355510
+405207	[1728017063]	2000000 OPS in 1.900031 seconds, throughput 1052614.404712
+405207	[1728017064]	2000000 OPS in 1.882785 seconds, throughput 1062256.179011
+405207	[1728017064]	2000000 OPS in 1.865791 seconds, throughput 1071931.422115
+405207	[1728017065]	2000000 OPS in 1.874976 seconds, throughput 1066680.320175
+405207	[1728017065]	2000000 OPS in 1.886886 seconds, throughput 1059947.447806
+405207	[1728017065]	2000000 OPS in 1.856302 seconds, throughput 1077410.895425
+405207	[1728017066]	2000000 OPS in 1.887716 seconds, throughput 1059481.405042
+405207	[1728017067]	2000000 OPS in 1.858072 seconds, throughput 1076384.553451
+405207	[1728017067]	2000000 OPS in 1.860136 seconds, throughput 1075190.201147
+405207	[1728017067]	2000000 OPS in 1.844701 seconds, throughput 1084186.542968
+405207	[1728017068]	2000000 OPS in 1.831453 seconds, throughput 1092029.115680
+405207	[1728017068]	2000000 OPS in 1.844685 seconds, throughput 1084195.946733
+405207	[1728017069]	2000000 OPS in 1.856216 seconds, throughput 1077460.812750
+405207	[1728017069]	2000000 OPS in 1.827812 seconds, throughput 1094204.436780
+405207	[1728017070]	2000000 OPS in 1.840543 seconds, throughput 1086635.846052
+405207	[1728017070]	2000000 OPS in 1.847643 seconds, throughput 1082460.193879
+405207	[1728017071]	2000000 OPS in 1.867997 seconds, throughput 1070665.531047
+405207	[1728017071]	2000000 OPS in 1.833849 seconds, throughput 1090602.334216
+405207	[1728017072]	2000000 OPS in 1.835376 seconds, throughput 1089694.972583
+405207	[1728017072]	2000000 OPS in 1.844973 seconds, throughput 1084026.703914
+405207	[1728017073]	2000000 OPS in 1.856285 seconds, throughput 1077420.762437
+405207	[1728017073]	2000000 OPS in 1.825867 seconds, throughput 1095370.035167
+405207	[1728017073]	2000000 OPS in 1.845914 seconds, throughput 1083474.094676
+405207	[1728017074]	2000000 OPS in 1.853053 seconds, throughput 1079299.944470
+405207	[1728017074]	2000000 OPS in 1.875750 seconds, throughput 1066240.170598
+405207	[1728017075]	2000000 OPS in 1.844555 seconds, throughput 1084272.358374
+405207	[1728017075]	2000000 OPS in 1.865490 seconds, throughput 1072104.380082
+405207	[1728017076]	2000000 OPS in 1.878845 seconds, throughput 1064483.765292
+405207	[1728017076]	2000000 OPS in 1.869104 seconds, throughput 1070031.416122
+405207	[1728017076]	2000000 OPS in 1.856757 seconds, throughput 1077146.874901
+405207	[1728017077]	2000000 OPS in 1.840741 seconds, throughput 1086518.961657
+405207	[1728017078]	2000000 OPS in 1.846032 seconds, throughput 1083404.838053
+405207	[1728017078]	2000000 OPS in 1.863600 seconds, throughput 1073191.672033
+405207	[1728017078]	2000000 OPS in 1.851951 seconds, throughput 1079942.179896
+405207	[1728017079]	2000000 OPS in 1.863269 seconds, throughput 1073382.318924
+405207	[1728017080]	2000000 OPS in 1.912946 seconds, throughput 1045507.818830
+405207	[1728017080]	2000000 OPS in 1.890241 seconds, throughput 1058066.140773
+405207	[1728017080]	2000000 OPS in 1.875902 seconds, throughput 1066153.775624
+405207	[1728017081]	2000000 OPS in 1.864508 seconds, throughput 1072669.036550
+405207	[1728017081]	2000000 OPS in 1.849083 seconds, throughput 1081617.212424
+405207	[1728017082]	2000000 OPS in 1.859842 seconds, throughput 1075360.165003
+405207	[1728017082]	2000000 OPS in 1.826272 seconds, throughput 1095127.122356
+405207	[1728017083]	2000000 OPS in 1.846380 seconds, throughput 1083200.641255
+405207	[1728017083]	2000000 OPS in 1.945522 seconds, throughput 1028001.739379
+405207	[1728017084]	2000000 OPS in 1.900576 seconds, throughput 1052312.562086
+405207	[1728017084]	2000000 OPS in 1.909332 seconds, throughput 1047486.765005
+405207	[1728017085]	2000000 OPS in 1.872419 seconds, throughput 1068136.992842
+405207	[1728017085]	2000000 OPS in 1.858033 seconds, throughput 1076407.146698
+405207	[1728017086]	2000000 OPS in 1.891748 seconds, throughput 1057223.266524
+405207	[1728017086]	2000000 OPS in 1.874493 seconds, throughput 1066955.171345
+405207	[1728017087]	2000000 OPS in 1.901414 seconds, throughput 1051848.782012
+405207	[1728017087]	2000000 OPS in 1.906452 seconds, throughput 1049069.160934
+405207	[1728017088]	2000000 OPS in 1.891592 seconds, throughput 1057310.455955
+405207	[1728017088]	2000000 OPS in 1.869605 seconds, throughput 1069744.678689
+405207	[1728017088]	2000000 OPS in 1.846553 seconds, throughput 1083099.158269
+405207	[1728017089]	2000000 OPS in 1.860228 seconds, throughput 1075137.026214
+405207	[1728017089]	2000000 OPS in 1.865981 seconds, throughput 1071822.274718
+405207	[1728017090]	2000000 OPS in 1.833678 seconds, throughput 1090704.038550
+405207	[1728017090]	2000000 OPS in 1.833492 seconds, throughput 1090814.685856
+405207	[1728017091]	2000000 OPS in 1.845802 seconds, throughput 1083539.837967
+405207	[1728017091]	2000000 OPS in 1.897075 seconds, throughput 1054254.576124
+405207	[1728017091]	2000000 OPS in 1.886126 seconds, throughput 1060374.545497
+405207	[1728017092]	2000000 OPS in 1.899153 seconds, throughput 1053101.040306
+405207	[1728017093]	2000000 OPS in 1.964260 seconds, throughput 1018195.147282
+405207	[1728017093]	2000000 OPS in 1.890092 seconds, throughput 1058149.550392
+405207	[1728017093]	2000000 OPS in 1.956326 seconds, throughput 1022324.500109
+405207	[1728017094]	2000000 OPS in 1.884910 seconds, throughput 1061058.618183
+405207	[1728017095]	2000000 OPS in 1.899643 seconds, throughput 1052829.400050
+405207	[1728017095]	2000000 OPS in 1.854318 seconds, throughput 1078563.655209
+405207	[1728017095]	2000000 OPS in 1.881189 seconds, throughput 1063157.396732
+405207	[1728017096]	2000000 OPS in 1.845651 seconds, throughput 1083628.486642
+405207	[1728017097]	2000000 OPS in 1.874437 seconds, throughput 1066987.047311
+405207	[1728017097]	2000000 OPS in 1.859947 seconds, throughput 1075299.457458
+405207	[1728017097]	2000000 OPS in 1.876723 seconds, throughput 1065687.371019
+405207	[1728017098]	2000000 OPS in 1.863974 seconds, throughput 1072976.339799
+405207	[1728017099]	2000000 OPS in 1.874292 seconds, throughput 1067069.592145
+405207	[1728017099]	2000000 OPS in 1.846109 seconds, throughput 1083359.649945
+405207	[1728017099]	2000000 OPS in 1.886336 seconds, throughput 1060256.497252
+405207	[1728017100]	2000000 OPS in 1.860554 seconds, throughput 1074948.644329
+405207	[1728017100]	2000000 OPS in 1.845654 seconds, throughput 1083626.725269
+405207	[1728017101]	2000000 OPS in 1.834593 seconds, throughput 1090160.051848
+405207	[1728017101]	2000000 OPS in 1.860762 seconds, throughput 1074828.484245
+405207	[1728017101]	2000000 OPS in 1.853741 seconds, throughput 1078899.371595
+405207	[1728017102]	2000000 OPS in 1.872019 seconds, throughput 1068365.224926
+405207	[1728017103]	2000000 OPS in 1.868481 seconds, throughput 1070388.192334
+405207	[1728017103]	2000000 OPS in 1.897110 seconds, throughput 1054235.126060
+405207	[1728017103]	2000000 OPS in 1.879003 seconds, throughput 1064394.255890
+405207	[1728017104]	2000000 OPS in 1.903662 seconds, throughput 1050606.672823
+405207	[1728017104]	2000000 OPS in 1.899751 seconds, throughput 1052769.547167
+405207	[1728017105]	2000000 OPS in 1.903094 seconds, throughput 1050920.238307
+405207	[1728017105]	2000000 OPS in 1.856034 seconds, throughput 1077566.466994
+405207	[1728017106]	2000000 OPS in 1.867700 seconds, throughput 1070835.787332
+405207	[1728017106]	2000000 OPS in 1.831544 seconds, throughput 1091974.858371
+405207	[1728017106]	2000000 OPS in 1.853563 seconds, throughput 1079002.979667
+405207	[1728017107]	2000000 OPS in 1.834799 seconds, throughput 1090037.655351
+405207	[1728017108]	2000000 OPS in 1.845332 seconds, throughput 1083815.812006
+405207	[1728017108]	2000000 OPS in 1.826952 seconds, throughput 1094719.510967
+405207	[1728017108]	2000000 OPS in 1.854646 seconds, throughput 1078372.907822
+405207	[1728017109]	2000000 OPS in 1.836218 seconds, throughput 1089195.291627
+405207	[1728017110]	2000000 OPS in 1.861330 seconds, throughput 1074500.491584
+405207	[1728017110]	2000000 OPS in 1.829693 seconds, throughput 1093079.549411
+405207	[1728017110]	2000000 OPS in 1.865037 seconds, throughput 1072364.784184
+405207	[1728017111]	2000000 OPS in 1.847627 seconds, throughput 1082469.567721
+405207	[1728017112]	2000000 OPS in 1.848131 seconds, throughput 1082174.369674
+405207	[1728017112]	2000000 OPS in 1.827185 seconds, throughput 1094579.913911
+405207	[1728017112]	2000000 OPS in 1.853878 seconds, throughput 1078819.641853
+405207	[1728017112]	2000000 OPS in 1.830881 seconds, throughput 1092370.285125
+405207	[1728017113]	2000000 OPS in 1.878547 seconds, throughput 1064652.627802
+405207	[1728017114]	2000000 OPS in 1.871648 seconds, throughput 1068576.997384
+405207	[1728017114]	2000000 OPS in 1.922649 seconds, throughput 1040231.472307
+405207	[1728017114]	2000000 OPS in 1.916306 seconds, throughput 1043674.653213
+405207	[1728017115]	2000000 OPS in 1.890945 seconds, throughput 1057672.222090
+405207	[1728017116]	2000000 OPS in 1.851668 seconds, throughput 1080107.233046
+405207	[1728017116]	2000000 OPS in 1.870197 seconds, throughput 1069406.057223
+405207	[1728017116]	2000000 OPS in 1.850880 seconds, throughput 1080567.081604
+405207	[1728017117]	2000000 OPS in 1.849904 seconds, throughput 1081137.183335
+405207	[1728017117]	2000000 OPS in 1.824566 seconds, throughput 1096151.084696
+405207	[1728017118]	2000000 OPS in 1.853868 seconds, throughput 1078825.461144
+405207	[1728017118]	2000000 OPS in 1.831598 seconds, throughput 1091942.664275
+405207	[1728017119]	2000000 OPS in 1.889680 seconds, throughput 1058380.254858
+405207	[1728017119]	2000000 OPS in 1.861229 seconds, throughput 1074558.799589
+405207	[1728017120]	2000000 OPS in 1.901483 seconds, throughput 1051810.613085
+405207	[1728017120]	2000000 OPS in 1.903166 seconds, throughput 1050880.480210
+405207	[1728017121]	2000000 OPS in 1.911722 seconds, throughput 1046177.216143
+405207	[1728017121]	2000000 OPS in 1.882169 seconds, throughput 1062603.836319
+405207	[1728017122]	2000000 OPS in 1.914677 seconds, throughput 1044562.607688
+405207	[1728017122]	2000000 OPS in 1.874907 seconds, throughput 1066719.575958
+405207	[1728017123]	2000000 OPS in 1.878553 seconds, throughput 1064649.227357
+405207	[1728017123]	2000000 OPS in 1.859285 seconds, throughput 1075682.318741
+405207	[1728017123]	2000000 OPS in 1.912501 seconds, throughput 1045751.087189
+405207	[1728017124]	2000000 OPS in 1.894428 seconds, throughput 1055727.639161
+405207	[1728017125]	2000000 OPS in 1.908976 seconds, throughput 1047682.108104
+405207	[1728017125]	2000000 OPS in 1.917799 seconds, throughput 1042862.156045
+405207	[1728017125]	2000000 OPS in 1.932446 seconds, throughput 1034957.768548
+405207	[1728017126]	2000000 OPS in 1.919239 seconds, throughput 1042079.699297
+405207	[1728017127]	2000000 OPS in 1.910404 seconds, throughput 1046898.980530
+405207	[1728017127]	2000000 OPS in 1.911853 seconds, throughput 1046105.532172
+405207	[1728017127]	2000000 OPS in 1.882209 seconds, throughput 1062581.254260
+405207	[1728017128]	2000000 OPS in 1.882948 seconds, throughput 1062164.223335
+405207	[1728017129]	2000000 OPS in 1.878306 seconds, throughput 1064789.230296
+405207	[1728017129]	2000000 OPS in 1.865407 seconds, throughput 1072152.082629
+405207	[1728017129]	2000000 OPS in 1.867587 seconds, throughput 1070900.579197
+405207	[1728017129]	2000000 OPS in 1.880963 seconds, throughput 1063285.136390
+405207	[1728017130]	2000000 OPS in 1.852550 seconds, throughput 1079592.993441
+405207	[1728017130]	2000000 OPS in 1.855026 seconds, throughput 1078152.004338
+405207	[1728017131]	2000000 OPS in 1.855874 seconds, throughput 1077659.366961
+405207	[1728017131]	2000000 OPS in 1.835014 seconds, throughput 1089909.940742
+405207	[1728017132]	2000000 OPS in 1.845008 seconds, throughput 1084006.139811
+405207	[1728017132]	2000000 OPS in 1.825931 seconds, throughput 1095331.641776
+405207	[1728017133]	2000000 OPS in 1.851543 seconds, throughput 1080180.152446
+405207	[1728017133]	2000000 OPS in 1.853440 seconds, throughput 1079074.585635
+405207	[1728017134]	2000000 OPS in 1.870146 seconds, throughput 1069435.220566
+405207	[1728017134]	2000000 OPS in 1.849216 seconds, throughput 1081539.419949
+405207	[1728017135]	2000000 OPS in 1.859991 seconds, throughput 1075274.020143
+405207	[1728017135]	2000000 OPS in 1.862017 seconds, throughput 1074104.049533
+405207	[1728017136]	2000000 OPS in 1.856561 seconds, throughput 1077260.590953
+405207	[1728017136]	2000000 OPS in 1.835215 seconds, throughput 1089790.569497
+405207	[1728017137]	2000000 OPS in 1.856690 seconds, throughput 1077185.744524
+405207	[1728017137]	2000000 OPS in 1.832966 seconds, throughput 1091127.713225
+405207	[1728017138]	2000000 OPS in 1.844977 seconds, throughput 1084024.353691
+405207	[1728017138]	2000000 OPS in 1.831999 seconds, throughput 1091703.652677
+405207	[1728017138]	2000000 OPS in 1.878420 seconds, throughput 1064724.608980
+405207	[1728017139]	2000000 OPS in 1.866407 seconds, throughput 1071577.635532
+405207	[1728017140]	2000000 OPS in 1.879150 seconds, throughput 1064310.991672
+405207	[1728017140]	2000000 OPS in 1.865318 seconds, throughput 1072203.238268
+405207	[1728017140]	2000000 OPS in 1.855618 seconds, throughput 1077808.040232
+405207	[1728017141]	2000000 OPS in 1.864664 seconds, throughput 1072579.295787
+405207	[1728017142]	2000000 OPS in 1.851051 seconds, throughput 1080467.258871
+405207	[1728017142]	2000000 OPS in 1.899485 seconds, throughput 1052916.974864
+405207	[1728017142]	2000000 OPS in 1.899642 seconds, throughput 1052829.954276
+405207	[1728017142]	2000000 OPS in 1.847115 seconds, throughput 1082769.616402
+405207	[1728017143]	2000000 OPS in 1.870843 seconds, throughput 1069036.792505
+405207	[1728017143]	2000000 OPS in 1.870196 seconds, throughput 1069406.629038
+405207	[1728017144]	2000000 OPS in 1.879932 seconds, throughput 1063868.267576
+405207	[1728017144]	2000000 OPS in 1.858964 seconds, throughput 1075868.064148
+405207	[1728017145]	2000000 OPS in 1.839504 seconds, throughput 1087249.606416
+405207	[1728017145]	2000000 OPS in 1.854740 seconds, throughput 1078318.254850
+405207	[1728017146]	2000000 OPS in 1.858327 seconds, throughput 1076236.851749
+405207	[1728017146]	2000000 OPS in 1.833909 seconds, throughput 1090566.652980
+405207	[1728017147]	2000000 OPS in 1.841636 seconds, throughput 1085990.934148
+405207	[1728017147]	2000000 OPS in 1.871974 seconds, throughput 1068390.907139
+405207	[1728017148]	2000000 OPS in 1.885840 seconds, throughput 1060535.358249
+405207	[1728017148]	2000000 OPS in 1.865821 seconds, throughput 1071914.186838
+405207	[1728017149]	2000000 OPS in 1.895517 seconds, throughput 1055121.109439
+405207	[1728017149]	2000000 OPS in 1.875838 seconds, throughput 1066190.150749
+405207	[1728017150]	2000000 OPS in 1.894005 seconds, throughput 1055963.421427
+405207	[1728017150]	2000000 OPS in 1.899150 seconds, throughput 1053102.703841
+405207	[1728017151]	2000000 OPS in 1.860208 seconds, throughput 1075148.585535
+405207	[1728017151]	2000000 OPS in 1.860760 seconds, throughput 1074829.639502
+405207	[1728017152]	2000000 OPS in 1.859216 seconds, throughput 1075722.239912
+405207	[1728017152]	2000000 OPS in 1.835950 seconds, throughput 1089354.285247
+405207	[1728017153]	2000000 OPS in 1.838369 seconds, throughput 1087920.868988
+405207	[1728017153]	2000000 OPS in 1.859202 seconds, throughput 1075730.340221
+405207	[1728017153]	2000000 OPS in 1.858493 seconds, throughput 1076140.722618
+405207	[1728017154]	2000000 OPS in 1.850304 seconds, throughput 1080903.462350
+405207	[1728017155]	2000000 OPS in 1.835902 seconds, throughput 1089382.766618
+405207	[1728017155]	2000000 OPS in 1.856204 seconds, throughput 1077467.778326
+405207	[1728017155]	2000000 OPS in 1.876344 seconds, throughput 1065902.627663
+405207	[1728017155]	2000000 OPS in 1.869143 seconds, throughput 1070009.089727
+405207	[1728017156]	2000000 OPS in 1.911314 seconds, throughput 1046400.539106
+405207	[1728017157]	2000000 OPS in 1.935533 seconds, throughput 1033307.104555
+405207	[1728017157]	2000000 OPS in 1.925369 seconds, throughput 1038761.920442
+405207	[1728017157]	2000000 OPS in 1.901324 seconds, throughput 1051898.571732
+405207	[1728017158]	2000000 OPS in 1.869412 seconds, throughput 1069855.120220
+405207	[1728017158]	2000000 OPS in 1.870167 seconds, throughput 1069423.211938
+405207	[1728017159]	2000000 OPS in 1.869995 seconds, throughput 1069521.576261
+405207	[1728017159]	2000000 OPS in 1.868668 seconds, throughput 1070281.077216
+405207	[1728017160]	2000000 OPS in 1.868734 seconds, throughput 1070243.276999
+405207	[1728017160]	2000000 OPS in 1.882535 seconds, throughput 1062397.246266
+405207	[1728017161]	2000000 OPS in 1.887368 seconds, throughput 1059676.756202
+405207	[1728017161]	2000000 OPS in 1.860883 seconds, throughput 1074758.595785
+405207	[1728017162]	2000000 OPS in 1.863043 seconds, throughput 1073512.527623
+405207	[1728017162]	2000000 OPS in 1.860311 seconds, throughput 1075089.057690
+405207	[1728017163]	2000000 OPS in 1.876510 seconds, throughput 1065808.335687
+405207	[1728017163]	2000000 OPS in 1.877584 seconds, throughput 1065198.680858
+405207	[1728017164]	2000000 OPS in 1.868112 seconds, throughput 1070599.621436
+405207	[1728017164]	2000000 OPS in 1.870629 seconds, throughput 1069159.090338
+405207	[1728017165]	2000000 OPS in 1.883793 seconds, throughput 1061687.775674
+405207	[1728017165]	2000000 OPS in 1.873393 seconds, throughput 1067581.655317
+405207	[1728017166]	2000000 OPS in 1.853685 seconds, throughput 1078931.965248
+405207	[1728017166]	2000000 OPS in 1.858166 seconds, throughput 1076330.101832
+405207	[1728017167]	2000000 OPS in 1.869644 seconds, throughput 1069722.364258
+405207	[1728017167]	2000000 OPS in 1.878946 seconds, throughput 1064426.545521
+405207	[1728017168]	2000000 OPS in 1.859403 seconds, throughput 1075614.054619
+405207	[1728017168]	2000000 OPS in 1.856480 seconds, throughput 1077307.592864
+405207	[1728017168]	2000000 OPS in 1.883476 seconds, throughput 1061866.463921
+405207	[1728017169]	2000000 OPS in 1.861676 seconds, throughput 1074300.791330
+405207	[1728017169]	2000000 OPS in 1.825499 seconds, throughput 1095590.849406
+405207	[1728017170]	2000000 OPS in 1.849937 seconds, throughput 1081117.897528
+405207	[1728017170]	2000000 OPS in 1.856027 seconds, throughput 1077570.531032
+405207	[1728017170]	2000000 OPS in 1.838099 seconds, throughput 1088080.674654
+405207	[1728017171]	2000000 OPS in 1.853535 seconds, throughput 1079019.279377
+405207	[1728017172]	2000000 OPS in 1.880327 seconds, throughput 1063644.780934
+405207	[1728017172]	2000000 OPS in 1.902946 seconds, throughput 1051001.972731
+405207	[1728017172]	2000000 OPS in 1.879959 seconds, throughput 1063852.988283
+405207	[1728017173]	2000000 OPS in 1.872185 seconds, throughput 1068270.496772
+405207	[1728017173]	2000000 OPS in 1.874977 seconds, throughput 1066679.751272
+405207	[1728017174]	2000000 OPS in 1.837672 seconds, throughput 1088333.500211
+405207	[1728017174]	2000000 OPS in 1.886473 seconds, throughput 1060179.498991
+405207	[1728017175]	2000000 OPS in 1.826773 seconds, throughput 1094826.779244
+405207	[1728017175]	2000000 OPS in 1.843470 seconds, throughput 1084910.522005
+405207	[1728017176]	2000000 OPS in 1.841718 seconds, throughput 1085942.581872
+405207	[1728017176]	2000000 OPS in 1.855870 seconds, throughput 1077661.689666
+405207	[1728017177]	2000000 OPS in 1.866308 seconds, throughput 1071634.478339
+405207	[1728017177]	2000000 OPS in 1.879072 seconds, throughput 1064355.171063
+405207	[1728017178]	2000000 OPS in 1.880201 seconds, throughput 1063716.060145
+405207	[1728017178]	2000000 OPS in 1.931065 seconds, throughput 1035697.917988
+405207	[1728017179]	2000000 OPS in 1.885070 seconds, throughput 1060968.558197
+405207	[1728017179]	2000000 OPS in 1.890721 seconds, throughput 1057797.528033
+405207	[1728017180]	2000000 OPS in 1.870932 seconds, throughput 1068985.938559
+405207	[1728017180]	2000000 OPS in 1.893929 seconds, throughput 1056005.795360
+405207	[1728017181]	2000000 OPS in 1.857489 seconds, throughput 1076722.392434
+405207	[1728017181]	2000000 OPS in 1.866798 seconds, throughput 1071353.194079
+405207	[1728017182]	2000000 OPS in 1.868797 seconds, throughput 1070207.197464
+405207	[1728017182]	2000000 OPS in 1.856114 seconds, throughput 1077520.023016
+405207	[1728017182]	2000000 OPS in 1.828357 seconds, throughput 1093878.274320
+405207	[1728017183]	2000000 OPS in 1.842907 seconds, throughput 1085241.957408
+405207	[1728017183]	2000000 OPS in 1.836787 seconds, throughput 1088857.880636
+405207	[1728017184]	2000000 OPS in 1.855372 seconds, throughput 1077950.944608
+405207	[1728017184]	2000000 OPS in 1.832994 seconds, throughput 1091111.045644
+405207	[1728017185]	2000000 OPS in 1.892236 seconds, throughput 1056950.612926
+405207	[1728017185]	2000000 OPS in 1.867548 seconds, throughput 1070922.942811
+405207	[1728017185]	2000000 OPS in 1.926070 seconds, throughput 1038383.859361
+405207	[1728017186]	2000000 OPS in 1.882791 seconds, throughput 1062252.793858
+405207	[1728017186]	2000000 OPS in 1.886252 seconds, throughput 1060303.713396
+405207	[1728017187]	2000000 OPS in 1.878954 seconds, throughput 1064422.013525
+405207	[1728017187]	2000000 OPS in 1.884822 seconds, throughput 1061108.157693
+405207	[1728017188]	2000000 OPS in 1.862384 seconds, throughput 1073892.387392
+405207	[1728017188]	2000000 OPS in 1.872311 seconds, throughput 1068198.605894
+405207	[1728017189]	2000000 OPS in 1.878230 seconds, throughput 1064832.315531
+405207	[1728017189]	2000000 OPS in 1.886491 seconds, throughput 1060169.383262
+405207	[1728017190]	2000000 OPS in 1.887311 seconds, throughput 1059708.760241
+405207	[1728017190]	2000000 OPS in 1.895218 seconds, throughput 1055287.571140
+405207	[1728017191]	2000000 OPS in 1.884829 seconds, throughput 1061104.216881
+405207	[1728017191]	2000000 OPS in 1.886167 seconds, throughput 1060351.495917
+405207	[1728017192]	2000000 OPS in 1.830916 seconds, throughput 1092349.403250
+405207	[1728017192]	2000000 OPS in 1.846730 seconds, throughput 1082995.348535
+405207	[1728017193]	2000000 OPS in 1.838519 seconds, throughput 1087832.108344
+405207	[1728017193]	2000000 OPS in 1.859359 seconds, throughput 1075639.508024
+405207	[1728017194]	2000000 OPS in 1.838019 seconds, throughput 1088128.033497
+405207	[1728017194]	2000000 OPS in 1.845168 seconds, throughput 1083912.142417
+405207	[1728017195]	2000000 OPS in 1.884208 seconds, throughput 1061453.937145
+405207	[1728017195]	2000000 OPS in 1.903493 seconds, throughput 1050699.950039
+405207	[1728017195]	2000000 OPS in 1.874336 seconds, throughput 1067044.542707
+405207	[1728017196]	2000000 OPS in 1.868836 seconds, throughput 1070184.863733
+405207	[1728017196]	2000000 OPS in 1.856797 seconds, throughput 1077123.670493
+405207	[1728017197]	2000000 OPS in 1.878308 seconds, throughput 1064788.096521
+405207	[1728017197]	2000000 OPS in 1.860561 seconds, throughput 1074944.600043
+405207	[1728017198]	2000000 OPS in 1.878844 seconds, throughput 1064484.331855
+405207	[1728017198]	2000000 OPS in 1.895048 seconds, throughput 1055382.238339
+405207	[1728017199]	2000000 OPS in 1.896925 seconds, throughput 1054337.941669
+405207	[1728017199]	2000000 OPS in 1.860580 seconds, throughput 1074933.622849
+405207	[1728017200]	2000000 OPS in 1.846013 seconds, throughput 1083415.988945
+405207	[1728017200]	2000000 OPS in 1.840305 seconds, throughput 1086776.376742
+405207	[1728017201]	2000000 OPS in 1.856064 seconds, throughput 1077549.050033
+405207	[1728017201]	2000000 OPS in 1.841980 seconds, throughput 1085788.119306
+405207	[1728017201]	2000000 OPS in 1.858574 seconds, throughput 1076093.822468
+405207	[1728017202]	2000000 OPS in 1.877140 seconds, throughput 1065450.632345
+405207	[1728017202]	2000000 OPS in 1.881545 seconds, throughput 1062956.240749
+405207	[1728017203]	2000000 OPS in 1.897356 seconds, throughput 1054098.440145
+405207	[1728017203]	2000000 OPS in 1.894732 seconds, throughput 1055558.253093
+405207	[1728017204]	2000000 OPS in 1.857119 seconds, throughput 1076936.911420
+405207	[1728017204]	2000000 OPS in 1.878243 seconds, throughput 1064824.945441
+405207	[1728017205]	2000000 OPS in 1.825749 seconds, throughput 1095440.830037
+405207	[1728017205]	2000000 OPS in 1.871165 seconds, throughput 1068852.826982
+405207	[1728017206]	2000000 OPS in 1.864071 seconds, throughput 1072920.505710
+405207	[1728017206]	2000000 OPS in 1.889462 seconds, throughput 1058502.367341
+405207	[1728017207]	2000000 OPS in 1.866169 seconds, throughput 1071714.298116
+405207	[1728017207]	2000000 OPS in 1.871520 seconds, throughput 1068650.081217
+405207	[1728017208]	2000000 OPS in 1.865889 seconds, throughput 1071875.122261
+405207	[1728017208]	2000000 OPS in 1.882049 seconds, throughput 1062671.588253
+405207	[1728017208]	2000000 OPS in 1.850941 seconds, throughput 1080531.470209
+405207	[1728017209]	2000000 OPS in 1.864748 seconds, throughput 1072530.980057
+405207	[1728017210]	2000000 OPS in 1.836230 seconds, throughput 1089188.173595
+405207	[1728017210]	2000000 OPS in 1.866594 seconds, throughput 1071470.282236
+405207	[1728017210]	2000000 OPS in 1.829585 seconds, throughput 1093144.073656
+405207	[1728017211]	2000000 OPS in 1.851051 seconds, throughput 1080467.258871
+405207	[1728017211]	2000000 OPS in 1.847765 seconds, throughput 1082388.723674
+405207	[1728017212]	2000000 OPS in 1.874676 seconds, throughput 1066851.018523
+405207	[1728017212]	2000000 OPS in 1.836225 seconds, throughput 1089191.139430
+405207	[1728017213]	2000000 OPS in 1.863471 seconds, throughput 1073265.964429
+405207	[1728017213]	2000000 OPS in 1.854757 seconds, throughput 1078308.371393
+405207	[1728017214]	2000000 OPS in 1.866418 seconds, throughput 1071571.320037
+405207	[1728017214]	2000000 OPS in 1.846063 seconds, throughput 1083386.644984
+405207	[1728017214]	2000000 OPS in 1.885212 seconds, throughput 1060888.642763
+405207	[1728017215]	2000000 OPS in 1.850042 seconds, throughput 1081056.538176
+405207	[1728017216]	2000000 OPS in 1.867784 seconds, throughput 1070787.628548
+405207	[1728017216]	2000000 OPS in 1.868718 seconds, throughput 1070252.440443
+405207	[1728017216]	2000000 OPS in 1.897264 seconds, throughput 1054149.554306
+405207	[1728017217]	2000000 OPS in 1.864965 seconds, throughput 1072406.184566
+405207	[1728017217]	2000000 OPS in 1.899320 seconds, throughput 1053008.445128
+405207	[1728017218]	2000000 OPS in 1.860840 seconds, throughput 1074783.431139
+405207	[1728017218]	2000000 OPS in 1.856299 seconds, throughput 1077412.636650
+405207	[1728017219]	2000000 OPS in 1.868003 seconds, throughput 1070662.092084
+405207	[1728017219]	2000000 OPS in 1.908261 seconds, throughput 1048074.660647
+405207	[1728017220]	2000000 OPS in 1.856507 seconds, throughput 1077291.925105
+405207	[1728017220]	2000000 OPS in 1.869206 seconds, throughput 1069973.025980
+405207	[1728017221]	2000000 OPS in 1.841008 seconds, throughput 1086361.384633
+405207	[1728017221]	2000000 OPS in 1.859760 seconds, throughput 1075407.579473
+405207	[1728017221]	2000000 OPS in 1.833094 seconds, throughput 1091051.522726
+405207	[1728017222]	2000000 OPS in 1.845650 seconds, throughput 1083629.073768
+405207	[1728017222]	2000000 OPS in 1.837275 seconds, throughput 1088568.668272
+405207	[1728017223]	2000000 OPS in 1.889354 seconds, throughput 1058562.873871
+405207	[1728017223]	2000000 OPS in 1.896553 seconds, throughput 1054544.745124
+405207	[1728017224]	2000000 OPS in 1.889072 seconds, throughput 1058720.895763
+405207	[1728017224]	2000000 OPS in 1.900783 seconds, throughput 1052197.962629
+405207	[1728017225]	2000000 OPS in 1.857157 seconds, throughput 1076914.875802
+405207	[1728017225]	2000000 OPS in 1.841512 seconds, throughput 1086064.060403
+405207	[1728017226]	2000000 OPS in 1.859795 seconds, throughput 1075387.341078
+405207	[1728017226]	2000000 OPS in 1.872759 seconds, throughput 1067943.072227
+405207	[1728017227]	2000000 OPS in 1.887162 seconds, throughput 1059792.429055
+405207	[1728017227]	2000000 OPS in 1.868638 seconds, throughput 1070298.260016
+405207	[1728017228]	2000000 OPS in 1.893165 seconds, throughput 1056431.953897
+405207	[1728017228]	2000000 OPS in 1.860469 seconds, throughput 1074997.755942
+405207	[1728017229]	2000000 OPS in 1.851315 seconds, throughput 1080313.182792
+405207	[1728017229]	2000000 OPS in 1.842865 seconds, throughput 1085266.690723
+405207	[1728017230]	2000000 OPS in 1.846859 seconds, throughput 1082919.703128
+405207	[1728017230]	2000000 OPS in 1.818257 seconds, throughput 1099954.516881
+405207	[1728017231]	2000000 OPS in 1.816863 seconds, throughput 1100798.464166
+405207	[1728017232]	2000000 OPS in 1.816016 seconds, throughput 1101311.882715
+405207	[1728017233]	2000000 OPS in 1.800590 seconds, throughput 1110747.032917
+405207	[1728017234]	2000000 OPS in 1.794637 seconds, throughput 1114431.497846
+405207	[1728017235]	2000000 OPS in 1.809449 seconds, throughput 1105308.853690
+405207	[1728017236]	2000000 OPS in 1.796140 seconds, throughput 1113498.947743
+405207	[1728017238]	2000000 OPS in 1.708942 seconds, throughput 1170314.732741
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     234397 ms       922011 ms            4 CompactionCPUUsage=1.96482 CompactionThroughput=599.707M Lat_Get_Avg=852.631 Lat_Get_P50=877.744 Lat_Get_P95=1.35996k Lat_Get_P99=1.80881k Lat_Put_Avg=1039.22 Lat_Put_P50=1013.6 Lat_Put_P95=1.55807k Lat_Put_P99=1.85559k items_per_second=4.26626M/s
+5582.29user 27.01system 16:18.52elapsed 573%CPU (0avgtext+0avgdata 9119776maxresident)k
+320944inputs+16649760outputs (5781major+3575518minor)pagefaults 0swaps

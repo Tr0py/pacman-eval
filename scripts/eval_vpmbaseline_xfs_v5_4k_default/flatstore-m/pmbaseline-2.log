@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 83%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T00:40:42-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 4.23, 5.33, 5.10
+[1728193242]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728193242]	Setup starts!
+[1728193242]	Setup starts!
+[1728193242]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f9e8b600000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728193242]	Initializing log segments...
+Log: pool_start 0x7f9e8b600000 total segments: 2028  cleaners: 2
+[1728193243]Initialized 2026 free log segments...
+[1728193243]	DB init finished in 1.529433 seconds
+[1728193243]	DB init finished in 1.529377 seconds
+[1728193243]	DB init finished in 1.529489 seconds
+[1728193243]	DB init finished in 1.529129 seconds
+[1728193247]	DB load finished in 4.001614 seconds
+[1728193247]	DB load finished in 4.002928 seconds
+[1728193247]	DB load finished in 4.012581 seconds
+[1728193247]	DB load finished in 4.020845 seconds
+[1728193247]	DB warmup finished in 0.000015 seconds
+[1728193247]	DB warmup finished in 0.019273 seconds
+[1728193247]	DB warmup finished in 0.017965 seconds
+[1728193247]	DB warmup finished in 0.008311 seconds
+[1728193247]	ETC init!
+[1728193247]	ETC starts!
+[1728193247]	ETC init!
+[1728193247]	ETC starts!
+[1728193247]	ETC init!
+[1728193247]	ETC init!
+[1728193247]	ETC starts!
+[1728193247]	ETC starts!
+139044	[1728193249]	2000000 OPS in 1.772209 seconds, throughput 1128535.065559
+139044	[1728193249]	2000000 OPS in 1.777219 seconds, throughput 1125353.712739
+139044	[1728193249]	2000000 OPS in 1.785954 seconds, throughput 1119849.671380
+139044	[1728193249]	2000000 OPS in 1.785998 seconds, throughput 1119822.082668
+139044	[1728193251]	2000000 OPS in 1.704249 seconds, throughput 1173537.434964
+139044	[1728193251]	2000000 OPS in 1.708202 seconds, throughput 1170821.717806
+139044	[1728193251]	2000000 OPS in 1.718807 seconds, throughput 1163597.774503
+139044	[1728193251]	2000000 OPS in 1.734878 seconds, throughput 1152818.814925
+139044	[1728193253]	2000000 OPS in 1.707015 seconds, throughput 1171635.867289
+139044	[1728193253]	2000000 OPS in 1.716953 seconds, throughput 1164854.250524
+139044	[1728193253]	2000000 OPS in 1.721806 seconds, throughput 1161571.048074
+139044	[1728193253]	2000000 OPS in 1.749441 seconds, throughput 1143222.320730
+139044	[1728193254]	2000000 OPS in 1.704131 seconds, throughput 1173618.694807
+139044	[1728193254]	2000000 OPS in 1.724870 seconds, throughput 1159507.673042
+139044	[1728193254]	2000000 OPS in 1.721247 seconds, throughput 1161948.285168
+139044	[1728193254]	2000000 OPS in 1.709180 seconds, throughput 1170151.768684
+139044	[1728193256]	2000000 OPS in 1.733703 seconds, throughput 1153600.126435
+139044	[1728193256]	2000000 OPS in 1.742259 seconds, throughput 1147934.951118
+139044	[1728193256]	2000000 OPS in 1.744195 seconds, throughput 1146660.780475
+139044	[1728193256]	2000000 OPS in 1.737444 seconds, throughput 1151116.237415
+139044	[1728193258]	2000000 OPS in 1.714946 seconds, throughput 1166217.478568
+139044	[1728193258]	2000000 OPS in 1.718904 seconds, throughput 1163532.111159
+139044	[1728193258]	2000000 OPS in 1.725821 seconds, throughput 1158868.735518
+139044	[1728193258]	2000000 OPS in 1.716375 seconds, throughput 1165246.522467
+139044	[1728193259]	2000000 OPS in 1.715075 seconds, throughput 1166129.761089
+139044	[1728193260]	2000000 OPS in 1.720150 seconds, throughput 1162689.300352
+139044	[1728193260]	2000000 OPS in 1.729703 seconds, throughput 1156267.867952
+139044	[1728193260]	2000000 OPS in 1.719384 seconds, throughput 1163207.288192
+139044	[1728193261]	2000000 OPS in 1.709100 seconds, throughput 1170206.541455
+139044	[1728193261]	2000000 OPS in 1.716670 seconds, throughput 1165046.281464
+139044	[1728193261]	2000000 OPS in 1.716646 seconds, throughput 1165062.569685
+139044	[1728193261]	2000000 OPS in 1.725615 seconds, throughput 1159007.078636
+139044	[1728193263]	2000000 OPS in 1.966585 seconds, throughput 1016991.383541
+139044	[1728193263]	2000000 OPS in 2.002074 seconds, throughput 998964.074255
+139044	[1728193263]	2000000 OPS in 2.053507 seconds, throughput 973943.599900
+139044	[1728193263]	2000000 OPS in 2.154255 seconds, throughput 928395.199268
+139044	[1728193265]	2000000 OPS in 2.335281 seconds, throughput 856427.984470
+139044	[1728193266]	2000000 OPS in 2.391167 seconds, throughput 836411.676809
+139044	[1728193266]	2000000 OPS in 2.474959 seconds, throughput 808094.194692
+139044	[1728193266]	2000000 OPS in 2.377237 seconds, throughput 841312.835027
+139044	[1728193268]	2000000 OPS in 2.162532 seconds, throughput 924841.805809
+139044	[1728193268]	2000000 OPS in 2.262429 seconds, throughput 884005.641724
+139044	[1728193268]	2000000 OPS in 2.217856 seconds, throughput 901771.801235
+139044	[1728193268]	2000000 OPS in 2.261539 seconds, throughput 884353.530936
+139044	[1728193270]	2000000 OPS in 2.133765 seconds, throughput 937310.341111
+139044	[1728193270]	2000000 OPS in 2.111633 seconds, throughput 947134.279489
+139044	[1728193270]	2000000 OPS in 2.192186 seconds, throughput 912331.344147
+139044	[1728193270]	2000000 OPS in 2.195859 seconds, throughput 910805.293054
+139044	[1728193272]	2000000 OPS in 2.049469 seconds, throughput 975862.528294
+139044	[1728193272]	2000000 OPS in 2.114053 seconds, throughput 946050.075377
+139044	[1728193272]	2000000 OPS in 2.132293 seconds, throughput 937957.400789
+139044	[1728193272]	2000000 OPS in 2.084729 seconds, throughput 959357.307353
+139044	[1728193274]	2000000 OPS in 1.789729 seconds, throughput 1117487.619634
+139044	[1728193274]	2000000 OPS in 1.730378 seconds, throughput 1155816.821527
+139044	[1728193274]	2000000 OPS in 1.713285 seconds, throughput 1167348.106124
+139044	[1728193274]	2000000 OPS in 1.729221 seconds, throughput 1156590.164010
+139044	[1728193275]	2000000 OPS in 1.706027 seconds, throughput 1172314.388928
+139044	[1728193276]	2000000 OPS in 1.708225 seconds, throughput 1170805.953548
+139044	[1728193276]	2000000 OPS in 1.709688 seconds, throughput 1169804.081212
+139044	[1728193276]	2000000 OPS in 1.721712 seconds, throughput 1161634.466159
+139044	[1728193277]	2000000 OPS in 1.705132 seconds, throughput 1172929.720397
+139044	[1728193277]	2000000 OPS in 1.703606 seconds, throughput 1173980.368700
+139044	[1728193278]	2000000 OPS in 1.710322 seconds, throughput 1169370.446033
+139044	[1728193278]	2000000 OPS in 1.720427 seconds, throughput 1162502.099769
+139044	[1728193279]	2000000 OPS in 1.702169 seconds, throughput 1174971.462881
+139044	[1728193279]	2000000 OPS in 1.704110 seconds, throughput 1173633.157484
+139044	[1728193279]	2000000 OPS in 1.709393 seconds, throughput 1170005.961180
+139044	[1728193279]	2000000 OPS in 1.719480 seconds, throughput 1163142.345360
+139044	[1728193280]	2000000 OPS in 1.704112 seconds, throughput 1173631.780071
+139044	[1728193281]	2000000 OPS in 1.705051 seconds, throughput 1172985.441491
+139044	[1728193281]	2000000 OPS in 1.709746 seconds, throughput 1169764.397753
+139044	[1728193281]	2000000 OPS in 1.717826 seconds, throughput 1164262.271033
+139044	[1728193282]	2000000 OPS in 1.703796 seconds, throughput 1173849.451460
+139044	[1728193282]	2000000 OPS in 1.705291 seconds, throughput 1172820.357347
+139044	[1728193283]	2000000 OPS in 1.711812 seconds, throughput 1168352.599468
+139044	[1728193283]	2000000 OPS in 1.721586 seconds, throughput 1161719.484243
+139044	[1728193284]	2000000 OPS in 1.705838 seconds, throughput 1172444.276655
+139044	[1728193284]	2000000 OPS in 1.706574 seconds, throughput 1171938.632605
+139044	[1728193284]	2000000 OPS in 1.712898 seconds, throughput 1167611.848458
+139044	[1728193284]	2000000 OPS in 1.720344 seconds, throughput 1162558.186037
+139044	[1728193286]	2000000 OPS in 1.704840 seconds, throughput 1173130.616363
+139044	[1728193286]	2000000 OPS in 1.706246 seconds, throughput 1172163.920091
+139044	[1728193286]	2000000 OPS in 1.713367 seconds, throughput 1167292.238032
+139044	[1728193286]	2000000 OPS in 1.719340 seconds, throughput 1163237.056080
+139044	[1728193287]	2000000 OPS in 1.708209 seconds, throughput 1170816.919944
+139044	[1728193288]	2000000 OPS in 1.723011 seconds, throughput 1160758.695098
+139044	[1728193288]	2000000 OPS in 1.816760 seconds, throughput 1100860.873203
+139044	[1728193288]	2000000 OPS in 1.770651 seconds, throughput 1129528.066231
+139044	[1728193289]	2000000 OPS in 2.029996 seconds, throughput 985223.616204
+139044	[1728193289]	2000000 OPS in 1.966119 seconds, throughput 1017232.425911
+139044	[1728193290]	2000000 OPS in 2.009860 seconds, throughput 995094.185665
+139044	[1728193290]	2000000 OPS in 2.079446 seconds, throughput 961794.631839
+139044	[1728193291]	2000000 OPS in 1.938586 seconds, throughput 1031679.791353
+139044	[1728193291]	2000000 OPS in 1.908852 seconds, throughput 1047750.166068
+139044	[1728193292]	2000000 OPS in 1.895879 seconds, throughput 1054919.644133
+139044	[1728193292]	2000000 OPS in 1.875282 seconds, throughput 1066506.264125
+139044	[1728193293]	2000000 OPS in 1.882085 seconds, throughput 1062651.261766
+139044	[1728193293]	2000000 OPS in 1.931584 seconds, throughput 1035419.634870
+139044	[1728193294]	2000000 OPS in 1.907556 seconds, throughput 1048462.011076
+139044	[1728193294]	2000000 OPS in 1.943692 seconds, throughput 1028969.610412
+139044	[1728193295]	2000000 OPS in 1.819842 seconds, throughput 1098996.506290
+139044	[1728193295]	2000000 OPS in 1.789242 seconds, throughput 1117791.779983
+139044	[1728193296]	2000000 OPS in 1.808893 seconds, throughput 1105648.592813
+139044	[1728193296]	2000000 OPS in 1.852136 seconds, throughput 1079834.310223
+139044	[1728193297]	2000000 OPS in 1.911170 seconds, throughput 1046479.381740
+139044	[1728193297]	2000000 OPS in 1.894626 seconds, throughput 1055617.309168
+139044	[1728193298]	2000000 OPS in 1.935267 seconds, throughput 1033449.131308
+139044	[1728193298]	2000000 OPS in 1.955021 seconds, throughput 1023006.913992
+139044	[1728193299]	2000000 OPS in 2.114166 seconds, throughput 945999.509972
+139044	[1728193299]	2000000 OPS in 1.964188 seconds, throughput 1018232.470619
+139044	[1728193300]	2000000 OPS in 2.002790 seconds, throughput 998606.943314
+139044	[1728193300]	2000000 OPS in 2.021313 seconds, throughput 989455.863590
+139044	[1728193301]	2000000 OPS in 1.892140 seconds, throughput 1057004.238587
+139044	[1728193301]	2000000 OPS in 1.969341 seconds, throughput 1015568.151986
+139044	[1728193301]	2000000 OPS in 1.903069 seconds, throughput 1050934.043905
+139044	[1728193301]	2000000 OPS in 1.930760 seconds, throughput 1035861.526031
+139044	[1728193303]	2000000 OPS in 1.850006 seconds, throughput 1081077.574884
+139044	[1728193303]	2000000 OPS in 1.913707 seconds, throughput 1045092.064773
+139044	[1728193303]	2000000 OPS in 1.902727 seconds, throughput 1051122.940916
+139044	[1728193303]	2000000 OPS in 1.962904 seconds, throughput 1018898.529933
+139044	[1728193305]	2000000 OPS in 1.875622 seconds, throughput 1066312.935122
+139044	[1728193305]	2000000 OPS in 1.880972 seconds, throughput 1063280.048826
+139044	[1728193305]	2000000 OPS in 1.845535 seconds, throughput 1083696.597464
+139044	[1728193305]	2000000 OPS in 1.843172 seconds, throughput 1085085.927955
+139044	[1728193306]	2000000 OPS in 1.829057 seconds, throughput 1093459.635211
+139044	[1728193307]	2000000 OPS in 1.842430 seconds, throughput 1085522.923530
+139044	[1728193307]	2000000 OPS in 1.820492 seconds, throughput 1098604.113613
+139044	[1728193307]	2000000 OPS in 1.823695 seconds, throughput 1096674.608419
+139044	[1728193308]	2000000 OPS in 1.862475 seconds, throughput 1073839.917314
+139044	[1728193308]	2000000 OPS in 1.853595 seconds, throughput 1078984.352029
+139044	[1728193309]	2000000 OPS in 1.869443 seconds, throughput 1069837.379369
+139044	[1728193309]	2000000 OPS in 1.957680 seconds, throughput 1021617.424707
+139044	[1728193310]	2000000 OPS in 1.818245 seconds, throughput 1099961.776328
+139044	[1728193310]	2000000 OPS in 1.840881 seconds, throughput 1086436.331300
+139044	[1728193311]	2000000 OPS in 1.797321 seconds, throughput 1112767.279746
+139044	[1728193311]	2000000 OPS in 1.814354 seconds, throughput 1102320.715803
+139044	[1728193312]	2000000 OPS in 1.804396 seconds, throughput 1108404.141885
+139044	[1728193312]	2000000 OPS in 1.769963 seconds, throughput 1129967.123607
+139044	[1728193312]	2000000 OPS in 1.789672 seconds, throughput 1117523.210957
+139044	[1728193313]	2000000 OPS in 1.764778 seconds, throughput 1133287.019670
+139044	[1728193314]	2000000 OPS in 1.875002 seconds, throughput 1066665.528890
+139044	[1728193314]	2000000 OPS in 1.834038 seconds, throughput 1090489.946228
+139044	[1728193314]	2000000 OPS in 1.815637 seconds, throughput 1101541.772942
+139044	[1728193314]	2000000 OPS in 1.852090 seconds, throughput 1079861.129859
+139044	[1728193316]	2000000 OPS in 1.778294 seconds, throughput 1124673.422955
+139044	[1728193316]	2000000 OPS in 1.874475 seconds, throughput 1066965.416983
+139044	[1728193316]	2000000 OPS in 1.860179 seconds, throughput 1075165.346991
+139044	[1728193316]	2000000 OPS in 1.824793 seconds, throughput 1096014.726054
+139044	[1728193317]	2000000 OPS in 1.840000 seconds, throughput 1086956.521739
+139044	[1728193318]	2000000 OPS in 1.883099 seconds, throughput 1062079.051606
+139044	[1728193318]	2000000 OPS in 1.890865 seconds, throughput 1057716.970804
+139044	[1728193318]	2000000 OPS in 1.863772 seconds, throughput 1073092.631502
+139044	[1728193319]	2000000 OPS in 1.891951 seconds, throughput 1057109.830011
+139044	[1728193320]	2000000 OPS in 1.973848 seconds, throughput 1013249.247156
+139044	[1728193320]	2000000 OPS in 1.909556 seconds, throughput 1047363.889826
+139044	[1728193320]	2000000 OPS in 1.889657 seconds, throughput 1058393.136956
+139044	[1728193321]	2000000 OPS in 1.833621 seconds, throughput 1090737.944210
+139044	[1728193321]	2000000 OPS in 1.826704 seconds, throughput 1094868.134082
+139044	[1728193322]	2000000 OPS in 1.858729 seconds, throughput 1076004.086664
+139044	[1728193322]	2000000 OPS in 1.861994 seconds, throughput 1074117.317242
+139044	[1728193323]	2000000 OPS in 1.881397 seconds, throughput 1063039.858148
+139044	[1728193323]	2000000 OPS in 1.919354 seconds, throughput 1042017.262058
+139044	[1728193324]	2000000 OPS in 1.925995 seconds, throughput 1038424.294975
+139044	[1728193324]	2000000 OPS in 1.917830 seconds, throughput 1042845.299114
+139044	[1728193325]	2000000 OPS in 1.868998 seconds, throughput 1070092.102827
+139044	[1728193325]	2000000 OPS in 2.034696 seconds, throughput 982947.821198
+139044	[1728193326]	2000000 OPS in 2.001353 seconds, throughput 999323.957343
+139044	[1728193326]	2000000 OPS in 1.876914 seconds, throughput 1065578.923701
+139044	[1728193327]	2000000 OPS in 1.845498 seconds, throughput 1083718.324268
+139044	[1728193327]	2000000 OPS in 1.783427 seconds, throughput 1121436.425489
+139044	[1728193328]	2000000 OPS in 1.829803 seconds, throughput 1093013.838102
+139044	[1728193328]	2000000 OPS in 1.843613 seconds, throughput 1084826.370827
+139044	[1728193329]	2000000 OPS in 1.835996 seconds, throughput 1089326.991998
+139044	[1728193329]	2000000 OPS in 1.892044 seconds, throughput 1057057.869690
+139044	[1728193329]	2000000 OPS in 1.901802 seconds, throughput 1051634.186945
+139044	[1728193330]	2000000 OPS in 1.925117 seconds, throughput 1038897.895556
+139044	[1728193330]	2000000 OPS in 1.829494 seconds, throughput 1093198.447221
+139044	[1728193331]	2000000 OPS in 1.859821 seconds, throughput 1075372.307335
+139044	[1728193331]	2000000 OPS in 1.860139 seconds, throughput 1075188.467098
+139044	[1728193331]	2000000 OPS in 1.904774 seconds, throughput 1049993.332542
+139044	[1728193332]	2000000 OPS in 1.851903 seconds, throughput 1079970.171224
+139044	[1728193333]	2000000 OPS in 1.861362 seconds, throughput 1074482.019081
+139044	[1728193333]	2000000 OPS in 1.886183 seconds, throughput 1060342.501231
+139044	[1728193333]	2000000 OPS in 1.926546 seconds, throughput 1038127.301398
+139044	[1728193334]	2000000 OPS in 1.882081 seconds, throughput 1062653.520226
+139044	[1728193335]	2000000 OPS in 1.822423 seconds, throughput 1097440.056452
+139044	[1728193335]	2000000 OPS in 1.833281 seconds, throughput 1090940.232294
+139044	[1728193335]	2000000 OPS in 1.901378 seconds, throughput 1051868.697334
+139044	[1728193336]	2000000 OPS in 1.866204 seconds, throughput 1071694.198491
+139044	[1728193336]	2000000 OPS in 1.866539 seconds, throughput 1071501.854502
+139044	[1728193337]	2000000 OPS in 1.816950 seconds, throughput 1100745.755249
+139044	[1728193337]	2000000 OPS in 1.947485 seconds, throughput 1026965.547873
+139044	[1728193338]	2000000 OPS in 1.831082 seconds, throughput 1092250.374369
+139044	[1728193338]	2000000 OPS in 1.875746 seconds, throughput 1066242.444339
+139044	[1728193339]	2000000 OPS in 1.900043 seconds, throughput 1052607.756772
+139044	[1728193339]	2000000 OPS in 1.917484 seconds, throughput 1043033.475116
+139044	[1728193340]	2000000 OPS in 1.843025 seconds, throughput 1085172.474600
+139044	[1728193340]	2000000 OPS in 1.812160 seconds, throughput 1103655.306375
+139044	[1728193341]	2000000 OPS in 1.869223 seconds, throughput 1069963.294909
+139044	[1728193341]	2000000 OPS in 1.920989 seconds, throughput 1041130.376072
+139044	[1728193342]	2000000 OPS in 1.896446 seconds, throughput 1054604.243938
+139044	[1728193342]	2000000 OPS in 1.810203 seconds, throughput 1104848.461747
+139044	[1728193342]	2000000 OPS in 1.856624 seconds, throughput 1077224.036746
+139044	[1728193343]	2000000 OPS in 1.914171 seconds, throughput 1044838.731754
+139044	[1728193343]	2000000 OPS in 1.824327 seconds, throughput 1096294.688397
+139044	[1728193344]	2000000 OPS in 1.829416 seconds, throughput 1093245.057439
+139044	[1728193344]	2000000 OPS in 1.894804 seconds, throughput 1055518.143301
+139044	[1728193345]	2000000 OPS in 1.867503 seconds, throughput 1070948.748141
+139044	[1728193345]	2000000 OPS in 1.871230 seconds, throughput 1068815.698765
+139044	[1728193346]	2000000 OPS in 1.811026 seconds, throughput 1104346.376032
+139044	[1728193346]	2000000 OPS in 1.820998 seconds, throughput 1098298.844919
+139044	[1728193347]	2000000 OPS in 1.790964 seconds, throughput 1116717.030605
+139044	[1728193347]	2000000 OPS in 1.866736 seconds, throughput 1071388.776988
+139044	[1728193347]	2000000 OPS in 1.839055 seconds, throughput 1087515.055287
+139044	[1728193348]	2000000 OPS in 1.926642 seconds, throughput 1038075.573978
+139044	[1728193349]	2000000 OPS in 2.008288 seconds, throughput 995873.101866
+139044	[1728193349]	2000000 OPS in 1.842219 seconds, throughput 1085647.254751
+139044	[1728193349]	2000000 OPS in 1.821358 seconds, throughput 1098081.760972
+139044	[1728193350]	2000000 OPS in 1.878859 seconds, throughput 1064475.833471
+139044	[1728193350]	2000000 OPS in 1.823770 seconds, throughput 1096629.509203
+139044	[1728193351]	2000000 OPS in 1.841194 seconds, throughput 1086251.638882
+139044	[1728193351]	2000000 OPS in 1.832305 seconds, throughput 1091521.335149
+139044	[1728193352]	2000000 OPS in 1.879651 seconds, throughput 1064027.311453
+139044	[1728193352]	2000000 OPS in 1.871218 seconds, throughput 1068822.553011
+139044	[1728193353]	2000000 OPS in 1.845778 seconds, throughput 1083553.926854
+139044	[1728193353]	2000000 OPS in 1.900584 seconds, throughput 1052308.132658
+139044	[1728193354]	2000000 OPS in 1.905564 seconds, throughput 1049558.031113
+139044	[1728193354]	2000000 OPS in 1.890659 seconds, throughput 1057832.216174
+139044	[1728193355]	2000000 OPS in 1.891308 seconds, throughput 1057469.222358
+139044	[1728193355]	2000000 OPS in 1.858606 seconds, throughput 1076075.295141
+139044	[1728193356]	2000000 OPS in 1.916902 seconds, throughput 1043350.155616
+139044	[1728193356]	2000000 OPS in 1.923590 seconds, throughput 1039722.602010
+139044	[1728193356]	2000000 OPS in 1.914953 seconds, throughput 1044412.056066
+139044	[1728193357]	2000000 OPS in 1.894959 seconds, throughput 1055431.806176
+139044	[1728193358]	2000000 OPS in 1.902357 seconds, throughput 1051327.379666
+139044	[1728193358]	2000000 OPS in 1.892600 seconds, throughput 1056747.331713
+139044	[1728193358]	2000000 OPS in 1.870813 seconds, throughput 1069053.935375
+139044	[1728193359]	2000000 OPS in 1.892522 seconds, throughput 1056790.885390
+139044	[1728193359]	2000000 OPS in 1.823687 seconds, throughput 1096679.419221
+139044	[1728193360]	2000000 OPS in 1.868313 seconds, throughput 1070484.442382
+139044	[1728193360]	2000000 OPS in 1.838817 seconds, throughput 1087655.813493
+139044	[1728193360]	2000000 OPS in 1.824296 seconds, throughput 1096313.317576
+139044	[1728193361]	2000000 OPS in 1.899772 seconds, throughput 1052757.909897
+139044	[1728193362]	2000000 OPS in 1.839315 seconds, throughput 1087361.327451
+139044	[1728193362]	2000000 OPS in 1.889205 seconds, throughput 1058646.361829
+139044	[1728193362]	2000000 OPS in 1.897473 seconds, throughput 1054033.443427
+139044	[1728193363]	2000000 OPS in 1.813730 seconds, throughput 1102699.960854
+139044	[1728193364]	2000000 OPS in 1.857736 seconds, throughput 1076579.234078
+139044	[1728193364]	2000000 OPS in 1.900463 seconds, throughput 1052375.131744
+139044	[1728193364]	2000000 OPS in 1.896124 seconds, throughput 1054783.336955
+139044	[1728193365]	2000000 OPS in 1.923609 seconds, throughput 1039712.332392
+139044	[1728193365]	2000000 OPS in 1.847643 seconds, throughput 1082460.193879
+139044	[1728193366]	2000000 OPS in 1.899124 seconds, throughput 1053117.121368
+139044	[1728193366]	2000000 OPS in 1.907555 seconds, throughput 1048462.560713
+139044	[1728193367]	2000000 OPS in 1.884483 seconds, throughput 1061299.040639
+139044	[1728193367]	2000000 OPS in 1.914486 seconds, throughput 1044666.819188
+139044	[1728193368]	2000000 OPS in 1.859843 seconds, throughput 1075359.586804
+139044	[1728193368]	2000000 OPS in 1.840332 seconds, throughput 1086760.432357
+139044	[1728193369]	2000000 OPS in 1.854085 seconds, throughput 1078699.196639
+139044	[1728193369]	2000000 OPS in 1.860546 seconds, throughput 1074953.266407
+139044	[1728193370]	2000000 OPS in 1.824367 seconds, throughput 1096270.651684
+139044	[1728193370]	2000000 OPS in 1.823784 seconds, throughput 1096621.091094
+139044	[1728193371]	2000000 OPS in 1.945979 seconds, throughput 1027760.320127
+139044	[1728193371]	2000000 OPS in 1.932498 seconds, throughput 1034929.919720
+139044	[1728193371]	2000000 OPS in 1.860909 seconds, throughput 1074743.579616
+139044	[1728193372]	2000000 OPS in 1.851762 seconds, throughput 1080052.404143
+139044	[1728193373]	2000000 OPS in 1.821907 seconds, throughput 1097750.873124
+139044	[1728193373]	2000000 OPS in 1.862296 seconds, throughput 1073943.132563
+139044	[1728193373]	2000000 OPS in 1.869345 seconds, throughput 1069893.465358
+139044	[1728193374]	2000000 OPS in 1.869939 seconds, throughput 1069553.605759
+139044	[1728193374]	2000000 OPS in 1.898945 seconds, throughput 1053216.391207
+139044	[1728193375]	2000000 OPS in 1.855688 seconds, throughput 1077767.383310
+139044	[1728193375]	2000000 OPS in 1.861907 seconds, throughput 1074167.506755
+139044	[1728193375]	2000000 OPS in 1.851410 seconds, throughput 1080257.749499
+139044	[1728193376]	2000000 OPS in 1.870883 seconds, throughput 1069013.936200
+139044	[1728193377]	2000000 OPS in 1.967495 seconds, throughput 1016521.007677
+139044	[1728193377]	2000000 OPS in 1.867216 seconds, throughput 1071113.358069
+139044	[1728193377]	2000000 OPS in 1.830472 seconds, throughput 1092614.363945
+139044	[1728193378]	2000000 OPS in 1.800050 seconds, throughput 1111080.247771
+139044	[1728193379]	2000000 OPS in 1.875308 seconds, throughput 1066491.477667
+139044	[1728193379]	2000000 OPS in 1.818001 seconds, throughput 1100109.405880
+139044	[1728193379]	2000000 OPS in 1.845169 seconds, throughput 1083911.554985
+139044	[1728193380]	2000000 OPS in 1.846946 seconds, throughput 1082868.692425
+139044	[1728193381]	2000000 OPS in 1.906596 seconds, throughput 1048989.927599
+139044	[1728193381]	2000000 OPS in 1.891958 seconds, throughput 1057105.918842
+139044	[1728193381]	2000000 OPS in 1.860472 seconds, throughput 1074996.022515
+139044	[1728193382]	2000000 OPS in 1.853559 seconds, throughput 1079005.308167
+139044	[1728193383]	2000000 OPS in 1.908936 seconds, throughput 1047704.061320
+139044	[1728193383]	2000000 OPS in 1.943102 seconds, throughput 1029282.044895
+139044	[1728193383]	2000000 OPS in 1.954093 seconds, throughput 1023492.740622
+139044	[1728193384]	2000000 OPS in 1.928258 seconds, throughput 1037205.602155
+139044	[1728193384]	2000000 OPS in 1.976180 seconds, throughput 1012053.557874
+139044	[1728193385]	2000000 OPS in 1.882293 seconds, throughput 1062533.835062
+139044	[1728193385]	2000000 OPS in 1.860892 seconds, throughput 1074753.397833
+139044	[1728193386]	2000000 OPS in 1.840816 seconds, throughput 1086474.693831
+139044	[1728193386]	2000000 OPS in 1.841667 seconds, throughput 1085972.654123
+139044	[1728193386]	2000000 OPS in 1.934760 seconds, throughput 1033719.944593
+139044	[1728193387]	2000000 OPS in 1.842610 seconds, throughput 1085416.881489
+139044	[1728193387]	2000000 OPS in 1.869407 seconds, throughput 1069857.981702
+139044	[1728193388]	2000000 OPS in 1.827173 seconds, throughput 1094587.102590
+139044	[1728193388]	2000000 OPS in 1.943206 seconds, throughput 1029226.957924
+139044	[1728193388]	2000000 OPS in 1.872117 seconds, throughput 1068309.299045
+139044	[1728193389]	2000000 OPS in 1.833705 seconds, throughput 1090687.978710
+139044	[1728193390]	2000000 OPS in 1.831390 seconds, throughput 1092066.681592
+139044	[1728193390]	2000000 OPS in 1.806948 seconds, throughput 1106838.713676
+139044	[1728193390]	2000000 OPS in 1.791991 seconds, throughput 1116077.033869
+139044	[1728193391]	2000000 OPS in 1.834013 seconds, throughput 1090504.811035
+139044	[1728193392]	2000000 OPS in 1.868555 seconds, throughput 1070345.801970
+139044	[1728193392]	2000000 OPS in 1.954617 seconds, throughput 1023218.359402
+139044	[1728193392]	2000000 OPS in 1.865831 seconds, throughput 1071908.441869
+139044	[1728193393]	2000000 OPS in 1.826829 seconds, throughput 1094793.218194
+139044	[1728193394]	2000000 OPS in 1.821347 seconds, throughput 1098088.392821
+139044	[1728193394]	2000000 OPS in 1.826474 seconds, throughput 1095006.006108
+139044	[1728193394]	2000000 OPS in 1.885729 seconds, throughput 1060597.784729
+139044	[1728193395]	2000000 OPS in 1.902658 seconds, throughput 1051161.059949
+139044	[1728193396]	2000000 OPS in 1.928583 seconds, throughput 1037030.814852
+139044	[1728193396]	2000000 OPS in 1.906503 seconds, throughput 1049041.097759
+139044	[1728193396]	2000000 OPS in 1.957784 seconds, throughput 1021563.155077
+139044	[1728193397]	2000000 OPS in 1.853130 seconds, throughput 1079255.098131
+139044	[1728193397]	2000000 OPS in 1.846989 seconds, throughput 1082843.482013
+139044	[1728193398]	2000000 OPS in 1.837024 seconds, throughput 1088717.403801
+139044	[1728193398]	2000000 OPS in 1.906591 seconds, throughput 1048992.678556
+139044	[1728193399]	2000000 OPS in 1.824227 seconds, throughput 1096354.784794
+139044	[1728193399]	2000000 OPS in 1.913312 seconds, throughput 1045307.822247
+139044	[1728193400]	2000000 OPS in 1.875563 seconds, throughput 1066346.478364
+139044	[1728193400]	2000000 OPS in 1.841437 seconds, throughput 1086108.294772
+139044	[1728193400]	2000000 OPS in 1.826154 seconds, throughput 1095197.885830
+139044	[1728193401]	2000000 OPS in 1.837854 seconds, throughput 1088225.724133
+139044	[1728193401]	2000000 OPS in 1.864619 seconds, throughput 1072605.181005
+139044	[1728193402]	2000000 OPS in 1.874434 seconds, throughput 1066988.755006
+139044	[1728193402]	2000000 OPS in 1.844949 seconds, throughput 1084040.805464
+139044	[1728193403]	2000000 OPS in 1.793215 seconds, throughput 1115315.229908
+139044	[1728193403]	2000000 OPS in 1.822113 seconds, throughput 1097626.766287
+139044	[1728193403]	2000000 OPS in 1.840808 seconds, throughput 1086479.415561
+139044	[1728193404]	2000000 OPS in 1.791696 seconds, throughput 1116260.794242
+139044	[1728193405]	2000000 OPS in 1.889725 seconds, throughput 1058355.051661
+139044	[1728193405]	2000000 OPS in 1.860764 seconds, throughput 1074827.328990
+139044	[1728193405]	2000000 OPS in 1.892125 seconds, throughput 1057012.618088
+139044	[1728193406]	2000000 OPS in 1.867280 seconds, throughput 1071076.646245
+139044	[1728193407]	2000000 OPS in 1.844000 seconds, throughput 1084598.698482
+139044	[1728193407]	2000000 OPS in 1.810810 seconds, throughput 1104478.106483
+139044	[1728193407]	2000000 OPS in 1.844048 seconds, throughput 1084570.466712
+139044	[1728193408]	2000000 OPS in 1.890411 seconds, throughput 1057970.991493
+139044	[1728193409]	2000000 OPS in 1.943571 seconds, throughput 1029033.670496
+139044	[1728193409]	2000000 OPS in 1.916292 seconds, throughput 1043682.278066
+139044	[1728193409]	2000000 OPS in 1.925510 seconds, throughput 1038685.854657
+139044	[1728193410]	2000000 OPS in 1.871434 seconds, throughput 1068699.190033
+139044	[1728193411]	2000000 OPS in 1.863555 seconds, throughput 1073217.586817
+139044	[1728193411]	2000000 OPS in 1.832979 seconds, throughput 1091119.974642
+139044	[1728193411]	2000000 OPS in 2.041209 seconds, throughput 979811.474474
+139044	[1728193411]	2000000 OPS in 1.845842 seconds, throughput 1083516.357305
+139044	[1728193412]	2000000 OPS in 1.855842 seconds, throughput 1077677.948877
+139044	[1728193413]	2000000 OPS in 1.829750 seconds, throughput 1093045.498019
+139044	[1728193413]	2000000 OPS in 1.834981 seconds, throughput 1089929.541505
+139044	[1728193413]	2000000 OPS in 1.846094 seconds, throughput 1083368.452527
+139044	[1728193414]	2000000 OPS in 1.905085 seconds, throughput 1049821.923956
+139044	[1728193414]	2000000 OPS in 1.886736 seconds, throughput 1060031.716149
+139044	[1728193415]	2000000 OPS in 1.896287 seconds, throughput 1054692.670466
+139044	[1728193415]	2000000 OPS in 1.849106 seconds, throughput 1081603.758789
+139044	[1728193416]	2000000 OPS in 1.870989 seconds, throughput 1068953.371719
+139044	[1728193416]	2000000 OPS in 1.861475 seconds, throughput 1074416.793134
+139044	[1728193417]	2000000 OPS in 1.854960 seconds, throughput 1078190.365291
+139044	[1728193417]	2000000 OPS in 1.844675 seconds, throughput 1084201.824170
+139044	[1728193418]	2000000 OPS in 1.837470 seconds, throughput 1088453.144813
+139044	[1728193418]	2000000 OPS in 1.788558 seconds, throughput 1118219.258196
+139044	[1728193419]	2000000 OPS in 1.863653 seconds, throughput 1073161.151781
+139044	[1728193419]	2000000 OPS in 1.886293 seconds, throughput 1060280.666895
+139044	[1728193420]	2000000 OPS in 1.896549 seconds, throughput 1054546.969258
+139044	[1728193420]	2000000 OPS in 1.876754 seconds, throughput 1065669.768121
+139044	[1728193420]	2000000 OPS in 1.846829 seconds, throughput 1082937.294140
+139044	[1728193421]	2000000 OPS in 1.851917 seconds, throughput 1079962.006937
+139044	[1728193422]	2000000 OPS in 1.852049 seconds, throughput 1079885.035439
+139044	[1728193422]	2000000 OPS in 1.865371 seconds, throughput 1072172.774210
+139044	[1728193422]	2000000 OPS in 1.903369 seconds, throughput 1050768.400662
+139044	[1728193423]	2000000 OPS in 1.900491 seconds, throughput 1052359.627065
+139044	[1728193424]	2000000 OPS in 1.886277 seconds, throughput 1060289.660532
+139044	[1728193424]	2000000 OPS in 1.887761 seconds, throughput 1059456.149375
+139044	[1728193424]	2000000 OPS in 1.866490 seconds, throughput 1071529.984088
+139044	[1728193425]	2000000 OPS in 1.841171 seconds, throughput 1086265.208392
+139044	[1728193426]	2000000 OPS in 1.858699 seconds, throughput 1076021.453716
+139044	[1728193426]	2000000 OPS in 1.880854 seconds, throughput 1063346.756314
+139044	[1728193426]	2000000 OPS in 1.878478 seconds, throughput 1064691.734479
+139044	[1728193426]	2000000 OPS in 1.856669 seconds, throughput 1077197.928118
+139044	[1728193427]	2000000 OPS in 1.839017 seconds, throughput 1087537.526842
+139044	[1728193427]	2000000 OPS in 1.886178 seconds, throughput 1060345.312054
+139044	[1728193428]	2000000 OPS in 1.869157 seconds, throughput 1070001.075351
+139044	[1728193428]	2000000 OPS in 1.881643 seconds, throughput 1062900.879710
+139044	[1728193429]	2000000 OPS in 1.836335 seconds, throughput 1089125.894785
+139044	[1728193429]	2000000 OPS in 1.888762 seconds, throughput 1058894.662218
+139044	[1728193430]	2000000 OPS in 1.810237 seconds, throughput 1104827.710405
+139044	[1728193430]	2000000 OPS in 1.914410 seconds, throughput 1044708.291327
+139044	[1728193431]	2000000 OPS in 1.907430 seconds, throughput 1048531.269824
+139044	[1728193431]	2000000 OPS in 1.831473 seconds, throughput 1092017.190535
+139044	[1728193432]	2000000 OPS in 1.864037 seconds, throughput 1072940.075760
+139044	[1728193432]	2000000 OPS in 1.859993 seconds, throughput 1075272.863930
+139044	[1728193433]	2000000 OPS in 1.840706 seconds, throughput 1086539.621211
+139044	[1728193433]	2000000 OPS in 1.848857 seconds, throughput 1081749.426808
+139044	[1728193434]	2000000 OPS in 1.944706 seconds, throughput 1028433.089629
+139044	[1728193434]	2000000 OPS in 1.858923 seconds, throughput 1075891.793259
+139044	[1728193435]	2000000 OPS in 1.861362 seconds, throughput 1074482.019081
+139044	[1728193435]	2000000 OPS in 1.870384 seconds, throughput 1069299.138573
+139044	[1728193435]	2000000 OPS in 1.834936 seconds, throughput 1089956.270954
+139044	[1728193436]	2000000 OPS in 1.816073 seconds, throughput 1101277.316496
+139044	[1728193437]	2000000 OPS in 1.851196 seconds, throughput 1080382.628312
+139044	[1728193437]	2000000 OPS in 1.908125 seconds, throughput 1048149.361284
+139044	[1728193437]	2000000 OPS in 1.846301 seconds, throughput 1083246.989521
+139044	[1728193438]	2000000 OPS in 1.898107 seconds, throughput 1053681.378342
+139044	[1728193439]	2000000 OPS in 1.843730 seconds, throughput 1084757.529573
+139044	[1728193439]	2000000 OPS in 1.828206 seconds, throughput 1093968.622792
+139044	[1728193439]	2000000 OPS in 1.847860 seconds, throughput 1082333.077181
+139044	[1728193440]	2000000 OPS in 1.920524 seconds, throughput 1041382.456038
+139044	[1728193440]	2000000 OPS in 1.863802 seconds, throughput 1073075.358863
+139044	[1728193440]	2000000 OPS in 1.861388 seconds, throughput 1074467.010639
+139044	[1728193441]	2000000 OPS in 1.864513 seconds, throughput 1072666.160011
+139044	[1728193441]	2000000 OPS in 1.901877 seconds, throughput 1051592.716038
+139044	[1728193442]	2000000 OPS in 1.900862 seconds, throughput 1052154.233185
+139044	[1728193442]	2000000 OPS in 1.867134 seconds, throughput 1071160.398772
+139044	[1728193443]	2000000 OPS in 1.909665 seconds, throughput 1047304.108312
+139044	[1728193443]	2000000 OPS in 1.872555 seconds, throughput 1068059.416145
+139044	[1728193444]	2000000 OPS in 1.870461 seconds, throughput 1069255.119460
+139044	[1728193444]	2000000 OPS in 1.861154 seconds, throughput 1074602.101707
+139044	[1728193445]	2000000 OPS in 1.892390 seconds, throughput 1056864.599792
+139044	[1728193445]	2000000 OPS in 1.955435 seconds, throughput 1022790.325426
+139044	[1728193446]	2000000 OPS in 1.896218 seconds, throughput 1054731.048856
+139044	[1728193446]	2000000 OPS in 1.853773 seconds, throughput 1078880.747535
+139044	[1728193447]	2000000 OPS in 1.863617 seconds, throughput 1073181.882329
+139044	[1728193447]	2000000 OPS in 1.896645 seconds, throughput 1054493.592633
+139044	[1728193448]	2000000 OPS in 1.831274 seconds, throughput 1092135.857332
+139044	[1728193448]	2000000 OPS in 1.808812 seconds, throughput 1105698.104612
+139044	[1728193448]	2000000 OPS in 1.811707 seconds, throughput 1103931.264824
+139044	[1728193449]	2000000 OPS in 1.851612 seconds, throughput 1080139.899720
+139044	[1728193450]	2000000 OPS in 1.837702 seconds, throughput 1088315.733454
+139044	[1728193450]	2000000 OPS in 1.896628 seconds, throughput 1054503.044350
+139044	[1728193450]	2000000 OPS in 1.897939 seconds, throughput 1053774.647130
+139044	[1728193451]	2000000 OPS in 1.944136 seconds, throughput 1028734.615274
+139044	[1728193452]	2000000 OPS in 1.854970 seconds, throughput 1078184.552850
+139044	[1728193452]	2000000 OPS in 1.833681 seconds, throughput 1090702.254100
+139044	[1728193452]	2000000 OPS in 1.837150 seconds, throughput 1088642.734671
+139044	[1728193453]	2000000 OPS in 1.869588 seconds, throughput 1069754.405784
+139044	[1728193453]	2000000 OPS in 1.859922 seconds, throughput 1075313.911013
+139044	[1728193453]	2000000 OPS in 1.859604 seconds, throughput 1075497.794154
+139044	[1728193454]	2000000 OPS in 1.886540 seconds, throughput 1060141.846979
+139044	[1728193455]	2000000 OPS in 1.863948 seconds, throughput 1072991.306624
+139044	[1728193455]	2000000 OPS in 1.813342 seconds, throughput 1102935.905086
+139044	[1728193455]	2000000 OPS in 1.810212 seconds, throughput 1104842.968669
+139044	[1728193456]	2000000 OPS in 1.860076 seconds, throughput 1075224.883284
+139044	[1728193457]	2000000 OPS in 1.973776 seconds, throughput 1013286.208769
+139044	[1728193457]	2000000 OPS in 1.877423 seconds, throughput 1065290.027873
+139044	[1728193457]	2000000 OPS in 1.927699 seconds, throughput 1037506.374180
+139044	[1728193458]	2000000 OPS in 1.928642 seconds, throughput 1036999.090552
+139044	[1728193459]	2000000 OPS in 1.887487 seconds, throughput 1059609.946982
+139044	[1728193459]	2000000 OPS in 1.916992 seconds, throughput 1043301.171836
+139044	[1728193459]	2000000 OPS in 1.907380 seconds, throughput 1048558.755990
+139044	[1728193460]	2000000 OPS in 1.874133 seconds, throughput 1067160.121507
+139044	[1728193460]	2000000 OPS in 1.862535 seconds, throughput 1073805.324464
+139044	[1728193461]	2000000 OPS in 1.868547 seconds, throughput 1070350.384550
+139044	[1728193461]	2000000 OPS in 1.920857 seconds, throughput 1041201.921851
+139044	[1728193462]	2000000 OPS in 1.835378 seconds, throughput 1089693.785149
+139044	[1728193462]	2000000 OPS in 1.819266 seconds, throughput 1099344.460898
+139044	[1728193463]	2000000 OPS in 1.794171 seconds, throughput 1114720.949118
+139044	[1728193463]	2000000 OPS in 1.890772 seconds, throughput 1057768.995945
+139044	[1728193463]	2000000 OPS in 1.837277 seconds, throughput 1088567.483292
+139044	[1728193464]	2000000 OPS in 1.874750 seconds, throughput 1066808.907854
+139044	[1728193465]	2000000 OPS in 1.868110 seconds, throughput 1070600.767621
+139044	[1728193465]	2000000 OPS in 1.868313 seconds, throughput 1070484.442382
+139044	[1728193465]	2000000 OPS in 1.846476 seconds, throughput 1083144.324649
+139044	[1728193466]	2000000 OPS in 1.929404 seconds, throughput 1036589.537494
+139044	[1728193466]	2000000 OPS in 1.858190 seconds, throughput 1076316.200173
+139044	[1728193467]	2000000 OPS in 1.796198 seconds, throughput 1113462.992387
+139044	[1728193467]	2000000 OPS in 1.834123 seconds, throughput 1090439.408916
+139044	[1728193468]	2000000 OPS in 1.891338 seconds, throughput 1057452.449007
+139044	[1728193468]	2000000 OPS in 1.880748 seconds, throughput 1063406.687127
+139044	[1728193468]	2000000 OPS in 1.857810 seconds, throughput 1076536.351941
+139044	[1728193469]	2000000 OPS in 1.929417 seconds, throughput 1036582.553175
+139044	[1728193470]	2000000 OPS in 1.890051 seconds, throughput 1058172.504340
+139044	[1728193470]	2000000 OPS in 1.844496 seconds, throughput 1084307.041056
+139044	[1728193470]	2000000 OPS in 1.829688 seconds, throughput 1093082.536476
+139044	[1728193471]	2000000 OPS in 1.859934 seconds, throughput 1075306.973258
+139044	[1728193472]	2000000 OPS in 1.848499 seconds, throughput 1081958.929921
+139044	[1728193472]	2000000 OPS in 1.852636 seconds, throughput 1079542.878364
+139044	[1728193472]	2000000 OPS in 1.819315 seconds, throughput 1099314.852018
+139044	[1728193473]	2000000 OPS in 1.931283 seconds, throughput 1035581.010137
+139044	[1728193474]	2000000 OPS in 1.882123 seconds, throughput 1062629.806872
+139044	[1728193474]	2000000 OPS in 1.843460 seconds, throughput 1084916.407191
+139044	[1728193474]	2000000 OPS in 1.885157 seconds, throughput 1060919.594495
+139044	[1728193475]	2000000 OPS in 1.874497 seconds, throughput 1066952.894563
+139044	[1728193475]	2000000 OPS in 1.932796 seconds, throughput 1034770.353415
+139044	[1728193476]	2000000 OPS in 1.847899 seconds, throughput 1082310.234488
+139044	[1728193476]	2000000 OPS in 1.894357 seconds, throughput 1055767.207554
+139044	[1728193477]	2000000 OPS in 1.837281 seconds, throughput 1088565.113339
+139044	[1728193477]	2000000 OPS in 1.886732 seconds, throughput 1060033.963488
+139044	[1728193478]	2000000 OPS in 1.833010 seconds, throughput 1091101.521541
+139044	[1728193478]	2000000 OPS in 1.814801 seconds, throughput 1102049.205395
+139044	[1728193478]	2000000 OPS in 1.892094 seconds, throughput 1057029.936145
+139044	[1728193479]	2000000 OPS in 1.829537 seconds, throughput 1093172.753544
+139044	[1728193479]	2000000 OPS in 1.801373 seconds, throughput 1110264.226232
+139044	[1728193480]	2000000 OPS in 1.852650 seconds, throughput 1079534.720535
+139044	[1728193480]	2000000 OPS in 1.891846 seconds, throughput 1057168.501030
+139044	[1728193481]	2000000 OPS in 1.889081 seconds, throughput 1058715.851782
+139044	[1728193481]	2000000 OPS in 1.841584 seconds, throughput 1086021.598798
+139044	[1728193481]	2000000 OPS in 1.834853 seconds, throughput 1090005.575379
+139044	[1728193482]	2000000 OPS in 1.892338 seconds, throughput 1056893.641622
+139044	[1728193483]	2000000 OPS in 1.907834 seconds, throughput 1048309.234451
+139044	[1728193483]	2000000 OPS in 1.913335 seconds, throughput 1045295.256711
+139044	[1728193483]	2000000 OPS in 1.845052 seconds, throughput 1083980.288902
+139044	[1728193484]	2000000 OPS in 1.816415 seconds, throughput 1101069.964738
+139044	[1728193485]	2000000 OPS in 1.878005 seconds, throughput 1064959.890948
+139044	[1728193485]	2000000 OPS in 1.926698 seconds, throughput 1038045.402030
+139044	[1728193485]	2000000 OPS in 1.956014 seconds, throughput 1022487.569107
+139044	[1728193486]	2000000 OPS in 1.941212 seconds, throughput 1030284.172981
+139044	[1728193487]	2000000 OPS in 1.917467 seconds, throughput 1043042.722508
+139044	[1728193487]	2000000 OPS in 1.896939 seconds, throughput 1054330.160327
+139044	[1728193487]	2000000 OPS in 1.866916 seconds, throughput 1071285.478297
+139044	[1728193488]	2000000 OPS in 1.839314 seconds, throughput 1087361.918628
+139044	[1728193489]	2000000 OPS in 1.835163 seconds, throughput 1089821.449103
+139044	[1728193489]	2000000 OPS in 1.840354 seconds, throughput 1086747.440981
+139044	[1728193489]	2000000 OPS in 1.870189 seconds, throughput 1069410.631760
+139044	[1728193490]	2000000 OPS in 1.855517 seconds, throughput 1077866.707769
+139044	[1728193491]	2000000 OPS in 1.924046 seconds, throughput 1039476.187160
+139044	[1728193491]	2000000 OPS in 1.871879 seconds, throughput 1068445.129199
+139044	[1728193491]	2000000 OPS in 1.864650 seconds, throughput 1072587.348832
+139044	[1728193492]	2000000 OPS in 1.878343 seconds, throughput 1064768.255851
+139044	[1728193492]	2000000 OPS in 1.848962 seconds, throughput 1081687.995751
+139044	[1728193492]	2000000 OPS in 1.828262 seconds, throughput 1093935.114333
+139044	[1728193493]	2000000 OPS in 1.834984 seconds, throughput 1089927.759588
+139044	[1728193493]	2000000 OPS in 1.871433 seconds, throughput 1068699.761092
+139044	[1728193494]	2000000 OPS in 1.857275 seconds, throughput 1076846.455156
+139044	[1728193494]	2000000 OPS in 1.823088 seconds, throughput 1097039.747944
+139044	[1728193494]	2000000 OPS in 1.835653 seconds, throughput 1089530.537634
+139044	[1728193495]	2000000 OPS in 1.850887 seconds, throughput 1080562.994932
+139044	[1728193496]	2000000 OPS in 1.905772 seconds, throughput 1049443.480122
+139044	[1728193496]	2000000 OPS in 1.911629 seconds, throughput 1046228.112254
+139044	[1728193496]	2000000 OPS in 1.926931 seconds, throughput 1037919.884002
+139044	[1728193497]	2000000 OPS in 1.877939 seconds, throughput 1064997.318869
+139044	[1728193498]	2000000 OPS in 1.860180 seconds, throughput 1075164.769001
+139044	[1728193498]	2000000 OPS in 1.921175 seconds, throughput 1041029.578253
+139044	[1728193498]	2000000 OPS in 1.857005 seconds, throughput 1077003.023686
+139044	[1728193499]	2000000 OPS in 1.790684 seconds, throughput 1116891.645874
+139044	[1728193500]	2000000 OPS in 1.904009 seconds, throughput 1050415.202869
+139044	[1728193500]	2000000 OPS in 1.818020 seconds, throughput 1100097.908714
+139044	[1728193500]	2000000 OPS in 1.824899 seconds, throughput 1095951.063593
+139044	[1728193501]	2000000 OPS in 1.884586 seconds, throughput 1061241.036493
+139044	[1728193502]	2000000 OPS in 1.784745 seconds, throughput 1120608.266167
+139044	[1728193502]	2000000 OPS in 1.867832 seconds, throughput 1070760.111188
+139044	[1728193502]	2000000 OPS in 1.789478 seconds, throughput 1117644.363328
+139044	[1728193503]	2000000 OPS in 1.825548 seconds, throughput 1095561.442372
+139044	[1728193504]	2000000 OPS in 1.850052 seconds, throughput 1081050.694791
+139044	[1728193504]	2000000 OPS in 1.941889 seconds, throughput 1029924.985414
+139044	[1728193504]	2000000 OPS in 1.908035 seconds, throughput 1048198.801385
+139044	[1728193504]	2000000 OPS in 1.888241 seconds, throughput 1059186.830495
+139044	[1728193505]	2000000 OPS in 1.830194 seconds, throughput 1092780.328206
+139044	[1728193506]	2000000 OPS in 1.836738 seconds, throughput 1088886.928892
+139044	[1728193506]	2000000 OPS in 1.856588 seconds, throughput 1077244.924561
+139044	[1728193506]	2000000 OPS in 1.853890 seconds, throughput 1078812.658788
+139044	[1728193507]	2000000 OPS in 1.869039 seconds, throughput 1070068.628852
+139044	[1728193507]	2000000 OPS in 1.836121 seconds, throughput 1089252.832466
+139044	[1728193507]	2000000 OPS in 1.870021 seconds, throughput 1069506.706074
+139044	[1728193508]	2000000 OPS in 1.909592 seconds, throughput 1047344.144718
+139044	[1728193509]	2000000 OPS in 1.885914 seconds, throughput 1060493.744678
+139044	[1728193509]	2000000 OPS in 1.852783 seconds, throughput 1079457.227317
+139044	[1728193509]	2000000 OPS in 1.936417 seconds, throughput 1032835.386180
+139044	[1728193510]	2000000 OPS in 1.848653 seconds, throughput 1081868.798525
+139044	[1728193511]	2000000 OPS in 1.918346 seconds, throughput 1042564.792795
+139044	[1728193511]	2000000 OPS in 1.919153 seconds, throughput 1042126.396384
+139044	[1728193511]	2000000 OPS in 1.931372 seconds, throughput 1035533.289289
+139044	[1728193512]	2000000 OPS in 1.835703 seconds, throughput 1089500.861523
+139044	[1728193513]	2000000 OPS in 1.830835 seconds, throughput 1092397.731090
+139044	[1728193513]	2000000 OPS in 1.832585 seconds, throughput 1091354.561998
+139044	[1728193513]	2000000 OPS in 1.854910 seconds, throughput 1078219.428436
+139044	[1728193514]	2000000 OPS in 1.798459 seconds, throughput 1112063.160739
+139044	[1728193515]	2000000 OPS in 1.835739 seconds, throughput 1089479.495724
+139044	[1728193515]	2000000 OPS in 1.862606 seconds, throughput 1073764.392469
+139044	[1728193515]	2000000 OPS in 1.870855 seconds, throughput 1069029.935511
+139044	[1728193516]	2000000 OPS in 1.924157 seconds, throughput 1039416.222273
+139044	[1728193517]	2000000 OPS in 1.858180 seconds, throughput 1076321.992487
+139044	[1728193517]	2000000 OPS in 1.876801 seconds, throughput 1065643.080966
+139044	[1728193517]	2000000 OPS in 1.868984 seconds, throughput 1070100.118567
+139044	[1728193518]	2000000 OPS in 1.850153 seconds, throughput 1080991.680148
+139044	[1728193519]	2000000 OPS in 1.876386 seconds, throughput 1065878.769081
+139044	[1728193519]	2000000 OPS in 1.878925 seconds, throughput 1064438.442194
+139044	[1728193519]	2000000 OPS in 1.920025 seconds, throughput 1041653.103475
+139044	[1728193519]	2000000 OPS in 1.864205 seconds, throughput 1072843.383641
+139044	[1728193520]	2000000 OPS in 1.841522 seconds, throughput 1086058.162759
+139044	[1728193520]	2000000 OPS in 1.816001 seconds, throughput 1101320.979449
+139044	[1728193521]	2000000 OPS in 1.881065 seconds, throughput 1063227.480177
+139044	[1728193521]	2000000 OPS in 1.803851 seconds, throughput 1108739.025563
+139044	[1728193522]	2000000 OPS in 1.870032 seconds, throughput 1069500.414966
+139044	[1728193522]	2000000 OPS in 1.769352 seconds, throughput 1130357.328559
+139044	[1728193523]	2000000 OPS in 1.881040 seconds, throughput 1063241.611024
+139044	[1728193523]	2000000 OPS in 1.856386 seconds, throughput 1077362.143434
+139044	[1728193524]	2000000 OPS in 1.843615 seconds, throughput 1084825.193980
+139044	[1728193524]	2000000 OPS in 1.863419 seconds, throughput 1073295.914660
+139044	[1728193524]	2000000 OPS in 1.890934 seconds, throughput 1057678.374814
+139044	[1728193525]	2000000 OPS in 1.835994 seconds, throughput 1089328.178632
+139044	[1728193526]	2000000 OPS in 1.851147 seconds, throughput 1080411.226121
+139044	[1728193526]	2000000 OPS in 1.866360 seconds, throughput 1071604.620759
+139044	[1728193526]	2000000 OPS in 1.978843 seconds, throughput 1010691.601102
+139044	[1728193527]	2000000 OPS in 1.886750 seconds, throughput 1060023.850537
+139044	[1728193528]	2000000 OPS in 1.847352 seconds, throughput 1082630.706005
+139044	[1728193528]	2000000 OPS in 1.891270 seconds, throughput 1057490.469367
+139044	[1728193528]	2000000 OPS in 1.884253 seconds, throughput 1061428.587350
+139044	[1728193529]	2000000 OPS in 1.856987 seconds, throughput 1077013.463207
+139044	[1728193530]	2000000 OPS in 1.893304 seconds, throughput 1056354.394223
+139044	[1728193530]	2000000 OPS in 1.830108 seconds, throughput 1092831.679879
+139044	[1728193530]	2000000 OPS in 1.912236 seconds, throughput 1045896.008652
+139044	[1728193530]	2000000 OPS in 1.876590 seconds, throughput 1065762.899728
+139044	[1728193532]	2000000 OPS in 1.858911 seconds, throughput 1075898.738563
+139044	[1728193532]	2000000 OPS in 1.832640 seconds, throughput 1091321.808975
+139044	[1728193532]	2000000 OPS in 1.936103 seconds, throughput 1033002.892925
+139044	[1728193533]	2000000 OPS in 2.055302 seconds, throughput 973093.005310
+139044	[1728193533]	2000000 OPS in 1.868727 seconds, throughput 1070247.285987
+139044	[1728193533]	2000000 OPS in 1.923693 seconds, throughput 1039666.932302
+139044	[1728193534]	2000000 OPS in 1.882297 seconds, throughput 1062531.577110
+139044	[1728193534]	2000000 OPS in 1.847964 seconds, throughput 1082272.165475
+139044	[1728193535]	2000000 OPS in 1.880521 seconds, throughput 1063535.052254
+139044	[1728193535]	2000000 OPS in 1.854773 seconds, throughput 1078299.069482
+139044	[1728193536]	2000000 OPS in 1.812420 seconds, throughput 1103496.981936
+139044	[1728193536]	2000000 OPS in 1.797109 seconds, throughput 1112898.549838
+139044	[1728193537]	2000000 OPS in 1.824105 seconds, throughput 1096428.111320
+139044	[1728193537]	2000000 OPS in 1.812081 seconds, throughput 1103703.421646
+139044	[1728193538]	2000000 OPS in 1.878312 seconds, throughput 1064785.828978
+139044	[1728193538]	2000000 OPS in 1.984680 seconds, throughput 1007719.128524
+139044	[1728193539]	2000000 OPS in 1.876806 seconds, throughput 1065640.241986
+139044	[1728193539]	2000000 OPS in 1.949642 seconds, throughput 1025829.357390
+139044	[1728193540]	2000000 OPS in 1.854674 seconds, throughput 1078356.627634
+139044	[1728193540]	2000000 OPS in 1.900063 seconds, throughput 1052596.677058
+139044	[1728193541]	2000000 OPS in 1.843071 seconds, throughput 1085145.390492
+139044	[1728193541]	2000000 OPS in 1.827128 seconds, throughput 1094614.060974
+139044	[1728193541]	2000000 OPS in 1.859018 seconds, throughput 1075836.812769
+139044	[1728193542]	2000000 OPS in 1.857101 seconds, throughput 1076947.349659
+139044	[1728193543]	2000000 OPS in 1.887728 seconds, throughput 1059474.670080
+139044	[1728193543]	2000000 OPS in 1.913489 seconds, throughput 1045211.130035
+139044	[1728193543]	2000000 OPS in 1.913815 seconds, throughput 1045033.088360
+139044	[1728193544]	2000000 OPS in 1.833020 seconds, throughput 1091095.569061
+139044	[1728193545]	2000000 OPS in 1.825141 seconds, throughput 1095805.748707
+139044	[1728193545]	2000000 OPS in 1.843353 seconds, throughput 1084979.382679
+139044	[1728193545]	2000000 OPS in 1.848955 seconds, throughput 1081692.090938
+139044	[1728193546]	2000000 OPS in 1.839914 seconds, throughput 1087007.327516
+139044	[1728193546]	2000000 OPS in 1.803550 seconds, throughput 1108924.066425
+139044	[1728193546]	2000000 OPS in 1.871154 seconds, throughput 1068859.110474
+139044	[1728193547]	2000000 OPS in 1.857402 seconds, throughput 1076772.825700
+139044	[1728193548]	2000000 OPS in 1.904042 seconds, throughput 1050396.997545
+139044	[1728193548]	2000000 OPS in 1.864008 seconds, throughput 1072956.768426
+139044	[1728193548]	2000000 OPS in 1.841425 seconds, throughput 1086115.372605
+139044	[1728193549]	2000000 OPS in 1.893098 seconds, throughput 1056469.342844
+139044	[1728193549]	2000000 OPS in 1.891457 seconds, throughput 1057385.919955
+139044	[1728193550]	2000000 OPS in 1.865858 seconds, throughput 1071892.930759
+139044	[1728193550]	2000000 OPS in 1.854230 seconds, throughput 1078614.842819
+139044	[1728193551]	2000000 OPS in 1.861970 seconds, throughput 1074131.162156
+139044	[1728193551]	2000000 OPS in 1.846317 seconds, throughput 1083237.602210
+139044	[1728193552]	2000000 OPS in 1.812182 seconds, throughput 1103641.907932
+139044	[1728193552]	2000000 OPS in 1.832377 seconds, throughput 1091478.445757
+139044	[1728193553]	2000000 OPS in 1.817397 seconds, throughput 1100475.020042
+139044	[1728193553]	2000000 OPS in 1.873478 seconds, throughput 1067533.218965
+139044	[1728193554]	2000000 OPS in 1.845857 seconds, throughput 1083507.552319
+139044	[1728193554]	2000000 OPS in 1.820466 seconds, throughput 1098619.803940
+139044	[1728193554]	2000000 OPS in 1.858640 seconds, throughput 1076055.610554
+139044	[1728193555]	2000000 OPS in 1.923580 seconds, throughput 1039728.007153
+139044	[1728193556]	2000000 OPS in 1.816901 seconds, throughput 1100775.441260
+139044	[1728193556]	2000000 OPS in 1.899448 seconds, throughput 1052937.484996
+139044	[1728193556]	2000000 OPS in 1.891230 seconds, throughput 1057512.835562
+139044	[1728193557]	2000000 OPS in 1.924420 seconds, throughput 1039274.170919
+139044	[1728193557]	2000000 OPS in 1.850749 seconds, throughput 1080643.566470
+139044	[1728193558]	2000000 OPS in 1.832740 seconds, throughput 1091262.263060
+139044	[1728193558]	2000000 OPS in 1.815907 seconds, throughput 1101377.989071
+139044	[1728193559]	2000000 OPS in 1.900090 seconds, throughput 1052581.719813
+139044	[1728193559]	2000000 OPS in 1.889607 seconds, throughput 1058421.142597
+139044	[1728193559]	2000000 OPS in 1.910493 seconds, throughput 1046850.210914
+139044	[1728193560]	2000000 OPS in 1.878439 seconds, throughput 1064713.839523
+139044	[1728193561]	2000000 OPS in 1.853172 seconds, throughput 1079230.638063
+139044	[1728193561]	2000000 OPS in 1.836838 seconds, throughput 1088827.648383
+139044	[1728193561]	2000000 OPS in 1.886596 seconds, throughput 1060110.378693
+139044	[1728193562]	2000000 OPS in 1.852099 seconds, throughput 1079855.882434
+139044	[1728193563]	2000000 OPS in 1.850592 seconds, throughput 1080735.245802
+139044	[1728193563]	2000000 OPS in 1.873922 seconds, throughput 1067280.281677
+139044	[1728193563]	2000000 OPS in 1.853704 seconds, throughput 1078920.906466
+139044	[1728193564]	2000000 OPS in 1.879810 seconds, throughput 1063937.312814
+139044	[1728193564]	2000000 OPS in 1.887913 seconds, throughput 1059370.850246
+139044	[1728193565]	2000000 OPS in 1.828271 seconds, throughput 1093929.729236
+139044	[1728193565]	2000000 OPS in 1.872490 seconds, throughput 1068096.491837
+139044	[1728193566]	2000000 OPS in 1.862990 seconds, throughput 1073543.067864
+139044	[1728193566]	2000000 OPS in 1.859470 seconds, throughput 1075575.298338
+139044	[1728193567]	2000000 OPS in 1.895899 seconds, throughput 1054908.515696
+139044	[1728193567]	2000000 OPS in 1.879597 seconds, throughput 1064057.880492
+139044	[1728193568]	2000000 OPS in 1.875308 seconds, throughput 1066491.477667
+139044	[1728193568]	2000000 OPS in 1.876683 seconds, throughput 1065710.085294
+139044	[1728193569]	2000000 OPS in 1.861538 seconds, throughput 1074380.431665
+139044	[1728193569]	2000000 OPS in 1.922093 seconds, throughput 1040532.377986
+139044	[1728193569]	2000000 OPS in 1.934825 seconds, throughput 1033685.217009
+139044	[1728193570]	2000000 OPS in 1.903966 seconds, throughput 1050438.925905
+139044	[1728193570]	2000000 OPS in 1.861342 seconds, throughput 1074493.564321
+139044	[1728193571]	2000000 OPS in 1.863926 seconds, throughput 1073003.971188
+139044	[1728193571]	2000000 OPS in 1.821216 seconds, throughput 1098167.378279
+139044	[1728193572]	2000000 OPS in 1.869506 seconds, throughput 1069801.327196
+139044	[1728193572]	2000000 OPS in 1.883598 seconds, throughput 1061797.687192
+139044	[1728193573]	2000000 OPS in 1.901127 seconds, throughput 1052007.572351
+139044	[1728193573]	2000000 OPS in 1.935183 seconds, throughput 1033493.989974
+139044	[1728193574]	2000000 OPS in 1.931087 seconds, throughput 1035686.118751
+139044	[1728193574]	2000000 OPS in 1.867318 seconds, throughput 1071054.849790
+139044	[1728193575]	2000000 OPS in 1.934549 seconds, throughput 1033832.691754
+139044	[1728193575]	2000000 OPS in 1.859203 seconds, throughput 1075729.761624
+139044	[1728193576]	2000000 OPS in 1.839594 seconds, throughput 1087196.413991
+139044	[1728193576]	2000000 OPS in 1.823005 seconds, throughput 1097089.695311
+139044	[1728193576]	2000000 OPS in 1.819835 seconds, throughput 1099000.733583
+139044	[1728193577]	2000000 OPS in 1.857459 seconds, throughput 1076739.782682
+139044	[1728193578]	2000000 OPS in 1.835209 seconds, throughput 1089794.132439
+139044	[1728193578]	2000000 OPS in 1.923096 seconds, throughput 1039989.683302
+139044	[1728193578]	2000000 OPS in 1.869924 seconds, throughput 1069562.185415
+139044	[1728193579]	2000000 OPS in 1.870893 seconds, throughput 1069008.222277
+139044	[1728193579]	2000000 OPS in 1.901946 seconds, throughput 1051554.565692
+139044	[1728193580]	2000000 OPS in 1.799160 seconds, throughput 1111629.871718
+139044	[1728193580]	2000000 OPS in 1.818441 seconds, throughput 1099843.217349
+139044	[1728193581]	2000000 OPS in 1.829363 seconds, throughput 1093276.730753
+139044	[1728193581]	2000000 OPS in 1.898231 seconds, throughput 1053612.547683
+139044	[1728193582]	2000000 OPS in 1.874309 seconds, throughput 1067059.913814
+139044	[1728193582]	2000000 OPS in 1.809859 seconds, throughput 1105058.460355
+139044	[1728193583]	2000000 OPS in 1.897369 seconds, throughput 1054091.217892
+139044	[1728193583]	2000000 OPS in 1.926861 seconds, throughput 1037957.590091
+139044	[1728193584]	2000000 OPS in 1.880346 seconds, throughput 1063634.033311
+139044	[1728193584]	2000000 OPS in 1.872966 seconds, throughput 1067825.043274
+139044	[1728193584]	2000000 OPS in 1.868744 seconds, throughput 1070237.549927
+139044	[1728193585]	2000000 OPS in 1.852811 seconds, throughput 1079440.914373
+139044	[1728193585]	2000000 OPS in 1.880813 seconds, throughput 1063369.936299
+139044	[1728193586]	2000000 OPS in 1.812685 seconds, throughput 1103335.659533
+139044	[1728193586]	2000000 OPS in 1.844251 seconds, throughput 1084451.086105
+139044	[1728193587]	2000000 OPS in 1.878997 seconds, throughput 1064397.654706
+139044	[1728193587]	2000000 OPS in 1.835155 seconds, throughput 1089826.199967
+139044	[1728193587]	2000000 OPS in 1.827482 seconds, throughput 1094402.024206
+139044	[1728193588]	2000000 OPS in 1.948126 seconds, throughput 1026627.641128
+139044	[1728193589]	2000000 OPS in 1.821135 seconds, throughput 1098216.222301
+139044	[1728193589]	2000000 OPS in 1.864488 seconds, throughput 1072680.542862
+139044	[1728193589]	2000000 OPS in 1.826603 seconds, throughput 1094928.673609
+139044	[1728193590]	2000000 OPS in 1.909617 seconds, throughput 1047330.433275
+139044	[1728193591]	2000000 OPS in 1.858219 seconds, throughput 1076299.402815
+139044	[1728193591]	2000000 OPS in 1.864600 seconds, throughput 1072616.110694
+139044	[1728193591]	2000000 OPS in 1.865672 seconds, throughput 1071999.794176
+139044	[1728193592]	2000000 OPS in 1.804455 seconds, throughput 1108367.900557
+139044	[1728193593]	2000000 OPS in 1.832844 seconds, throughput 1091200.342200
+139044	[1728193593]	2000000 OPS in 1.837809 seconds, throughput 1088252.370078
+139044	[1728193593]	2000000 OPS in 1.806447 seconds, throughput 1107145.684318
+139044	[1728193594]	2000000 OPS in 1.942581 seconds, throughput 1029558.098221
+139044	[1728193594]	2000000 OPS in 1.871163 seconds, throughput 1068853.969430
+139044	[1728193595]	2000000 OPS in 1.922625 seconds, throughput 1040244.457448
+139044	[1728193595]	2000000 OPS in 1.810381 seconds, throughput 1104739.831008
+139044	[1728193596]	2000000 OPS in 1.849538 seconds, throughput 1081351.126606
+139044	[1728193596]	2000000 OPS in 1.882133 seconds, throughput 1062624.160992
+139044	[1728193597]	2000000 OPS in 1.823704 seconds, throughput 1096669.196317
+139044	[1728193597]	2000000 OPS in 1.867440 seconds, throughput 1070984.877694
+139044	[1728193598]	2000000 OPS in 1.940705 seconds, throughput 1030553.329847
+139044	[1728193598]	2000000 OPS in 1.890166 seconds, throughput 1058108.123837
+139044	[1728193598]	2000000 OPS in 1.874787 seconds, throughput 1066787.853767
+139044	[1728193599]	2000000 OPS in 1.944300 seconds, throughput 1028647.842411
+139044	[1728193600]	2000000 OPS in 1.906880 seconds, throughput 1048833.696929
+139044	[1728193600]	2000000 OPS in 1.852299 seconds, throughput 1079739.286152
+139044	[1728193600]	2000000 OPS in 1.854169 seconds, throughput 1078650.327991
+139044	[1728193600]	2000000 OPS in 1.845333 seconds, throughput 1083815.224678
+139044	[1728193601]	2000000 OPS in 1.877633 seconds, throughput 1065170.882702
+139044	[1728193602]	2000000 OPS in 1.855226 seconds, throughput 1078035.775695
+139044	[1728193602]	2000000 OPS in 1.862365 seconds, throughput 1073903.343330
+139044	[1728193602]	2000000 OPS in 1.827019 seconds, throughput 1094679.365677
+139044	[1728193603]	2000000 OPS in 1.864987 seconds, throughput 1072393.534110
+139044	[1728193604]	2000000 OPS in 1.796542 seconds, throughput 1113249.787648
+139044	[1728193604]	2000000 OPS in 1.853372 seconds, throughput 1079114.176755
+139044	[1728193604]	2000000 OPS in 1.854366 seconds, throughput 1078535.736742
+139044	[1728193605]	2000000 OPS in 1.836271 seconds, throughput 1089163.854355
+139044	[1728193606]	2000000 OPS in 1.825794 seconds, throughput 1095413.830914
+139044	[1728193606]	2000000 OPS in 1.812945 seconds, throughput 1103177.426783
+139044	[1728193606]	2000000 OPS in 1.828040 seconds, throughput 1094067.963502
+139044	[1728193607]	2000000 OPS in 1.895065 seconds, throughput 1055372.770855
+139044	[1728193607]	2000000 OPS in 1.852449 seconds, throughput 1079651.855463
+139044	[1728193608]	2000000 OPS in 1.883660 seconds, throughput 1061762.738498
+139044	[1728193608]	2000000 OPS in 1.883477 seconds, throughput 1061865.900141
+139044	[1728193609]	2000000 OPS in 1.845332 seconds, throughput 1083815.812006
+139044	[1728193609]	2000000 OPS in 1.844373 seconds, throughput 1084379.352766
+139044	[1728193610]	2000000 OPS in 1.919646 seconds, throughput 1041858.759375
+139044	[1728193610]	2000000 OPS in 1.929893 seconds, throughput 1036326.884444
+139044	[1728193611]	2000000 OPS in 2.034433 seconds, throughput 983074.891137
+139044	[1728193611]	2000000 OPS in 1.871045 seconds, throughput 1068921.378160
+139044	[1728193611]	2000000 OPS in 1.815000 seconds, throughput 1101928.374656
+139044	[1728193612]	2000000 OPS in 1.840926 seconds, throughput 1086409.774211
+139044	[1728193613]	2000000 OPS in 1.960217 seconds, throughput 1020295.202011
+139044	[1728193613]	2000000 OPS in 1.838954 seconds, throughput 1087574.784361
+139044	[1728193613]	2000000 OPS in 1.830777 seconds, throughput 1092432.338838
+139044	[1728193613]	2000000 OPS in 1.827292 seconds, throughput 1094515.819037
+139044	[1728193615]	2000000 OPS in 1.821659 seconds, throughput 1097900.320532
+139044	[1728193615]	2000000 OPS in 1.854980 seconds, throughput 1078178.740472
+139044	[1728193615]	2000000 OPS in 1.854361 seconds, throughput 1078538.644849
+139044	[1728193615]	2000000 OPS in 1.869252 seconds, throughput 1069946.695256
+139044	[1728193617]	2000000 OPS in 1.934044 seconds, throughput 1034102.636755
+139044	[1728193617]	2000000 OPS in 1.888051 seconds, throughput 1059293.419510
+139044	[1728193617]	2000000 OPS in 1.868493 seconds, throughput 1070381.317993
+139044	[1728193617]	2000000 OPS in 1.881929 seconds, throughput 1062739.348828
+139044	[1728193619]	2000000 OPS in 1.913032 seconds, throughput 1045460.818219
+139044	[1728193619]	2000000 OPS in 1.882073 seconds, throughput 1062658.037175
+139044	[1728193619]	2000000 OPS in 1.791792 seconds, throughput 1116200.987615
+139044	[1728193619]	2000000 OPS in 1.859054 seconds, throughput 1075815.979525
+139044	[1728193620]	2000000 OPS in 1.908649 seconds, throughput 1047861.602631
+139044	[1728193620]	2000000 OPS in 1.912669 seconds, throughput 1045659.233249
+139044	[1728193621]	2000000 OPS in 1.848747 seconds, throughput 1081813.790638
+139044	[1728193621]	2000000 OPS in 1.799756 seconds, throughput 1111261.748815
+139044	[1728193622]	2000000 OPS in 1.799567 seconds, throughput 1111378.459374
+139044	[1728193622]	2000000 OPS in 1.895784 seconds, throughput 1054972.507416
+139044	[1728193622]	2000000 OPS in 1.816987 seconds, throughput 1100723.340343
+139044	[1728193623]	2000000 OPS in 1.831481 seconds, throughput 1092012.420549
+139044	[1728193624]	2000000 OPS in 1.880235 seconds, throughput 1063696.825131
+139044	[1728193624]	2000000 OPS in 1.881842 seconds, throughput 1062788.480648
+139044	[1728193624]	2000000 OPS in 1.840439 seconds, throughput 1086697.249950
+139044	[1728193624]	2000000 OPS in 1.827094 seconds, throughput 1094634.430412
+139044	[1728193626]	2000000 OPS in 1.844761 seconds, throughput 1084151.280301
+139044	[1728193626]	2000000 OPS in 1.868964 seconds, throughput 1070111.569832
+139044	[1728193626]	2000000 OPS in 1.843116 seconds, throughput 1085118.896477
+139044	[1728193626]	2000000 OPS in 1.879057 seconds, throughput 1064363.667520
+139044	[1728193628]	2000000 OPS in 1.903084 seconds, throughput 1050925.760502
+139044	[1728193628]	2000000 OPS in 1.926077 seconds, throughput 1038380.085531
+139044	[1728193628]	2000000 OPS in 1.889636 seconds, throughput 1058404.899145
+139044	[1728193628]	2000000 OPS in 1.912910 seconds, throughput 1045527.494759
+139044	[1728193630]	2000000 OPS in 1.822944 seconds, throughput 1097126.406516
+139044	[1728193630]	2000000 OPS in 1.824416 seconds, throughput 1096241.208146
+139044	[1728193630]	2000000 OPS in 1.853185 seconds, throughput 1079223.067314
+139044	[1728193630]	2000000 OPS in 1.865837 seconds, throughput 1071904.994916
+139044	[1728193632]	2000000 OPS in 1.833731 seconds, throughput 1090672.514126
+139044	[1728193632]	2000000 OPS in 1.818478 seconds, throughput 1099820.839185
+139044	[1728193632]	2000000 OPS in 1.855195 seconds, throughput 1078053.789494
+139044	[1728193632]	2000000 OPS in 1.843333 seconds, throughput 1084991.154610
+139044	[1728193633]	2000000 OPS in 1.790840 seconds, throughput 1116794.353488
+139044	[1728193634]	2000000 OPS in 1.812033 seconds, throughput 1103732.658290
+139044	[1728193634]	2000000 OPS in 1.875966 seconds, throughput 1066117.402981
+139044	[1728193634]	2000000 OPS in 1.857402 seconds, throughput 1076772.825700
+139044	[1728193635]	2000000 OPS in 1.829028 seconds, throughput 1093476.972468
+139044	[1728193635]	2000000 OPS in 1.845769 seconds, throughput 1083559.210280
+139044	[1728193636]	2000000 OPS in 1.888515 seconds, throughput 1059033.155681
+139044	[1728193636]	2000000 OPS in 1.867260 seconds, throughput 1071088.118420
+139044	[1728193637]	2000000 OPS in 1.873945 seconds, throughput 1067267.182335
+139044	[1728193637]	2000000 OPS in 1.871844 seconds, throughput 1068465.107135
+139044	[1728193638]	2000000 OPS in 2.043877 seconds, throughput 978532.465506
+139044	[1728193638]	2000000 OPS in 1.969866 seconds, throughput 1015297.487240
+139044	[1728193639]	2000000 OPS in 1.865572 seconds, throughput 1072057.256434
+139044	[1728193639]	2000000 OPS in 1.880182 seconds, throughput 1063726.809426
+139044	[1728193639]	2000000 OPS in 1.809421 seconds, throughput 1105325.957862
+139044	[1728193639]	2000000 OPS in 1.873190 seconds, throughput 1067697.350509
+139044	[1728193641]	2000000 OPS in 1.866282 seconds, throughput 1071649.407753
+139044	[1728193641]	2000000 OPS in 1.848008 seconds, throughput 1082246.397202
+139044	[1728193641]	2000000 OPS in 1.860888 seconds, throughput 1074755.708028
+139044	[1728193641]	2000000 OPS in 1.942410 seconds, throughput 1029648.735334
+139044	[1728193643]	2000000 OPS in 1.878834 seconds, throughput 1064489.997520
+139044	[1728193643]	2000000 OPS in 1.845787 seconds, throughput 1083548.643478
+139044	[1728193643]	2000000 OPS in 1.821586 seconds, throughput 1097944.318852
+139044	[1728193643]	2000000 OPS in 1.859608 seconds, throughput 1075495.480768
+139044	[1728193645]	2000000 OPS in 1.880634 seconds, throughput 1063471.148559
+139044	[1728193645]	2000000 OPS in 1.933257 seconds, throughput 1034523.604466
+139044	[1728193645]	2000000 OPS in 1.880566 seconds, throughput 1063509.602960
+139044	[1728193645]	2000000 OPS in 1.933970 seconds, throughput 1034142.204895
+139044	[1728193646]	2000000 OPS in 1.827467 seconds, throughput 1094411.007148
+139044	[1728193647]	2000000 OPS in 1.846905 seconds, throughput 1082892.731353
+139044	[1728193647]	2000000 OPS in 1.874617 seconds, throughput 1066884.595627
+139044	[1728193647]	2000000 OPS in 1.894735 seconds, throughput 1055556.581791
+139044	[1728193648]	2000000 OPS in 1.901182 seconds, throughput 1051977.138433
+139044	[1728193648]	2000000 OPS in 1.857344 seconds, throughput 1076806.450501
+139044	[1728193649]	2000000 OPS in 1.903338 seconds, throughput 1050785.514712
+139044	[1728193649]	2000000 OPS in 1.927218 seconds, throughput 1037765.317676
+139044	[1728193650]	2000000 OPS in 1.817186 seconds, throughput 1100602.800154
+139044	[1728193650]	2000000 OPS in 1.872402 seconds, throughput 1068146.690721
+139044	[1728193651]	2000000 OPS in 1.813441 seconds, throughput 1102875.693226
+139044	[1728193651]	2000000 OPS in 1.848408 seconds, throughput 1082012.196441
+139044	[1728193652]	2000000 OPS in 1.852601 seconds, throughput 1079563.273473
+139044	[1728193652]	2000000 OPS in 1.837496 seconds, throughput 1088437.743538
+139044	[1728193652]	2000000 OPS in 1.900684 seconds, throughput 1052252.767951
+139044	[1728193653]	2000000 OPS in 1.931544 seconds, throughput 1035441.077190
+139044	[1728193654]	2000000 OPS in 1.921615 seconds, throughput 1040791.209477
+139044	[1728193654]	2000000 OPS in 1.853634 seconds, throughput 1078961.650466
+139044	[1728193654]	2000000 OPS in 1.855343 seconds, throughput 1077967.793556
+139044	[1728193655]	2000000 OPS in 1.941225 seconds, throughput 1030277.273371
+139044	[1728193656]	2000000 OPS in 1.909088 seconds, throughput 1047620.643993
+139044	[1728193656]	2000000 OPS in 1.878095 seconds, throughput 1064908.857113
+139044	[1728193656]	2000000 OPS in 1.873982 seconds, throughput 1067246.110155
+139044	[1728193657]	2000000 OPS in 1.835761 seconds, throughput 1089466.439259
+139044	[1728193658]	2000000 OPS in 1.794354 seconds, throughput 1114607.262558
+139044	[1728193658]	2000000 OPS in 1.793489 seconds, throughput 1115144.837799
+139044	[1728193658]	2000000 OPS in 1.818211 seconds, throughput 1099982.345283
+139044	[1728193658]	2000000 OPS in 1.789239 seconds, throughput 1117793.654174
+139044	[1728193659]	2000000 OPS in 1.894512 seconds, throughput 1055680.829681
+139044	[1728193659]	2000000 OPS in 1.814434 seconds, throughput 1102272.113508
+139044	[1728193660]	2000000 OPS in 1.881387 seconds, throughput 1063045.508447
+139044	[1728193660]	2000000 OPS in 1.831078 seconds, throughput 1092252.760396
+139044	[1728193661]	2000000 OPS in 1.826042 seconds, throughput 1095265.059621
+139044	[1728193661]	2000000 OPS in 1.857941 seconds, throughput 1076460.447345
+139044	[1728193662]	2000000 OPS in 1.854498 seconds, throughput 1078458.968411
+139044	[1728193662]	2000000 OPS in 1.909739 seconds, throughput 1047263.526587
+139044	[1728193663]	2000000 OPS in 1.885787 seconds, throughput 1060565.164571
+139044	[1728193663]	2000000 OPS in 1.871499 seconds, throughput 1068662.072488
+139044	[1728193664]	2000000 OPS in 1.887420 seconds, throughput 1059647.561221
+139044	[1728193664]	2000000 OPS in 1.870711 seconds, throughput 1069112.225245
+139044	[1728193665]	2000000 OPS in 1.917214 seconds, throughput 1043180.364842
+139044	[1728193665]	2000000 OPS in 1.919332 seconds, throughput 1042029.205995
+139044	[1728193666]	2000000 OPS in 1.862861 seconds, throughput 1073617.408921
+139044	[1728193666]	2000000 OPS in 1.886804 seconds, throughput 1059993.512840
+139044	[1728193667]	2000000 OPS in 1.833980 seconds, throughput 1090524.433200
+139044	[1728193667]	2000000 OPS in 1.823439 seconds, throughput 1096828.575017
+139044	[1728193667]	2000000 OPS in 1.814394 seconds, throughput 1102296.414120
+139044	[1728193668]	2000000 OPS in 1.797657 seconds, throughput 1112559.292457
+139044	[1728193669]	2000000 OPS in 1.878091 seconds, throughput 1064911.125180
+139044	[1728193669]	2000000 OPS in 1.871638 seconds, throughput 1068582.706699
+139044	[1728193669]	2000000 OPS in 1.862432 seconds, throughput 1073864.710228
+139044	[1728193669]	2000000 OPS in 1.856188 seconds, throughput 1077477.065901
+139044	[1728193671]	2000000 OPS in 1.833485 seconds, throughput 1090818.850441
+139044	[1728193671]	2000000 OPS in 1.831281 seconds, throughput 1092131.682686
+139044	[1728193671]	2000000 OPS in 1.912695 seconds, throughput 1045645.019201
+139044	[1728193671]	2000000 OPS in 1.870088 seconds, throughput 1069468.388653
+139044	[1728193672]	2000000 OPS in 1.829672 seconds, throughput 1093092.095195
+139044	[1728193673]	2000000 OPS in 1.850038 seconds, throughput 1081058.875547
+139044	[1728193673]	2000000 OPS in 1.852717 seconds, throughput 1079495.681208
+139044	[1728193673]	2000000 OPS in 1.863000 seconds, throughput 1073537.305421
+139044	[1728193674]	2000000 OPS in 1.846405 seconds, throughput 1083185.974908
+139044	[1728193674]	2000000 OPS in 1.862131 seconds, throughput 1074038.292687
+139044	[1728193675]	2000000 OPS in 1.872049 seconds, throughput 1068348.104136
+139044	[1728193675]	2000000 OPS in 1.870955 seconds, throughput 1068972.797315
+139044	[1728193676]	2000000 OPS in 1.851083 seconds, throughput 1080448.580642
+139044	[1728193676]	2000000 OPS in 1.879564 seconds, throughput 1064076.562437
+139044	[1728193677]	2000000 OPS in 1.843167 seconds, throughput 1085088.871491
+139044	[1728193677]	2000000 OPS in 1.966721 seconds, throughput 1016921.057944
+139044	[1728193678]	2000000 OPS in 1.832898 seconds, throughput 1091168.193757
+139044	[1728193678]	2000000 OPS in 1.867340 seconds, throughput 1071042.231195
+139044	[1728193679]	2000000 OPS in 1.898554 seconds, throughput 1053433.297130
+139044	[1728193679]	2000000 OPS in 1.959451 seconds, throughput 1020694.061755
+139044	[1728193680]	2000000 OPS in 1.924917 seconds, throughput 1039005.837654
+139044	[1728193680]	2000000 OPS in 1.933498 seconds, throughput 1034394.656731
+139044	[1728193680]	2000000 OPS in 1.885699 seconds, throughput 1060614.658013
+139044	[1728193681]	2000000 OPS in 1.948328 seconds, throughput 1026521.201769
+139044	[1728193682]	2000000 OPS in 1.883987 seconds, throughput 1061578.450382
+139044	[1728193682]	2000000 OPS in 1.857841 seconds, throughput 1076518.388818
+139044	[1728193682]	2000000 OPS in 1.891662 seconds, throughput 1057271.330713
+139044	[1728193683]	2000000 OPS in 1.952137 seconds, throughput 1024518.258708
+139044	[1728193684]	2000000 OPS in 1.900272 seconds, throughput 1052480.907996
+139044	[1728193684]	2000000 OPS in 1.902818 seconds, throughput 1051072.672216
+139044	[1728193684]	2000000 OPS in 1.893508 seconds, throughput 1056240.586256
+139044	[1728193685]	2000000 OPS in 1.858265 seconds, throughput 1076272.759806
+139044	[1728193686]	2000000 OPS in 1.811092 seconds, throughput 1104306.131329
+139044	[1728193686]	2000000 OPS in 1.835055 seconds, throughput 1089885.589260
+139044	[1728193686]	2000000 OPS in 1.810187 seconds, throughput 1104858.227354
+139044	[1728193687]	2000000 OPS in 1.852418 seconds, throughput 1079669.923311
+139044	[1728193687]	2000000 OPS in 1.840885 seconds, throughput 1086433.970617
+139044	[1728193688]	2000000 OPS in 1.870265 seconds, throughput 1069367.175240
+139044	[1728193688]	2000000 OPS in 1.911408 seconds, throughput 1046349.078794
+139044	[1728193688]	2000000 OPS in 1.863589 seconds, throughput 1073198.006642
+139044	[1728193689]	2000000 OPS in 1.833395 seconds, throughput 1090872.397928
+139044	[1728193689]	2000000 OPS in 1.831432 seconds, throughput 1092041.637364
+139044	[1728193690]	2000000 OPS in 1.863997 seconds, throughput 1072963.100263
+139044	[1728193690]	2000000 OPS in 1.914071 seconds, throughput 1044893.319004
+139044	[1728193691]	2000000 OPS in 1.923014 seconds, throughput 1040034.029913
+139044	[1728193691]	2000000 OPS in 1.839980 seconds, throughput 1086968.336612
+139044	[1728193692]	2000000 OPS in 1.816746 seconds, throughput 1100869.356531
+139044	[1728193692]	2000000 OPS in 1.861076 seconds, throughput 1074647.139612
+139044	[1728193693]	2000000 OPS in 1.881644 seconds, throughput 1062900.314831
+139044	[1728193693]	2000000 OPS in 1.874195 seconds, throughput 1067124.818922
+139044	[1728193694]	2000000 OPS in 1.873914 seconds, throughput 1067284.838045
+139044	[1728193694]	2000000 OPS in 1.864546 seconds, throughput 1072647.175237
+139044	[1728193695]	2000000 OPS in 1.809030 seconds, throughput 1105564.860726
+139044	[1728193695]	2000000 OPS in 1.848839 seconds, throughput 1081759.958547
+139044	[1728193695]	2000000 OPS in 1.836906 seconds, throughput 1088787.341323
+139044	[1728193696]	2000000 OPS in 1.982078 seconds, throughput 1009042.025591
+139044	[1728193697]	2000000 OPS in 1.806211 seconds, throughput 1107290.344262
+139044	[1728193697]	2000000 OPS in 1.813979 seconds, throughput 1102548.596208
+139044	[1728193697]	2000000 OPS in 1.851683 seconds, throughput 1080098.483380
+139044	[1728193698]	2000000 OPS in 1.835485 seconds, throughput 1089630.261212
+139044	[1728193698]	2000000 OPS in 1.844130 seconds, throughput 1084522.240840
+139044	[1728193699]	2000000 OPS in 1.861340 seconds, throughput 1074494.718858
+139044	[1728193699]	2000000 OPS in 1.935151 seconds, throughput 1033511.080014
+139044	[1728193700]	2000000 OPS in 1.881022 seconds, throughput 1063251.785466
+139044	[1728193700]	2000000 OPS in 1.898399 seconds, throughput 1053519.307585
+139044	[1728193700]	2000000 OPS in 1.878508 seconds, throughput 1064674.731223
+139044	[1728193701]	2000000 OPS in 1.878788 seconds, throughput 1064516.060354
+139044	[1728193702]	2000000 OPS in 1.873562 seconds, throughput 1067485.356770
+139044	[1728193702]	2000000 OPS in 1.870700 seconds, throughput 1069118.511787
+139044	[1728193702]	2000000 OPS in 1.840040 seconds, throughput 1086932.892763
+139044	[1728193703]	2000000 OPS in 1.885539 seconds, throughput 1060704.657925
+139044	[1728193704]	2000000 OPS in 1.861573 seconds, throughput 1074360.231911
+139044	[1728193704]	2000000 OPS in 1.868644 seconds, throughput 1070294.823412
+139044	[1728193704]	2000000 OPS in 1.857419 seconds, throughput 1076762.970552
+139044	[1728193705]	2000000 OPS in 1.871533 seconds, throughput 1068642.658184
+139044	[1728193705]	2000000 OPS in 1.903078 seconds, throughput 1050929.073848
+139044	[1728193706]	2000000 OPS in 1.854317 seconds, throughput 1078564.236859
+139044	[1728193706]	2000000 OPS in 1.814369 seconds, throughput 1102311.602546
+139044	[1728193707]	2000000 OPS in 1.875602 seconds, throughput 1066324.305476
+139044	[1728193707]	2000000 OPS in 1.895977 seconds, throughput 1054865.117035
+139044	[1728193708]	2000000 OPS in 1.915841 seconds, throughput 1043927.966882
+139044	[1728193708]	2000000 OPS in 1.917419 seconds, throughput 1043068.833677
+139044	[1728193709]	2000000 OPS in 1.921725 seconds, throughput 1040731.634339
+139044	[1728193709]	2000000 OPS in 1.913106 seconds, throughput 1045420.379216
+139044	[1728193710]	2000000 OPS in 1.873330 seconds, throughput 1067617.558038
+139044	[1728193710]	2000000 OPS in 1.856888 seconds, throughput 1077070.884189
+139044	[1728193710]	2000000 OPS in 1.916702 seconds, throughput 1043459.024929
+139044	[1728193711]	2000000 OPS in 1.835152 seconds, throughput 1089827.981551
+139044	[1728193712]	2000000 OPS in 1.811857 seconds, throughput 1103839.872573
+139044	[1728193712]	2000000 OPS in 1.841800 seconds, throughput 1085894.233902
+139044	[1728193712]	2000000 OPS in 1.852375 seconds, throughput 1079694.986166
+139044	[1728193713]	2000000 OPS in 1.844970 seconds, throughput 1084028.466588
+139044	[1728193713]	2000000 OPS in 1.867469 seconds, throughput 1070968.246327
+139044	[1728193713]	2000000 OPS in 1.897078 seconds, throughput 1054252.908947
+139044	[1728193714]	2000000 OPS in 1.880337 seconds, throughput 1063639.124263
+139044	[1728193715]	2000000 OPS in 1.913024 seconds, throughput 1045465.190191
+139044	[1728193715]	2000000 OPS in 1.883150 seconds, throughput 1062050.288081
+139044	[1728193715]	2000000 OPS in 1.887639 seconds, throughput 1059524.623087
+139044	[1728193716]	2000000 OPS in 1.886710 seconds, throughput 1060046.324024
+139044	[1728193717]	2000000 OPS in 1.805804 seconds, throughput 1107539.910201
+139044	[1728193717]	2000000 OPS in 1.801925 seconds, throughput 1109924.108939
+139044	[1728193717]	2000000 OPS in 1.831129 seconds, throughput 1092222.339333
+139044	[1728193718]	2000000 OPS in 1.837482 seconds, throughput 1088446.036478
+139044	[1728193719]	2000000 OPS in 1.855984 seconds, throughput 1077595.496513
+139044	[1728193719]	2000000 OPS in 1.821270 seconds, throughput 1098134.818012
+139044	[1728193719]	2000000 OPS in 1.867241 seconds, throughput 1071099.017213
+139044	[1728193720]	2000000 OPS in 1.883520 seconds, throughput 1061841.658172
+139044	[1728193720]	2000000 OPS in 1.929135 seconds, throughput 1036734.080300
+139044	[1728193721]	2000000 OPS in 1.875932 seconds, throughput 1066136.725638
+139044	[1728193721]	2000000 OPS in 1.861903 seconds, throughput 1074169.814432
+139044	[1728193722]	2000000 OPS in 1.812187 seconds, throughput 1103638.862877
+139044	[1728193722]	2000000 OPS in 1.795973 seconds, throughput 1113602.487343
+139044	[1728193723]	2000000 OPS in 1.846044 seconds, throughput 1083397.795502
+139044	[1728193723]	2000000 OPS in 1.831674 seconds, throughput 1091897.357281
+139044	[1728193724]	2000000 OPS in 1.928547 seconds, throughput 1037050.173006
+139044	[1728193724]	2000000 OPS in 1.877949 seconds, throughput 1064991.647803
+139044	[1728193725]	2000000 OPS in 1.906508 seconds, throughput 1049038.346548
+139044	[1728193725]	2000000 OPS in 1.901994 seconds, throughput 1051528.027954
+139044	[1728193725]	2000000 OPS in 1.856121 seconds, throughput 1077515.959358
+139044	[1728193726]	2000000 OPS in 1.872090 seconds, throughput 1068324.706611
+139044	[1728193726]	2000000 OPS in 1.851564 seconds, throughput 1080167.901299
+139044	[1728193726]	2000000 OPS in 1.867277 seconds, throughput 1071078.367055
+139044	[1728193727]	2000000 OPS in 1.892774 seconds, throughput 1056650.186446
+139044	[1728193728]	2000000 OPS in 1.934423 seconds, throughput 1033900.031172
+139044	[1728193728]	2000000 OPS in 1.872292 seconds, throughput 1068209.445962
+139044	[1728193728]	2000000 OPS in 1.906222 seconds, throughput 1049195.739006
+139044	[1728193729]	2000000 OPS in 1.882162 seconds, throughput 1062607.788278
+139044	[1728193730]	2000000 OPS in 1.843254 seconds, throughput 1085037.656232
+139044	[1728193730]	2000000 OPS in 1.826528 seconds, throughput 1094973.633035
+139044	[1728193730]	2000000 OPS in 1.859394 seconds, throughput 1075619.260899
+139044	[1728193731]	2000000 OPS in 1.836740 seconds, throughput 1088885.743219
+139044	[1728193732]	2000000 OPS in 1.931271 seconds, throughput 1035587.444745
+139044	[1728193732]	2000000 OPS in 1.873204 seconds, throughput 1067689.370725
+139044	[1728193732]	2000000 OPS in 1.874522 seconds, throughput 1066938.664897
+139044	[1728193733]	2000000 OPS in 1.867785 seconds, throughput 1070787.055255
+139044	[1728193734]	2000000 OPS in 1.842135 seconds, throughput 1085696.759467
+139044	[1728193734]	2000000 OPS in 1.806897 seconds, throughput 1106869.954402
+139044	[1728193734]	2000000 OPS in 1.854924 seconds, throughput 1078211.290597
+139044	[1728193735]	2000000 OPS in 1.836686 seconds, throughput 1088917.757309
+139044	[1728193735]	2000000 OPS in 1.886490 seconds, throughput 1060169.945242
+139044	[1728193736]	2000000 OPS in 1.910210 seconds, throughput 1047005.303082
+139044	[1728193736]	2000000 OPS in 1.860457 seconds, throughput 1075004.689708
+139044	[1728193737]	2000000 OPS in 1.915006 seconds, throughput 1044383.150758
+139044	[1728193737]	2000000 OPS in 1.840899 seconds, throughput 1086425.708309
+139044	[1728193738]	2000000 OPS in 1.845856 seconds, throughput 1083508.139313
+139044	[1728193738]	2000000 OPS in 1.879690 seconds, throughput 1064005.234906
+139044	[1728193739]	2000000 OPS in 1.887522 seconds, throughput 1059590.298815
+139044	[1728193739]	2000000 OPS in 1.957878 seconds, throughput 1021514.108642
+139044	[1728193739]	2000000 OPS in 1.882447 seconds, throughput 1062446.910856
+139044	[1728193740]	2000000 OPS in 1.835274 seconds, throughput 1089755.535141
+139044	[1728193740]	2000000 OPS in 1.960049 seconds, throughput 1020382.653699
+139044	[1728193741]	2000000 OPS in 1.886048 seconds, throughput 1060418.398683
+139044	[1728193741]	2000000 OPS in 1.848652 seconds, throughput 1081869.383746
+139044	[1728193741]	2000000 OPS in 1.914156 seconds, throughput 1044846.919478
+139044	[1728193742]	2000000 OPS in 1.834781 seconds, throughput 1090048.349095
+139044	[1728193743]	2000000 OPS in 1.872604 seconds, throughput 1068031.468479
+139044	[1728193743]	2000000 OPS in 1.840681 seconds, throughput 1086554.378515
+139044	[1728193743]	2000000 OPS in 1.832271 seconds, throughput 1091541.589645
+139044	[1728193744]	2000000 OPS in 1.800789 seconds, throughput 1110624.287465
+139044	[1728193745]	2000000 OPS in 1.886573 seconds, throughput 1060123.302941
+139044	[1728193745]	2000000 OPS in 1.887507 seconds, throughput 1059598.719369
+139044	[1728193745]	2000000 OPS in 1.891248 seconds, throughput 1057502.770657
+139044	[1728193746]	2000000 OPS in 1.859360 seconds, throughput 1075638.929524
+139044	[1728193747]	2000000 OPS in 1.911242 seconds, throughput 1046439.958938
+139044	[1728193747]	2000000 OPS in 1.816316 seconds, throughput 1101129.979585
+139044	[1728193747]	2000000 OPS in 1.920177 seconds, throughput 1041570.646873
+139044	[1728193748]	2000000 OPS in 1.843615 seconds, throughput 1084825.193980
+139044	[1728193749]	2000000 OPS in 1.840220 seconds, throughput 1086826.575083
+139044	[1728193749]	2000000 OPS in 1.892057 seconds, throughput 1057050.606826
+139044	[1728193749]	2000000 OPS in 1.818503 seconds, throughput 1099805.719320
+139044	[1728193750]	2000000 OPS in 1.793165 seconds, throughput 1115346.328977
+139044	[1728193750]	2000000 OPS in 1.812530 seconds, throughput 1103430.012193
+139044	[1728193751]	2000000 OPS in 1.814908 seconds, throughput 1101984.232810
+139044	[1728193751]	2000000 OPS in 1.828022 seconds, throughput 1094078.736470
+139044	[1728193751]	2000000 OPS in 1.851927 seconds, throughput 1079956.175378
+139044	[1728193752]	2000000 OPS in 1.889371 seconds, throughput 1058553.349236
+139044	[1728193752]	2000000 OPS in 1.924299 seconds, throughput 1039339.520521
+139044	[1728193753]	2000000 OPS in 1.821584 seconds, throughput 1097945.524335
+139044	[1728193753]	2000000 OPS in 1.878904 seconds, throughput 1064450.339134
+139044	[1728193754]	2000000 OPS in 1.907120 seconds, throughput 1048701.707286
+139044	[1728193754]	2000000 OPS in 1.786161 seconds, throughput 1119719.890872
+139044	[1728193755]	2000000 OPS in 1.929954 seconds, throughput 1036294.129290
+139044	[1728193755]	2000000 OPS in 1.853872 seconds, throughput 1078823.133420
+139044	[1728193756]	2000000 OPS in 1.868408 seconds, throughput 1070430.013145
+139044	[1728193756]	2000000 OPS in 1.874113 seconds, throughput 1067171.509936
+139044	[1728193756]	2000000 OPS in 1.860686 seconds, throughput 1074872.385776
+139044	[1728193757]	2000000 OPS in 1.902929 seconds, throughput 1051011.361958
+139044	[1728193758]	2000000 OPS in 1.841870 seconds, throughput 1085852.964650
+139044	[1728193758]	2000000 OPS in 1.899875 seconds, throughput 1052700.835581
+139044	[1728193758]	2000000 OPS in 1.879660 seconds, throughput 1064022.216784
+139044	[1728193759]	2000000 OPS in 1.880782 seconds, throughput 1063387.463300
+139044	[1728193760]	2000000 OPS in 1.848645 seconds, throughput 1081873.480306
+139044	[1728193760]	2000000 OPS in 1.854621 seconds, throughput 1078387.444119
+139044	[1728193760]	2000000 OPS in 1.855178 seconds, throughput 1078063.668284
+139044	[1728193761]	2000000 OPS in 1.887372 seconds, throughput 1059674.510377
+139044	[1728193762]	2000000 OPS in 1.930403 seconds, throughput 1036053.093577
+139044	[1728193762]	2000000 OPS in 1.880947 seconds, throughput 1063294.181069
+139044	[1728193762]	2000000 OPS in 1.931502 seconds, throughput 1035463.592582
+139044	[1728193763]	2000000 OPS in 1.829221 seconds, throughput 1093361.600375
+139044	[1728193764]	2000000 OPS in 1.819681 seconds, throughput 1099093.742255
+139044	[1728193764]	2000000 OPS in 1.882799 seconds, throughput 1062248.280353
+139044	[1728193764]	2000000 OPS in 1.825155 seconds, throughput 1095797.343239
+139044	[1728193765]	2000000 OPS in 1.864386 seconds, throughput 1072739.228894
+139044	[1728193765]	2000000 OPS in 1.828620 seconds, throughput 1093720.948037
+139044	[1728193765]	2000000 OPS in 1.875610 seconds, throughput 1066319.757306
+139044	[1728193766]	2000000 OPS in 1.790432 seconds, throughput 1117048.846312
+139044	[1728193766]	2000000 OPS in 1.850979 seconds, throughput 1080509.287247
+139044	[1728193767]	2000000 OPS in 1.912121 seconds, throughput 1045958.911596
+139044	[1728193768]	2000000 OPS in 2.015469 seconds, throughput 992324.863344
+139044	[1728193768]	2000000 OPS in 1.935752 seconds, throughput 1033190.202051
+139044	[1728193768]	2000000 OPS in 1.897917 seconds, throughput 1053786.862123
+139044	[1728193769]	2000000 OPS in 1.880663 seconds, throughput 1063454.749735
+139044	[1728193769]	2000000 OPS in 1.879456 seconds, throughput 1064137.707933
+139044	[1728193769]	2000000 OPS in 1.856714 seconds, throughput 1077171.820754
+139044	[1728193770]	2000000 OPS in 1.876065 seconds, throughput 1066061.143937
+139044	[1728193771]	2000000 OPS in 1.868635 seconds, throughput 1070299.978326
+139044	[1728193771]	2000000 OPS in 1.946508 seconds, throughput 1027481.007014
+139044	[1728193771]	2000000 OPS in 1.936205 seconds, throughput 1032948.473948
+139044	[1728193772]	2000000 OPS in 1.835270 seconds, throughput 1089757.910280
+139044	[1728193773]	2000000 OPS in 1.796658 seconds, throughput 1113177.911433
+139044	[1728193773]	2000000 OPS in 1.821235 seconds, throughput 1098155.921669
+139044	[1728193773]	2000000 OPS in 1.841638 seconds, throughput 1085989.754773
+139044	[1728193774]	2000000 OPS in 1.797358 seconds, throughput 1112744.372574
+139044	[1728193775]	2000000 OPS in 1.870061 seconds, throughput 1069483.829672
+139044	[1728193775]	2000000 OPS in 1.870078 seconds, throughput 1069474.107497
+139044	[1728193775]	2000000 OPS in 1.900218 seconds, throughput 1052510.817180
+139044	[1728193776]	2000000 OPS in 1.905560 seconds, throughput 1049560.234262
+139044	[1728193777]	2000000 OPS in 1.873276 seconds, throughput 1067648.333721
+139044	[1728193777]	2000000 OPS in 1.920118 seconds, throughput 1041602.651504
+139044	[1728193777]	2000000 OPS in 1.869909 seconds, throughput 1069570.765208
+139044	[1728193778]	2000000 OPS in 1.937130 seconds, throughput 1032455.230160
+139044	[1728193778]	2000000 OPS in 1.863297 seconds, throughput 1073366.189072
+139044	[1728193779]	2000000 OPS in 1.833966 seconds, throughput 1090532.757968
+139044	[1728193779]	2000000 OPS in 1.905559 seconds, throughput 1049560.785050
+139044	[1728193780]	2000000 OPS in 1.832801 seconds, throughput 1091225.943242
+139044	[1728193780]	2000000 OPS in 1.903259 seconds, throughput 1050829.130455
+139044	[1728193781]	2000000 OPS in 1.891595 seconds, throughput 1057308.779099
+139044	[1728193781]	2000000 OPS in 1.871998 seconds, throughput 1068377.209805
+139044	[1728193781]	2000000 OPS in 1.833636 seconds, throughput 1090729.021463
+139044	[1728193782]	2000000 OPS in 1.847085 seconds, throughput 1082787.202538
+139044	[1728193783]	2000000 OPS in 1.809949 seconds, throughput 1105003.511149
+139044	[1728193783]	2000000 OPS in 1.820968 seconds, throughput 1098316.939122
+139044	[1728193783]	2000000 OPS in 1.785827 seconds, throughput 1119929.310062
+139044	[1728193784]	2000000 OPS in 1.831554 seconds, throughput 1091968.896358
+139044	[1728193784]	2000000 OPS in 1.890016 seconds, throughput 1058192.099961
+139044	[1728193784]	2000000 OPS in 1.938143 seconds, throughput 1031915.601687
+139044	[1728193785]	2000000 OPS in 1.883191 seconds, throughput 1062027.165593
+139044	[1728193786]	2000000 OPS in 1.903269 seconds, throughput 1050823.609274
+139044	[1728193786]	2000000 OPS in 1.843046 seconds, throughput 1085160.109948
+139044	[1728193786]	2000000 OPS in 1.919572 seconds, throughput 1041898.923302
+139044	[1728193787]	2000000 OPS in 1.832808 seconds, throughput 1091221.775549
+139044	[1728193788]	2000000 OPS in 1.919867 seconds, throughput 1041738.828783
+139044	[1728193788]	2000000 OPS in 1.911451 seconds, throughput 1046325.540126
+139044	[1728193788]	2000000 OPS in 1.954500 seconds, throughput 1023279.611154
+139044	[1728193789]	2000000 OPS in 1.833994 seconds, throughput 1090516.108559
+139044	[1728193790]	2000000 OPS in 1.796917 seconds, throughput 1113017.462687
+139044	[1728193790]	2000000 OPS in 1.858064 seconds, throughput 1076389.187886
+139044	[1728193790]	2000000 OPS in 1.853303 seconds, throughput 1079154.353066
+139044	[1728193791]	2000000 OPS in 1.848876 seconds, throughput 1081738.310195
+139044	[1728193792]	2000000 OPS in 1.844859 seconds, throughput 1084093.689545
+139044	[1728193792]	2000000 OPS in 1.823637 seconds, throughput 1096709.487689
+139044	[1728193792]	2000000 OPS in 1.881428 seconds, throughput 1063022.342604
+139044	[1728193792]	2000000 OPS in 1.830248 seconds, throughput 1092748.086598
+139044	[1728193793]	2000000 OPS in 1.852623 seconds, throughput 1079550.453600
+139044	[1728193794]	2000000 OPS in 1.917078 seconds, throughput 1043254.369410
+139044	[1728193794]	2000000 OPS in 1.890238 seconds, throughput 1058067.820031
+139044	[1728193794]	2000000 OPS in 1.900896 seconds, throughput 1052135.414036
+139044	[1728193795]	2000000 OPS in 1.861199 seconds, throughput 1074576.120017
+139044	[1728193796]	2000000 OPS in 1.897327 seconds, throughput 1054114.551682
+139044	[1728193796]	2000000 OPS in 1.885200 seconds, throughput 1060895.395714
+139044	[1728193796]	2000000 OPS in 1.870137 seconds, throughput 1069440.367203
+139044	[1728193797]	2000000 OPS in 1.897194 seconds, throughput 1054188.448835
+139044	[1728193798]	2000000 OPS in 1.858470 seconds, throughput 1076154.040689
+139044	[1728193798]	2000000 OPS in 1.912758 seconds, throughput 1045610.579070
+139044	[1728193798]	2000000 OPS in 1.897331 seconds, throughput 1054112.329372
+139044	[1728193799]	2000000 OPS in 1.859418 seconds, throughput 1075605.377597
+139044	[1728193799]	2000000 OPS in 1.832846 seconds, throughput 1091199.151484
+139044	[1728193800]	2000000 OPS in 1.883870 seconds, throughput 1061644.380982
+139044	[1728193800]	2000000 OPS in 1.834652 seconds, throughput 1090124.993732
+139044	[1728193801]	2000000 OPS in 1.847057 seconds, throughput 1082803.616781
+139044	[1728193801]	2000000 OPS in 1.815751 seconds, throughput 1101472.613811
+139044	[1728193801]	2000000 OPS in 1.844008 seconds, throughput 1084593.993085
+139044	[1728193802]	2000000 OPS in 1.961893 seconds, throughput 1019423.587321
+139044	[1728193803]	2000000 OPS in 1.903900 seconds, throughput 1050475.340091
+139044	[1728193803]	2000000 OPS in 1.882213 seconds, throughput 1062578.996107
+139044	[1728193803]	2000000 OPS in 1.928914 seconds, throughput 1036852.861247
+139044	[1728193804]	2000000 OPS in 1.860331 seconds, throughput 1075077.499649
+139044	[1728193805]	2000000 OPS in 1.899515 seconds, throughput 1052900.345615
+139044	[1728193805]	2000000 OPS in 1.886707 seconds, throughput 1060048.009574
+139044	[1728193805]	2000000 OPS in 1.855313 seconds, throughput 1077985.224057
+139044	[1728193806]	2000000 OPS in 1.875722 seconds, throughput 1066256.086989
+139044	[1728193807]	2000000 OPS in 1.862480 seconds, throughput 1073837.034492
+139044	[1728193807]	2000000 OPS in 1.914825 seconds, throughput 1044481.871712
+139044	[1728193807]	2000000 OPS in 1.935756 seconds, throughput 1033188.067091
+139044	[1728193807]	2000000 OPS in 1.900485 seconds, throughput 1052362.949458
+139044	[1728193808]	2000000 OPS in 1.812758 seconds, throughput 1103291.228062
+139044	[1728193809]	2000000 OPS in 1.829806 seconds, throughput 1093012.046086
+139044	[1728193809]	2000000 OPS in 1.855714 seconds, throughput 1077752.282949
+139044	[1728193809]	2000000 OPS in 1.876375 seconds, throughput 1065885.017654
+139044	[1728193810]	2000000 OPS in 1.827482 seconds, throughput 1094402.024206
+139044	[1728193811]	2000000 OPS in 1.889846 seconds, throughput 1058287.289017
+139044	[1728193811]	2000000 OPS in 1.891576 seconds, throughput 1057319.399273
+139044	[1728193811]	2000000 OPS in 1.843413 seconds, throughput 1084944.068421
+139044	[1728193812]	2000000 OPS in 1.826372 seconds, throughput 1095067.160469
+139044	[1728193813]	2000000 OPS in 1.860360 seconds, throughput 1075060.740932
+139044	[1728193813]	2000000 OPS in 1.851099 seconds, throughput 1080439.241769
+139044	[1728193813]	2000000 OPS in 1.795049 seconds, throughput 1114175.713309
+139044	[1728193814]	2000000 OPS in 1.868979 seconds, throughput 1070102.981360
+139044	[1728193814]	2000000 OPS in 1.923723 seconds, throughput 1039650.718944
+139044	[1728193815]	2000000 OPS in 1.902496 seconds, throughput 1051250.567675
+139044	[1728193815]	2000000 OPS in 1.853816 seconds, throughput 1078855.722467
+139044	[1728193816]	2000000 OPS in 1.855141 seconds, throughput 1078085.169806
+139044	[1728193816]	2000000 OPS in 1.829152 seconds, throughput 1093402.844597
+139044	[1728193816]	2000000 OPS in 1.869508 seconds, throughput 1069800.182722
+139044	[1728193817]	2000000 OPS in 1.857690 seconds, throughput 1076605.892264
+139044	[1728193818]	2000000 OPS in 1.856344 seconds, throughput 1077386.518878
+139044	[1728193818]	2000000 OPS in 1.838026 seconds, throughput 1088123.889434
+139044	[1728193818]	2000000 OPS in 1.850566 seconds, throughput 1080750.429868
+139044	[1728193819]	2000000 OPS in 1.888159 seconds, throughput 1059232.829439
+139044	[1728193819]	2000000 OPS in 1.832363 seconds, throughput 1091486.785097
+139044	[1728193820]	2000000 OPS in 1.850097 seconds, throughput 1081024.400342
+139044	[1728193820]	2000000 OPS in 1.896650 seconds, throughput 1054490.812749
+139044	[1728193820]	2000000 OPS in 1.846570 seconds, throughput 1083089.186979
+139044	[1728193821]	2000000 OPS in 1.860137 seconds, throughput 1075189.623130
+139044	[1728193822]	2000000 OPS in 1.826433 seconds, throughput 1095030.586942
+139044	[1728193822]	2000000 OPS in 1.853103 seconds, throughput 1079270.823047
+139044	[1728193822]	2000000 OPS in 1.884364 seconds, throughput 1061366.063032
+139044	[1728193823]	2000000 OPS in 1.828694 seconds, throughput 1093676.689484
+139044	[1728193824]	2000000 OPS in 1.848027 seconds, throughput 1082235.270372
+139044	[1728193824]	2000000 OPS in 1.870448 seconds, throughput 1069262.551004
+139044	[1728193824]	2000000 OPS in 1.836517 seconds, throughput 1089017.961718
+139044	[1728193825]	2000000 OPS in 1.853890 seconds, throughput 1078812.658788
+139044	[1728193826]	2000000 OPS in 1.858829 seconds, throughput 1075946.200538
+139044	[1728193826]	2000000 OPS in 1.846917 seconds, throughput 1082885.695459
+139044	[1728193826]	2000000 OPS in 1.838267 seconds, throughput 1087981.234500
+139044	[1728193827]	2000000 OPS in 1.876861 seconds, throughput 1065609.014200
+139044	[1728193827]	2000000 OPS in 1.948697 seconds, throughput 1026326.822487
+139044	[1728193828]	2000000 OPS in 1.903710 seconds, throughput 1050580.182906
+139044	[1728193828]	2000000 OPS in 1.904066 seconds, throughput 1050383.757706
+139044	[1728193829]	2000000 OPS in 1.889416 seconds, throughput 1058528.137795
+139044	[1728193829]	2000000 OPS in 1.887296 seconds, throughput 1059717.182678
+139044	[1728193830]	2000000 OPS in 1.923525 seconds, throughput 1039757.736447
+139044	[1728193830]	2000000 OPS in 1.823980 seconds, throughput 1096503.251132
+139044	[1728193831]	2000000 OPS in 1.792181 seconds, throughput 1115958.711760
+139044	[1728193831]	2000000 OPS in 1.829548 seconds, throughput 1093166.180936
+139044	[1728193831]	2000000 OPS in 1.852108 seconds, throughput 1079850.635060
+139044	[1728193832]	2000000 OPS in 1.852322 seconds, throughput 1079725.879194
+139044	[1728193832]	2000000 OPS in 1.854332 seconds, throughput 1078555.512174
+139044	[1728193833]	2000000 OPS in 1.859243 seconds, throughput 1075706.618231
+139044	[1728193833]	2000000 OPS in 1.852664 seconds, throughput 1079526.562831
+139044	[1728193833]	2000000 OPS in 1.949327 seconds, throughput 1025995.125497
+139044	[1728193834]	2000000 OPS in 1.864474 seconds, throughput 1072688.597427
+139044	[1728193835]	2000000 OPS in 1.894662 seconds, throughput 1055597.251647
+139044	[1728193835]	2000000 OPS in 1.869302 seconds, throughput 1069918.076373
+139044	[1728193835]	2000000 OPS in 1.939766 seconds, throughput 1031052.199080
+139044	[1728193836]	2000000 OPS in 1.861731 seconds, throughput 1074269.053907
+139044	[1728193837]	2000000 OPS in 1.820489 seconds, throughput 1098605.924013
+139044	[1728193837]	2000000 OPS in 1.867407 seconds, throughput 1071003.803670
+139044	[1728193837]	2000000 OPS in 1.879608 seconds, throughput 1064051.653323
+139044	[1728193838]	2000000 OPS in 1.886699 seconds, throughput 1060052.504401
+139044	[1728193839]	2000000 OPS in 1.879895 seconds, throughput 1063889.206578
+139044	[1728193839]	2000000 OPS in 1.839760 seconds, throughput 1087098.317172
+139044	[1728193839]	2000000 OPS in 1.938309 seconds, throughput 1031827.226722
+139044	[1728193840]	2000000 OPS in 1.874228 seconds, throughput 1067106.029789
+139044	[1728193841]	2000000 OPS in 1.856978 seconds, throughput 1077018.683043
+139044	[1728193841]	2000000 OPS in 1.835494 seconds, throughput 1089624.918414
+139044	[1728193841]	2000000 OPS in 1.919522 seconds, throughput 1041926.062843
+139044	[1728193842]	2000000 OPS in 1.877414 seconds, throughput 1065295.134691
+139044	[1728193842]	2000000 OPS in 1.856115 seconds, throughput 1077519.442491
+139044	[1728193843]	2000000 OPS in 1.922950 seconds, throughput 1040068.644531
+139044	[1728193843]	2000000 OPS in 1.939886 seconds, throughput 1030988.418907
+139044	[1728193844]	2000000 OPS in 1.896758 seconds, throughput 1054430.770821
+139044	[1728193844]	2000000 OPS in 1.949588 seconds, throughput 1025857.770975
+139044	[1728193845]	2000000 OPS in 1.863202 seconds, throughput 1073420.917324
+139044	[1728193845]	2000000 OPS in 1.944824 seconds, throughput 1028370.690613
+139044	[1728193845]	2000000 OPS in 1.867716 seconds, throughput 1070826.613896
+139044	[1728193846]	2000000 OPS in 1.789054 seconds, throughput 1117909.241420
+139044	[1728193846]	2000000 OPS in 1.803069 seconds, throughput 1109219.891197
+139044	[1728193847]	2000000 OPS in 1.893921 seconds, throughput 1056010.255972
+139044	[1728193847]	2000000 OPS in 1.799703 seconds, throughput 1111294.474699
+139044	[1728193848]	2000000 OPS in 1.788929 seconds, throughput 1117987.354445
+139044	[1728193848]	2000000 OPS in 1.791300 seconds, throughput 1116507.564339
+139044	[1728193849]	2000000 OPS in 1.901957 seconds, throughput 1051548.484009
+139044	[1728193849]	2000000 OPS in 1.956521 seconds, throughput 1022222.608395
+139044	[1728193850]	2000000 OPS in 1.866499 seconds, throughput 1071524.817318
+139044	[1728193850]	2000000 OPS in 1.895508 seconds, throughput 1055126.119225
+139044	[1728193851]	2000000 OPS in 1.947519 seconds, throughput 1026947.618996
+139044	[1728193851]	2000000 OPS in 1.813797 seconds, throughput 1102659.228128
+139044	[1728193852]	2000000 OPS in 1.875689 seconds, throughput 1066274.846203
+139044	[1728193852]	2000000 OPS in 1.881946 seconds, throughput 1062729.748888
+139044	[1728193853]	2000000 OPS in 1.861089 seconds, throughput 1074639.633032
+139044	[1728193853]	2000000 OPS in 1.851993 seconds, throughput 1079917.688674
+139044	[1728193853]	2000000 OPS in 1.835656 seconds, throughput 1089528.757022
+139044	[1728193854]	2000000 OPS in 1.817778 seconds, throughput 1100244.364273
+139044	[1728193854]	2000000 OPS in 1.829273 seconds, throughput 1093330.519829
+139044	[1728193855]	2000000 OPS in 1.809103 seconds, throughput 1105520.249538
+139044	[1728193855]	2000000 OPS in 1.836105 seconds, throughput 1089262.324322
+139044	[1728193856]	2000000 OPS in 1.825698 seconds, throughput 1095471.430653
+139044	[1728193856]	2000000 OPS in 1.840482 seconds, throughput 1086671.860958
+139044	[1728193857]	2000000 OPS in 1.861627 seconds, throughput 1074329.068068
+139044	[1728193857]	2000000 OPS in 1.822343 seconds, throughput 1097488.233554
+139044	[1728193857]	2000000 OPS in 1.844359 seconds, throughput 1084387.583979
+139044	[1728193858]	2000000 OPS in 1.864555 seconds, throughput 1072641.997688
+139044	[1728193858]	2000000 OPS in 1.837234 seconds, throughput 1088592.960940
+139044	[1728193859]	2000000 OPS in 1.842282 seconds, throughput 1085610.129177
+139044	[1728193859]	2000000 OPS in 1.905796 seconds, throughput 1049430.264310
+139044	[1728193860]	2000000 OPS in 2.053488 seconds, throughput 973952.611362
+139044	[1728193860]	2000000 OPS in 1.930050 seconds, throughput 1036242.584389
+139044	[1728193861]	2000000 OPS in 1.873088 seconds, throughput 1067755.492534
+139044	[1728193861]	2000000 OPS in 1.932632 seconds, throughput 1034858.162340
+139044	[1728193862]	2000000 OPS in 1.840389 seconds, throughput 1086726.773525
+139044	[1728193862]	2000000 OPS in 1.832505 seconds, throughput 1091402.206270
+139044	[1728193863]	2000000 OPS in 1.884711 seconds, throughput 1061170.651628
+139044	[1728193863]	2000000 OPS in 1.862249 seconds, throughput 1073970.237063
+139044	[1728193864]	2000000 OPS in 1.841768 seconds, throughput 1085913.100890
+139044	[1728193864]	2000000 OPS in 1.826521 seconds, throughput 1094977.829436
+139044	[1728193865]	2000000 OPS in 1.869246 seconds, throughput 1069950.129624
+139044	[1728193865]	2000000 OPS in 1.850219 seconds, throughput 1080953.119604
+139044	[1728193866]	2000000 OPS in 1.909465 seconds, throughput 1047413.804390
+139044	[1728193866]	2000000 OPS in 1.901712 seconds, throughput 1051683.956351
+139044	[1728193866]	2000000 OPS in 1.885002 seconds, throughput 1061006.831823
+139044	[1728193867]	2000000 OPS in 1.869901 seconds, throughput 1069575.341154
+139044	[1728193868]	2000000 OPS in 1.939950 seconds, throughput 1030954.406041
+139044	[1728193868]	2000000 OPS in 1.868542 seconds, throughput 1070353.248683
+139044	[1728193868]	2000000 OPS in 1.855100 seconds, throughput 1078108.996820
+139044	[1728193869]	2000000 OPS in 1.905805 seconds, throughput 1049425.308465
+139044	[1728193870]	2000000 OPS in 1.851689 seconds, throughput 1080094.983553
+139044	[1728193870]	2000000 OPS in 1.927644 seconds, throughput 1037535.976560
+139044	[1728193870]	2000000 OPS in 1.951175 seconds, throughput 1025023.383346
+139044	[1728193871]	2000000 OPS in 1.896981 seconds, throughput 1054306.816990
+139044	[1728193871]	2000000 OPS in 1.844872 seconds, throughput 1084086.050414
+139044	[1728193872]	2000000 OPS in 1.889555 seconds, throughput 1058450.270037
+139044	[1728193872]	2000000 OPS in 1.850304 seconds, throughput 1080903.462350
+139044	[1728193873]	2000000 OPS in 1.819551 seconds, throughput 1099172.268323
+139044	[1728193873]	2000000 OPS in 1.791577 seconds, throughput 1116334.938437
+139044	[1728193873]	2000000 OPS in 1.838140 seconds, throughput 1088056.404844
+139044	[1728193874]	2000000 OPS in 1.837892 seconds, throughput 1088203.224129
+139044	[1728193874]	2000000 OPS in 1.870187 seconds, throughput 1069411.775400
+139044	[1728193875]	2000000 OPS in 1.853884 seconds, throughput 1078816.150309
+139044	[1728193875]	2000000 OPS in 1.928911 seconds, throughput 1036854.473846
+139044	[1728193876]	2000000 OPS in 1.895682 seconds, throughput 1055029.271787
+139044	[1728193876]	2000000 OPS in 1.835728 seconds, throughput 1089486.024073
+139044	[1728193877]	2000000 OPS in 1.866372 seconds, throughput 1071597.730785
+139044	[1728193877]	2000000 OPS in 1.943824 seconds, throughput 1028899.735779
+139044	[1728193878]	2000000 OPS in 1.810155 seconds, throughput 1104877.759087
+139044	[1728193878]	2000000 OPS in 1.884982 seconds, throughput 1061018.089297
+139044	[1728193879]	2000000 OPS in 1.854651 seconds, throughput 1078370.000609
+139044	[1728193879]	2000000 OPS in 2.003324 seconds, throughput 998340.757661
+139044	[1728193880]	2000000 OPS in 1.943558 seconds, throughput 1029040.553459
+139044	[1728193880]	2000000 OPS in 1.852147 seconds, throughput 1079827.897030
+139044	[1728193881]	2000000 OPS in 1.857048 seconds, throughput 1076978.085650
+139044	[1728193881]	2000000 OPS in 1.828836 seconds, throughput 1093591.770941
+139044	[1728193881]	2000000 OPS in 1.756343 seconds, throughput 1138729.735593
+139044	[1728193882]	2000000 OPS in 1.799261 seconds, throughput 1111567.471312
+139044	[1728193883]	2000000 OPS in 1.835609 seconds, throughput 1089556.653950
+139044	[1728193883]	2000000 OPS in 1.855823 seconds, throughput 1077688.982193
+139044	[1728193883]	2000000 OPS in 1.839664 seconds, throughput 1087155.045704
+139044	[1728193884]	2000000 OPS in 1.878753 seconds, throughput 1064535.891626
+139044	[1728193884]	2000000 OPS in 1.879285 seconds, throughput 1064234.536007
+139044	[1728193885]	2000000 OPS in 1.841861 seconds, throughput 1085858.270521
+139044	[1728193885]	2000000 OPS in 1.839815 seconds, throughput 1087065.819118
+139044	[1728193885]	2000000 OPS in 1.851844 seconds, throughput 1080004.579219
+139044	[1728193886]	2000000 OPS in 1.794298 seconds, throughput 1114642.049425
+139044	[1728193887]	2000000 OPS in 1.938194 seconds, throughput 1031888.448731
+139044	[1728193887]	2000000 OPS in 1.912675 seconds, throughput 1045655.953050
+139044	[1728193887]	2000000 OPS in 1.835285 seconds, throughput 1089749.003561
+139044	[1728193888]	2000000 OPS in 1.796685 seconds, throughput 1113161.182956
+139044	[1728193889]	2000000 OPS in 1.832237 seconds, throughput 1091561.844892
+139044	[1728193889]	2000000 OPS in 1.905833 seconds, throughput 1049409.890583
+139044	[1728193889]	2000000 OPS in 1.844683 seconds, throughput 1084197.122216
+139044	[1728193890]	2000000 OPS in 1.856339 seconds, throughput 1077389.420790
+139044	[1728193890]	2000000 OPS in 1.936912 seconds, throughput 1032571.433292
+139044	[1728193891]	2000000 OPS in 1.933457 seconds, throughput 1034416.591628
+139044	[1728193891]	2000000 OPS in 1.815781 seconds, throughput 1101454.415483
+139044	[1728193892]	2000000 OPS in 1.830459 seconds, throughput 1092622.123741
+139044	[1728193892]	2000000 OPS in 1.911658 seconds, throughput 1046212.240892
+139044	[1728193893]	2000000 OPS in 1.904225 seconds, throughput 1050296.052200
+139044	[1728193893]	2000000 OPS in 1.853788 seconds, throughput 1078872.017728
+139044	[1728193894]	2000000 OPS in 1.857975 seconds, throughput 1076440.748665
+139044	[1728193894]	2000000 OPS in 1.869247 seconds, throughput 1069949.557228
+139044	[1728193895]	2000000 OPS in 1.918596 seconds, throughput 1042428.942831
+139044	[1728193895]	2000000 OPS in 1.834301 seconds, throughput 1090333.593014
+139044	[1728193895]	2000000 OPS in 1.850429 seconds, throughput 1080830.445264
+139044	[1728193896]	2000000 OPS in 1.947837 seconds, throughput 1026779.961568
+139044	[1728193897]	2000000 OPS in 1.850228 seconds, throughput 1080947.861561
+139044	[1728193897]	2000000 OPS in 1.890812 seconds, throughput 1057746.618913
+139044	[1728193897]	2000000 OPS in 1.879457 seconds, throughput 1064137.141738
+139044	[1728193898]	2000000 OPS in 1.915669 seconds, throughput 1044021.696859
+139044	[1728193898]	2000000 OPS in 1.901543 seconds, throughput 1051777.424965
+139044	[1728193898]	2000000 OPS in 1.954578 seconds, throughput 1023238.775838
+139044	[1728193899]	2000000 OPS in 1.863070 seconds, throughput 1073496.970055
+139044	[1728193900]	2000000 OPS in 1.885751 seconds, throughput 1060585.411329
+139044	[1728193900]	2000000 OPS in 1.881338 seconds, throughput 1063073.195779
+139044	[1728193900]	2000000 OPS in 1.870882 seconds, throughput 1069014.507596
+139044	[1728193901]	2000000 OPS in 1.868197 seconds, throughput 1070550.910851
+139044	[1728193902]	2000000 OPS in 1.861610 seconds, throughput 1074338.878713
+139044	[1728193902]	2000000 OPS in 1.790895 seconds, throughput 1116760.055726
+139044	[1728193902]	2000000 OPS in 1.799486 seconds, throughput 1111428.485690
+139044	[1728193903]	2000000 OPS in 1.873304 seconds, throughput 1067632.375738
+139044	[1728193904]	2000000 OPS in 1.862383 seconds, throughput 1073892.964014
+139044	[1728193904]	2000000 OPS in 1.859701 seconds, throughput 1075441.697348
+139044	[1728193904]	2000000 OPS in 1.863559 seconds, throughput 1073215.283230
+139044	[1728193905]	2000000 OPS in 1.788986 seconds, throughput 1117951.733552
+139044	[1728193906]	2000000 OPS in 1.871896 seconds, throughput 1068435.425900
+139044	[1728193906]	2000000 OPS in 1.853173 seconds, throughput 1079230.055694
+139044	[1728193906]	2000000 OPS in 1.859297 seconds, throughput 1075675.376231
+139044	[1728193907]	2000000 OPS in 1.889753 seconds, throughput 1058339.370277
+139044	[1728193907]	2000000 OPS in 1.862624 seconds, throughput 1073754.015840
+139044	[1728193908]	2000000 OPS in 1.854226 seconds, throughput 1078617.169644
+139044	[1728193908]	2000000 OPS in 1.850013 seconds, throughput 1081073.484348
+139044	[1728193908]	2000000 OPS in 1.818787 seconds, throughput 1099633.986827
+139044	[1728193909]	2000000 OPS in 1.888187 seconds, throughput 1059217.122033
+139044	[1728193910]	2000000 OPS in 1.905081 seconds, throughput 1049824.128213
+139044	[1728193910]	2000000 OPS in 1.857421 seconds, throughput 1076761.811135
+139044	[1728193910]	2000000 OPS in 1.890472 seconds, throughput 1057936.853865
+139044	[1728193911]	2000000 OPS in 1.863072 seconds, throughput 1073495.817660
+139044	[1728193911]	2000000 OPS in 1.819719 seconds, throughput 1099070.790600
+139044	[1728193911]	2000000 OPS in 1.849335 seconds, throughput 1081469.825640
+139044	[1728193912]	2000000 OPS in 1.886894 seconds, throughput 1059942.953870
+139044	[1728193913]	2000000 OPS in 1.834059 seconds, throughput 1090477.460104
+139044	[1728193913]	2000000 OPS in 1.834131 seconds, throughput 1090434.652705
+139044	[1728193913]	2000000 OPS in 1.864621 seconds, throughput 1072604.030524
+139044	[1728193914]	2000000 OPS in 1.864052 seconds, throughput 1072931.441827
+139044	[1728193915]	2000000 OPS in 1.843002 seconds, throughput 1085186.017161
+139044	[1728193915]	2000000 OPS in 1.915425 seconds, throughput 1044154.691518
+139044	[1728193915]	2000000 OPS in 1.870438 seconds, throughput 1069268.267646
+139044	[1728193916]	2000000 OPS in 1.968175 seconds, throughput 1016169.801974
+139044	[1728193917]	2000000 OPS in 1.944372 seconds, throughput 1028609.751632
+139044	[1728193917]	2000000 OPS in 1.925017 seconds, throughput 1038951.863802
+139044	[1728193917]	2000000 OPS in 1.980301 seconds, throughput 1009947.477681
+139044	[1728193918]	2000000 OPS in 1.886327 seconds, throughput 1060261.555923
+139044	[1728193919]	2000000 OPS in 1.841110 seconds, throughput 1086301.198733
+139044	[1728193919]	2000000 OPS in 1.822405 seconds, throughput 1097450.895931
+139044	[1728193919]	2000000 OPS in 1.839603 seconds, throughput 1087191.095035
+139044	[1728193920]	2000000 OPS in 1.840902 seconds, throughput 1086423.937830
+139044	[1728193921]	2000000 OPS in 1.846729 seconds, throughput 1082995.934975
+139044	[1728193921]	2000000 OPS in 1.847344 seconds, throughput 1082635.394382
+139044	[1728193921]	2000000 OPS in 1.847865 seconds, throughput 1082330.148577
+139044	[1728193922]	2000000 OPS in 1.876095 seconds, throughput 1066044.096914
+139044	[1728193922]	2000000 OPS in 1.950034 seconds, throughput 1025623.142981
+139044	[1728193923]	2000000 OPS in 1.843606 seconds, throughput 1084830.489812
+139044	[1728193923]	2000000 OPS in 1.899118 seconds, throughput 1053120.448545
+139044	[1728193923]	2000000 OPS in 1.858631 seconds, throughput 1076060.821110
+139044	[1728193924]	2000000 OPS in 1.895641 seconds, throughput 1055052.090559
+139044	[1728193924]	2000000 OPS in 1.826141 seconds, throughput 1095205.682365
+139044	[1728193925]	2000000 OPS in 1.866234 seconds, throughput 1071676.970841
+139044	[1728193925]	2000000 OPS in 1.889088 seconds, throughput 1058711.928719
+139044	[1728193926]	2000000 OPS in 1.911947 seconds, throughput 1046054.100872
+139044	[1728193926]	2000000 OPS in 1.878305 seconds, throughput 1064789.797184
+139044	[1728193926]	2000000 OPS in 1.888579 seconds, throughput 1058997.267258
+139044	[1728193927]	2000000 OPS in 1.827773 seconds, throughput 1094227.784304
+139044	[1728193928]	2000000 OPS in 1.791456 seconds, throughput 1116410.338853
+139044	[1728193928]	2000000 OPS in 1.793362 seconds, throughput 1115223.808690
+139044	[1728193928]	2000000 OPS in 1.832297 seconds, throughput 1091526.100845
+139044	[1728193929]	2000000 OPS in 1.835323 seconds, throughput 1089726.440523
+139044	[1728193930]	2000000 OPS in 1.804738 seconds, throughput 1108194.097980
+139044	[1728193930]	2000000 OPS in 1.885921 seconds, throughput 1060489.808428
+139044	[1728193930]	2000000 OPS in 1.849472 seconds, throughput 1081389.715551
+139044	[1728193931]	2000000 OPS in 1.860305 seconds, throughput 1075092.525150
+139044	[1728193932]	2000000 OPS in 1.885992 seconds, throughput 1060449.885259
+139044	[1728193932]	2000000 OPS in 1.831678 seconds, throughput 1091894.972806
+139044	[1728193932]	2000000 OPS in 1.851968 seconds, throughput 1079932.266648
+139044	[1728193933]	2000000 OPS in 1.859678 seconds, throughput 1075454.998123
+139044	[1728193934]	2000000 OPS in 1.901265 seconds, throughput 1051931.214218
+139044	[1728193934]	2000000 OPS in 1.904687 seconds, throughput 1050041.292874
+139044	[1728193934]	2000000 OPS in 1.914975 seconds, throughput 1044400.057442
+139044	[1728193935]	2000000 OPS in 1.886049 seconds, throughput 1060417.836440
+139044	[1728193936]	2000000 OPS in 1.837986 seconds, throughput 1088147.570221
+139044	[1728193936]	2000000 OPS in 1.879667 seconds, throughput 1064018.254297
+139044	[1728193936]	2000000 OPS in 1.874647 seconds, throughput 1066867.522259
+139044	[1728193936]	2000000 OPS in 1.869917 seconds, throughput 1069566.189301
+139044	[1728193937]	2000000 OPS in 1.857399 seconds, throughput 1076774.564862
+139044	[1728193938]	2000000 OPS in 1.904494 seconds, throughput 1050147.703274
+139044	[1728193938]	2000000 OPS in 1.897362 seconds, throughput 1054095.106785
+139044	[1728193938]	2000000 OPS in 1.909232 seconds, throughput 1047541.629304
+139044	[1728193939]	2000000 OPS in 1.796060 seconds, throughput 1113548.545149
+139044	[1728193939]	2000000 OPS in 1.851751 seconds, throughput 1080058.820003
+139044	[1728193940]	2000000 OPS in 1.882721 seconds, throughput 1062292.288661
+139044	[1728193940]	2000000 OPS in 1.810480 seconds, throughput 1104679.422032
+139044	[1728193941]	2000000 OPS in 1.827156 seconds, throughput 1094597.286712
+139044	[1728193941]	2000000 OPS in 1.840859 seconds, throughput 1086449.315238
+139044	[1728193941]	2000000 OPS in 1.850500 seconds, throughput 1080788.975952
+139044	[1728193942]	2000000 OPS in 1.908475 seconds, throughput 1047957.138553
+139044	[1728193943]	2000000 OPS in 1.892040 seconds, throughput 1057060.104438
+139044	[1728193943]	2000000 OPS in 1.818655 seconds, throughput 1099713.799484
+139044	[1728193943]	2000000 OPS in 1.847689 seconds, throughput 1082433.244989
+139044	[1728193944]	2000000 OPS in 1.868387 seconds, throughput 1070442.044394
+139044	[1728193945]	2000000 OPS in 1.891944 seconds, throughput 1057113.741210
+139044	[1728193945]	2000000 OPS in 1.841752 seconds, throughput 1085922.534630
+139044	[1728193945]	2000000 OPS in 1.879239 seconds, throughput 1064260.586333
+139044	[1728193946]	2000000 OPS in 1.825400 seconds, throughput 1095650.268434
+139044	[1728193947]	2000000 OPS in 1.900611 seconds, throughput 1052293.183613
+139044	[1728193947]	2000000 OPS in 1.855585 seconds, throughput 1077827.208131
+139044	[1728193947]	2000000 OPS in 1.865767 seconds, throughput 1071945.210736
+139044	[1728193948]	2000000 OPS in 1.901124 seconds, throughput 1052009.232433
+139044	[1728193949]	2000000 OPS in 1.842939 seconds, throughput 1085223.113733
+139044	[1728193949]	2000000 OPS in 1.986025 seconds, throughput 1007036.668723
+139044	[1728193949]	2000000 OPS in 1.855047 seconds, throughput 1078139.799153
+139044	[1728193950]	2000000 OPS in 1.826904 seconds, throughput 1094748.273582
+139044	[1728193950]	2000000 OPS in 1.844903 seconds, throughput 1084067.834461
+139044	[1728193951]	2000000 OPS in 1.904465 seconds, throughput 1050163.694266
+139044	[1728193951]	2000000 OPS in 1.872862 seconds, throughput 1067884.339583
+139044	[1728193951]	2000000 OPS in 1.812553 seconds, throughput 1103416.010456
+139044	[1728193952]	2000000 OPS in 1.818805 seconds, throughput 1099623.104181
+139044	[1728193953]	2000000 OPS in 1.814924 seconds, throughput 1101974.517941
+139044	[1728193953]	2000000 OPS in 1.924507 seconds, throughput 1039227.189093
+139044	[1728193953]	2000000 OPS in 1.843590 seconds, throughput 1084839.904751
+139044	[1728193954]	2000000 OPS in 1.866574 seconds, throughput 1071481.762845
+139044	[1728193954]	2000000 OPS in 1.878654 seconds, throughput 1064591.989797
+139044	[1728193954]	2000000 OPS in 1.969883 seconds, throughput 1015288.725269
+139044	[1728193955]	2000000 OPS in 1.837463 seconds, throughput 1088457.291385
+139044	[1728193956]	2000000 OPS in 1.796943 seconds, throughput 1113001.358418
+139044	[1728193956]	2000000 OPS in 1.878730 seconds, throughput 1064548.924007
+139044	[1728193956]	2000000 OPS in 1.881283 seconds, throughput 1063104.275114
+139044	[1728193957]	2000000 OPS in 1.891535 seconds, throughput 1057342.317219
+139044	[1728193958]	2000000 OPS in 1.869158 seconds, throughput 1070000.502900
+139044	[1728193958]	2000000 OPS in 1.857584 seconds, throughput 1076667.327023
+139044	[1728193958]	2000000 OPS in 1.877097 seconds, throughput 1065475.039383
+139044	[1728193959]	2000000 OPS in 1.884913 seconds, throughput 1061056.929418
+139044	[1728193960]	2000000 OPS in 1.857082 seconds, throughput 1076958.368020
+139044	[1728193960]	2000000 OPS in 1.844952 seconds, throughput 1084039.042750
+139044	[1728193960]	2000000 OPS in 1.840246 seconds, throughput 1086811.219804
+139044	[1728193961]	2000000 OPS in 1.846893 seconds, throughput 1082899.767339
+139044	[1728193962]	2000000 OPS in 1.894545 seconds, throughput 1055662.441378
+139044	[1728193962]	2000000 OPS in 1.907027 seconds, throughput 1048752.849330
+139044	[1728193962]	2000000 OPS in 1.892964 seconds, throughput 1056544.128679
+139044	[1728193963]	2000000 OPS in 1.898801 seconds, throughput 1053296.264327
+139044	[1728193963]	2000000 OPS in 1.841678 seconds, throughput 1085966.167810
+139044	[1728193964]	2000000 OPS in 1.824557 seconds, throughput 1096156.491685
+139044	[1728193964]	2000000 OPS in 1.836006 seconds, throughput 1089321.058864
+139044	[1728193964]	2000000 OPS in 1.801769 seconds, throughput 1110020.207918
+139044	[1728193965]	2000000 OPS in 1.854081 seconds, throughput 1078701.523828
+139044	[1728193966]	2000000 OPS in 1.872896 seconds, throughput 1067864.953527
+139044	[1728193966]	2000000 OPS in 1.853112 seconds, throughput 1079265.581357
+139044	[1728193966]	2000000 OPS in 1.790515 seconds, throughput 1116997.065090
+139044	[1728193967]	2000000 OPS in 1.871366 seconds, throughput 1068738.023455
+139044	[1728193967]	2000000 OPS in 1.891186 seconds, throughput 1057537.439469
+139044	[1728193968]	2000000 OPS in 1.860619 seconds, throughput 1074911.091416
+139044	[1728193968]	2000000 OPS in 1.912694 seconds, throughput 1045645.565888
+139044	[1728193969]	2000000 OPS in 1.926413 seconds, throughput 1038198.973948
+139044	[1728193969]	2000000 OPS in 1.875839 seconds, throughput 1066189.582368
+139044	[1728193969]	2000000 OPS in 1.881785 seconds, throughput 1062820.672925
+139044	[1728193970]	2000000 OPS in 1.843078 seconds, throughput 1085141.269116
+139044	[1728193971]	2000000 OPS in 1.859231 seconds, throughput 1075713.561144
+139044	[1728193971]	2000000 OPS in 1.874382 seconds, throughput 1067018.355917
+139044	[1728193971]	2000000 OPS in 1.882673 seconds, throughput 1062319.372509
+139044	[1728193972]	2000000 OPS in 1.863954 seconds, throughput 1072987.852705
+139044	[1728193973]	2000000 OPS in 1.826199 seconds, throughput 1095170.898681
+139044	[1728193973]	2000000 OPS in 1.914858 seconds, throughput 1044463.871472
+139044	[1728193973]	2000000 OPS in 1.925113 seconds, throughput 1038900.054179
+139044	[1728193974]	2000000 OPS in 1.864351 seconds, throughput 1072759.367737
+139044	[1728193975]	2000000 OPS in 1.940940 seconds, throughput 1030428.555236
+139044	[1728193975]	2000000 OPS in 1.892037 seconds, throughput 1057061.780504
+139044	[1728193975]	2000000 OPS in 1.944720 seconds, throughput 1028425.685960
+139044	[1728193976]	2000000 OPS in 1.911508 seconds, throughput 1046294.339338
+139044	[1728193976]	2000000 OPS in 1.816720 seconds, throughput 1100885.111630
+139044	[1728193977]	2000000 OPS in 1.872301 seconds, throughput 1068204.311166
+139044	[1728193977]	2000000 OPS in 1.844008 seconds, throughput 1084593.993085
+139044	[1728193977]	2000000 OPS in 1.888629 seconds, throughput 1058969.231120
+139044	[1728193978]	2000000 OPS in 1.858399 seconds, throughput 1076195.155077
+139044	[1728193979]	2000000 OPS in 1.899314 seconds, throughput 1053011.771619
+139044	[1728193979]	2000000 OPS in 1.844070 seconds, throughput 1084557.527643
+139044	[1728193979]	2000000 OPS in 1.803977 seconds, throughput 1108661.584932
+139044	[1728193980]	2000000 OPS in 1.871133 seconds, throughput 1068871.106437
+139044	[1728193981]	2000000 OPS in 1.911893 seconds, throughput 1046083.645894
+139044	[1728193981]	2000000 OPS in 1.890650 seconds, throughput 1057837.251739
+139044	[1728193981]	2000000 OPS in 1.826177 seconds, throughput 1095184.092232
+139044	[1728193982]	2000000 OPS in 1.889262 seconds, throughput 1058614.421928
+139044	[1728193983]	2000000 OPS in 1.843647 seconds, throughput 1084806.364776
+139044	[1728193983]	2000000 OPS in 1.848286 seconds, throughput 1082083.616929
+139044	[1728193983]	2000000 OPS in 1.825776 seconds, throughput 1095424.630404
+139044	[1728193984]	2000000 OPS in 1.829890 seconds, throughput 1092961.872025
+139044	[1728193984]	2000000 OPS in 1.854214 seconds, throughput 1078624.150179
+139044	[1728193984]	2000000 OPS in 1.940038 seconds, throughput 1030907.642015
+139044	[1728193985]	2000000 OPS in 1.828360 seconds, throughput 1093876.479468
+139044	[1728193986]	2000000 OPS in 1.809993 seconds, throughput 1104976.649081
+139044	[1728193986]	2000000 OPS in 1.817867 seconds, throughput 1100190.497985
+139044	[1728193986]	2000000 OPS in 1.845572 seconds, throughput 1083674.871530
+139044	[1728193987]	2000000 OPS in 1.862717 seconds, throughput 1073700.406449
+139044	[1728193988]	2000000 OPS in 1.903975 seconds, throughput 1050433.960530
+139044	[1728193988]	2000000 OPS in 1.861147 seconds, throughput 1074606.143416
+139044	[1728193988]	2000000 OPS in 1.849072 seconds, throughput 1081623.646889
+139044	[1728193988]	2000000 OPS in 1.870489 seconds, throughput 1069239.113408
+139044	[1728193990]	2000000 OPS in 1.851937 seconds, throughput 1079950.343883
+139044	[1728193990]	2000000 OPS in 1.875867 seconds, throughput 1066173.667963
+139044	[1728193990]	2000000 OPS in 1.830944 seconds, throughput 1092332.698324
+139044	[1728193990]	2000000 OPS in 1.798874 seconds, throughput 1111806.607911
+139044	[1728193991]	2000000 OPS in 1.916896 seconds, throughput 1043353.421365
+139044	[1728193992]	2000000 OPS in 1.900654 seconds, throughput 1052269.376751
+139044	[1728193992]	2000000 OPS in 1.924937 seconds, throughput 1038995.042435
+139044	[1728193992]	2000000 OPS in 1.865497 seconds, throughput 1072100.357170
+139044	[1728193993]	2000000 OPS in 1.863748 seconds, throughput 1073106.450014
+139044	[1728193994]	2000000 OPS in 1.883735 seconds, throughput 1061720.464927
+139044	[1728193994]	2000000 OPS in 1.875487 seconds, throughput 1066389.689718
+139044	[1728193994]	2000000 OPS in 1.877438 seconds, throughput 1065281.516620
+139044	[1728193995]	2000000 OPS in 1.842939 seconds, throughput 1085223.113733
+139044	[1728193996]	2000000 OPS in 1.842676 seconds, throughput 1085378.004598
+139044	[1728193996]	2000000 OPS in 1.884800 seconds, throughput 1061120.543294
+139044	[1728193996]	2000000 OPS in 1.863810 seconds, throughput 1073070.752920
+139044	[1728193997]	2000000 OPS in 1.800880 seconds, throughput 1110568.166674
+139044	[1728193997]	2000000 OPS in 1.848576 seconds, throughput 1081913.862346
+139044	[1728193998]	2000000 OPS in 1.902622 seconds, throughput 1051180.949237
+139044	[1728193998]	2000000 OPS in 1.818649 seconds, throughput 1099717.427607
+139044	[1728193999]	2000000 OPS in 1.925698 seconds, throughput 1038584.450937
+139044	[1728193999]	2000000 OPS in 1.890372 seconds, throughput 1057992.818345
+139044	[1728193999]	2000000 OPS in 1.859149 seconds, throughput 1075761.006783
+139044	[1728194000]	2000000 OPS in 1.844202 seconds, throughput 1084479.899707
+139044	[1728194001]	2000000 OPS in 1.874355 seconds, throughput 1067033.726269
+139044	[1728194001]	2000000 OPS in 1.823283 seconds, throughput 1096922.419613
+139044	[1728194001]	2000000 OPS in 1.830781 seconds, throughput 1092429.952026
+139044	[1728194001]	2000000 OPS in 1.926643 seconds, throughput 1038075.035178
+139044	[1728194003]	2000000 OPS in 1.829503 seconds, throughput 1093193.069375
+139044	[1728194003]	2000000 OPS in 1.891808 seconds, throughput 1057189.735956
+139044	[1728194003]	2000000 OPS in 1.913665 seconds, throughput 1045115.001842
+139044	[1728194003]	2000000 OPS in 1.852824 seconds, throughput 1079433.340673
+139044	[1728194004]	2000000 OPS in 1.865460 seconds, throughput 1072121.621477
+139044	[1728194005]	2000000 OPS in 1.924387 seconds, throughput 1039291.992723
+139044	[1728194005]	2000000 OPS in 1.918318 seconds, throughput 1042580.010196
+139044	[1728194005]	2000000 OPS in 1.895438 seconds, throughput 1055165.085854
+139044	[1728194006]	2000000 OPS in 1.867517 seconds, throughput 1070940.719683
+139044	[1728194007]	2000000 OPS in 1.855485 seconds, throughput 1077885.296836
+139044	[1728194007]	2000000 OPS in 1.847137 seconds, throughput 1082756.720265
+139044	[1728194007]	2000000 OPS in 1.841925 seconds, throughput 1085820.541010
+139044	[1728194008]	2000000 OPS in 1.948010 seconds, throughput 1026688.774698
+139044	[1728194009]	2000000 OPS in 1.949351 seconds, throughput 1025982.493661
+139044	[1728194009]	2000000 OPS in 1.941427 seconds, throughput 1030170.075929
+139044	[1728194009]	2000000 OPS in 1.897201 seconds, throughput 1054184.559253
+139044	[1728194010]	2000000 OPS in 1.854429 seconds, throughput 1078499.095948
+139044	[1728194011]	2000000 OPS in 1.860104 seconds, throughput 1075208.698008
+139044	[1728194011]	2000000 OPS in 1.909309 seconds, throughput 1047499.383285
+139044	[1728194011]	2000000 OPS in 1.845857 seconds, throughput 1083507.552319
+139044	[1728194012]	2000000 OPS in 1.861924 seconds, throughput 1074157.699240
+139044	[1728194013]	2000000 OPS in 1.806237 seconds, throughput 1107274.405297
+139044	[1728194013]	2000000 OPS in 1.861567 seconds, throughput 1074363.694672
+139044	[1728194013]	2000000 OPS in 1.849959 seconds, throughput 1081105.040706
+139044	[1728194014]	2000000 OPS in 1.829298 seconds, throughput 1093315.577888
+139044	[1728194014]	2000000 OPS in 1.825930 seconds, throughput 1095332.241652
+139044	[1728194014]	2000000 OPS in 1.840937 seconds, throughput 1086403.282676
+139044	[1728194014]	2000000 OPS in 1.858552 seconds, throughput 1076106.560376
+139044	[1728194016]	2000000 OPS in 1.838177 seconds, throughput 1088034.503750
+139044	[1728194016]	2000000 OPS in 1.835647 seconds, throughput 1089534.098876
+139044	[1728194016]	2000000 OPS in 1.832895 seconds, throughput 1091169.979732
+139044	[1728194016]	2000000 OPS in 1.907620 seconds, throughput 1048426.835533
+139044	[1728194017]	2000000 OPS in 1.875052 seconds, throughput 1066637.085265
+139044	[1728194018]	2000000 OPS in 1.773618 seconds, throughput 1127638.533213
+139044	[1728194018]	2000000 OPS in 1.849904 seconds, throughput 1081137.183335
+139044	[1728194018]	2000000 OPS in 1.953639 seconds, throughput 1023730.586869
+139044	[1728194019]	2000000 OPS in 1.878069 seconds, throughput 1064923.599719
+139044	[1728194020]	2000000 OPS in 1.848595 seconds, throughput 1081902.742353
+139044	[1728194020]	2000000 OPS in 1.823281 seconds, throughput 1096923.622854
+139044	[1728194020]	2000000 OPS in 1.899585 seconds, throughput 1052861.546075
+139044	[1728194021]	2000000 OPS in 1.867453 seconds, throughput 1070977.422189
+139044	[1728194022]	2000000 OPS in 1.848884 seconds, throughput 1081733.629584
+139044	[1728194022]	2000000 OPS in 1.863603 seconds, throughput 1073189.944425
+139044	[1728194022]	2000000 OPS in 1.856779 seconds, throughput 1077134.112353
+139044	[1728194023]	2000000 OPS in 1.814701 seconds, throughput 1102109.934364
+139044	[1728194024]	2000000 OPS in 1.841040 seconds, throughput 1086342.502064
+139044	[1728194024]	2000000 OPS in 1.838859 seconds, throughput 1087630.971162
+139044	[1728194024]	2000000 OPS in 1.829170 seconds, throughput 1093392.084935
+139044	[1728194025]	2000000 OPS in 1.856891 seconds, throughput 1077069.144069
+139044	[1728194025]	2000000 OPS in 1.866830 seconds, throughput 1071334.829631
+139044	[1728194025]	2000000 OPS in 1.847653 seconds, throughput 1082454.335311
+139044	[1728194026]	2000000 OPS in 1.939575 seconds, throughput 1031153.732132
+139044	[1728194027]	2000000 OPS in 1.878538 seconds, throughput 1064657.728510
+139044	[1728194027]	2000000 OPS in 1.852865 seconds, throughput 1079409.455087
+139044	[1728194027]	2000000 OPS in 1.903503 seconds, throughput 1050694.430216
+139044	[1728194028]	2000000 OPS in 1.882886 seconds, throughput 1062199.198464
+139044	[1728194029]	2000000 OPS in 1.840914 seconds, throughput 1086416.855975
+139044	[1728194029]	2000000 OPS in 1.930668 seconds, throughput 1035910.886802
+139044	[1728194029]	2000000 OPS in 1.911408 seconds, throughput 1046349.078794
+139044	[1728194030]	2000000 OPS in 1.873206 seconds, throughput 1067688.230766
+139044	[1728194030]	2000000 OPS in 1.815310 seconds, throughput 1101740.198644
+139044	[1728194031]	2000000 OPS in 1.783759 seconds, throughput 1121227.699482
+139044	[1728194031]	2000000 OPS in 1.838899 seconds, throughput 1087607.312854
+139044	[1728194031]	2000000 OPS in 1.878213 seconds, throughput 1064841.953495
+139044	[1728194032]	2000000 OPS in 1.844203 seconds, throughput 1084479.311659
+139044	[1728194033]	2000000 OPS in 1.883924 seconds, throughput 1061613.950457
+139044	[1728194033]	2000000 OPS in 1.901312 seconds, throughput 1051905.210718
+139044	[1728194033]	2000000 OPS in 1.897797 seconds, throughput 1053853.494341
+139044	[1728194034]	2000000 OPS in 1.887763 seconds, throughput 1059455.026929
+139044	[1728194035]	2000000 OPS in 1.930439 seconds, throughput 1036033.772629
+139044	[1728194035]	2000000 OPS in 1.985843 seconds, throughput 1007128.962360
+139044	[1728194035]	2000000 OPS in 1.844126 seconds, throughput 1084524.593222
+139044	[1728194036]	2000000 OPS in 1.860905 seconds, throughput 1074745.889769
+139044	[1728194037]	2000000 OPS in 1.833316 seconds, throughput 1090919.405056
+139044	[1728194037]	2000000 OPS in 1.850209 seconds, throughput 1080958.961933
+139044	[1728194037]	2000000 OPS in 1.814136 seconds, throughput 1102453.178813
+139044	[1728194038]	2000000 OPS in 1.820324 seconds, throughput 1098705.505174
+139044	[1728194038]	2000000 OPS in 1.793128 seconds, throughput 1115369.343404
+139044	[1728194039]	2000000 OPS in 1.927712 seconds, throughput 1037499.377500
+139044	[1728194039]	2000000 OPS in 1.907582 seconds, throughput 1048447.720727
+139044	[1728194040]	2000000 OPS in 1.870455 seconds, throughput 1069258.549390
+139044	[1728194040]	2000000 OPS in 1.914914 seconds, throughput 1044433.327032
+139044	[1728194041]	2000000 OPS in 1.952366 seconds, throughput 1024398.089293
+139044	[1728194041]	2000000 OPS in 1.870070 seconds, throughput 1069478.682616
+139044	[1728194042]	2000000 OPS in 1.896048 seconds, throughput 1054825.616229
+139044	[1728194042]	2000000 OPS in 1.843132 seconds, throughput 1085109.476695
+139044	[1728194043]	2000000 OPS in 1.852353 seconds, throughput 1079707.809473
+139044	[1728194043]	2000000 OPS in 1.852006 seconds, throughput 1079910.108283
+139044	[1728194043]	2000000 OPS in 1.866116 seconds, throughput 1071744.736126
+139044	[1728194044]	2000000 OPS in 1.827820 seconds, throughput 1094199.647668
+139044	[1728194045]	2000000 OPS in 1.851626 seconds, throughput 1080131.732866
+139044	[1728194045]	2000000 OPS in 1.952201 seconds, throughput 1024484.671404
+139044	[1728194045]	2000000 OPS in 1.874221 seconds, throughput 1067110.015308
+139044	[1728194046]	2000000 OPS in 1.803755 seconds, throughput 1108798.035210
+139044	[1728194046]	2000000 OPS in 1.878139 seconds, throughput 1064883.909018
+139044	[1728194046]	2000000 OPS in 1.913492 seconds, throughput 1045209.491338
+139044	[1728194047]	2000000 OPS in 1.820804 seconds, throughput 1098415.864640
+139044	[1728194048]	2000000 OPS in 1.860238 seconds, throughput 1075131.246647
+139044	[1728194048]	2000000 OPS in 1.944273 seconds, throughput 1028662.127181
+139044	[1728194048]	2000000 OPS in 1.907476 seconds, throughput 1048505.983824
+139044	[1728194049]	2000000 OPS in 1.874126 seconds, throughput 1067164.107429
+139044	[1728194050]	2000000 OPS in 1.883208 seconds, throughput 1062017.578515
+139044	[1728194050]	2000000 OPS in 1.842959 seconds, throughput 1085211.336769
+139044	[1728194050]	2000000 OPS in 1.893765 seconds, throughput 1056097.245434
+139044	[1728194051]	2000000 OPS in 1.832513 seconds, throughput 1091397.441655
+139044	[1728194051]	2000000 OPS in 1.868930 seconds, throughput 1070131.037546
+139044	[1728194052]	2000000 OPS in 1.866342 seconds, throughput 1071614.955887
+139044	[1728194052]	2000000 OPS in 1.923933 seconds, throughput 1039537.239602
+139044	[1728194053]	2000000 OPS in 1.872498 seconds, throughput 1068091.928536
+139044	[1728194053]	2000000 OPS in 1.842411 seconds, throughput 1085534.118066
+139044	[1728194054]	2000000 OPS in 1.856160 seconds, throughput 1077493.319541
+139044	[1728194054]	2000000 OPS in 1.947112 seconds, throughput 1027162.279314
+139044	[1728194055]	2000000 OPS in 1.900925 seconds, throughput 1052119.362942
+139044	[1728194055]	2000000 OPS in 1.872509 seconds, throughput 1068085.654061
+139044	[1728194056]	2000000 OPS in 1.835212 seconds, throughput 1089792.350965
+139044	[1728194056]	2000000 OPS in 1.883892 seconds, throughput 1061631.983150
+139044	[1728194056]	2000000 OPS in 1.768150 seconds, throughput 1131125.752906
+139044	[1728194057]	2000000 OPS in 1.837804 seconds, throughput 1088255.330819
+139044	[1728194058]	2000000 OPS in 1.896394 seconds, throughput 1054633.161674
+139044	[1728194058]	2000000 OPS in 1.861846 seconds, throughput 1074202.699901
+139044	[1728194058]	2000000 OPS in 1.837624 seconds, throughput 1088361.928229
+139044	[1728194059]	2000000 OPS in 1.795485 seconds, throughput 1113905.156545
+139044	[1728194059]	2000000 OPS in 1.828576 seconds, throughput 1093747.265632
+139044	[1728194060]	2000000 OPS in 1.810041 seconds, throughput 1104947.346497
+139044	[1728194060]	2000000 OPS in 1.888146 seconds, throughput 1059240.122321
+139044	[1728194061]	2000000 OPS in 1.845755 seconds, throughput 1083567.429047
+139044	[1728194061]	2000000 OPS in 1.825913 seconds, throughput 1095342.439645
+139044	[1728194062]	2000000 OPS in 1.892895 seconds, throughput 1056582.641932
+139044	[1728194062]	2000000 OPS in 1.839257 seconds, throughput 1087395.616817
+139044	[1728194062]	2000000 OPS in 1.813665 seconds, throughput 1102739.480555
+139044	[1728194063]	2000000 OPS in 1.875306 seconds, throughput 1066492.615072
+139044	[1728194063]	2000000 OPS in 1.887541 seconds, throughput 1059579.632972
+139044	[1728194064]	2000000 OPS in 1.796599 seconds, throughput 1113214.468003
+139044	[1728194064]	2000000 OPS in 1.794058 seconds, throughput 1114791.160598
+139044	[1728194065]	2000000 OPS in 1.814050 seconds, throughput 1102505.443621
+139044	[1728194065]	2000000 OPS in 1.917367 seconds, throughput 1043097.122252
+139044	[1728194066]	2000000 OPS in 1.859564 seconds, throughput 1075520.928562
+139044	[1728194066]	2000000 OPS in 1.852927 seconds, throughput 1079373.337428
+139044	[1728194067]	2000000 OPS in 1.829251 seconds, throughput 1093343.669075
+139044	[1728194067]	2000000 OPS in 1.967041 seconds, throughput 1016755.624311
+139044	[1728194068]	2000000 OPS in 1.849640 seconds, throughput 1081291.494561
+139044	[1728194068]	2000000 OPS in 1.848941 seconds, throughput 1081700.281404
+139044	[1728194069]	2000000 OPS in 1.913985 seconds, throughput 1044940.268602
+139044	[1728194069]	2000000 OPS in 1.983997 seconds, throughput 1008066.040422
+139044	[1728194069]	2000000 OPS in 1.847911 seconds, throughput 1082303.206161
+139044	[1728194070]	2000000 OPS in 1.801826 seconds, throughput 1109985.092900
+139044	[1728194071]	2000000 OPS in 1.844329 seconds, throughput 1084405.222712
+139044	[1728194071]	2000000 OPS in 1.820106 seconds, throughput 1098837.100696
+139044	[1728194071]	2000000 OPS in 1.908997 seconds, throughput 1047670.583034
+139044	[1728194072]	2000000 OPS in 1.845539 seconds, throughput 1083694.248672
+139044	[1728194072]	2000000 OPS in 1.840557 seconds, throughput 1086627.580673
+139044	[1728194073]	2000000 OPS in 1.860379 seconds, throughput 1075049.761366
+139044	[1728194073]	2000000 OPS in 1.900585 seconds, throughput 1052307.578982
+139044	[1728194074]	2000000 OPS in 1.981283 seconds, throughput 1009446.908897
+139044	[1728194074]	2000000 OPS in 1.869862 seconds, throughput 1069597.649452
+139044	[1728194075]	2000000 OPS in 1.866449 seconds, throughput 1071553.522223
+139044	[1728194075]	2000000 OPS in 1.903043 seconds, throughput 1050948.402112
+139044	[1728194075]	2000000 OPS in 1.843047 seconds, throughput 1085159.521163
+139044	[1728194076]	2000000 OPS in 1.907077 seconds, throughput 1048725.352988
+139044	[1728194077]	2000000 OPS in 1.859545 seconds, throughput 1075531.917754
+139044	[1728194077]	2000000 OPS in 1.932579 seconds, throughput 1034886.542801
+139044	[1728194077]	2000000 OPS in 1.803763 seconds, throughput 1108793.117499
+139044	[1728194078]	2000000 OPS in 1.879512 seconds, throughput 1064106.001983
+139044	[1728194079]	2000000 OPS in 1.803157 seconds, throughput 1109165.757613
+139044	[1728194079]	2000000 OPS in 1.807284 seconds, throughput 1106632.936495
+139044	[1728194079]	2000000 OPS in 1.866338 seconds, throughput 1071617.252609
+139044	[1728194080]	2000000 OPS in 1.834942 seconds, throughput 1089952.706952
+139044	[1728194080]	2000000 OPS in 1.920779 seconds, throughput 1041244.203524
+139044	[1728194081]	2000000 OPS in 1.890501 seconds, throughput 1057920.625273
+139044	[1728194081]	2000000 OPS in 1.859473 seconds, throughput 1075573.563047
+139044	[1728194082]	2000000 OPS in 1.882173 seconds, throughput 1062601.578070
+139044	[1728194082]	2000000 OPS in 1.933129 seconds, throughput 1034592.104303
+139044	[1728194083]	2000000 OPS in 1.877729 seconds, throughput 1065116.425214
+139044	[1728194083]	2000000 OPS in 1.824768 seconds, throughput 1096029.741863
+139044	[1728194084]	2000000 OPS in 1.903787 seconds, throughput 1050537.691454
+139044	[1728194084]	2000000 OPS in 1.813836 seconds, throughput 1102635.519419
+139044	[1728194084]	2000000 OPS in 1.873805 seconds, throughput 1067346.922439
+139044	[1728194085]	2000000 OPS in 1.911617 seconds, throughput 1046234.679855
+139044	[1728194086]	2000000 OPS in 1.918945 seconds, throughput 1042239.355479
+139044	[1728194086]	2000000 OPS in 1.959858 seconds, throughput 1020482.096152
+139044	[1728194086]	2000000 OPS in 1.929164 seconds, throughput 1036718.495680
+139044	[1728194087]	2000000 OPS in 1.911965 seconds, throughput 1046044.252902
+139044	[1728194087]	2000000 OPS in 1.885644 seconds, throughput 1060645.593760
+139044	[1728194088]	2000000 OPS in 1.857551 seconds, throughput 1076686.454369
+139044	[1728194088]	2000000 OPS in 1.830795 seconds, throughput 1092421.598267
+139044	[1728194088]	2000000 OPS in 1.772880 seconds, throughput 1128107.937367
+139044	[1728194089]	2000000 OPS in 1.844396 seconds, throughput 1084365.830331
+139044	[1728194090]	2000000 OPS in 1.910805 seconds, throughput 1046679.279152
+139044	[1728194090]	2000000 OPS in 1.895526 seconds, throughput 1055116.099700
+139044	[1728194090]	2000000 OPS in 1.913044 seconds, throughput 1045454.260331
+139044	[1728194091]	2000000 OPS in 1.950146 seconds, throughput 1025564.239806
+139044	[1728194092]	2000000 OPS in 1.811558 seconds, throughput 1104022.062777
+139044	[1728194092]	2000000 OPS in 1.869609 seconds, throughput 1069742.389986
+139044	[1728194092]	2000000 OPS in 1.827744 seconds, throughput 1094245.145929
+139044	[1728194093]	2000000 OPS in 1.808116 seconds, throughput 1106123.722151
+139044	[1728194094]	2000000 OPS in 1.874110 seconds, throughput 1067173.218221
+139044	[1728194094]	2000000 OPS in 1.862874 seconds, throughput 1073609.916720
+139044	[1728194094]	2000000 OPS in 1.848784 seconds, throughput 1081792.140131
+139044	[1728194095]	2000000 OPS in 1.871574 seconds, throughput 1068619.247756
+139044	[1728194095]	2000000 OPS in 1.831504 seconds, throughput 1091998.707074
+139044	[1728194096]	2000000 OPS in 1.824689 seconds, throughput 1096077.194525
+139044	[1728194096]	2000000 OPS in 1.813553 seconds, throughput 1102807.582684
+139044	[1728194097]	2000000 OPS in 1.903024 seconds, throughput 1050958.894896
+139044	[1728194097]	2000000 OPS in 1.840805 seconds, throughput 1086481.186220
+139044	[1728194098]	2000000 OPS in 1.915576 seconds, throughput 1044072.383450
+139044	[1728194098]	2000000 OPS in 1.876405 seconds, throughput 1065867.976263
+139044	[1728194099]	2000000 OPS in 1.834157 seconds, throughput 1090419.195303
+139044	[1728194099]	2000000 OPS in 1.801594 seconds, throughput 1110128.031066
+139044	[1728194099]	2000000 OPS in 1.804341 seconds, throughput 1108437.928307
+139044	[1728194099]	2000000 OPS in 1.808512 seconds, throughput 1105881.520277
+139044	[1728194101]	2000000 OPS in 1.838296 seconds, throughput 1087964.071075
+139044	[1728194101]	2000000 OPS in 1.841409 seconds, throughput 1086124.809860
+139044	[1728194101]	2000000 OPS in 1.824258 seconds, throughput 1096336.154206
+139044	[1728194101]	2000000 OPS in 1.872531 seconds, throughput 1068073.105332
+139044	[1728194102]	2000000 OPS in 1.855438 seconds, throughput 1077912.600691
+139044	[1728194103]	2000000 OPS in 1.900383 seconds, throughput 1052419.433346
+139044	[1728194103]	2000000 OPS in 1.916589 seconds, throughput 1043520.546137
+139044	[1728194103]	2000000 OPS in 1.935725 seconds, throughput 1033204.613259
+139044	[1728194104]	2000000 OPS in 1.867305 seconds, throughput 1071062.306372
+139044	[1728194105]	2000000 OPS in 1.880552 seconds, throughput 1063517.520388
+139044	[1728194105]	2000000 OPS in 1.871996 seconds, throughput 1068378.351236
+139044	[1728194105]	2000000 OPS in 1.843447 seconds, throughput 1084924.058028
+139044	[1728194106]	2000000 OPS in 1.828284 seconds, throughput 1093921.950857
+139044	[1728194107]	2000000 OPS in 1.857447 seconds, throughput 1076746.738938
+139044	[1728194107]	2000000 OPS in 1.849500 seconds, throughput 1081373.344147
+139044	[1728194107]	2000000 OPS in 1.862286 seconds, throughput 1073948.899363
+139044	[1728194108]	2000000 OPS in 1.911144 seconds, throughput 1046493.618482
+139044	[1728194108]	2000000 OPS in 1.857716 seconds, throughput 1076590.824432
+139044	[1728194109]	2000000 OPS in 1.917833 seconds, throughput 1042843.667827
+139044	[1728194109]	2000000 OPS in 1.923179 seconds, throughput 1039944.799730
+139044	[1728194110]	2000000 OPS in 1.935177 seconds, throughput 1033497.194313
+139044	[1728194110]	2000000 OPS in 1.896750 seconds, throughput 1054435.218136
+139044	[1728194111]	2000000 OPS in 1.904313 seconds, throughput 1050247.517084
+139044	[1728194111]	2000000 OPS in 1.906288 seconds, throughput 1049159.413478
+139044	[1728194112]	2000000 OPS in 1.913184 seconds, throughput 1045377.757707
+139044	[1728194112]	2000000 OPS in 1.872305 seconds, throughput 1068202.029050
+139044	[1728194112]	2000000 OPS in 1.826611 seconds, throughput 1094923.878155
+139044	[1728194113]	2000000 OPS in 1.874897 seconds, throughput 1066725.265441
+139044	[1728194114]	2000000 OPS in 1.843570 seconds, throughput 1084851.673655
+139044	[1728194114]	2000000 OPS in 1.849481 seconds, throughput 1081384.453260
+139044	[1728194114]	2000000 OPS in 1.936226 seconds, throughput 1032937.270752
+139044	[1728194115]	2000000 OPS in 1.877017 seconds, throughput 1065520.450800
+139044	[1728194116]	2000000 OPS in 1.947260 seconds, throughput 1027084.210634
+139044	[1728194116]	2000000 OPS in 1.885790 seconds, throughput 1060563.477376
+139044	[1728194116]	2000000 OPS in 1.840879 seconds, throughput 1086437.511645
+139044	[1728194117]	2000000 OPS in 1.940491 seconds, throughput 1030666.980677
+139044	[1728194118]	2000000 OPS in 1.952030 seconds, throughput 1024574.417401
+139044	[1728194118]	2000000 OPS in 1.880559 seconds, throughput 1063513.561659
+139044	[1728194118]	2000000 OPS in 1.945339 seconds, throughput 1028098.444538
+139044	[1728194118]	2000000 OPS in 1.892190 seconds, throughput 1056976.307876
+139044	[1728194119]	2000000 OPS in 1.826410 seconds, throughput 1095044.376673
+139044	[1728194120]	2000000 OPS in 1.834565 seconds, throughput 1090176.690387
+139044	[1728194120]	2000000 OPS in 1.819002 seconds, throughput 1099504.013739
+139044	[1728194120]	2000000 OPS in 1.822749 seconds, throughput 1097243.778491
+139044	[1728194121]	2000000 OPS in 1.807948 seconds, throughput 1106226.506515
+139044	[1728194121]	2000000 OPS in 1.788470 seconds, throughput 1118274.279132
+139044	[1728194122]	2000000 OPS in 1.816715 seconds, throughput 1100888.141508
+139044	[1728194122]	2000000 OPS in 1.831036 seconds, throughput 1092277.814308
+139044	[1728194123]	2000000 OPS in 1.841002 seconds, throughput 1086364.925187
+139044	[1728194123]	2000000 OPS in 1.861023 seconds, throughput 1074677.744445
+139044	[1728194124]	2000000 OPS in 1.866059 seconds, throughput 1071777.473274
+139044	[1728194124]	2000000 OPS in 1.862353 seconds, throughput 1073910.262985
+139044	[1728194125]	2000000 OPS in 1.946627 seconds, throughput 1027418.195679
+139044	[1728194125]	2000000 OPS in 1.888867 seconds, throughput 1058835.799450
+139044	[1728194126]	2000000 OPS in 1.848132 seconds, throughput 1082173.784124
+139044	[1728194126]	2000000 OPS in 1.844754 seconds, throughput 1084155.394161
+139044	[1728194127]	2000000 OPS in 1.834550 seconds, throughput 1090185.604099
+139044	[1728194127]	2000000 OPS in 1.819364 seconds, throughput 1099285.244734
+139044	[1728194127]	2000000 OPS in 1.834777 seconds, throughput 1090050.725511
+139044	[1728194128]	2000000 OPS in 1.792828 seconds, throughput 1115555.981946
+139044	[1728194129]	2000000 OPS in 1.840698 seconds, throughput 1086544.343504
+139044	[1728194129]	2000000 OPS in 1.787674 seconds, throughput 1118772.214621
+139044	[1728194129]	2000000 OPS in 1.843803 seconds, throughput 1084714.581764
+139044	[1728194129]	2000000 OPS in 1.812795 seconds, throughput 1103268.709369
+139044	[1728194131]	2000000 OPS in 1.838074 seconds, throughput 1088095.473849
+139044	[1728194131]	2000000 OPS in 1.893423 seconds, throughput 1056288.003262
+139044	[1728194131]	2000000 OPS in 1.940398 seconds, throughput 1030716.378805
+139044	[1728194131]	2000000 OPS in 1.963396 seconds, throughput 1018643.207993
+139044	[1728194132]	2000000 OPS in 1.974178 seconds, throughput 1013079.874257
+139044	[1728194133]	2000000 OPS in 1.888735 seconds, throughput 1058909.799416
+139044	[1728194133]	2000000 OPS in 1.932629 seconds, throughput 1034859.768740
+139044	[1728194133]	2000000 OPS in 1.838643 seconds, throughput 1087758.743813
+139044	[1728194134]	2000000 OPS in 1.855793 seconds, throughput 1077706.403678
+139044	[1728194135]	2000000 OPS in 1.901291 seconds, throughput 1051916.829144
+139044	[1728194135]	2000000 OPS in 1.904592 seconds, throughput 1050093.668355
+139044	[1728194135]	2000000 OPS in 1.879132 seconds, throughput 1064321.186590
+139044	[1728194136]	2000000 OPS in 1.936452 seconds, throughput 1032816.718411
+139044	[1728194136]	2000000 OPS in 1.884386 seconds, throughput 1061353.671700
+139044	[1728194137]	2000000 OPS in 1.816570 seconds, throughput 1100976.015238
+139044	[1728194137]	2000000 OPS in 1.827898 seconds, throughput 1094152.956018
+139044	[1728194138]	2000000 OPS in 1.936622 seconds, throughput 1032726.055988
+139044	[1728194138]	2000000 OPS in 1.872664 seconds, throughput 1067997.248839
+139044	[1728194139]	2000000 OPS in 1.868801 seconds, throughput 1070204.906782
+139044	[1728194139]	2000000 OPS in 1.843457 seconds, throughput 1084918.172759
+139044	[1728194140]	2000000 OPS in 1.811918 seconds, throughput 1103802.710719
+139044	[1728194140]	2000000 OPS in 1.822154 seconds, throughput 1097602.068760
+139044	[1728194141]	2000000 OPS in 1.885914 seconds, throughput 1060493.744678
+139044	[1728194141]	2000000 OPS in 1.844416 seconds, throughput 1084354.071966
+139044	[1728194142]	2000000 OPS in 1.841439 seconds, throughput 1086107.115142
+139044	[1728194142]	2000000 OPS in 1.910146 seconds, throughput 1047040.383301
+139044	[1728194142]	2000000 OPS in 1.861026 seconds, throughput 1074676.012049
+139044	[1728194142]	2000000 OPS in 1.859711 seconds, throughput 1075435.914505
+139044	[1728194144]	2000000 OPS in 1.844431 seconds, throughput 1084345.253360
+139044	[1728194144]	2000000 OPS in 1.835703 seconds, throughput 1089500.861523
+139044	[1728194144]	2000000 OPS in 1.861856 seconds, throughput 1074196.930375
+139044	[1728194144]	2000000 OPS in 1.843802 seconds, throughput 1084715.170067
+139044	[1728194146]	2000000 OPS in 1.818361 seconds, throughput 1099891.605682
+139044	[1728194146]	2000000 OPS in 1.870994 seconds, throughput 1068950.515074
+139044	[1728194146]	2000000 OPS in 1.849715 seconds, throughput 1081247.651665
+139044	[1728194146]	2000000 OPS in 1.840583 seconds, throughput 1086612.231016
+139044	[1728194147]	2000000 OPS in 1.898644 seconds, throughput 1053383.362020
+139044	[1728194148]	2000000 OPS in 1.938207 seconds, throughput 1031881.527618
+139044	[1728194148]	2000000 OPS in 1.896927 seconds, throughput 1054336.830041
+139044	[1728194148]	2000000 OPS in 1.945977 seconds, throughput 1027761.376419
+139044	[1728194149]	2000000 OPS in 1.872640 seconds, throughput 1068010.936432
+139044	[1728194150]	2000000 OPS in 1.925922 seconds, throughput 1038463.655330
+139044	[1728194150]	2000000 OPS in 1.878167 seconds, throughput 1064868.033567
+139044	[1728194150]	2000000 OPS in 1.868244 seconds, throughput 1070523.978667
+139044	[1728194151]	2000000 OPS in 1.887680 seconds, throughput 1059501.610442
+139044	[1728194151]	2000000 OPS in 1.877870 seconds, throughput 1065036.450873
+139044	[1728194152]	2000000 OPS in 1.871810 seconds, throughput 1068484.514988
+139044	[1728194152]	2000000 OPS in 1.892706 seconds, throughput 1056688.149137
+139044	[1728194153]	2000000 OPS in 1.822715 seconds, throughput 1097264.245919
+139044	[1728194153]	2000000 OPS in 1.859089 seconds, throughput 1075795.725756
+139044	[1728194154]	2000000 OPS in 1.860782 seconds, throughput 1074816.931806
+139044	[1728194154]	2000000 OPS in 1.848173 seconds, throughput 1082149.777104
+139044	[1728194155]	2000000 OPS in 1.832045 seconds, throughput 1091676.241577
+139044	[1728194155]	2000000 OPS in 1.890135 seconds, throughput 1058125.477810
+139044	[1728194155]	2000000 OPS in 1.849875 seconds, throughput 1081154.132036
+139044	[1728194156]	2000000 OPS in 1.892466 seconds, throughput 1056822.156911
+139044	[1728194157]	2000000 OPS in 1.855250 seconds, throughput 1078021.829942
+139044	[1728194157]	2000000 OPS in 1.841525 seconds, throughput 1086056.393478
+139044	[1728194157]	2000000 OPS in 1.886243 seconds, throughput 1060308.772518
+139044	[1728194157]	2000000 OPS in 1.863669 seconds, throughput 1073151.938461
+139044	[1728194159]	2000000 OPS in 1.902429 seconds, throughput 1051287.590759
+139044	[1728194159]	2000000 OPS in 1.898997 seconds, throughput 1053187.551113
+139044	[1728194159]	2000000 OPS in 1.845281 seconds, throughput 1083845.766580
+139044	[1728194159]	2000000 OPS in 1.861536 seconds, throughput 1074381.585959
+139044	[1728194161]	2000000 OPS in 1.842087 seconds, throughput 1085725.049903
+139044	[1728194161]	2000000 OPS in 1.870785 seconds, throughput 1069069.935883
+139044	[1728194161]	2000000 OPS in 1.852477 seconds, throughput 1079635.536636
+139044	[1728194161]	2000000 OPS in 1.902665 seconds, throughput 1051157.192674
+139044	[1728194162]	2000000 OPS in 1.827790 seconds, throughput 1094217.607056
+139044	[1728194163]	2000000 OPS in 1.940777 seconds, throughput 1030515.097819
+139044	[1728194163]	2000000 OPS in 1.856313 seconds, throughput 1077404.510985
+139044	[1728194163]	2000000 OPS in 1.854598 seconds, throughput 1078400.817859
+139044	[1728194164]	2000000 OPS in 1.892464 seconds, throughput 1056823.273785
+139044	[1728194165]	2000000 OPS in 1.851166 seconds, throughput 1080400.136995
+139044	[1728194165]	2000000 OPS in 1.797420 seconds, throughput 1112705.989696
+139044	[1728194165]	2000000 OPS in 1.802272 seconds, throughput 1109710.409971
+139044	[1728194166]	2000000 OPS in 1.865695 seconds, throughput 1071986.578728
+139044	[1728194167]	2000000 OPS in 2.015869 seconds, throughput 992127.960696
+139044	[1728194167]	2000000 OPS in 1.855760 seconds, throughput 1077725.567961
+139044	[1728194167]	2000000 OPS in 1.861002 seconds, throughput 1074689.871370
+139044	[1728194168]	2000000 OPS in 1.885258 seconds, throughput 1060862.757246
+139044	[1728194168]	2000000 OPS in 1.883035 seconds, throughput 1062115.149214
+139044	[1728194169]	2000000 OPS in 1.959965 seconds, throughput 1020426.385165
+139044	[1728194169]	2000000 OPS in 1.915170 seconds, throughput 1044293.718051
+139044	[1728194170]	2000000 OPS in 1.815552 seconds, throughput 1101593.344614
+139044	[1728194170]	2000000 OPS in 1.886900 seconds, throughput 1059939.583444
+139044	[1728194170]	2000000 OPS in 1.863963 seconds, throughput 1072982.671866
+139044	[1728194170]	2000000 OPS in 1.832241 seconds, throughput 1091559.461883
+139044	[1728194172]	2000000 OPS in 1.817776 seconds, throughput 1100245.574812
+139044	[1728194172]	2000000 OPS in 1.821232 seconds, throughput 1098157.730591
+139044	[1728194172]	2000000 OPS in 1.879283 seconds, throughput 1064235.668603
+139044	[1728194172]	2000000 OPS in 1.837567 seconds, throughput 1088395.688429
+139044	[1728194173]	2000000 OPS in 1.881730 seconds, throughput 1062851.737497
+139044	[1728194174]	2000000 OPS in 1.897774 seconds, throughput 1053866.266479
+139044	[1728194174]	2000000 OPS in 1.904725 seconds, throughput 1050020.344144
+139044	[1728194174]	2000000 OPS in 1.968625 seconds, throughput 1015937.519843
+139044	[1728194175]	2000000 OPS in 1.831402 seconds, throughput 1092059.525981
+139044	[1728194176]	2000000 OPS in 1.854218 seconds, throughput 1078621.823324
+139044	[1728194176]	2000000 OPS in 1.832632 seconds, throughput 1091326.572929
+139044	[1728194178]	2000000 OPS in 1.665121 seconds, throughput 1201113.913043
+139044	[1728194178]	2000000 OPS in 1.684667 seconds, throughput 1187178.237598
+139044	[1728194179]	2000000 OPS in 1.640025 seconds, throughput 1219493.605280
+139044	[1728194179]	2000000 OPS in 1.659895 seconds, throughput 1204895.490377
+139044	[1728194181]	2000000 OPS in 1.640652 seconds, throughput 1219027.557337
+139044	[1728194181]	2000000 OPS in 1.658385 seconds, throughput 1205992.577116
+139044	[1728194183]	2000000 OPS in 1.697718 seconds, throughput 1178051.949735
+139044	[1728194184]	2000000 OPS in 1.515928 seconds, throughput 1319323.872902
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     233231 ms       858687 ms            4 CompactionCPUUsage=1.97609 CompactionThroughput=599.194M Lat_Get_Avg=784.241 Lat_Get_P50=757.803 Lat_Get_P95=1.27081k Lat_Get_P99=1.71466k Lat_Put_Avg=1090.29 Lat_Put_P50=958.95 Lat_Put_P95=1.31633k Lat_Put_P99=1.79977k items_per_second=4.2876M/s
+5328.27user 16.27system 16:05.81elapsed 553%CPU (0avgtext+0avgdata 9121828maxresident)k
+333291inputs+16649760outputs (5854major+1377135minor)pagefaults 0swaps

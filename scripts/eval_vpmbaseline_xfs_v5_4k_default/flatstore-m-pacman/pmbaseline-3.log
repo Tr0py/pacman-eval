@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T01:47:24-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.11, 4.08, 4.39
+[1728197244]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728197244]	Setup starts!
+[1728197244]	Setup starts!
+[1728197244]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f9970c00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728197244]	Initializing log segments...
+Log: pool_start 0x7f9970c00000 total segments: 2028  cleaners: 2
+[1728197246]Initialized 2026 free log segments...
+[1728197246]	DB init finished in 1.538669 seconds
+[1728197246]	DB init finished in 1.538720 seconds
+[1728197246]	DB init finished in 1.538753 seconds
+[1728197246]	DB init finished in 1.538503 seconds
+[1728197250]	DB load finished in 4.131903 seconds
+[1728197250]	DB load finished in 4.162665 seconds
+[1728197250]	DB load finished in 4.169386 seconds
+[1728197251]	DB load finished in 5.114725 seconds
+[1728197251]	DB warmup finished in 0.000014 seconds
+[1728197251]	DB warmup finished in 0.952251 seconds
+[1728197251]	DB warmup finished in 0.945542 seconds
+[1728197251]	DB warmup finished in 0.983014 seconds
+[1728197251]	ETC init!
+[1728197251]	ETC starts!
+[1728197251]	ETC init!
+[1728197251]	ETC starts!
+[1728197251]	ETC init!
+[1728197251]	ETC init!
+[1728197251]	ETC starts!
+[1728197251]	ETC starts!
+179004	[1728197253]	2000000 OPS in 1.995011 seconds, throughput 1002500.738091
+179004	[1728197253]	2000000 OPS in 2.002800 seconds, throughput 998601.957260
+179004	[1728197253]	2000000 OPS in 2.041739 seconds, throughput 979557.132425
+179004	[1728197253]	2000000 OPS in 2.045192 seconds, throughput 977903.297099
+179004	[1728197255]	2000000 OPS in 1.939494 seconds, throughput 1031196.796690
+179004	[1728197255]	2000000 OPS in 1.931632 seconds, throughput 1035393.905257
+179004	[1728197255]	2000000 OPS in 1.942664 seconds, throughput 1029514.110520
+179004	[1728197255]	2000000 OPS in 2.036122 seconds, throughput 982259.412746
+179004	[1728197257]	2000000 OPS in 1.942694 seconds, throughput 1029498.212276
+179004	[1728197257]	2000000 OPS in 1.937304 seconds, throughput 1032362.499639
+179004	[1728197257]	2000000 OPS in 1.942551 seconds, throughput 1029573.998315
+179004	[1728197257]	2000000 OPS in 1.966691 seconds, throughput 1016936.570107
+179004	[1728197259]	2000000 OPS in 1.944097 seconds, throughput 1028755.252439
+179004	[1728197259]	2000000 OPS in 1.942810 seconds, throughput 1029436.743686
+179004	[1728197259]	2000000 OPS in 1.947972 seconds, throughput 1026708.802796
+179004	[1728197259]	2000000 OPS in 1.956845 seconds, throughput 1022053.356295
+179004	[1728197261]	2000000 OPS in 1.944831 seconds, throughput 1028366.989214
+179004	[1728197261]	2000000 OPS in 1.942466 seconds, throughput 1029619.051247
+179004	[1728197261]	2000000 OPS in 1.950153 seconds, throughput 1025560.558582
+179004	[1728197261]	2000000 OPS in 1.954893 seconds, throughput 1023073.897139
+179004	[1728197263]	2000000 OPS in 1.925594 seconds, throughput 1038640.544165
+179004	[1728197263]	2000000 OPS in 1.922811 seconds, throughput 1040143.831089
+179004	[1728197263]	2000000 OPS in 1.931162 seconds, throughput 1035645.896098
+179004	[1728197263]	2000000 OPS in 1.935304 seconds, throughput 1033429.373370
+179004	[1728197265]	2000000 OPS in 1.952143 seconds, throughput 1024515.109805
+179004	[1728197265]	2000000 OPS in 1.944303 seconds, throughput 1028646.255239
+179004	[1728197265]	2000000 OPS in 1.952798 seconds, throughput 1024171.470884
+179004	[1728197265]	2000000 OPS in 1.962572 seconds, throughput 1019070.892686
+179004	[1728197267]	2000000 OPS in 1.958225 seconds, throughput 1021333.095022
+179004	[1728197267]	2000000 OPS in 1.972307 seconds, throughput 1014040.917565
+179004	[1728197267]	2000000 OPS in 1.962087 seconds, throughput 1019322.792516
+179004	[1728197267]	2000000 OPS in 1.971361 seconds, throughput 1014527.526922
+179004	[1728197269]	2000000 OPS in 1.990484 seconds, throughput 1004780.746793
+179004	[1728197269]	2000000 OPS in 2.013322 seconds, throughput 993383.075335
+179004	[1728197269]	2000000 OPS in 1.994177 seconds, throughput 1002920.001585
+179004	[1728197269]	2000000 OPS in 1.999220 seconds, throughput 1000390.152159
+179004	[1728197271]	2000000 OPS in 1.998851 seconds, throughput 1000574.830240
+179004	[1728197271]	2000000 OPS in 2.011815 seconds, throughput 994127.193604
+179004	[1728197271]	2000000 OPS in 2.007553 seconds, throughput 996237.708295
+179004	[1728197271]	2000000 OPS in 2.011573 seconds, throughput 994246.790944
+179004	[1728197273]	2000000 OPS in 2.005932 seconds, throughput 997042.771141
+179004	[1728197273]	2000000 OPS in 2.006564 seconds, throughput 996728.736288
+179004	[1728197273]	2000000 OPS in 2.010325 seconds, throughput 994864.014525
+179004	[1728197273]	2000000 OPS in 2.016769 seconds, throughput 991685.215312
+179004	[1728197275]	2000000 OPS in 2.003019 seconds, throughput 998492.775156
+179004	[1728197275]	2000000 OPS in 2.017743 seconds, throughput 991206.511434
+179004	[1728197275]	2000000 OPS in 2.014635 seconds, throughput 992735.656831
+179004	[1728197275]	2000000 OPS in 2.021189 seconds, throughput 989516.566734
+179004	[1728197277]	2000000 OPS in 2.001167 seconds, throughput 999416.840274
+179004	[1728197277]	2000000 OPS in 2.007434 seconds, throughput 996296.764925
+179004	[1728197277]	2000000 OPS in 2.008773 seconds, throughput 995632.657349
+179004	[1728197277]	2000000 OPS in 2.018985 seconds, throughput 990596.760253
+179004	[1728197279]	2000000 OPS in 1.998163 seconds, throughput 1000919.344418
+179004	[1728197279]	2000000 OPS in 2.002075 seconds, throughput 998963.575291
+179004	[1728197279]	2000000 OPS in 2.007562 seconds, throughput 996233.242112
+179004	[1728197279]	2000000 OPS in 2.013817 seconds, throughput 993138.899910
+179004	[1728197281]	2000000 OPS in 1.996091 seconds, throughput 1001958.327551
+179004	[1728197281]	2000000 OPS in 1.999948 seconds, throughput 1000026.000676
+179004	[1728197281]	2000000 OPS in 2.007057 seconds, throughput 996483.906536
+179004	[1728197281]	2000000 OPS in 2.006667 seconds, throughput 996677.575303
+179004	[1728197283]	2000000 OPS in 1.995449 seconds, throughput 1002280.689709
+179004	[1728197283]	2000000 OPS in 2.005601 seconds, throughput 997207.320898
+179004	[1728197283]	2000000 OPS in 2.006133 seconds, throughput 996942.874675
+179004	[1728197283]	2000000 OPS in 2.008377 seconds, throughput 995828.970358
+179004	[1728197285]	2000000 OPS in 1.995319 seconds, throughput 1002345.990791
+179004	[1728197285]	2000000 OPS in 2.000660 seconds, throughput 999670.108864
+179004	[1728197285]	2000000 OPS in 2.003612 seconds, throughput 998197.255756
+179004	[1728197285]	2000000 OPS in 2.008318 seconds, throughput 995858.225640
+179004	[1728197287]	2000000 OPS in 1.989765 seconds, throughput 1005143.823517
+179004	[1728197287]	2000000 OPS in 1.998752 seconds, throughput 1000624.389619
+179004	[1728197287]	2000000 OPS in 1.995528 seconds, throughput 1002241.010900
+179004	[1728197287]	2000000 OPS in 2.003095 seconds, throughput 998454.891056
+179004	[1728197289]	2000000 OPS in 1.988295 seconds, throughput 1005886.953395
+179004	[1728197289]	2000000 OPS in 1.994649 seconds, throughput 1002682.677504
+179004	[1728197289]	2000000 OPS in 1.994198 seconds, throughput 1002909.440286
+179004	[1728197289]	2000000 OPS in 2.001365 seconds, throughput 999317.965489
+179004	[1728197291]	2000000 OPS in 1.993918 seconds, throughput 1003050.275889
+179004	[1728197291]	2000000 OPS in 2.002556 seconds, throughput 998723.631199
+179004	[1728197291]	2000000 OPS in 2.006314 seconds, throughput 996852.935283
+179004	[1728197291]	2000000 OPS in 2.009390 seconds, throughput 995326.940017
+179004	[1728197293]	2000000 OPS in 1.991297 seconds, throughput 1004370.518310
+179004	[1728197293]	2000000 OPS in 1.998126 seconds, throughput 1000937.878792
+179004	[1728197293]	2000000 OPS in 1.996439 seconds, throughput 1001783.675835
+179004	[1728197293]	2000000 OPS in 2.002815 seconds, throughput 998594.478272
+179004	[1728197295]	2000000 OPS in 1.989259 seconds, throughput 1005399.498004
+179004	[1728197295]	2000000 OPS in 1.993723 seconds, throughput 1003148.381194
+179004	[1728197295]	2000000 OPS in 1.997640 seconds, throughput 1001181.394045
+179004	[1728197295]	2000000 OPS in 2.004692 seconds, throughput 997659.490835
+179004	[1728197297]	2000000 OPS in 1.990470 seconds, throughput 1004787.813933
+179004	[1728197297]	2000000 OPS in 1.998077 seconds, throughput 1000962.425372
+179004	[1728197297]	2000000 OPS in 2.000867 seconds, throughput 999566.687841
+179004	[1728197297]	2000000 OPS in 2.004481 seconds, throughput 997764.508618
+179004	[1728197299]	2000000 OPS in 1.989220 seconds, throughput 1005419.209539
+179004	[1728197299]	2000000 OPS in 1.996793 seconds, throughput 1001606.075342
+179004	[1728197299]	2000000 OPS in 1.997910 seconds, throughput 1001046.093167
+179004	[1728197299]	2000000 OPS in 2.005250 seconds, throughput 997381.872584
+179004	[1728197301]	2000000 OPS in 1.992891 seconds, throughput 1003567.179540
+179004	[1728197301]	2000000 OPS in 1.995624 seconds, throughput 1002192.797842
+179004	[1728197301]	2000000 OPS in 2.000126 seconds, throughput 999937.003969
+179004	[1728197301]	2000000 OPS in 2.003634 seconds, throughput 998186.295501
+179004	[1728197303]	2000000 OPS in 1.995388 seconds, throughput 1002311.329927
+179004	[1728197303]	2000000 OPS in 2.000758 seconds, throughput 999621.143587
+179004	[1728197303]	2000000 OPS in 2.002240 seconds, throughput 998881.252997
+179004	[1728197303]	2000000 OPS in 2.007893 seconds, throughput 996069.013638
+179004	[1728197305]	2000000 OPS in 1.994844 seconds, throughput 1002584.663262
+179004	[1728197305]	2000000 OPS in 1.996771 seconds, throughput 1001617.110825
+179004	[1728197305]	2000000 OPS in 1.998839 seconds, throughput 1000580.837176
+179004	[1728197305]	2000000 OPS in 2.010488 seconds, throughput 994783.356081
+179004	[1728197307]	2000000 OPS in 1.995224 seconds, throughput 1002393.716194
+179004	[1728197307]	2000000 OPS in 2.003314 seconds, throughput 998345.741107
+179004	[1728197307]	2000000 OPS in 1.999991 seconds, throughput 1000004.500020
+179004	[1728197307]	2000000 OPS in 2.011147 seconds, throughput 994457.391727
+179004	[1728197309]	2000000 OPS in 1.991148 seconds, throughput 1004445.676564
+179004	[1728197309]	2000000 OPS in 2.001445 seconds, throughput 999278.021629
+179004	[1728197309]	2000000 OPS in 2.002995 seconds, throughput 998504.739153
+179004	[1728197309]	2000000 OPS in 2.009623 seconds, throughput 995211.539677
+179004	[1728197311]	2000000 OPS in 1.999882 seconds, throughput 1000059.003481
+179004	[1728197311]	2000000 OPS in 2.003389 seconds, throughput 998308.366473
+179004	[1728197311]	2000000 OPS in 2.005660 seconds, throughput 997177.986299
+179004	[1728197311]	2000000 OPS in 2.009721 seconds, throughput 995163.010189
+179004	[1728197313]	2000000 OPS in 1.995740 seconds, throughput 1002134.546584
+179004	[1728197313]	2000000 OPS in 2.004344 seconds, throughput 997832.707360
+179004	[1728197313]	2000000 OPS in 2.003618 seconds, throughput 998194.266572
+179004	[1728197313]	2000000 OPS in 2.007875 seconds, throughput 996077.943099
+179004	[1728197315]	2000000 OPS in 1.994063 seconds, throughput 1002977.338229
+179004	[1728197315]	2000000 OPS in 2.005544 seconds, throughput 997235.662743
+179004	[1728197315]	2000000 OPS in 2.006992 seconds, throughput 996516.179437
+179004	[1728197315]	2000000 OPS in 2.010653 seconds, throughput 994701.721282
+179004	[1728197317]	2000000 OPS in 1.999662 seconds, throughput 1000169.028566
+179004	[1728197317]	2000000 OPS in 2.005931 seconds, throughput 997043.268188
+179004	[1728197317]	2000000 OPS in 2.004715 seconds, throughput 997648.044735
+179004	[1728197317]	2000000 OPS in 2.012087 seconds, throughput 993992.804486
+179004	[1728197319]	2000000 OPS in 1.998726 seconds, throughput 1000637.406028
+179004	[1728197319]	2000000 OPS in 2.002337 seconds, throughput 998832.863799
+179004	[1728197319]	2000000 OPS in 2.004909 seconds, throughput 997551.509819
+179004	[1728197319]	2000000 OPS in 2.011331 seconds, throughput 994366.417064
+179004	[1728197321]	2000000 OPS in 1.998795 seconds, throughput 1000602.863225
+179004	[1728197321]	2000000 OPS in 2.004313 seconds, throughput 997848.140485
+179004	[1728197321]	2000000 OPS in 2.005986 seconds, throughput 997015.931318
+179004	[1728197321]	2000000 OPS in 2.014779 seconds, throughput 992664.704169
+179004	[1728197323]	2000000 OPS in 1.999208 seconds, throughput 1000396.156878
+179004	[1728197323]	2000000 OPS in 1.999298 seconds, throughput 1000351.123244
+179004	[1728197323]	2000000 OPS in 2.008645 seconds, throughput 995696.103592
+179004	[1728197323]	2000000 OPS in 2.012902 seconds, throughput 993590.348661
+179004	[1728197325]	2000000 OPS in 2.000221 seconds, throughput 999889.512209
+179004	[1728197325]	2000000 OPS in 2.003348 seconds, throughput 998328.797593
+179004	[1728197325]	2000000 OPS in 2.011162 seconds, throughput 994449.974691
+179004	[1728197325]	2000000 OPS in 2.014075 seconds, throughput 993011.680300
+179004	[1728197327]	2000000 OPS in 2.003694 seconds, throughput 998156.405120
+179004	[1728197327]	2000000 OPS in 2.005527 seconds, throughput 997244.115886
+179004	[1728197327]	2000000 OPS in 2.007825 seconds, throughput 996102.747998
+179004	[1728197327]	2000000 OPS in 2.014688 seconds, throughput 992709.541130
+179004	[1728197329]	2000000 OPS in 1.998201 seconds, throughput 1000900.309829
+179004	[1728197329]	2000000 OPS in 2.005601 seconds, throughput 997207.320898
+179004	[1728197329]	2000000 OPS in 2.008422 seconds, throughput 995806.658162
+179004	[1728197329]	2000000 OPS in 2.015931 seconds, throughput 992097.447780
+179004	[1728197331]	2000000 OPS in 2.002079 seconds, throughput 998961.579438
+179004	[1728197331]	2000000 OPS in 2.001513 seconds, throughput 999244.071860
+179004	[1728197331]	2000000 OPS in 2.004992 seconds, throughput 997510.214505
+179004	[1728197331]	2000000 OPS in 2.014638 seconds, throughput 992734.178547
+179004	[1728197333]	2000000 OPS in 1.997249 seconds, throughput 1001377.394606
+179004	[1728197333]	2000000 OPS in 1.999542 seconds, throughput 1000229.052453
+179004	[1728197333]	2000000 OPS in 2.010150 seconds, throughput 994950.625575
+179004	[1728197333]	2000000 OPS in 2.016479 seconds, throughput 991827.834557
+179004	[1728197335]	2000000 OPS in 2.000940 seconds, throughput 999530.220796
+179004	[1728197335]	2000000 OPS in 2.004021 seconds, throughput 997993.534000
+179004	[1728197335]	2000000 OPS in 2.009855 seconds, throughput 995096.661202
+179004	[1728197335]	2000000 OPS in 2.012292 seconds, throughput 993891.542579
+179004	[1728197337]	2000000 OPS in 2.003980 seconds, throughput 998013.952235
+179004	[1728197337]	2000000 OPS in 2.007132 seconds, throughput 996446.671171
+179004	[1728197337]	2000000 OPS in 2.010226 seconds, throughput 994913.009781
+179004	[1728197337]	2000000 OPS in 2.020686 seconds, throughput 989762.882506
+179004	[1728197339]	2000000 OPS in 1.998645 seconds, throughput 1000677.959317
+179004	[1728197339]	2000000 OPS in 2.003648 seconds, throughput 998179.320919
+179004	[1728197339]	2000000 OPS in 2.004802 seconds, throughput 997604.750993
+179004	[1728197339]	2000000 OPS in 2.011441 seconds, throughput 994312.037987
+179004	[1728197341]	2000000 OPS in 1.998956 seconds, throughput 1000522.272626
+179004	[1728197341]	2000000 OPS in 2.001855 seconds, throughput 999073.359459
+179004	[1728197341]	2000000 OPS in 2.005452 seconds, throughput 997281.410874
+179004	[1728197341]	2000000 OPS in 2.014194 seconds, throughput 992953.012470
+179004	[1728197343]	2000000 OPS in 2.000598 seconds, throughput 999701.089374
+179004	[1728197343]	2000000 OPS in 2.001855 seconds, throughput 999073.359459
+179004	[1728197343]	2000000 OPS in 2.005280 seconds, throughput 997366.951249
+179004	[1728197343]	2000000 OPS in 2.011087 seconds, throughput 994487.060977
+179004	[1728197345]	2000000 OPS in 2.001188 seconds, throughput 999406.352627
+179004	[1728197345]	2000000 OPS in 1.999438 seconds, throughput 1000281.078983
+179004	[1728197345]	2000000 OPS in 2.006037 seconds, throughput 996990.583922
+179004	[1728197345]	2000000 OPS in 2.009651 seconds, throughput 995197.673626
+179004	[1728197347]	2000000 OPS in 1.998242 seconds, throughput 1000879.773321
+179004	[1728197347]	2000000 OPS in 2.004084 seconds, throughput 997962.161267
+179004	[1728197347]	2000000 OPS in 2.005641 seconds, throughput 997187.432846
+179004	[1728197347]	2000000 OPS in 2.009713 seconds, throughput 995166.971602
+179004	[1728197349]	2000000 OPS in 2.001187 seconds, throughput 999406.852033
+179004	[1728197349]	2000000 OPS in 2.004441 seconds, throughput 997784.419696
+179004	[1728197349]	2000000 OPS in 2.004982 seconds, throughput 997515.189663
+179004	[1728197349]	2000000 OPS in 2.013642 seconds, throughput 993225.210837
+179004	[1728197351]	2000000 OPS in 1.996506 seconds, throughput 1001750.057350
+179004	[1728197351]	2000000 OPS in 2.004091 seconds, throughput 997958.675529
+179004	[1728197351]	2000000 OPS in 2.007288 seconds, throughput 996369.230524
+179004	[1728197351]	2000000 OPS in 2.011806 seconds, throughput 994131.640924
+179004	[1728197353]	2000000 OPS in 2.002297 seconds, throughput 998852.817539
+179004	[1728197353]	2000000 OPS in 2.002743 seconds, throughput 998630.378436
+179004	[1728197353]	2000000 OPS in 2.007973 seconds, throughput 996029.329080
+179004	[1728197353]	2000000 OPS in 2.012788 seconds, throughput 993646.623489
+179004	[1728197355]	2000000 OPS in 1.996456 seconds, throughput 1001775.145558
+179004	[1728197355]	2000000 OPS in 2.003973 seconds, throughput 998017.438359
+179004	[1728197355]	2000000 OPS in 2.006640 seconds, throughput 996690.985927
+179004	[1728197355]	2000000 OPS in 2.012697 seconds, throughput 993691.549200
+179004	[1728197357]	2000000 OPS in 2.000324 seconds, throughput 999838.026240
+179004	[1728197357]	2000000 OPS in 2.007532 seconds, throughput 996248.129544
+179004	[1728197357]	2000000 OPS in 2.003641 seconds, throughput 998182.808198
+179004	[1728197357]	2000000 OPS in 2.015167 seconds, throughput 992473.576632
+179004	[1728197359]	2000000 OPS in 1.999293 seconds, throughput 1000353.625006
+179004	[1728197359]	2000000 OPS in 2.005141 seconds, throughput 997436.090529
+179004	[1728197359]	2000000 OPS in 2.007095 seconds, throughput 996465.040270
+179004	[1728197359]	2000000 OPS in 2.012109 seconds, throughput 993981.936366
+179004	[1728197361]	2000000 OPS in 2.000985 seconds, throughput 999507.742437
+179004	[1728197361]	2000000 OPS in 2.003741 seconds, throughput 998132.992238
+179004	[1728197361]	2000000 OPS in 2.011888 seconds, throughput 994091.122369
+179004	[1728197361]	2000000 OPS in 2.012004 seconds, throughput 994033.809078
+179004	[1728197363]	2000000 OPS in 1.999851 seconds, throughput 1000074.505551
+179004	[1728197363]	2000000 OPS in 2.003279 seconds, throughput 998363.183561
+179004	[1728197363]	2000000 OPS in 2.008521 seconds, throughput 995757.574852
+179004	[1728197363]	2000000 OPS in 2.018369 seconds, throughput 990899.087332
+179004	[1728197365]	2000000 OPS in 1.997342 seconds, throughput 1001330.768591
+179004	[1728197365]	2000000 OPS in 2.005964 seconds, throughput 997026.865886
+179004	[1728197365]	2000000 OPS in 2.010000 seconds, throughput 995024.875622
+179004	[1728197365]	2000000 OPS in 2.016878 seconds, throughput 991631.620752
+179004	[1728197367]	2000000 OPS in 2.002633 seconds, throughput 998685.230894
+179004	[1728197367]	2000000 OPS in 2.005393 seconds, throughput 997310.751558
+179004	[1728197367]	2000000 OPS in 2.010768 seconds, throughput 994644.832223
+179004	[1728197367]	2000000 OPS in 2.016329 seconds, throughput 991901.619230
+179004	[1728197369]	2000000 OPS in 2.001111 seconds, throughput 999444.808409
+179004	[1728197369]	2000000 OPS in 2.001177 seconds, throughput 999411.846129
+179004	[1728197369]	2000000 OPS in 2.008477 seconds, throughput 995779.389059
+179004	[1728197370]	2000000 OPS in 2.014268 seconds, throughput 992916.533450
+179004	[1728197371]	2000000 OPS in 2.003606 seconds, throughput 998200.244958
+179004	[1728197371]	2000000 OPS in 2.006382 seconds, throughput 996819.150092
+179004	[1728197371]	2000000 OPS in 2.009543 seconds, throughput 995251.159094
+179004	[1728197372]	2000000 OPS in 2.014711 seconds, throughput 992698.208329
+179004	[1728197373]	2000000 OPS in 1.999442 seconds, throughput 1000279.077863
+179004	[1728197373]	2000000 OPS in 2.003779 seconds, throughput 998114.063477
+179004	[1728197373]	2000000 OPS in 2.011307 seconds, throughput 994378.282381
+179004	[1728197374]	2000000 OPS in 2.019386 seconds, throughput 990400.052293
+179004	[1728197375]	2000000 OPS in 2.004021 seconds, throughput 997993.534000
+179004	[1728197375]	2000000 OPS in 2.004829 seconds, throughput 997591.315768
+179004	[1728197375]	2000000 OPS in 2.010251 seconds, throughput 994900.636786
+179004	[1728197376]	2000000 OPS in 2.016072 seconds, throughput 992028.062490
+179004	[1728197377]	2000000 OPS in 2.000898 seconds, throughput 999551.201511
+179004	[1728197377]	2000000 OPS in 2.011821 seconds, throughput 994124.228746
+179004	[1728197377]	2000000 OPS in 2.008623 seconds, throughput 995707.009230
+179004	[1728197378]	2000000 OPS in 2.014355 seconds, throughput 992873.649382
+179004	[1728197379]	2000000 OPS in 1.999980 seconds, throughput 1000010.000100
+179004	[1728197379]	2000000 OPS in 2.007085 seconds, throughput 996470.005007
+179004	[1728197379]	2000000 OPS in 2.009137 seconds, throughput 995452.276276
+179004	[1728197380]	2000000 OPS in 2.016858 seconds, throughput 991641.454183
+179004	[1728197381]	2000000 OPS in 2.003009 seconds, throughput 998497.760120
+179004	[1728197381]	2000000 OPS in 2.008245 seconds, throughput 995894.425232
+179004	[1728197381]	2000000 OPS in 2.013086 seconds, throughput 993499.532558
+179004	[1728197382]	2000000 OPS in 2.019730 seconds, throughput 990231.367559
+179004	[1728197383]	2000000 OPS in 2.006248 seconds, throughput 996885.728983
+179004	[1728197383]	2000000 OPS in 2.013072 seconds, throughput 993506.441896
+179004	[1728197383]	2000000 OPS in 2.012871 seconds, throughput 993605.650834
+179004	[1728197384]	2000000 OPS in 2.019945 seconds, throughput 990125.968776
+179004	[1728197385]	2000000 OPS in 2.002623 seconds, throughput 998690.217779
+179004	[1728197385]	2000000 OPS in 2.003041 seconds, throughput 998481.808410
+179004	[1728197385]	2000000 OPS in 2.008034 seconds, throughput 995999.071729
+179004	[1728197386]	2000000 OPS in 2.016731 seconds, throughput 991703.901016
+179004	[1728197387]	2000000 OPS in 1.998605 seconds, throughput 1000697.986846
+179004	[1728197387]	2000000 OPS in 2.007769 seconds, throughput 996130.530953
+179004	[1728197387]	2000000 OPS in 2.012338 seconds, throughput 993868.823229
+179004	[1728197388]	2000000 OPS in 2.016656 seconds, throughput 991740.782761
+179004	[1728197389]	2000000 OPS in 2.004379 seconds, throughput 997815.283437
+179004	[1728197389]	2000000 OPS in 2.008602 seconds, throughput 995717.419379
+179004	[1728197389]	2000000 OPS in 2.013756 seconds, throughput 993168.983730
+179004	[1728197390]	2000000 OPS in 2.015338 seconds, throughput 992389.365953
+179004	[1728197391]	2000000 OPS in 2.000977 seconds, throughput 999511.738516
+179004	[1728197391]	2000000 OPS in 2.005650 seconds, throughput 997182.958143
+179004	[1728197391]	2000000 OPS in 2.014101 seconds, throughput 992998.861527
+179004	[1728197392]	2000000 OPS in 2.015788 seconds, throughput 992167.827172
+179004	[1728197393]	2000000 OPS in 2.001957 seconds, throughput 999022.456526
+179004	[1728197393]	2000000 OPS in 2.006142 seconds, throughput 996938.402167
+179004	[1728197393]	2000000 OPS in 2.008861 seconds, throughput 995589.042746
+179004	[1728197394]	2000000 OPS in 2.015756 seconds, throughput 992183.577774
+179004	[1728197395]	2000000 OPS in 2.000416 seconds, throughput 999792.043255
+179004	[1728197395]	2000000 OPS in 2.007959 seconds, throughput 996036.273649
+179004	[1728197395]	2000000 OPS in 2.013900 seconds, throughput 993097.969115
+179004	[1728197396]	2000000 OPS in 2.018359 seconds, throughput 990903.996762
+179004	[1728197397]	2000000 OPS in 2.003640 seconds, throughput 998183.306382
+179004	[1728197397]	2000000 OPS in 2.006094 seconds, throughput 996962.256006
+179004	[1728197397]	2000000 OPS in 2.010581 seconds, throughput 994737.342092
+179004	[1728197398]	2000000 OPS in 2.017695 seconds, throughput 991230.091763
+179004	[1728197399]	2000000 OPS in 2.004099 seconds, throughput 997954.691859
+179004	[1728197399]	2000000 OPS in 2.006261 seconds, throughput 996879.269447
+179004	[1728197399]	2000000 OPS in 2.009917 seconds, throughput 995065.965411
+179004	[1728197400]	2000000 OPS in 2.017992 seconds, throughput 991084.206479
+179004	[1728197401]	2000000 OPS in 2.001530 seconds, throughput 999235.584778
+179004	[1728197401]	2000000 OPS in 2.005773 seconds, throughput 997121.807901
+179004	[1728197401]	2000000 OPS in 2.011598 seconds, throughput 994234.434514
+179004	[1728197402]	2000000 OPS in 2.019924 seconds, throughput 990136.262552
+179004	[1728197403]	2000000 OPS in 2.005559 seconds, throughput 997228.204206
+179004	[1728197403]	2000000 OPS in 2.007992 seconds, throughput 996019.904462
+179004	[1728197403]	2000000 OPS in 2.010610 seconds, throughput 994722.994514
+179004	[1728197404]	2000000 OPS in 2.017647 seconds, throughput 991253.673214
+179004	[1728197405]	2000000 OPS in 2.002805 seconds, throughput 998599.464251
+179004	[1728197405]	2000000 OPS in 2.013151 seconds, throughput 993467.454751
+179004	[1728197405]	2000000 OPS in 2.009666 seconds, throughput 995190.245543
+179004	[1728197406]	2000000 OPS in 2.018284 seconds, throughput 990940.819032
+179004	[1728197407]	2000000 OPS in 2.003677 seconds, throughput 998164.873879
+179004	[1728197407]	2000000 OPS in 2.008883 seconds, throughput 995578.139693
+179004	[1728197407]	2000000 OPS in 2.010720 seconds, throughput 994668.576430
+179004	[1728197408]	2000000 OPS in 2.015638 seconds, throughput 992241.662441
+179004	[1728197409]	2000000 OPS in 2.004196 seconds, throughput 997906.392389
+179004	[1728197409]	2000000 OPS in 2.006039 seconds, throughput 996989.589933
+179004	[1728197409]	2000000 OPS in 2.015374 seconds, throughput 992371.639209
+179004	[1728197410]	2000000 OPS in 2.016466 seconds, throughput 991834.228794
+179004	[1728197411]	2000000 OPS in 2.003080 seconds, throughput 998462.367953
+179004	[1728197411]	2000000 OPS in 2.005432 seconds, throughput 997291.356675
+179004	[1728197411]	2000000 OPS in 2.011003 seconds, throughput 994528.600902
+179004	[1728197412]	2000000 OPS in 2.014093 seconds, throughput 993002.805729
+179004	[1728197413]	2000000 OPS in 2.001997 seconds, throughput 999002.496008
+179004	[1728197413]	2000000 OPS in 2.010046 seconds, throughput 995002.104429
+179004	[1728197413]	2000000 OPS in 2.011083 seconds, throughput 994489.038990
+179004	[1728197414]	2000000 OPS in 2.015568 seconds, throughput 992276.122661
+179004	[1728197415]	2000000 OPS in 2.004477 seconds, throughput 997766.499690
+179004	[1728197415]	2000000 OPS in 2.010251 seconds, throughput 994900.636786
+179004	[1728197415]	2000000 OPS in 2.015020 seconds, throughput 992545.979693
+179004	[1728197416]	2000000 OPS in 2.013281 seconds, throughput 993403.305351
+179004	[1728197417]	2000000 OPS in 2.002750 seconds, throughput 998626.888029
+179004	[1728197417]	2000000 OPS in 2.005713 seconds, throughput 997151.636351
+179004	[1728197417]	2000000 OPS in 2.012912 seconds, throughput 993585.412576
+179004	[1728197418]	2000000 OPS in 2.019784 seconds, throughput 990204.893197
+179004	[1728197419]	2000000 OPS in 2.000309 seconds, throughput 999845.523867
+179004	[1728197419]	2000000 OPS in 2.006738 seconds, throughput 996642.312051
+179004	[1728197419]	2000000 OPS in 2.011794 seconds, throughput 994137.570745
+179004	[1728197420]	2000000 OPS in 2.016432 seconds, throughput 991850.952574
+179004	[1728197421]	2000000 OPS in 2.002623 seconds, throughput 998690.217779
+179004	[1728197421]	2000000 OPS in 2.012635 seconds, throughput 993722.160253
+179004	[1728197421]	2000000 OPS in 2.016273 seconds, throughput 991929.168322
+179004	[1728197422]	2000000 OPS in 2.021575 seconds, throughput 989327.628211
+179004	[1728197423]	2000000 OPS in 2.005077 seconds, throughput 997467.927666
+179004	[1728197423]	2000000 OPS in 2.003863 seconds, throughput 998072.223500
+179004	[1728197423]	2000000 OPS in 2.010910 seconds, throughput 994574.595581
+179004	[1728197424]	2000000 OPS in 2.015297 seconds, throughput 992409.555515
+179004	[1728197425]	2000000 OPS in 2.004837 seconds, throughput 997587.335030
+179004	[1728197425]	2000000 OPS in 2.004983 seconds, throughput 997514.692145
+179004	[1728197425]	2000000 OPS in 2.011921 seconds, throughput 994074.817053
+179004	[1728197426]	2000000 OPS in 2.015502 seconds, throughput 992308.615918
+179004	[1728197427]	2000000 OPS in 1.999020 seconds, throughput 1000490.240218
+179004	[1728197427]	2000000 OPS in 2.008927 seconds, throughput 995556.334302
+179004	[1728197427]	2000000 OPS in 2.012289 seconds, throughput 993893.024312
+179004	[1728197428]	2000000 OPS in 2.017211 seconds, throughput 991467.922790
+179004	[1728197429]	2000000 OPS in 2.001615 seconds, throughput 999193.151530
+179004	[1728197429]	2000000 OPS in 2.012374 seconds, throughput 993851.043593
+179004	[1728197429]	2000000 OPS in 2.011503 seconds, throughput 994281.390582
+179004	[1728197430]	2000000 OPS in 2.018903 seconds, throughput 990636.994447
+179004	[1728197431]	2000000 OPS in 2.005093 seconds, throughput 997459.968191
+179004	[1728197431]	2000000 OPS in 2.009317 seconds, throughput 995363.100994
+179004	[1728197431]	2000000 OPS in 2.012294 seconds, throughput 993890.554760
+179004	[1728197432]	2000000 OPS in 2.019444 seconds, throughput 990371.607234
+179004	[1728197433]	2000000 OPS in 2.004727 seconds, throughput 997642.072961
+179004	[1728197433]	2000000 OPS in 2.006916 seconds, throughput 996553.916557
+179004	[1728197433]	2000000 OPS in 2.012106 seconds, throughput 993983.418369
+179004	[1728197434]	2000000 OPS in 2.018179 seconds, throughput 990992.374809
+179004	[1728197435]	2000000 OPS in 2.001031 seconds, throughput 999484.765603
+179004	[1728197435]	2000000 OPS in 2.007312 seconds, throughput 996357.317647
+179004	[1728197435]	2000000 OPS in 2.012399 seconds, throughput 993838.696998
+179004	[1728197436]	2000000 OPS in 2.016550 seconds, throughput 991792.913640
+179004	[1728197437]	2000000 OPS in 2.000932 seconds, throughput 999534.217055
+179004	[1728197437]	2000000 OPS in 2.005039 seconds, throughput 997486.831927
+179004	[1728197437]	2000000 OPS in 2.012772 seconds, throughput 993654.522221
+179004	[1728197438]	2000000 OPS in 2.015487 seconds, throughput 992316.001046
+179004	[1728197439]	2000000 OPS in 2.004534 seconds, throughput 997738.127665
+179004	[1728197439]	2000000 OPS in 2.006212 seconds, throughput 996903.617364
+179004	[1728197440]	2000000 OPS in 2.008753 seconds, throughput 995642.570291
+179004	[1728197440]	2000000 OPS in 2.016812 seconds, throughput 991664.071812
+179004	[1728197441]	2000000 OPS in 2.004224 seconds, throughput 997892.451143
+179004	[1728197441]	2000000 OPS in 2.006502 seconds, throughput 996759.534753
+179004	[1728197442]	2000000 OPS in 2.011029 seconds, throughput 994515.742936
+179004	[1728197442]	2000000 OPS in 2.018306 seconds, throughput 990930.017549
+179004	[1728197443]	2000000 OPS in 2.000966 seconds, throughput 999517.233176
+179004	[1728197443]	2000000 OPS in 2.008429 seconds, throughput 995803.187466
+179004	[1728197444]	2000000 OPS in 2.012279 seconds, throughput 993897.963453
+179004	[1728197444]	2000000 OPS in 2.017172 seconds, throughput 991487.091830
+179004	[1728197445]	2000000 OPS in 2.002410 seconds, throughput 998796.450277
+179004	[1728197445]	2000000 OPS in 2.004705 seconds, throughput 997653.021267
+179004	[1728197446]	2000000 OPS in 2.010511 seconds, throughput 994771.975881
+179004	[1728197446]	2000000 OPS in 2.019628 seconds, throughput 990281.378551
+179004	[1728197447]	2000000 OPS in 2.005965 seconds, throughput 997026.368855
+179004	[1728197447]	2000000 OPS in 2.008698 seconds, throughput 995669.831901
+179004	[1728197448]	2000000 OPS in 2.008532 seconds, throughput 995752.121450
+179004	[1728197448]	2000000 OPS in 2.016680 seconds, throughput 991728.980304
+179004	[1728197449]	2000000 OPS in 2.002259 seconds, throughput 998871.774331
+179004	[1728197449]	2000000 OPS in 2.010091 seconds, throughput 994979.829271
+179004	[1728197450]	2000000 OPS in 2.011818 seconds, throughput 994125.711173
+179004	[1728197450]	2000000 OPS in 2.016719 seconds, throughput 991709.801911
+179004	[1728197451]	2000000 OPS in 2.006688 seconds, throughput 996667.145067
+179004	[1728197451]	2000000 OPS in 2.004333 seconds, throughput 997838.183575
+179004	[1728197452]	2000000 OPS in 2.012380 seconds, throughput 993848.080382
+179004	[1728197452]	2000000 OPS in 2.014499 seconds, throughput 992802.676993
+179004	[1728197453]	2000000 OPS in 2.006418 seconds, throughput 996801.264741
+179004	[1728197453]	2000000 OPS in 2.007589 seconds, throughput 996219.843803
+179004	[1728197454]	2000000 OPS in 2.007794 seconds, throughput 996118.127657
+179004	[1728197454]	2000000 OPS in 2.016863 seconds, throughput 991638.995807
+179004	[1728197455]	2000000 OPS in 2.001786 seconds, throughput 999107.796738
+179004	[1728197455]	2000000 OPS in 2.008384 seconds, throughput 995825.499506
+179004	[1728197456]	2000000 OPS in 2.012913 seconds, throughput 993584.918971
+179004	[1728197456]	2000000 OPS in 2.018522 seconds, throughput 990823.979129
+179004	[1728197457]	2000000 OPS in 2.003293 seconds, throughput 998356.206506
+179004	[1728197457]	2000000 OPS in 2.009113 seconds, throughput 995464.167521
+179004	[1728197458]	2000000 OPS in 2.008204 seconds, throughput 995914.757664
+179004	[1728197458]	2000000 OPS in 2.018459 seconds, throughput 990854.904657
+179004	[1728197459]	2000000 OPS in 2.002391 seconds, throughput 998805.927514
+179004	[1728197459]	2000000 OPS in 2.007942 seconds, throughput 996044.706471
+179004	[1728197460]	2000000 OPS in 2.013355 seconds, throughput 993366.793238
+179004	[1728197460]	2000000 OPS in 2.018588 seconds, throughput 990791.583027
+179004	[1728197461]	2000000 OPS in 2.000236 seconds, throughput 999882.013922
+179004	[1728197461]	2000000 OPS in 2.008011 seconds, throughput 996010.480022
+179004	[1728197462]	2000000 OPS in 2.007696 seconds, throughput 996166.750345
+179004	[1728197462]	2000000 OPS in 2.018895 seconds, throughput 990640.919909
+179004	[1728197463]	2000000 OPS in 2.004756 seconds, throughput 997627.641469
+179004	[1728197463]	2000000 OPS in 2.011302 seconds, throughput 994380.754357
+179004	[1728197464]	2000000 OPS in 2.011551 seconds, throughput 994257.664857
+179004	[1728197464]	2000000 OPS in 2.018991 seconds, throughput 990593.816416
+179004	[1728197465]	2000000 OPS in 2.003439 seconds, throughput 998283.451605
+179004	[1728197465]	2000000 OPS in 2.011973 seconds, throughput 994049.124914
+179004	[1728197466]	2000000 OPS in 2.011682 seconds, throughput 994192.919159
+179004	[1728197466]	2000000 OPS in 2.017456 seconds, throughput 991347.518855
+179004	[1728197467]	2000000 OPS in 2.002795 seconds, throughput 998604.450281
+179004	[1728197467]	2000000 OPS in 2.009538 seconds, throughput 995253.635413
+179004	[1728197468]	2000000 OPS in 2.010936 seconds, throughput 994561.736425
+179004	[1728197468]	2000000 OPS in 2.019654 seconds, throughput 990268.630171
+179004	[1728197469]	2000000 OPS in 2.004348 seconds, throughput 997830.716023
+179004	[1728197469]	2000000 OPS in 2.010755 seconds, throughput 994651.262834
+179004	[1728197470]	2000000 OPS in 2.016324 seconds, throughput 991904.078908
+179004	[1728197470]	2000000 OPS in 2.016391 seconds, throughput 991871.120234
+179004	[1728197471]	2000000 OPS in 2.002669 seconds, throughput 998667.278517
+179004	[1728197471]	2000000 OPS in 2.007462 seconds, throughput 996282.868617
+179004	[1728197472]	2000000 OPS in 2.009782 seconds, throughput 995132.805449
+179004	[1728197472]	2000000 OPS in 2.014941 seconds, throughput 992584.894545
+179004	[1728197473]	2000000 OPS in 2.004051 seconds, throughput 997978.594357
+179004	[1728197473]	2000000 OPS in 2.003291 seconds, throughput 998357.203222
+179004	[1728197474]	2000000 OPS in 2.012767 seconds, throughput 993656.990601
+179004	[1728197474]	2000000 OPS in 2.017807 seconds, throughput 991175.072740
+179004	[1728197475]	2000000 OPS in 2.004286 seconds, throughput 997861.582628
+179004	[1728197475]	2000000 OPS in 2.008419 seconds, throughput 995808.145611
+179004	[1728197476]	2000000 OPS in 2.010129 seconds, throughput 994961.019915
+179004	[1728197476]	2000000 OPS in 2.022483 seconds, throughput 988883.466511
+179004	[1728197477]	2000000 OPS in 2.005917 seconds, throughput 997050.226904
+179004	[1728197477]	2000000 OPS in 2.009772 seconds, throughput 995137.756920
+179004	[1728197478]	2000000 OPS in 2.019499 seconds, throughput 990344.634981
+179004	[1728197478]	2000000 OPS in 2.018481 seconds, throughput 990844.105047
+179004	[1728197479]	2000000 OPS in 2.004970 seconds, throughput 997521.159918
+179004	[1728197479]	2000000 OPS in 2.006465 seconds, throughput 996777.915389
+179004	[1728197480]	2000000 OPS in 2.011416 seconds, throughput 994324.396346
+179004	[1728197480]	2000000 OPS in 2.018316 seconds, throughput 990925.107862
+179004	[1728197481]	2000000 OPS in 2.000822 seconds, throughput 999589.168852
+179004	[1728197481]	2000000 OPS in 2.003989 seconds, throughput 998009.470112
+179004	[1728197482]	2000000 OPS in 2.012489 seconds, throughput 993794.251795
+179004	[1728197482]	2000000 OPS in 2.013997 seconds, throughput 993050.138605
+179004	[1728197483]	2000000 OPS in 2.003290 seconds, throughput 998357.701581
+179004	[1728197483]	2000000 OPS in 2.002337 seconds, throughput 998832.863799
+179004	[1728197484]	2000000 OPS in 2.012555 seconds, throughput 993761.661172
+179004	[1728197484]	2000000 OPS in 2.016257 seconds, throughput 991937.039772
+179004	[1728197485]	2000000 OPS in 2.006832 seconds, throughput 996595.629330
+179004	[1728197485]	2000000 OPS in 2.006833 seconds, throughput 996595.132729
+179004	[1728197486]	2000000 OPS in 2.013415 seconds, throughput 993337.190793
+179004	[1728197487]	2000000 OPS in 2.018322 seconds, throughput 990922.162073
+179004	[1728197487]	2000000 OPS in 2.003150 seconds, throughput 998427.476724
+179004	[1728197487]	2000000 OPS in 2.009183 seconds, throughput 995429.485517
+179004	[1728197488]	2000000 OPS in 2.015724 seconds, throughput 992199.328876
+179004	[1728197489]	2000000 OPS in 2.015244 seconds, throughput 992435.655434
+179004	[1728197489]	2000000 OPS in 2.006155 seconds, throughput 996931.941949
+179004	[1728197489]	2000000 OPS in 2.007733 seconds, throughput 996148.392241
+179004	[1728197490]	2000000 OPS in 2.012398 seconds, throughput 993839.190856
+179004	[1728197491]	2000000 OPS in 2.014153 seconds, throughput 992973.224973
+179004	[1728197491]	2000000 OPS in 2.006329 seconds, throughput 996845.482471
+179004	[1728197491]	2000000 OPS in 2.008063 seconds, throughput 995984.687731
+179004	[1728197492]	2000000 OPS in 2.010726 seconds, throughput 994665.608342
+179004	[1728197493]	2000000 OPS in 2.018147 seconds, throughput 991008.088113
+179004	[1728197493]	2000000 OPS in 2.003289 seconds, throughput 998358.199940
+179004	[1728197493]	2000000 OPS in 2.008622 seconds, throughput 995707.504946
+179004	[1728197494]	2000000 OPS in 2.012084 seconds, throughput 993994.286521
+179004	[1728197495]	2000000 OPS in 2.020982 seconds, throughput 989617.918418
+179004	[1728197495]	2000000 OPS in 2.000805 seconds, throughput 999597.661941
+179004	[1728197495]	2000000 OPS in 2.006442 seconds, throughput 996789.341531
+179004	[1728197496]	2000000 OPS in 2.008645 seconds, throughput 995696.103592
+179004	[1728197497]	2000000 OPS in 2.016981 seconds, throughput 991580.981675
+179004	[1728197497]	2000000 OPS in 2.005200 seconds, throughput 997406.742470
+179004	[1728197497]	2000000 OPS in 2.006995 seconds, throughput 996514.689872
+179004	[1728197498]	2000000 OPS in 2.009046 seconds, throughput 995497.365416
+179004	[1728197499]	2000000 OPS in 2.019360 seconds, throughput 990412.804057
+179004	[1728197499]	2000000 OPS in 2.005748 seconds, throughput 997134.236205
+179004	[1728197499]	2000000 OPS in 2.007900 seconds, throughput 996065.541113
+179004	[1728197500]	2000000 OPS in 2.009734 seconds, throughput 995156.572959
+179004	[1728197501]	2000000 OPS in 2.013657 seconds, throughput 993217.812170
+179004	[1728197501]	2000000 OPS in 2.001950 seconds, throughput 999025.949699
+179004	[1728197501]	2000000 OPS in 2.010332 seconds, throughput 994860.550397
+179004	[1728197502]	2000000 OPS in 2.011132 seconds, throughput 994464.808874
+179004	[1728197503]	2000000 OPS in 2.013589 seconds, throughput 993251.353677
+179004	[1728197503]	2000000 OPS in 2.002873 seconds, throughput 998565.560572
+179004	[1728197503]	2000000 OPS in 2.009810 seconds, throughput 995118.941591
+179004	[1728197504]	2000000 OPS in 2.012421 seconds, throughput 993827.832248
+179004	[1728197505]	2000000 OPS in 2.018296 seconds, throughput 990934.927285
+179004	[1728197505]	2000000 OPS in 2.005053 seconds, throughput 997479.867116
+179004	[1728197505]	2000000 OPS in 2.007294 seconds, throughput 996366.252278
+179004	[1728197506]	2000000 OPS in 2.012082 seconds, throughput 993995.274546
+179004	[1728197507]	2000000 OPS in 2.019341 seconds, throughput 990422.122861
+179004	[1728197507]	2000000 OPS in 2.003784 seconds, throughput 998111.572904
+179004	[1728197507]	2000000 OPS in 2.009766 seconds, throughput 995140.727826
+179004	[1728197508]	2000000 OPS in 2.011996 seconds, throughput 994037.761506
+179004	[1728197509]	2000000 OPS in 2.020195 seconds, throughput 990003.440262
+179004	[1728197509]	2000000 OPS in 2.003629 seconds, throughput 998188.786447
+179004	[1728197509]	2000000 OPS in 2.007678 seconds, throughput 996175.681558
+179004	[1728197510]	2000000 OPS in 2.014467 seconds, throughput 992818.447758
+179004	[1728197511]	2000000 OPS in 2.016708 seconds, throughput 991715.211126
+179004	[1728197511]	2000000 OPS in 2.006047 seconds, throughput 996985.613996
+179004	[1728197511]	2000000 OPS in 2.008170 seconds, throughput 995931.619335
+179004	[1728197512]	2000000 OPS in 2.011417 seconds, throughput 994323.902005
+179004	[1728197513]	2000000 OPS in 2.018721 seconds, throughput 990726.306409
+179004	[1728197513]	2000000 OPS in 2.000296 seconds, throughput 999852.021901
+179004	[1728197513]	2000000 OPS in 2.007145 seconds, throughput 996440.217324
+179004	[1728197514]	2000000 OPS in 2.010530 seconds, throughput 994762.575042
+179004	[1728197515]	2000000 OPS in 2.016612 seconds, throughput 991762.421328
+179004	[1728197515]	2000000 OPS in 2.008433 seconds, throughput 995801.204222
+179004	[1728197515]	2000000 OPS in 2.008044 seconds, throughput 995994.111683
+179004	[1728197516]	2000000 OPS in 2.012860 seconds, throughput 993611.080751
+179004	[1728197517]	2000000 OPS in 2.018252 seconds, throughput 990956.530701
+179004	[1728197517]	2000000 OPS in 2.003642 seconds, throughput 998182.310013
+179004	[1728197517]	2000000 OPS in 2.007193 seconds, throughput 996416.388459
+179004	[1728197518]	2000000 OPS in 2.012132 seconds, throughput 993970.574495
+179004	[1728197519]	2000000 OPS in 2.016355 seconds, throughput 991888.829100
+179004	[1728197519]	2000000 OPS in 2.000151 seconds, throughput 999924.505700
+179004	[1728197520]	2000000 OPS in 2.003689 seconds, throughput 998158.895916
+179004	[1728197520]	2000000 OPS in 2.014382 seconds, throughput 992860.341286
+179004	[1728197521]	2000000 OPS in 2.017955 seconds, throughput 991102.378398
+179004	[1728197521]	2000000 OPS in 2.004785 seconds, throughput 997613.210394
+179004	[1728197522]	2000000 OPS in 2.005196 seconds, throughput 997408.732114
+179004	[1728197522]	2000000 OPS in 2.015568 seconds, throughput 992276.122661
+179004	[1728197523]	2000000 OPS in 2.017998 seconds, throughput 991081.259744
+179004	[1728197523]	2000000 OPS in 2.004334 seconds, throughput 997837.685735
+179004	[1728197524]	2000000 OPS in 2.003401 seconds, throughput 998302.386791
+179004	[1728197524]	2000000 OPS in 2.010124 seconds, throughput 994963.494789
+179004	[1728197525]	2000000 OPS in 2.017846 seconds, throughput 991155.915764
+179004	[1728197525]	2000000 OPS in 2.004520 seconds, throughput 997745.096083
+179004	[1728197526]	2000000 OPS in 2.010129 seconds, throughput 994961.019915
+179004	[1728197526]	2000000 OPS in 2.013961 seconds, throughput 993067.889597
+179004	[1728197527]	2000000 OPS in 2.018049 seconds, throughput 991056.213204
+179004	[1728197527]	2000000 OPS in 2.003393 seconds, throughput 998306.373238
+179004	[1728197528]	2000000 OPS in 2.010733 seconds, throughput 994662.145596
+179004	[1728197528]	2000000 OPS in 2.013716 seconds, throughput 993188.711814
+179004	[1728197529]	2000000 OPS in 2.018348 seconds, throughput 990909.397190
+179004	[1728197529]	2000000 OPS in 2.003153 seconds, throughput 998425.981440
+179004	[1728197530]	2000000 OPS in 2.012124 seconds, throughput 993974.526421
+179004	[1728197530]	2000000 OPS in 2.011224 seconds, throughput 994419.318783
+179004	[1728197531]	2000000 OPS in 2.016760 seconds, throughput 991689.640810
+179004	[1728197531]	2000000 OPS in 2.006877 seconds, throughput 996573.282767
+179004	[1728197532]	2000000 OPS in 2.012030 seconds, throughput 994020.963902
+179004	[1728197532]	2000000 OPS in 2.018326 seconds, throughput 990920.198224
+179004	[1728197533]	2000000 OPS in 2.022726 seconds, throughput 988764.667088
+179004	[1728197533]	2000000 OPS in 2.007588 seconds, throughput 996220.340030
+179004	[1728197534]	2000000 OPS in 2.010887 seconds, throughput 994585.971265
+179004	[1728197534]	2000000 OPS in 2.009531 seconds, throughput 995257.102279
+179004	[1728197535]	2000000 OPS in 2.016545 seconds, throughput 991795.372779
+179004	[1728197535]	2000000 OPS in 2.010275 seconds, throughput 994888.759001
+179004	[1728197536]	2000000 OPS in 2.007689 seconds, throughput 996170.223575
+179004	[1728197536]	2000000 OPS in 2.012908 seconds, throughput 993587.387004
+179004	[1728197537]	2000000 OPS in 2.005709 seconds, throughput 997153.624978
+179004	[1728197537]	2000000 OPS in 2.019537 seconds, throughput 990326.000464
+179004	[1728197538]	2000000 OPS in 2.009147 seconds, throughput 995447.321674
+179004	[1728197538]	2000000 OPS in 2.014750 seconds, throughput 992678.992431
+179004	[1728197539]	2000000 OPS in 2.005829 seconds, throughput 997093.969626
+179004	[1728197539]	2000000 OPS in 2.019308 seconds, throughput 990438.308569
+179004	[1728197540]	2000000 OPS in 2.009341 seconds, throughput 995351.212164
+179004	[1728197540]	2000000 OPS in 2.013293 seconds, throughput 993397.384285
+179004	[1728197541]	2000000 OPS in 2.003904 seconds, throughput 998051.802881
+179004	[1728197541]	2000000 OPS in 2.021609 seconds, throughput 989310.989415
+179004	[1728197542]	2000000 OPS in 2.008733 seconds, throughput 995652.483431
+179004	[1728197542]	2000000 OPS in 2.011796 seconds, throughput 994136.582437
+179004	[1728197543]	2000000 OPS in 2.004642 seconds, throughput 997684.374567
+179004	[1728197543]	2000000 OPS in 2.018221 seconds, throughput 990971.751855
+179004	[1728197544]	2000000 OPS in 2.005187 seconds, throughput 997413.208843
+179004	[1728197544]	2000000 OPS in 2.012146 seconds, throughput 993963.658701
+179004	[1728197545]	2000000 OPS in 2.001626 seconds, throughput 999187.660432
+179004	[1728197545]	2000000 OPS in 2.018125 seconds, throughput 991018.891298
+179004	[1728197546]	2000000 OPS in 2.006744 seconds, throughput 996639.332172
+179004	[1728197546]	2000000 OPS in 2.011564 seconds, throughput 994251.239334
+179004	[1728197547]	2000000 OPS in 2.004338 seconds, throughput 997835.694379
+179004	[1728197547]	2000000 OPS in 2.018899 seconds, throughput 990638.957174
+179004	[1728197548]	2000000 OPS in 2.010510 seconds, throughput 994772.470667
+179004	[1728197548]	2000000 OPS in 2.012315 seconds, throughput 993880.182775
+179004	[1728197549]	2000000 OPS in 2.003896 seconds, throughput 998055.787326
+179004	[1728197549]	2000000 OPS in 2.019358 seconds, throughput 990413.784975
+179004	[1728197550]	2000000 OPS in 2.010576 seconds, throughput 994739.815854
+179004	[1728197550]	2000000 OPS in 2.010612 seconds, throughput 994722.005041
+179004	[1728197551]	2000000 OPS in 2.008408 seconds, throughput 995813.599627
+179004	[1728197551]	2000000 OPS in 2.019028 seconds, throughput 990575.663141
+179004	[1728197552]	2000000 OPS in 2.007791 seconds, throughput 996119.616036
+179004	[1728197552]	2000000 OPS in 2.018168 seconds, throughput 990997.776201
+179004	[1728197553]	2000000 OPS in 2.002375 seconds, throughput 998813.908484
+179004	[1728197553]	2000000 OPS in 2.015620 seconds, throughput 992250.523412
+179004	[1728197554]	2000000 OPS in 2.010472 seconds, throughput 994791.272895
+179004	[1728197554]	2000000 OPS in 2.015207 seconds, throughput 992453.876947
+179004	[1728197555]	2000000 OPS in 2.005120 seconds, throughput 997446.536866
+179004	[1728197555]	2000000 OPS in 2.018833 seconds, throughput 990671.343296
+179004	[1728197556]	2000000 OPS in 2.010373 seconds, throughput 994840.260986
+179004	[1728197556]	2000000 OPS in 2.015735 seconds, throughput 992193.914379
+179004	[1728197557]	2000000 OPS in 2.002678 seconds, throughput 998662.790523
+179004	[1728197557]	2000000 OPS in 2.014942 seconds, throughput 992584.401933
+179004	[1728197558]	2000000 OPS in 2.007018 seconds, throughput 996503.270025
+179004	[1728197558]	2000000 OPS in 2.014192 seconds, throughput 992953.998427
+179004	[1728197559]	2000000 OPS in 2.003748 seconds, throughput 998129.505307
+179004	[1728197559]	2000000 OPS in 2.016569 seconds, throughput 991783.569022
+179004	[1728197560]	2000000 OPS in 2.009162 seconds, throughput 995439.889865
+179004	[1728197560]	2000000 OPS in 2.017944 seconds, throughput 991107.780989
+179004	[1728197561]	2000000 OPS in 2.005863 seconds, throughput 997077.068573
+179004	[1728197561]	2000000 OPS in 2.018370 seconds, throughput 990898.596392
+179004	[1728197562]	2000000 OPS in 2.009756 seconds, throughput 995145.679376
+179004	[1728197562]	2000000 OPS in 2.011004 seconds, throughput 994528.106359
+179004	[1728197563]	2000000 OPS in 2.005241 seconds, throughput 997386.349072
+179004	[1728197563]	2000000 OPS in 2.018538 seconds, throughput 990816.125334
+179004	[1728197564]	2000000 OPS in 2.010093 seconds, throughput 994978.839288
+179004	[1728197564]	2000000 OPS in 2.014241 seconds, throughput 992929.843053
+179004	[1728197565]	2000000 OPS in 2.002527 seconds, throughput 998738.094418
+179004	[1728197565]	2000000 OPS in 2.018203 seconds, throughput 990980.590159
+179004	[1728197566]	2000000 OPS in 2.010775 seconds, throughput 994641.369621
+179004	[1728197566]	2000000 OPS in 2.013728 seconds, throughput 993182.793307
+179004	[1728197567]	2000000 OPS in 2.005748 seconds, throughput 997134.236205
+179004	[1728197567]	2000000 OPS in 2.013930 seconds, throughput 993083.175681
+179004	[1728197568]	2000000 OPS in 2.008180 seconds, throughput 995926.659961
+179004	[1728197568]	2000000 OPS in 2.011407 seconds, throughput 994328.845430
+179004	[1728197569]	2000000 OPS in 2.002542 seconds, throughput 998730.613390
+179004	[1728197569]	2000000 OPS in 2.016033 seconds, throughput 992047.253195
+179004	[1728197570]	2000000 OPS in 2.007156 seconds, throughput 996434.756441
+179004	[1728197570]	2000000 OPS in 2.012276 seconds, throughput 993899.445205
+179004	[1728197571]	2000000 OPS in 2.002878 seconds, throughput 998563.067746
+179004	[1728197571]	2000000 OPS in 2.018882 seconds, throughput 990647.298852
+179004	[1728197572]	2000000 OPS in 2.007909 seconds, throughput 996061.076473
+179004	[1728197572]	2000000 OPS in 2.012146 seconds, throughput 993963.658701
+179004	[1728197573]	2000000 OPS in 2.002048 seconds, throughput 998977.047503
+179004	[1728197573]	2000000 OPS in 2.018533 seconds, throughput 990818.579632
+179004	[1728197574]	2000000 OPS in 2.012220 seconds, throughput 993927.105386
+179004	[1728197574]	2000000 OPS in 2.011006 seconds, throughput 994527.117274
+179004	[1728197575]	2000000 OPS in 2.005082 seconds, throughput 997465.440316
+179004	[1728197575]	2000000 OPS in 2.023130 seconds, throughput 988567.220100
+179004	[1728197576]	2000000 OPS in 2.008533 seconds, throughput 995751.625689
+179004	[1728197576]	2000000 OPS in 2.012489 seconds, throughput 993794.251795
+179004	[1728197577]	2000000 OPS in 2.012085 seconds, throughput 993993.792509
+179004	[1728197577]	2000000 OPS in 2.023048 seconds, throughput 988607.289595
+179004	[1728197578]	2000000 OPS in 2.011601 seconds, throughput 994232.951763
+179004	[1728197578]	2000000 OPS in 2.007595 seconds, throughput 996216.866450
+179004	[1728197579]	2000000 OPS in 2.003648 seconds, throughput 998179.320919
+179004	[1728197579]	2000000 OPS in 2.019857 seconds, throughput 990169.106031
+179004	[1728197580]	2000000 OPS in 2.009874 seconds, throughput 995087.254226
+179004	[1728197580]	2000000 OPS in 2.011429 seconds, throughput 994317.969961
+179004	[1728197581]	2000000 OPS in 2.005686 seconds, throughput 997165.059735
+179004	[1728197581]	2000000 OPS in 2.016880 seconds, throughput 991630.637420
+179004	[1728197582]	2000000 OPS in 2.013470 seconds, throughput 993310.056768
+179004	[1728197582]	2000000 OPS in 2.008936 seconds, throughput 995551.874226
+179004	[1728197583]	2000000 OPS in 2.005955 seconds, throughput 997031.339188
+179004	[1728197583]	2000000 OPS in 2.021661 seconds, throughput 989285.542927
+179004	[1728197584]	2000000 OPS in 2.011339 seconds, throughput 994362.462022
+179004	[1728197584]	2000000 OPS in 2.010761 seconds, throughput 994648.294850
+179004	[1728197585]	2000000 OPS in 2.004068 seconds, throughput 997970.128758
+179004	[1728197585]	2000000 OPS in 2.019154 seconds, throughput 990513.848869
+179004	[1728197586]	2000000 OPS in 2.009850 seconds, throughput 995099.136751
+179004	[1728197586]	2000000 OPS in 2.012812 seconds, throughput 993634.775627
+179004	[1728197587]	2000000 OPS in 2.008205 seconds, throughput 995914.261741
+179004	[1728197587]	2000000 OPS in 2.023782 seconds, throughput 988248.734300
+179004	[1728197588]	2000000 OPS in 2.014686 seconds, throughput 992710.526603
+179004	[1728197588]	2000000 OPS in 2.015976 seconds, throughput 992075.302484
+179004	[1728197589]	2000000 OPS in 2.004057 seconds, throughput 997975.606482
+179004	[1728197589]	2000000 OPS in 2.016315 seconds, throughput 991908.506359
+179004	[1728197590]	2000000 OPS in 2.007671 seconds, throughput 996179.154852
+179004	[1728197590]	2000000 OPS in 2.015701 seconds, throughput 992210.650290
+179004	[1728197591]	2000000 OPS in 2.004915 seconds, throughput 997548.524501
+179004	[1728197591]	2000000 OPS in 2.015578 seconds, throughput 992271.199626
+179004	[1728197592]	2000000 OPS in 2.005344 seconds, throughput 997335.120558
+179004	[1728197592]	2000000 OPS in 2.014105 seconds, throughput 992996.889437
+179004	[1728197593]	2000000 OPS in 2.002920 seconds, throughput 998542.128492
+179004	[1728197593]	2000000 OPS in 2.020121 seconds, throughput 990039.705542
+179004	[1728197594]	2000000 OPS in 2.007847 seconds, throughput 996091.833691
+179004	[1728197594]	2000000 OPS in 2.011927 seconds, throughput 994071.852508
+179004	[1728197595]	2000000 OPS in 2.001308 seconds, throughput 999346.427436
+179004	[1728197595]	2000000 OPS in 2.019525 seconds, throughput 990331.884973
+179004	[1728197596]	2000000 OPS in 2.012348 seconds, throughput 993863.884378
+179004	[1728197596]	2000000 OPS in 2.013977 seconds, throughput 993060.000189
+179004	[1728197597]	2000000 OPS in 1.999987 seconds, throughput 1000006.500042
+179004	[1728197598]	2000000 OPS in 2.020253 seconds, throughput 989975.017980
+179004	[1728197598]	2000000 OPS in 2.013150 seconds, throughput 993467.948240
+179004	[1728197598]	2000000 OPS in 2.013870 seconds, throughput 993112.762989
+179004	[1728197599]	2000000 OPS in 2.003733 seconds, throughput 998136.977332
+179004	[1728197600]	2000000 OPS in 2.019018 seconds, throughput 990580.569366
+179004	[1728197600]	2000000 OPS in 2.010194 seconds, throughput 994928.847663
+179004	[1728197600]	2000000 OPS in 2.012610 seconds, throughput 993734.503953
+179004	[1728197601]	2000000 OPS in 2.003619 seconds, throughput 998193.768376
+179004	[1728197602]	2000000 OPS in 2.017429 seconds, throughput 991360.786427
+179004	[1728197602]	2000000 OPS in 2.010737 seconds, throughput 994660.166894
+179004	[1728197603]	2000000 OPS in 2.009473 seconds, throughput 995285.828672
+179004	[1728197603]	2000000 OPS in 2.006525 seconds, throughput 996748.109293
+179004	[1728197604]	2000000 OPS in 2.016404 seconds, throughput 991864.725521
+179004	[1728197604]	2000000 OPS in 2.002593 seconds, throughput 998705.178736
+179004	[1728197605]	2000000 OPS in 2.012430 seconds, throughput 993823.387646
+179004	[1728197605]	2000000 OPS in 2.006551 seconds, throughput 996735.193872
+179004	[1728197606]	2000000 OPS in 2.016488 seconds, throughput 991823.407826
+179004	[1728197606]	2000000 OPS in 2.005307 seconds, throughput 997353.522428
+179004	[1728197607]	2000000 OPS in 2.015138 seconds, throughput 992487.859392
+179004	[1728197607]	2000000 OPS in 2.004913 seconds, throughput 997549.519605
+179004	[1728197608]	2000000 OPS in 2.019834 seconds, throughput 990180.381160
+179004	[1728197608]	2000000 OPS in 2.004520 seconds, throughput 997745.096083
+179004	[1728197609]	2000000 OPS in 2.009063 seconds, throughput 995488.941860
+179004	[1728197609]	2000000 OPS in 2.003911 seconds, throughput 998048.316517
+179004	[1728197610]	2000000 OPS in 2.020421 seconds, throughput 989892.700581
+179004	[1728197610]	2000000 OPS in 2.007011 seconds, throughput 996506.745603
+179004	[1728197611]	2000000 OPS in 2.009891 seconds, throughput 995078.837609
+179004	[1728197611]	2000000 OPS in 2.000694 seconds, throughput 999653.120367
+179004	[1728197612]	2000000 OPS in 2.020740 seconds, throughput 989736.433188
+179004	[1728197612]	2000000 OPS in 2.008320 seconds, throughput 995857.233907
+179004	[1728197613]	2000000 OPS in 2.013542 seconds, throughput 993274.538103
+179004	[1728197613]	2000000 OPS in 2.005587 seconds, throughput 997214.281904
+179004	[1728197614]	2000000 OPS in 2.019561 seconds, throughput 990314.231657
+179004	[1728197614]	2000000 OPS in 2.009908 seconds, throughput 995070.421134
+179004	[1728197615]	2000000 OPS in 2.012660 seconds, throughput 993709.816859
+179004	[1728197615]	2000000 OPS in 2.003159 seconds, throughput 998422.990886
+179004	[1728197616]	2000000 OPS in 2.020599 seconds, throughput 989805.498271
+179004	[1728197616]	2000000 OPS in 2.007185 seconds, throughput 996420.359857
+179004	[1728197617]	2000000 OPS in 2.013006 seconds, throughput 993539.015780
+179004	[1728197617]	2000000 OPS in 2.004723 seconds, throughput 997644.063544
+179004	[1728197618]	2000000 OPS in 2.017271 seconds, throughput 991438.433408
+179004	[1728197618]	2000000 OPS in 2.008100 seconds, throughput 995966.336338
+179004	[1728197619]	2000000 OPS in 2.014509 seconds, throughput 992797.748732
+179004	[1728197619]	2000000 OPS in 2.003250 seconds, throughput 998377.636341
+179004	[1728197620]	2000000 OPS in 2.015761 seconds, throughput 992181.116710
+179004	[1728197620]	2000000 OPS in 2.006753 seconds, throughput 996634.862387
+179004	[1728197621]	2000000 OPS in 2.014103 seconds, throughput 992997.875481
+179004	[1728197621]	2000000 OPS in 2.006621 seconds, throughput 996700.423249
+179004	[1728197622]	2000000 OPS in 2.018346 seconds, throughput 990910.379093
+179004	[1728197622]	2000000 OPS in 2.006365 seconds, throughput 996827.596175
+179004	[1728197623]	2000000 OPS in 2.012836 seconds, throughput 993622.928048
+179004	[1728197623]	2000000 OPS in 2.004103 seconds, throughput 997952.700036
+179004	[1728197624]	2000000 OPS in 2.018507 seconds, throughput 990831.342175
+179004	[1728197624]	2000000 OPS in 2.005443 seconds, throughput 997285.886460
+179004	[1728197625]	2000000 OPS in 2.012604 seconds, throughput 993737.466486
+179004	[1728197625]	2000000 OPS in 2.003668 seconds, throughput 998169.357399
+179004	[1728197626]	2000000 OPS in 2.018917 seconds, throughput 990630.124963
+179004	[1728197626]	2000000 OPS in 2.008098 seconds, throughput 995967.328288
+179004	[1728197627]	2000000 OPS in 2.012770 seconds, throughput 993655.509571
+179004	[1728197627]	2000000 OPS in 2.002416 seconds, throughput 998793.457503
+179004	[1728197628]	2000000 OPS in 2.020177 seconds, throughput 990012.261302
+179004	[1728197628]	2000000 OPS in 2.007669 seconds, throughput 996180.147225
+179004	[1728197629]	2000000 OPS in 2.016431 seconds, throughput 991851.444458
+179004	[1728197629]	2000000 OPS in 2.005907 seconds, throughput 997055.197474
+179004	[1728197630]	2000000 OPS in 2.019005 seconds, throughput 990586.947531
+179004	[1728197630]	2000000 OPS in 2.009740 seconds, throughput 995153.601958
+179004	[1728197631]	2000000 OPS in 2.015218 seconds, throughput 992448.459670
+179004	[1728197631]	2000000 OPS in 2.000001 seconds, throughput 999999.500000
+179004	[1728197632]	2000000 OPS in 2.021899 seconds, throughput 989169.093016
+179004	[1728197632]	2000000 OPS in 2.011249 seconds, throughput 994406.958064
+179004	[1728197633]	2000000 OPS in 2.011770 seconds, throughput 994149.430601
+179004	[1728197633]	2000000 OPS in 2.003343 seconds, throughput 998331.289250
+179004	[1728197634]	2000000 OPS in 2.019823 seconds, throughput 990185.773704
+179004	[1728197634]	2000000 OPS in 2.013503 seconds, throughput 993293.777064
+179004	[1728197635]	2000000 OPS in 2.014654 seconds, throughput 992726.294441
+179004	[1728197635]	2000000 OPS in 2.003829 seconds, throughput 998089.158306
+179004	[1728197636]	2000000 OPS in 2.016994 seconds, throughput 991574.590703
+179004	[1728197636]	2000000 OPS in 2.006435 seconds, throughput 996792.819105
+179004	[1728197637]	2000000 OPS in 2.010774 seconds, throughput 994641.864277
+179004	[1728197637]	2000000 OPS in 2.006411 seconds, throughput 996804.742398
+179004	[1728197638]	2000000 OPS in 2.018116 seconds, throughput 991023.310850
+179004	[1728197638]	2000000 OPS in 2.008249 seconds, throughput 995892.441625
+179004	[1728197639]	2000000 OPS in 2.015907 seconds, throughput 992109.259008
+179004	[1728197639]	2000000 OPS in 2.003890 seconds, throughput 998058.775681
+179004	[1728197640]	2000000 OPS in 2.020288 seconds, throughput 989957.867393
+179004	[1728197640]	2000000 OPS in 2.010571 seconds, throughput 994742.289628
+179004	[1728197641]	2000000 OPS in 2.013424 seconds, throughput 993332.750578
+179004	[1728197641]	2000000 OPS in 1.999473 seconds, throughput 1000263.569451
+179004	[1728197642]	2000000 OPS in 2.022339 seconds, throughput 988953.879641
+179004	[1728197642]	2000000 OPS in 2.011600 seconds, throughput 994233.446013
+179004	[1728197643]	2000000 OPS in 2.020064 seconds, throughput 990067.641421
+179004	[1728197643]	2000000 OPS in 2.011473 seconds, throughput 994296.219735
+179004	[1728197644]	2000000 OPS in 2.022791 seconds, throughput 988732.894303
+179004	[1728197644]	2000000 OPS in 2.009436 seconds, throughput 995304.154997
+179004	[1728197645]	2000000 OPS in 2.012905 seconds, throughput 993588.867830
+179004	[1728197645]	2000000 OPS in 2.004339 seconds, throughput 997835.196541
+179004	[1728197646]	2000000 OPS in 2.020028 seconds, throughput 990085.285947
+179004	[1728197646]	2000000 OPS in 2.011320 seconds, throughput 994371.855299
+179004	[1728197647]	2000000 OPS in 2.013820 seconds, throughput 993137.420425
+179004	[1728197647]	2000000 OPS in 2.003400 seconds, throughput 998302.885095
+179004	[1728197648]	2000000 OPS in 2.017623 seconds, throughput 991265.464361
+179004	[1728197648]	2000000 OPS in 2.013023 seconds, throughput 993530.625333
+179004	[1728197649]	2000000 OPS in 2.010956 seconds, throughput 994551.844993
+179004	[1728197649]	2000000 OPS in 2.000986 seconds, throughput 999507.242929
+179004	[1728197650]	2000000 OPS in 2.020854 seconds, throughput 989680.600380
+179004	[1728197650]	2000000 OPS in 2.009694 seconds, throughput 995176.380086
+179004	[1728197651]	2000000 OPS in 2.013127 seconds, throughput 993479.298623
+179004	[1728197651]	2000000 OPS in 2.007011 seconds, throughput 996506.745603
+179004	[1728197652]	2000000 OPS in 2.019863 seconds, throughput 990166.164735
+179004	[1728197652]	2000000 OPS in 2.010954 seconds, throughput 994552.834127
+179004	[1728197653]	2000000 OPS in 2.012357 seconds, throughput 993859.439453
+179004	[1728197653]	2000000 OPS in 2.003685 seconds, throughput 998160.888563
+179004	[1728197654]	2000000 OPS in 2.020870 seconds, throughput 989672.764700
+179004	[1728197654]	2000000 OPS in 2.009448 seconds, throughput 995298.211250
+179004	[1728197655]	2000000 OPS in 2.009957 seconds, throughput 995046.162679
+179004	[1728197655]	2000000 OPS in 2.005906 seconds, throughput 997055.694534
+179004	[1728197656]	2000000 OPS in 2.020074 seconds, throughput 990062.740276
+179004	[1728197656]	2000000 OPS in 2.008133 seconds, throughput 995949.969449
+179004	[1728197657]	2000000 OPS in 2.009106 seconds, throughput 995467.635854
+179004	[1728197657]	2000000 OPS in 2.004176 seconds, throughput 997916.350660
+179004	[1728197658]	2000000 OPS in 2.017510 seconds, throughput 991320.984778
+179004	[1728197658]	2000000 OPS in 2.012045 seconds, throughput 994013.553375
+179004	[1728197659]	2000000 OPS in 2.013468 seconds, throughput 993311.043434
+179004	[1728197659]	2000000 OPS in 2.005457 seconds, throughput 997278.924455
+179004	[1728197660]	2000000 OPS in 2.015930 seconds, throughput 992097.939909
+179004	[1728197660]	2000000 OPS in 2.006463 seconds, throughput 996778.908956
+179004	[1728197661]	2000000 OPS in 2.009695 seconds, throughput 995175.884898
+179004	[1728197661]	2000000 OPS in 2.003548 seconds, throughput 998229.141503
+179004	[1728197662]	2000000 OPS in 2.020112 seconds, throughput 990044.116366
+179004	[1728197662]	2000000 OPS in 2.007433 seconds, throughput 996297.261229
+179004	[1728197663]	2000000 OPS in 2.012499 seconds, throughput 993789.313684
+179004	[1728197663]	2000000 OPS in 2.003585 seconds, throughput 998210.707307
+179004	[1728197664]	2000000 OPS in 2.020955 seconds, throughput 989631.139733
+179004	[1728197664]	2000000 OPS in 2.008894 seconds, throughput 995572.688255
+179004	[1728197665]	2000000 OPS in 2.015285 seconds, throughput 992415.464810
+179004	[1728197665]	2000000 OPS in 2.004568 seconds, throughput 997721.204768
+179004	[1728197666]	2000000 OPS in 2.017266 seconds, throughput 991440.890790
+179004	[1728197666]	2000000 OPS in 2.010671 seconds, throughput 994692.816478
+179004	[1728197667]	2000000 OPS in 2.012565 seconds, throughput 993756.723385
+179004	[1728197667]	2000000 OPS in 2.008205 seconds, throughput 995914.261741
+179004	[1728197668]	2000000 OPS in 2.009142 seconds, throughput 995449.798969
+179004	[1728197668]	2000000 OPS in 2.019040 seconds, throughput 990569.775735
+179004	[1728197669]	2000000 OPS in 2.014042 seconds, throughput 993027.950758
+179004	[1728197669]	2000000 OPS in 2.003564 seconds, throughput 998221.169875
+179004	[1728197670]	2000000 OPS in 2.011637 seconds, throughput 994215.159097
+179004	[1728197670]	2000000 OPS in 2.019288 seconds, throughput 990448.118347
+179004	[1728197671]	2000000 OPS in 2.012457 seconds, throughput 993810.054078
+179004	[1728197671]	2000000 OPS in 2.003748 seconds, throughput 998129.505307
+179004	[1728197672]	2000000 OPS in 2.007303 seconds, throughput 996361.784942
+179004	[1728197672]	2000000 OPS in 2.017662 seconds, throughput 991246.303890
+179004	[1728197673]	2000000 OPS in 2.011865 seconds, throughput 994102.486996
+179004	[1728197673]	2000000 OPS in 2.006687 seconds, throughput 996667.641740
+179004	[1728197674]	2000000 OPS in 2.008241 seconds, throughput 995896.408847
+179004	[1728197674]	2000000 OPS in 2.019373 seconds, throughput 990406.428134
+179004	[1728197675]	2000000 OPS in 2.012869 seconds, throughput 993606.638087
+179004	[1728197675]	2000000 OPS in 2.004269 seconds, throughput 997870.046386
+179004	[1728197676]	2000000 OPS in 2.014176 seconds, throughput 992961.886151
+179004	[1728197676]	2000000 OPS in 2.022708 seconds, throughput 988773.466066
+179004	[1728197677]	2000000 OPS in 2.015493 seconds, throughput 992313.046982
+179004	[1728197677]	2000000 OPS in 2.004686 seconds, throughput 997662.476817
+179004	[1728197678]	2000000 OPS in 2.009098 seconds, throughput 995471.599693
+179004	[1728197678]	2000000 OPS in 2.019033 seconds, throughput 990573.210047
+179004	[1728197679]	2000000 OPS in 2.010041 seconds, throughput 995004.579509
+179004	[1728197679]	2000000 OPS in 2.004527 seconds, throughput 997741.611862
+179004	[1728197680]	2000000 OPS in 2.009622 seconds, throughput 995212.034900
+179004	[1728197680]	2000000 OPS in 2.020271 seconds, throughput 989966.197604
+179004	[1728197681]	2000000 OPS in 2.013388 seconds, throughput 993350.511675
+179004	[1728197681]	2000000 OPS in 2.003823 seconds, throughput 998092.146861
+179004	[1728197682]	2000000 OPS in 2.009809 seconds, throughput 995119.436723
+179004	[1728197682]	2000000 OPS in 2.020901 seconds, throughput 989657.583424
+179004	[1728197683]	2000000 OPS in 2.015088 seconds, throughput 992512.485807
+179004	[1728197683]	2000000 OPS in 2.005777 seconds, throughput 997119.819402
+179004	[1728197684]	2000000 OPS in 2.007383 seconds, throughput 996322.077053
+179004	[1728197684]	2000000 OPS in 2.019012 seconds, throughput 990583.513124
+179004	[1728197685]	2000000 OPS in 2.010591 seconds, throughput 994732.394604
+179004	[1728197685]	2000000 OPS in 2.003392 seconds, throughput 998306.871546
+179004	[1728197686]	2000000 OPS in 2.009621 seconds, throughput 995212.530124
+179004	[1728197686]	2000000 OPS in 2.018500 seconds, throughput 990834.778301
+179004	[1728197687]	2000000 OPS in 2.013043 seconds, throughput 993520.754400
+179004	[1728197687]	2000000 OPS in 2.005117 seconds, throughput 997448.029217
+179004	[1728197688]	2000000 OPS in 2.012057 seconds, throughput 994007.625032
+179004	[1728197688]	2000000 OPS in 2.022841 seconds, throughput 988708.455089
+179004	[1728197689]	2000000 OPS in 2.011965 seconds, throughput 994053.077464
+179004	[1728197689]	2000000 OPS in 2.001536 seconds, throughput 999232.589371
+179004	[1728197690]	2000000 OPS in 2.010153 seconds, throughput 994949.140687
+179004	[1728197690]	2000000 OPS in 2.019107 seconds, throughput 990536.905672
+179004	[1728197691]	2000000 OPS in 2.013569 seconds, throughput 993261.219258
+179004	[1728197691]	2000000 OPS in 2.002748 seconds, throughput 998627.885286
+179004	[1728197692]	2000000 OPS in 2.009922 seconds, throughput 995063.490026
+179004	[1728197692]	2000000 OPS in 2.018459 seconds, throughput 990854.904657
+179004	[1728197693]	2000000 OPS in 2.014136 seconds, throughput 992981.606009
+179004	[1728197693]	2000000 OPS in 1.999663 seconds, throughput 1000168.528397
+179004	[1728197694]	2000000 OPS in 2.010516 seconds, throughput 994769.501959
+179004	[1728197694]	2000000 OPS in 2.017991 seconds, throughput 991084.697603
+179004	[1728197695]	2000000 OPS in 2.011855 seconds, throughput 994107.428219
+179004	[1728197695]	2000000 OPS in 2.005342 seconds, throughput 997336.115236
+179004	[1728197696]	2000000 OPS in 2.015805 seconds, throughput 992159.459868
+179004	[1728197696]	2000000 OPS in 2.018075 seconds, throughput 991043.444867
+179004	[1728197697]	2000000 OPS in 2.013900 seconds, throughput 993097.969115
+179004	[1728197697]	2000000 OPS in 2.009815 seconds, throughput 995116.465943
+179004	[1728197698]	2000000 OPS in 2.016108 seconds, throughput 992010.348652
+179004	[1728197698]	2000000 OPS in 2.024665 seconds, throughput 987817.737749
+179004	[1728197699]	2000000 OPS in 2.013764 seconds, throughput 993165.038207
+179004	[1728197699]	2000000 OPS in 2.005857 seconds, throughput 997080.051070
+179004	[1728197700]	2000000 OPS in 2.010185 seconds, throughput 994933.302159
+179004	[1728197701]	2000000 OPS in 2.022175 seconds, throughput 989034.084587
+179004	[1728197701]	2000000 OPS in 2.019858 seconds, throughput 990168.615814
+179004	[1728197701]	2000000 OPS in 2.003992 seconds, throughput 998007.976080
+179004	[1728197702]	2000000 OPS in 2.014121 seconds, throughput 992989.001157
+179004	[1728197703]	2000000 OPS in 2.018794 seconds, throughput 990690.481545
+179004	[1728197703]	2000000 OPS in 2.012906 seconds, throughput 993588.374221
+179004	[1728197703]	2000000 OPS in 2.006573 seconds, throughput 996724.265701
+179004	[1728197704]	2000000 OPS in 2.013941 seconds, throughput 993077.751533
+179004	[1728197705]	2000000 OPS in 2.017786 seconds, throughput 991185.388341
+179004	[1728197705]	2000000 OPS in 2.008510 seconds, throughput 995763.028315
+179004	[1728197705]	2000000 OPS in 2.004679 seconds, throughput 997665.960485
+179004	[1728197706]	2000000 OPS in 2.011845 seconds, throughput 994112.369492
+179004	[1728197707]	2000000 OPS in 2.024431 seconds, throughput 987931.917660
+179004	[1728197707]	2000000 OPS in 2.012249 seconds, throughput 993912.781172
+179004	[1728197707]	2000000 OPS in 2.001411 seconds, throughput 999294.997379
+179004	[1728197708]	2000000 OPS in 2.011495 seconds, throughput 994285.344980
+179004	[1728197709]	2000000 OPS in 2.019598 seconds, throughput 990296.088628
+179004	[1728197709]	2000000 OPS in 2.015605 seconds, throughput 992257.907675
+179004	[1728197709]	2000000 OPS in 2.005686 seconds, throughput 997165.059735
+179004	[1728197710]	2000000 OPS in 2.010321 seconds, throughput 994865.994038
+179004	[1728197711]	2000000 OPS in 2.023339 seconds, throughput 988465.106440
+179004	[1728197711]	2000000 OPS in 2.011404 seconds, throughput 994330.328467
+179004	[1728197711]	2000000 OPS in 2.004630 seconds, throughput 997690.346847
+179004	[1728197712]	2000000 OPS in 2.010643 seconds, throughput 994706.668464
+179004	[1728197713]	2000000 OPS in 2.017005 seconds, throughput 991569.183021
+179004	[1728197713]	2000000 OPS in 2.014524 seconds, throughput 992790.356432
+179004	[1728197713]	2000000 OPS in 2.006692 seconds, throughput 996665.158380
+179004	[1728197714]	2000000 OPS in 2.010321 seconds, throughput 994865.994038
+179004	[1728197715]	2000000 OPS in 2.018793 seconds, throughput 990690.972279
+179004	[1728197715]	2000000 OPS in 2.013762 seconds, throughput 993166.024585
+179004	[1728197715]	2000000 OPS in 2.004685 seconds, throughput 997662.974482
+179004	[1728197716]	2000000 OPS in 2.011808 seconds, throughput 994130.652627
+179004	[1728197717]	2000000 OPS in 2.020227 seconds, throughput 989987.758801
+179004	[1728197717]	2000000 OPS in 2.011462 seconds, throughput 994301.657203
+179004	[1728197717]	2000000 OPS in 2.006205 seconds, throughput 996907.095735
+179004	[1728197718]	2000000 OPS in 2.009498 seconds, throughput 995273.446403
+179004	[1728197719]	2000000 OPS in 2.016172 seconds, throughput 991978.858947
+179004	[1728197719]	2000000 OPS in 2.011977 seconds, throughput 994047.148650
+179004	[1728197719]	2000000 OPS in 2.003562 seconds, throughput 998222.166322
+179004	[1728197720]	2000000 OPS in 2.005529 seconds, throughput 997243.121391
+179004	[1728197721]	2000000 OPS in 2.019015 seconds, throughput 990582.041243
+179004	[1728197721]	2000000 OPS in 2.010363 seconds, throughput 994845.209547
+179004	[1728197721]	2000000 OPS in 2.002966 seconds, throughput 998519.196032
+179004	[1728197722]	2000000 OPS in 2.010031 seconds, throughput 995009.529704
+179004	[1728197723]	2000000 OPS in 2.020233 seconds, throughput 989984.818583
+179004	[1728197723]	2000000 OPS in 2.016919 seconds, throughput 991611.462830
+179004	[1728197723]	2000000 OPS in 2.003860 seconds, throughput 998073.717725
+179004	[1728197724]	2000000 OPS in 2.006529 seconds, throughput 996746.122284
+179004	[1728197725]	2000000 OPS in 2.018899 seconds, throughput 990638.957174
+179004	[1728197725]	2000000 OPS in 2.012336 seconds, throughput 993869.811006
+179004	[1728197725]	2000000 OPS in 2.003195 seconds, throughput 998405.047936
+179004	[1728197726]	2000000 OPS in 2.006528 seconds, throughput 996746.619035
+179004	[1728197727]	2000000 OPS in 2.020809 seconds, throughput 989702.638894
+179004	[1728197727]	2000000 OPS in 2.014154 seconds, throughput 992972.731976
+179004	[1728197727]	2000000 OPS in 2.005128 seconds, throughput 997442.557283
+179004	[1728197728]	2000000 OPS in 2.006784 seconds, throughput 996619.466769
+179004	[1728197729]	2000000 OPS in 2.016325 seconds, throughput 991903.586971
+179004	[1728197729]	2000000 OPS in 2.013393 seconds, throughput 993348.044818
+179004	[1728197729]	2000000 OPS in 2.005416 seconds, throughput 997299.313459
+179004	[1728197731]	2000000 OPS in 2.011684 seconds, throughput 994191.930741
+179004	[1728197731]	2000000 OPS in 2.017008 seconds, throughput 991567.708209
+179004	[1728197731]	2000000 OPS in 2.009543 seconds, throughput 995251.159094
+179004	[1728197731]	2000000 OPS in 2.005146 seconds, throughput 997433.603339
+179004	[1728197733]	2000000 OPS in 2.007039 seconds, throughput 996492.843438
+179004	[1728197733]	2000000 OPS in 2.016137 seconds, throughput 991996.079631
+179004	[1728197733]	2000000 OPS in 2.013557 seconds, throughput 993267.138700
+179004	[1728197733]	2000000 OPS in 2.007001 seconds, throughput 996511.710756
+179004	[1728197735]	2000000 OPS in 2.007012 seconds, throughput 996506.249091
+179004	[1728197735]	2000000 OPS in 2.017095 seconds, throughput 991524.940570
+179004	[1728197735]	2000000 OPS in 2.013344 seconds, throughput 993372.220545
+179004	[1728197735]	2000000 OPS in 2.002115 seconds, throughput 998943.617125
+179004	[1728197737]	2000000 OPS in 2.008527 seconds, throughput 995754.600262
+179004	[1728197737]	2000000 OPS in 2.021736 seconds, throughput 989248.843568
+179004	[1728197737]	2000000 OPS in 2.011952 seconds, throughput 994059.500425
+179004	[1728197737]	2000000 OPS in 2.004197 seconds, throughput 997905.894480
+179004	[1728197739]	2000000 OPS in 2.010587 seconds, throughput 994734.373593
+179004	[1728197739]	2000000 OPS in 2.021000 seconds, throughput 989609.104404
+179004	[1728197739]	2000000 OPS in 2.002591 seconds, throughput 998706.176149
+179004	[1728197739]	2000000 OPS in 2.011239 seconds, throughput 994411.902315
+179004	[1728197741]	2000000 OPS in 2.010753 seconds, throughput 994652.252166
+179004	[1728197741]	2000000 OPS in 2.021232 seconds, throughput 989495.515606
+179004	[1728197741]	2000000 OPS in 2.002476 seconds, throughput 998763.530749
+179004	[1728197741]	2000000 OPS in 2.014445 seconds, throughput 992829.290450
+179004	[1728197743]	2000000 OPS in 2.009960 seconds, throughput 995044.677506
+179004	[1728197743]	2000000 OPS in 2.019040 seconds, throughput 990569.775735
+179004	[1728197743]	2000000 OPS in 2.003369 seconds, throughput 998318.332768
+179004	[1728197743]	2000000 OPS in 2.012650 seconds, throughput 993714.754180
+179004	[1728197745]	2000000 OPS in 2.007801 seconds, throughput 996114.654789
+179004	[1728197745]	2000000 OPS in 2.018600 seconds, throughput 990785.693055
+179004	[1728197745]	2000000 OPS in 2.004502 seconds, throughput 997754.055621
+179004	[1728197745]	2000000 OPS in 2.014217 seconds, throughput 992941.674110
+179004	[1728197747]	2000000 OPS in 2.007031 seconds, throughput 996496.815445
+179004	[1728197747]	2000000 OPS in 2.018759 seconds, throughput 990707.657526
+179004	[1728197747]	2000000 OPS in 2.002731 seconds, throughput 998636.362048
+179004	[1728197747]	2000000 OPS in 2.013356 seconds, throughput 993366.299850
+179004	[1728197749]	2000000 OPS in 2.013761 seconds, throughput 993166.517774
+179004	[1728197749]	2000000 OPS in 2.020553 seconds, throughput 989828.032227
+179004	[1728197749]	2000000 OPS in 2.006131 seconds, throughput 996943.868571
+179004	[1728197749]	2000000 OPS in 2.015893 seconds, throughput 992116.149022
+179004	[1728197751]	2000000 OPS in 2.008087 seconds, throughput 995972.784048
+179004	[1728197751]	2000000 OPS in 2.020217 seconds, throughput 989992.659204
+179004	[1728197751]	2000000 OPS in 2.004983 seconds, throughput 997514.692145
+179004	[1728197751]	2000000 OPS in 2.017872 seconds, throughput 991143.144858
+179004	[1728197753]	2000000 OPS in 2.017024 seconds, throughput 991559.842620
+179004	[1728197753]	2000000 OPS in 2.026348 seconds, throughput 986997.297601
+179004	[1728197753]	2000000 OPS in 2.010638 seconds, throughput 994709.142073
+179004	[1728197753]	2000000 OPS in 2.016717 seconds, throughput 991710.785400
+179004	[1728197755]	2000000 OPS in 2.011186 seconds, throughput 994438.107664
+179004	[1728197755]	2000000 OPS in 2.020065 seconds, throughput 990067.151305
+179004	[1728197755]	2000000 OPS in 2.005089 seconds, throughput 997461.958048
+179004	[1728197756]	2000000 OPS in 2.012048 seconds, throughput 994012.071283
+179004	[1728197757]	2000000 OPS in 2.011201 seconds, throughput 994430.690916
+179004	[1728197757]	2000000 OPS in 2.014679 seconds, throughput 992713.975775
+179004	[1728197757]	2000000 OPS in 2.003159 seconds, throughput 998422.990886
+179004	[1728197758]	2000000 OPS in 2.013586 seconds, throughput 993252.833502
+179004	[1728197759]	2000000 OPS in 2.009816 seconds, throughput 995115.970815
+179004	[1728197759]	2000000 OPS in 2.019961 seconds, throughput 990118.126043
+179004	[1728197759]	2000000 OPS in 2.003508 seconds, throughput 998249.071129
+179004	[1728197760]	2000000 OPS in 2.012583 seconds, throughput 993747.835493
+179004	[1728197761]	2000000 OPS in 2.011503 seconds, throughput 994281.390582
+179004	[1728197761]	2000000 OPS in 2.021026 seconds, throughput 989596.373327
+179004	[1728197761]	2000000 OPS in 2.005071 seconds, throughput 997470.912501
+179004	[1728197762]	2000000 OPS in 2.013418 seconds, throughput 993335.710717
+179004	[1728197763]	2000000 OPS in 2.012553 seconds, throughput 993762.648735
+179004	[1728197763]	2000000 OPS in 2.024297 seconds, throughput 987997.314623
+179004	[1728197763]	2000000 OPS in 2.001099 seconds, throughput 999450.801784
+179004	[1728197764]	2000000 OPS in 2.014485 seconds, throughput 992809.576641
+179004	[1728197765]	2000000 OPS in 2.009412 seconds, throughput 995316.042703
+179004	[1728197765]	2000000 OPS in 2.019596 seconds, throughput 990297.069315
+179004	[1728197765]	2000000 OPS in 2.000758 seconds, throughput 999621.143587
+179004	[1728197766]	2000000 OPS in 2.010635 seconds, throughput 994710.626245
+179004	[1728197767]	2000000 OPS in 2.012549 seconds, throughput 993764.623868
+179004	[1728197767]	2000000 OPS in 2.019866 seconds, throughput 990164.694094
+179004	[1728197767]	2000000 OPS in 2.006881 seconds, throughput 996571.296455
+179004	[1728197768]	2000000 OPS in 2.009567 seconds, throughput 995239.272938
+179004	[1728197769]	2000000 OPS in 2.008764 seconds, throughput 995637.118148
+179004	[1728197769]	2000000 OPS in 2.019507 seconds, throughput 990340.711867
+179004	[1728197769]	2000000 OPS in 2.003778 seconds, throughput 998114.561593
+179004	[1728197770]	2000000 OPS in 2.011932 seconds, throughput 994069.382067
+179004	[1728197771]	2000000 OPS in 2.009187 seconds, throughput 995427.503761
+179004	[1728197771]	2000000 OPS in 2.020775 seconds, throughput 989719.290866
+179004	[1728197771]	2000000 OPS in 2.001496 seconds, throughput 999252.559086
+179004	[1728197772]	2000000 OPS in 2.014249 seconds, throughput 992925.899430
+179004	[1728197773]	2000000 OPS in 2.009424 seconds, throughput 995310.098814
+179004	[1728197773]	2000000 OPS in 2.015233 seconds, throughput 992441.072571
+179004	[1728197773]	2000000 OPS in 2.005861 seconds, throughput 997078.062737
+179004	[1728197774]	2000000 OPS in 2.011761 seconds, throughput 994153.878120
+179004	[1728197775]	2000000 OPS in 2.003889 seconds, throughput 998059.273742
+179004	[1728197775]	2000000 OPS in 2.021991 seconds, throughput 989124.086111
+179004	[1728197775]	2000000 OPS in 2.005884 seconds, throughput 997066.629975
+179004	[1728197776]	2000000 OPS in 2.009628 seconds, throughput 995209.063568
+179004	[1728197777]	2000000 OPS in 2.008172 seconds, throughput 995930.627456
+179004	[1728197777]	2000000 OPS in 2.020799 seconds, throughput 989707.536474
+179004	[1728197777]	2000000 OPS in 1.999844 seconds, throughput 1000078.006084
+179004	[1728197778]	2000000 OPS in 2.012291 seconds, throughput 993892.036490
+179004	[1728197779]	2000000 OPS in 2.004251 seconds, throughput 997879.008168
+179004	[1728197779]	2000000 OPS in 2.017680 seconds, throughput 991237.460846
+179004	[1728197779]	2000000 OPS in 2.007038 seconds, throughput 996493.339937
+179004	[1728197780]	2000000 OPS in 2.012781 seconds, throughput 993650.079169
+179004	[1728197781]	2000000 OPS in 2.009798 seconds, throughput 995124.883197
+179004	[1728197781]	2000000 OPS in 2.019197 seconds, throughput 990492.755288
+179004	[1728197781]	2000000 OPS in 2.010294 seconds, throughput 994879.355955
+179004	[1728197782]	2000000 OPS in 2.014766 seconds, throughput 992671.109201
+179004	[1728197783]	2000000 OPS in 2.010334 seconds, throughput 994859.560650
+179004	[1728197783]	2000000 OPS in 2.016616 seconds, throughput 991760.454147
+179004	[1728197783]	2000000 OPS in 2.004852 seconds, throughput 997579.871232
+179004	[1728197784]	2000000 OPS in 2.010896 seconds, throughput 994581.519880
+179004	[1728197785]	2000000 OPS in 2.005992 seconds, throughput 997012.949204
+179004	[1728197785]	2000000 OPS in 2.019633 seconds, throughput 990278.926914
+179004	[1728197785]	2000000 OPS in 2.008705 seconds, throughput 995666.362159
+179004	[1728197786]	2000000 OPS in 2.010602 seconds, throughput 994726.952425
+179004	[1728197787]	2000000 OPS in 2.009163 seconds, throughput 995439.394414
+179004	[1728197787]	2000000 OPS in 2.017248 seconds, throughput 991449.737464
+179004	[1728197787]	2000000 OPS in 2.003581 seconds, throughput 998212.700160
+179004	[1728197788]	2000000 OPS in 2.010610 seconds, throughput 994722.994514
+179004	[1728197789]	2000000 OPS in 2.009725 seconds, throughput 995161.029494
+179004	[1728197789]	2000000 OPS in 2.019251 seconds, throughput 990466.266947
+179004	[1728197789]	2000000 OPS in 2.002127 seconds, throughput 998937.629831
+179004	[1728197790]	2000000 OPS in 2.011853 seconds, throughput 994108.416470
+179004	[1728197791]	2000000 OPS in 2.006554 seconds, throughput 996733.703653
+179004	[1728197791]	2000000 OPS in 2.019237 seconds, throughput 990473.134159
+179004	[1728197792]	2000000 OPS in 2.004320 seconds, throughput 997844.655544
+179004	[1728197792]	2000000 OPS in 2.011646 seconds, throughput 994210.711030
+179004	[1728197793]	2000000 OPS in 2.005177 seconds, throughput 997418.183033
+179004	[1728197793]	2000000 OPS in 2.019456 seconds, throughput 990365.722254
+179004	[1728197794]	2000000 OPS in 2.005352 seconds, throughput 997331.141864
+179004	[1728197794]	2000000 OPS in 2.012136 seconds, throughput 993968.598544
+179004	[1728197795]	2000000 OPS in 2.012452 seconds, throughput 993812.523230
+179004	[1728197795]	2000000 OPS in 2.018957 seconds, throughput 990610.498391
+179004	[1728197796]	2000000 OPS in 2.003091 seconds, throughput 998456.884884
+179004	[1728197796]	2000000 OPS in 2.011541 seconds, throughput 994262.607623
+179004	[1728197797]	2000000 OPS in 2.008560 seconds, throughput 995738.240331
+179004	[1728197797]	2000000 OPS in 2.017361 seconds, throughput 991394.202624
+179004	[1728197798]	2000000 OPS in 2.004504 seconds, throughput 997753.060109
+179004	[1728197798]	2000000 OPS in 2.015122 seconds, throughput 992495.739712
+179004	[1728197799]	2000000 OPS in 2.008980 seconds, throughput 995530.069986
+179004	[1728197799]	2000000 OPS in 2.017652 seconds, throughput 991251.216761
+179004	[1728197800]	2000000 OPS in 2.003944 seconds, throughput 998031.881130
+179004	[1728197800]	2000000 OPS in 2.012640 seconds, throughput 993719.691549
+179004	[1728197801]	2000000 OPS in 2.006186 seconds, throughput 996916.537151
+179004	[1728197801]	2000000 OPS in 2.016357 seconds, throughput 991887.845258
+179004	[1728197802]	2000000 OPS in 2.006540 seconds, throughput 996740.658048
+179004	[1728197802]	2000000 OPS in 2.015514 seconds, throughput 992302.707895
+179004	[1728197803]	2000000 OPS in 2.008571 seconds, throughput 995732.787141
+179004	[1728197803]	2000000 OPS in 2.019216 seconds, throughput 990483.435155
+179004	[1728197804]	2000000 OPS in 2.006995 seconds, throughput 996514.689872
+179004	[1728197804]	2000000 OPS in 2.018711 seconds, throughput 990731.214126
+179004	[1728197805]	2000000 OPS in 2.007839 seconds, throughput 996095.802502
+179004	[1728197806]	2000000 OPS in 2.021140 seconds, throughput 989540.556320
+179004	[1728197806]	2000000 OPS in 2.004790 seconds, throughput 997610.722320
+179004	[1728197806]	2000000 OPS in 2.013875 seconds, throughput 993110.297312
+179004	[1728197807]	2000000 OPS in 2.010672 seconds, throughput 994692.321771
+179004	[1728197808]	2000000 OPS in 2.024769 seconds, throughput 987766.999594
+179004	[1728197808]	2000000 OPS in 2.006683 seconds, throughput 996669.628437
+179004	[1728197808]	2000000 OPS in 2.019598 seconds, throughput 990296.088628
+179004	[1728197809]	2000000 OPS in 2.015110 seconds, throughput 992501.650034
+179004	[1728197810]	2000000 OPS in 2.003403 seconds, throughput 998301.390185
+179004	[1728197810]	2000000 OPS in 2.022463 seconds, throughput 988893.245513
+179004	[1728197810]	2000000 OPS in 2.015359 seconds, throughput 992379.025275
+179004	[1728197811]	2000000 OPS in 2.010852 seconds, throughput 994603.282589
+179004	[1728197812]	2000000 OPS in 2.004415 seconds, throughput 997797.362323
+179004	[1728197812]	2000000 OPS in 2.017942 seconds, throughput 991108.763285
+179004	[1728197812]	2000000 OPS in 2.015394 seconds, throughput 992361.791292
+179004	[1728197813]	2000000 OPS in 2.012051 seconds, throughput 994010.589195
+179004	[1728197814]	2000000 OPS in 2.002832 seconds, throughput 998586.002221
+179004	[1728197814]	2000000 OPS in 2.018611 seconds, throughput 990780.293974
+179004	[1728197814]	2000000 OPS in 2.012011 seconds, throughput 994030.350729
+179004	[1728197815]	2000000 OPS in 2.009288 seconds, throughput 995377.467043
+179004	[1728197816]	2000000 OPS in 2.006430 seconds, throughput 996795.303101
+179004	[1728197816]	2000000 OPS in 2.022231 seconds, throughput 989006.696070
+179004	[1728197816]	2000000 OPS in 2.013941 seconds, throughput 993077.751533
+179004	[1728197817]	2000000 OPS in 2.008857 seconds, throughput 995591.025145
+179004	[1728197818]	2000000 OPS in 2.002399 seconds, throughput 998801.937076
+179004	[1728197818]	2000000 OPS in 2.020107 seconds, throughput 990046.566840
+179004	[1728197818]	2000000 OPS in 2.013026 seconds, throughput 993529.144681
+179004	[1728197819]	2000000 OPS in 2.009810 seconds, throughput 995118.941591
+179004	[1728197820]	2000000 OPS in 2.005726 seconds, throughput 997145.173369
+179004	[1728197820]	2000000 OPS in 2.019629 seconds, throughput 990280.888223
+179004	[1728197820]	2000000 OPS in 2.009812 seconds, throughput 995117.951331
+179004	[1728197821]	2000000 OPS in 2.007134 seconds, throughput 996445.678266
+179004	[1728197822]	2000000 OPS in 2.007604 seconds, throughput 996212.400453
+179004	[1728197822]	2000000 OPS in 2.019566 seconds, throughput 990311.779858
+179004	[1728197822]	2000000 OPS in 2.009360 seconds, throughput 995341.800374
+179004	[1728197823]	2000000 OPS in 2.008366 seconds, throughput 995834.424602
+179004	[1728197824]	2000000 OPS in 2.007738 seconds, throughput 996145.911469
+179004	[1728197824]	2000000 OPS in 2.016242 seconds, throughput 991944.419370
+179004	[1728197824]	2000000 OPS in 2.011834 seconds, throughput 994117.804948
+179004	[1728197825]	2000000 OPS in 2.007458 seconds, throughput 996284.853780
+179004	[1728197826]	2000000 OPS in 2.008552 seconds, throughput 995742.206326
+179004	[1728197826]	2000000 OPS in 2.019884 seconds, throughput 990155.870337
+179004	[1728197826]	2000000 OPS in 2.014056 seconds, throughput 993021.048074
+179004	[1728197827]	2000000 OPS in 2.013854 seconds, throughput 993120.653235
+179004	[1728197828]	2000000 OPS in 2.005526 seconds, throughput 997244.613134
+179004	[1728197828]	2000000 OPS in 2.016484 seconds, throughput 991825.375257
+179004	[1728197828]	2000000 OPS in 2.010793 seconds, throughput 994632.465898
+179004	[1728197829]	2000000 OPS in 2.012218 seconds, throughput 993928.093278
+179004	[1728197830]	2000000 OPS in 2.002145 seconds, throughput 998928.649024
+179004	[1728197830]	2000000 OPS in 2.019151 seconds, throughput 990515.320548
+179004	[1728197830]	2000000 OPS in 2.013069 seconds, throughput 993507.922481
+179004	[1728197831]	2000000 OPS in 2.011195 seconds, throughput 994433.657602
+179004	[1728197832]	2000000 OPS in 2.005049 seconds, throughput 997481.857052
+179004	[1728197832]	2000000 OPS in 2.022413 seconds, throughput 988917.693864
+179004	[1728197832]	2000000 OPS in 2.010889 seconds, throughput 994584.982065
+179004	[1728197833]	2000000 OPS in 2.012779 seconds, throughput 993651.066511
+179004	[1728197834]	2000000 OPS in 2.003081 seconds, throughput 998461.869490
+179004	[1728197834]	2000000 OPS in 2.020110 seconds, throughput 990045.096554
+179004	[1728197834]	2000000 OPS in 2.010608 seconds, throughput 994723.983989
+179004	[1728197835]	2000000 OPS in 2.008860 seconds, throughput 995589.538345
+179004	[1728197836]	2000000 OPS in 2.003687 seconds, throughput 998159.892239
+179004	[1728197836]	2000000 OPS in 2.020353 seconds, throughput 989926.017879
+179004	[1728197836]	2000000 OPS in 2.015301 seconds, throughput 992407.585765
+179004	[1728197837]	2000000 OPS in 2.008322 seconds, throughput 995856.242176
+179004	[1728197838]	2000000 OPS in 2.003502 seconds, throughput 998252.060642
+179004	[1728197838]	2000000 OPS in 2.016613 seconds, throughput 991761.929532
+179004	[1728197838]	2000000 OPS in 2.013048 seconds, throughput 993518.286698
+179004	[1728197839]	2000000 OPS in 2.005843 seconds, throughput 997087.010299
+179004	[1728197840]	2000000 OPS in 2.004232 seconds, throughput 997888.468002
+179004	[1728197840]	2000000 OPS in 2.023762 seconds, throughput 988258.500753
+179004	[1728197840]	2000000 OPS in 2.012645 seconds, throughput 993717.222858
+179004	[1728197841]	2000000 OPS in 2.007919 seconds, throughput 996056.115809
+179004	[1728197842]	2000000 OPS in 2.005183 seconds, throughput 997415.198513
+179004	[1728197842]	2000000 OPS in 2.019960 seconds, throughput 990118.616210
+179004	[1728197842]	2000000 OPS in 2.013520 seconds, throughput 993285.390758
+179004	[1728197843]	2000000 OPS in 2.008284 seconds, throughput 995875.085396
+179004	[1728197844]	2000000 OPS in 2.004083 seconds, throughput 997962.659231
+179004	[1728197844]	2000000 OPS in 2.020527 seconds, throughput 989840.769265
+179004	[1728197844]	2000000 OPS in 2.014293 seconds, throughput 992904.210063
+179004	[1728197845]	2000000 OPS in 2.008264 seconds, throughput 995885.003167
+179004	[1728197846]	2000000 OPS in 2.004170 seconds, throughput 997919.338180
+179004	[1728197846]	2000000 OPS in 2.019440 seconds, throughput 990373.568910
+179004	[1728197846]	2000000 OPS in 2.012888 seconds, throughput 993597.259261
+179004	[1728197847]	2000000 OPS in 2.009224 seconds, throughput 995409.172895
+179004	[1728197848]	2000000 OPS in 2.002301 seconds, throughput 998850.822129
+179004	[1728197848]	2000000 OPS in 2.019535 seconds, throughput 990326.981211
+179004	[1728197848]	2000000 OPS in 2.011426 seconds, throughput 994319.452965
+179004	[1728197849]	2000000 OPS in 2.009929 seconds, throughput 995060.024508
+179004	[1728197850]	2000000 OPS in 2.005798 seconds, throughput 997109.379908
+179004	[1728197850]	2000000 OPS in 2.020267 seconds, throughput 989968.157674
+179004	[1728197850]	2000000 OPS in 2.010746 seconds, throughput 994655.714844
+179004	[1728197851]	2000000 OPS in 2.009714 seconds, throughput 995166.476424
+179004	[1728197852]	2000000 OPS in 2.005215 seconds, throughput 997399.281374
+179004	[1728197852]	2000000 OPS in 2.019003 seconds, throughput 990587.928795
+179004	[1728197852]	2000000 OPS in 2.011844 seconds, throughput 994112.863622
+179004	[1728197853]	2000000 OPS in 2.008777 seconds, throughput 995630.674784
+179004	[1728197854]	2000000 OPS in 2.002644 seconds, throughput 998679.745377
+179004	[1728197854]	2000000 OPS in 2.017994 seconds, throughput 991083.224232
+179004	[1728197854]	2000000 OPS in 2.013515 seconds, throughput 993287.857304
+179004	[1728197855]	2000000 OPS in 2.009648 seconds, throughput 995199.159256
+179004	[1728197856]	2000000 OPS in 2.005813 seconds, throughput 997101.923260
+179004	[1728197856]	2000000 OPS in 2.019751 seconds, throughput 990221.071805
+179004	[1728197856]	2000000 OPS in 2.012687 seconds, throughput 993696.486339
+179004	[1728197857]	2000000 OPS in 2.008418 seconds, throughput 995808.641428
+179004	[1728197858]	2000000 OPS in 2.006364 seconds, throughput 996828.093008
+179004	[1728197858]	2000000 OPS in 2.020218 seconds, throughput 989992.169162
+179004	[1728197858]	2000000 OPS in 2.013127 seconds, throughput 993479.298623
+179004	[1728197859]	2000000 OPS in 2.007460 seconds, throughput 996283.861198
+179004	[1728197860]	2000000 OPS in 2.004350 seconds, throughput 997829.720358
+179004	[1728197860]	2000000 OPS in 2.019663 seconds, throughput 990264.217347
+179004	[1728197860]	2000000 OPS in 2.015663 seconds, throughput 992229.355800
+179004	[1728197861]	2000000 OPS in 2.012193 seconds, throughput 993940.442095
+179004	[1728197862]	2000000 OPS in 2.004707 seconds, throughput 997652.025957
+179004	[1728197862]	2000000 OPS in 2.019542 seconds, throughput 990323.548607
+179004	[1728197862]	2000000 OPS in 2.017038 seconds, throughput 991552.960331
+179004	[1728197863]	2000000 OPS in 2.012857 seconds, throughput 993612.561647
+179004	[1728197864]	2000000 OPS in 2.013072 seconds, throughput 993506.441896
+179004	[1728197864]	2000000 OPS in 2.022877 seconds, throughput 988690.859602
+179004	[1728197864]	2000000 OPS in 2.022754 seconds, throughput 988750.980099
+179004	[1728197865]	2000000 OPS in 2.010939 seconds, throughput 994560.252698
+179004	[1728197866]	2000000 OPS in 2.005647 seconds, throughput 997184.449706
+179004	[1728197866]	2000000 OPS in 2.021474 seconds, throughput 989377.058523
+179004	[1728197866]	2000000 OPS in 2.013311 seconds, throughput 993388.502819
+179004	[1728197867]	2000000 OPS in 2.008662 seconds, throughput 995687.676672
+179004	[1728197868]	2000000 OPS in 2.004405 seconds, throughput 997802.340345
+179004	[1728197868]	2000000 OPS in 2.021222 seconds, throughput 989500.411137
+179004	[1728197868]	2000000 OPS in 2.013263 seconds, throughput 993412.187081
+179004	[1728197869]	2000000 OPS in 2.008251 seconds, throughput 995891.449824
+179004	[1728197870]	2000000 OPS in 2.005255 seconds, throughput 997379.385664
+179004	[1728197870]	2000000 OPS in 2.021859 seconds, throughput 989188.662513
+179004	[1728197870]	2000000 OPS in 2.011938 seconds, throughput 994066.417554
+179004	[1728197871]	2000000 OPS in 2.007693 seconds, throughput 996168.238869
+179004	[1728197872]	2000000 OPS in 2.006102 seconds, throughput 996958.280287
+179004	[1728197872]	2000000 OPS in 2.015907 seconds, throughput 992109.259008
+179004	[1728197872]	2000000 OPS in 2.019796 seconds, throughput 990199.010197
+179004	[1728197873]	2000000 OPS in 2.009564 seconds, throughput 995240.758692
+179004	[1728197874]	2000000 OPS in 2.006977 seconds, throughput 996523.627326
+179004	[1728197874]	2000000 OPS in 2.020180 seconds, throughput 990010.791118
+179004	[1728197874]	2000000 OPS in 2.013342 seconds, throughput 993373.207334
+179004	[1728197875]	2000000 OPS in 2.013202 seconds, throughput 993442.287460
+179004	[1728197876]	2000000 OPS in 2.005007 seconds, throughput 997502.751861
+179004	[1728197876]	2000000 OPS in 2.019431 seconds, throughput 990377.982709
+179004	[1728197876]	2000000 OPS in 2.015794 seconds, throughput 992164.873990
+179004	[1728197877]	2000000 OPS in 2.009476 seconds, throughput 995284.342784
+179004	[1728197878]	2000000 OPS in 2.002128 seconds, throughput 998937.130893
+179004	[1728197878]	2000000 OPS in 2.026696 seconds, throughput 986827.822229
+179004	[1728197878]	2000000 OPS in 2.012888 seconds, throughput 993597.259261
+179004	[1728197879]	2000000 OPS in 2.009038 seconds, throughput 995501.329492
+179004	[1728197880]	2000000 OPS in 2.009625 seconds, throughput 995210.549232
+179004	[1728197880]	2000000 OPS in 2.019925 seconds, throughput 990135.772368
+179004	[1728197880]	2000000 OPS in 2.017162 seconds, throughput 991492.007087
+179004	[1728197881]	2000000 OPS in 2.010014 seconds, throughput 995017.945149
+179004	[1728197882]	2000000 OPS in 2.009464 seconds, throughput 995290.286365
+179004	[1728197882]	2000000 OPS in 2.020062 seconds, throughput 990068.621656
+179004	[1728197882]	2000000 OPS in 2.012092 seconds, throughput 993990.334438
+179004	[1728197883]	2000000 OPS in 2.004266 seconds, throughput 997871.540005
+179004	[1728197884]	2000000 OPS in 2.002724 seconds, throughput 998639.852521
+179004	[1728197884]	2000000 OPS in 2.020135 seconds, throughput 990032.844340
+179004	[1728197884]	2000000 OPS in 2.015425 seconds, throughput 992346.527407
+179004	[1728197885]	2000000 OPS in 2.006727 seconds, throughput 996647.775208
+179004	[1728197886]	2000000 OPS in 2.002261 seconds, throughput 998870.776587
+179004	[1728197886]	2000000 OPS in 2.017074 seconds, throughput 991535.263456
+179004	[1728197886]	2000000 OPS in 2.011430 seconds, throughput 994317.475627
+179004	[1728197887]	2000000 OPS in 2.008871 seconds, throughput 995584.086783
+179004	[1728197888]	2000000 OPS in 2.002178 seconds, throughput 998912.184631
+179004	[1728197888]	2000000 OPS in 2.019495 seconds, throughput 990346.596550
+179004	[1728197888]	2000000 OPS in 2.011792 seconds, throughput 994138.559056
+179004	[1728197889]	2000000 OPS in 2.005664 seconds, throughput 997175.997575
+179004	[1728197890]	2000000 OPS in 2.005287 seconds, throughput 997363.469668
+179004	[1728197890]	2000000 OPS in 2.023587 seconds, throughput 988343.965444
+179004	[1728197890]	2000000 OPS in 2.013708 seconds, throughput 993192.657525
+179004	[1728197891]	2000000 OPS in 2.010271 seconds, throughput 994890.738612
+179004	[1728197892]	2000000 OPS in 2.004245 seconds, throughput 997881.995465
+179004	[1728197892]	2000000 OPS in 2.018767 seconds, throughput 990703.731535
+179004	[1728197892]	2000000 OPS in 2.012704 seconds, throughput 993688.093232
+179004	[1728197893]	2000000 OPS in 2.008022 seconds, throughput 996005.023849
+179004	[1728197894]	2000000 OPS in 2.001739 seconds, throughput 999131.255373
+179004	[1728197894]	2000000 OPS in 2.018501 seconds, throughput 990834.287424
+179004	[1728197894]	2000000 OPS in 2.012405 seconds, throughput 993835.733861
+179004	[1728197895]	2000000 OPS in 2.014443 seconds, throughput 992830.276161
+179004	[1728197896]	2000000 OPS in 2.006185 seconds, throughput 996917.034072
+179004	[1728197896]	2000000 OPS in 2.018441 seconds, throughput 990863.740877
+179004	[1728197896]	2000000 OPS in 2.015115 seconds, throughput 992499.187391
+179004	[1728197897]	2000000 OPS in 2.010113 seconds, throughput 994968.939557
+179004	[1728197898]	2000000 OPS in 1.999390 seconds, throughput 1000305.093053
+179004	[1728197898]	2000000 OPS in 2.019861 seconds, throughput 990167.145165
+179004	[1728197898]	2000000 OPS in 2.012382 seconds, throughput 993847.092649
+179004	[1728197899]	2000000 OPS in 2.009476 seconds, throughput 995284.342784
+179004	[1728197900]	2000000 OPS in 2.006948 seconds, throughput 996538.026895
+179004	[1728197900]	2000000 OPS in 2.018631 seconds, throughput 990770.477616
+179004	[1728197900]	2000000 OPS in 2.012631 seconds, throughput 993724.135224
+179004	[1728197901]	2000000 OPS in 2.010521 seconds, throughput 994767.028049
+179004	[1728197902]	2000000 OPS in 2.005006 seconds, throughput 997503.249367
+179004	[1728197902]	2000000 OPS in 2.018221 seconds, throughput 990971.751855
+179004	[1728197902]	2000000 OPS in 2.015628 seconds, throughput 992246.585183
+179004	[1728197903]	2000000 OPS in 2.007121 seconds, throughput 996452.132183
+179004	[1728197904]	2000000 OPS in 2.004901 seconds, throughput 997555.490271
+179004	[1728197904]	2000000 OPS in 2.013816 seconds, throughput 993139.393073
+179004	[1728197904]	2000000 OPS in 2.020292 seconds, throughput 989955.907364
+179004	[1728197905]	2000000 OPS in 2.012651 seconds, throughput 993714.260446
+179004	[1728197906]	2000000 OPS in 2.001206 seconds, throughput 999397.363390
+179004	[1728197907]	2000000 OPS in 2.014294 seconds, throughput 992903.717134
+179004	[1728197907]	2000000 OPS in 2.017907 seconds, throughput 991125.953773
+179004	[1728197907]	2000000 OPS in 2.005866 seconds, throughput 997075.577332
+179004	[1728197908]	2000000 OPS in 1.998622 seconds, throughput 1000689.475048
+179004	[1728197909]	2000000 OPS in 2.017355 seconds, throughput 991397.151220
+179004	[1728197909]	2000000 OPS in 2.023521 seconds, throughput 988376.201680
+179004	[1728197909]	2000000 OPS in 2.007493 seconds, throughput 996267.483872
+179004	[1728197910]	2000000 OPS in 2.002983 seconds, throughput 998510.721259
+179004	[1728197911]	2000000 OPS in 2.013390 seconds, throughput 993349.524931
+179004	[1728197911]	2000000 OPS in 2.021909 seconds, throughput 989164.200763
+179004	[1728197911]	2000000 OPS in 2.008352 seconds, throughput 995841.366454
+179004	[1728197912]	2000000 OPS in 2.003331 seconds, throughput 998337.269278
+179004	[1728197913]	2000000 OPS in 2.015598 seconds, throughput 992261.353702
+179004	[1728197913]	2000000 OPS in 2.019223 seconds, throughput 990480.001466
+179004	[1728197913]	2000000 OPS in 2.008450 seconds, throughput 995792.775523
+179004	[1728197914]	2000000 OPS in 2.008703 seconds, throughput 995667.353511
+179004	[1728197915]	2000000 OPS in 2.015595 seconds, throughput 992262.830579
+179004	[1728197915]	2000000 OPS in 2.021239 seconds, throughput 989492.088763
+179004	[1728197915]	2000000 OPS in 2.010159 seconds, throughput 994946.170925
+179004	[1728197916]	2000000 OPS in 2.007910 seconds, throughput 996060.580405
+179004	[1728197917]	2000000 OPS in 2.014601 seconds, throughput 992752.411023
+179004	[1728197917]	2000000 OPS in 2.021688 seconds, throughput 989272.330844
+179004	[1728197917]	2000000 OPS in 2.008586 seconds, throughput 995725.351068
+179004	[1728197918]	2000000 OPS in 2.005428 seconds, throughput 997293.345859
+179004	[1728197919]	2000000 OPS in 2.018470 seconds, throughput 990849.504823
+179004	[1728197919]	2000000 OPS in 2.022801 seconds, throughput 988728.006363
+179004	[1728197919]	2000000 OPS in 2.012338 seconds, throughput 993868.823229
+179004	[1728197920]	2000000 OPS in 2.009987 seconds, throughput 995031.311148
+179004	[1728197921]	2000000 OPS in 2.013276 seconds, throughput 993405.772482
+179004	[1728197921]	2000000 OPS in 2.017230 seconds, throughput 991458.584296
+179004	[1728197921]	2000000 OPS in 2.007227 seconds, throughput 996399.510369
+179004	[1728197922]	2000000 OPS in 2.005154 seconds, throughput 997429.623859
+179004	[1728197923]	2000000 OPS in 2.017896 seconds, throughput 991131.356621
+179004	[1728197923]	2000000 OPS in 2.019355 seconds, throughput 990415.256357
+179004	[1728197923]	2000000 OPS in 2.008269 seconds, throughput 995882.523706
+179004	[1728197924]	2000000 OPS in 2.004298 seconds, throughput 997855.608298
+179004	[1728197925]	2000000 OPS in 2.010358 seconds, throughput 994847.683845
+179004	[1728197925]	2000000 OPS in 2.021179 seconds, throughput 989521.462473
+179004	[1728197925]	2000000 OPS in 2.011498 seconds, throughput 994283.862077
+179004	[1728197926]	2000000 OPS in 2.006778 seconds, throughput 996622.446529
+179004	[1728197927]	2000000 OPS in 2.012940 seconds, throughput 993571.591801
+179004	[1728197927]	2000000 OPS in 2.016902 seconds, throughput 991619.820894
+179004	[1728197927]	2000000 OPS in 2.004261 seconds, throughput 997874.029380
+179004	[1728197928]	2000000 OPS in 2.006452 seconds, throughput 996784.373611
+179004	[1728197929]	2000000 OPS in 2.012105 seconds, throughput 993983.912370
+179004	[1728197929]	2000000 OPS in 2.016898 seconds, throughput 991621.787517
+179004	[1728197929]	2000000 OPS in 2.008793 seconds, throughput 995622.744603
+179004	[1728197930]	2000000 OPS in 2.001083 seconds, throughput 999458.793064
+179004	[1728197931]	2000000 OPS in 2.013316 seconds, throughput 993386.035774
+179004	[1728197931]	2000000 OPS in 2.016523 seconds, throughput 991806.193135
+179004	[1728197931]	2000000 OPS in 2.006396 seconds, throughput 996812.194602
+179004	[1728197932]	2000000 OPS in 2.001152 seconds, throughput 999424.331585
+179004	[1728197933]	2000000 OPS in 2.011384 seconds, throughput 994340.215493
+179004	[1728197933]	2000000 OPS in 2.016386 seconds, throughput 991873.579761
+179004	[1728197933]	2000000 OPS in 2.006293 seconds, throughput 996863.369408
+179004	[1728197934]	2000000 OPS in 2.001519 seconds, throughput 999241.076402
+179004	[1728197935]	2000000 OPS in 2.014265 seconds, throughput 992918.012277
+179004	[1728197935]	2000000 OPS in 2.018219 seconds, throughput 990972.733881
+179004	[1728197935]	2000000 OPS in 2.012735 seconds, throughput 993672.788519
+179004	[1728197936]	2000000 OPS in 2.007434 seconds, throughput 996296.764925
+179004	[1728197937]	2000000 OPS in 2.013646 seconds, throughput 993223.237848
+179004	[1728197937]	2000000 OPS in 2.019283 seconds, throughput 990450.570821
+179004	[1728197937]	2000000 OPS in 2.009235 seconds, throughput 995403.723308
+179004	[1728197938]	2000000 OPS in 2.004278 seconds, throughput 997865.565555
+179004	[1728197939]	2000000 OPS in 2.012742 seconds, throughput 993669.332681
+179004	[1728197939]	2000000 OPS in 2.017350 seconds, throughput 991399.608397
+179004	[1728197939]	2000000 OPS in 2.010424 seconds, throughput 994815.024094
+179004	[1728197940]	2000000 OPS in 2.002865 seconds, throughput 998569.549121
+179004	[1728197941]	2000000 OPS in 2.012135 seconds, throughput 993969.092531
+179004	[1728197941]	2000000 OPS in 2.019761 seconds, throughput 990216.169141
+179004	[1728197941]	2000000 OPS in 2.008973 seconds, throughput 995533.538778
+179004	[1728197942]	2000000 OPS in 2.003457 seconds, throughput 998274.482557
+179004	[1728197943]	2000000 OPS in 2.012379 seconds, throughput 993848.574250
+179004	[1728197943]	2000000 OPS in 2.017140 seconds, throughput 991502.820826
+179004	[1728197943]	2000000 OPS in 2.006804 seconds, throughput 996609.534364
+179004	[1728197944]	2000000 OPS in 2.004835 seconds, throughput 997588.330212
+179004	[1728197945]	2000000 OPS in 2.016811 seconds, throughput 991664.563511
+179004	[1728197945]	2000000 OPS in 2.017436 seconds, throughput 991357.346652
+179004	[1728197945]	2000000 OPS in 2.009258 seconds, throughput 995392.328909
+179004	[1728197946]	2000000 OPS in 2.005477 seconds, throughput 997268.978901
+179004	[1728197947]	2000000 OPS in 2.014072 seconds, throughput 993013.159410
+179004	[1728197947]	2000000 OPS in 2.015514 seconds, throughput 992302.707895
+179004	[1728197947]	2000000 OPS in 2.007911 seconds, throughput 996060.084336
+179004	[1728197948]	2000000 OPS in 2.007741 seconds, throughput 996144.423011
+179004	[1728197949]	2000000 OPS in 2.015446 seconds, throughput 992336.187623
+179004	[1728197949]	2000000 OPS in 2.023816 seconds, throughput 988232.131775
+179004	[1728197950]	2000000 OPS in 2.011191 seconds, throughput 994435.635402
+179004	[1728197950]	2000000 OPS in 2.006324 seconds, throughput 996847.966729
+179004	[1728197951]	2000000 OPS in 2.014745 seconds, throughput 992681.455966
+179004	[1728197951]	2000000 OPS in 2.019126 seconds, throughput 990527.584707
+179004	[1728197952]	2000000 OPS in 2.005747 seconds, throughput 997134.733344
+179004	[1728197952]	2000000 OPS in 2.005602 seconds, throughput 997206.823687
+179004	[1728197953]	2000000 OPS in 2.016922 seconds, throughput 991609.987892
+179004	[1728197953]	2000000 OPS in 2.018234 seconds, throughput 990965.368733
+179004	[1728197954]	2000000 OPS in 2.007845 seconds, throughput 996092.825890
+179004	[1728197954]	2000000 OPS in 2.004310 seconds, throughput 997849.634039
+179004	[1728197955]	2000000 OPS in 2.017164 seconds, throughput 991491.024032
+179004	[1728197955]	2000000 OPS in 2.019704 seconds, throughput 990244.114979
+179004	[1728197956]	2000000 OPS in 2.007373 seconds, throughput 996327.040366
+179004	[1728197956]	2000000 OPS in 2.007039 seconds, throughput 996492.843438
+179004	[1728197957]	2000000 OPS in 2.013356 seconds, throughput 993366.299850
+179004	[1728197957]	2000000 OPS in 2.018658 seconds, throughput 990757.225840
+179004	[1728197958]	2000000 OPS in 2.012978 seconds, throughput 993552.835649
+179004	[1728197958]	2000000 OPS in 2.005443 seconds, throughput 997285.886460
+179004	[1728197959]	2000000 OPS in 2.012685 seconds, throughput 993697.473773
+179004	[1728197959]	2000000 OPS in 2.019406 seconds, throughput 990390.243468
+179004	[1728197960]	2000000 OPS in 2.005347 seconds, throughput 997333.628544
+179004	[1728197960]	2000000 OPS in 2.004048 seconds, throughput 997980.088301
+179004	[1728197961]	2000000 OPS in 2.012347 seconds, throughput 993864.378261
+179004	[1728197961]	2000000 OPS in 2.016747 seconds, throughput 991696.033265
+179004	[1728197962]	2000000 OPS in 2.007756 seconds, throughput 996136.980789
+179004	[1728197962]	2000000 OPS in 2.005469 seconds, throughput 997272.957099
+179004	[1728197963]	2000000 OPS in 2.012252 seconds, throughput 993911.299380
+179004	[1728197963]	2000000 OPS in 2.019931 seconds, throughput 990132.831270
+179004	[1728197964]	2000000 OPS in 2.006021 seconds, throughput 996998.535908
+179004	[1728197964]	2000000 OPS in 2.008504 seconds, throughput 995766.002955
+179004	[1728197965]	2000000 OPS in 2.013551 seconds, throughput 993270.098448
+179004	[1728197965]	2000000 OPS in 2.014437 seconds, throughput 992833.233305
+179004	[1728197966]	2000000 OPS in 2.009330 seconds, throughput 995356.661176
+179004	[1728197966]	2000000 OPS in 2.002085 seconds, throughput 998958.585674
+179004	[1728197967]	2000000 OPS in 2.014364 seconds, throughput 992869.213310
+179004	[1728197967]	2000000 OPS in 2.022314 seconds, throughput 988966.105165
+179004	[1728197968]	2000000 OPS in 2.008622 seconds, throughput 995707.504946
+179004	[1728197968]	2000000 OPS in 2.004498 seconds, throughput 997756.046651
+179004	[1728197969]	2000000 OPS in 2.013103 seconds, throughput 993491.142778
+179004	[1728197969]	2000000 OPS in 2.018090 seconds, throughput 991036.078668
+179004	[1728197970]	2000000 OPS in 2.011729 seconds, throughput 994169.691842
+179004	[1728197970]	2000000 OPS in 2.005775 seconds, throughput 997120.813651
+179004	[1728197971]	2000000 OPS in 2.014759 seconds, throughput 992674.558099
+179004	[1728197971]	2000000 OPS in 2.018465 seconds, throughput 990851.959286
+179004	[1728197972]	2000000 OPS in 2.011010 seconds, throughput 994525.139109
+179004	[1728197972]	2000000 OPS in 2.005074 seconds, throughput 997469.420081
+179004	[1728197973]	2000000 OPS in 2.017091 seconds, throughput 991526.906818
+179004	[1728197973]	2000000 OPS in 2.020032 seconds, throughput 990083.325413
+179004	[1728197974]	2000000 OPS in 2.015420 seconds, throughput 992348.989293
+179004	[1728197974]	2000000 OPS in 2.011309 seconds, throughput 994377.293593
+179004	[1728197975]	2000000 OPS in 2.015470 seconds, throughput 992324.370990
+179004	[1728197975]	2000000 OPS in 2.022063 seconds, throughput 989088.866173
+179004	[1728197976]	2000000 OPS in 2.010221 seconds, throughput 994915.484417
+179004	[1728197976]	2000000 OPS in 2.007883 seconds, throughput 996073.974430
+179004	[1728197977]	2000000 OPS in 2.014163 seconds, throughput 992968.295019
+179004	[1728197977]	2000000 OPS in 2.019260 seconds, throughput 990461.852362
+179004	[1728197978]	2000000 OPS in 2.009886 seconds, throughput 995081.313069
+179004	[1728197978]	2000000 OPS in 2.006584 seconds, throughput 996718.801705
+179004	[1728197979]	2000000 OPS in 2.016284 seconds, throughput 991923.756772
+179004	[1728197979]	2000000 OPS in 2.019304 seconds, throughput 990440.270509
+179004	[1728197980]	2000000 OPS in 2.007649 seconds, throughput 996190.071073
+179004	[1728197980]	2000000 OPS in 2.007735 seconds, throughput 996147.399931
+179004	[1728197981]	2000000 OPS in 2.011354 seconds, throughput 994355.046402
+179004	[1728197981]	2000000 OPS in 2.021266 seconds, throughput 989478.871163
+179004	[1728197982]	2000000 OPS in 2.009556 seconds, throughput 995244.720724
+179004	[1728197982]	2000000 OPS in 2.006993 seconds, throughput 996515.682915
+179004	[1728197983]	2000000 OPS in 2.012634 seconds, throughput 993722.653995
+179004	[1728197983]	2000000 OPS in 2.018206 seconds, throughput 990979.117097
+179004	[1728197984]	2000000 OPS in 2.006303 seconds, throughput 996858.400750
+179004	[1728197984]	2000000 OPS in 2.006548 seconds, throughput 996736.684096
+179004	[1728197985]	2000000 OPS in 2.013704 seconds, throughput 993194.630393
+179004	[1728197985]	2000000 OPS in 2.018901 seconds, throughput 990637.975810
+179004	[1728197986]	2000000 OPS in 2.008692 seconds, throughput 995672.805985
+179004	[1728197986]	2000000 OPS in 2.004459 seconds, throughput 997775.459613
+179004	[1728197987]	2000000 OPS in 2.014760 seconds, throughput 992674.065397
+179004	[1728197987]	2000000 OPS in 2.026395 seconds, throughput 986974.405286
+179004	[1728197988]	2000000 OPS in 2.010906 seconds, throughput 994576.573942
+179004	[1728197988]	2000000 OPS in 2.004871 seconds, throughput 997570.417249
+179004	[1728197989]	2000000 OPS in 2.010530 seconds, throughput 994762.575042
+179004	[1728197989]	2000000 OPS in 2.018233 seconds, throughput 990965.859740
+179004	[1728197990]	2000000 OPS in 2.010740 seconds, throughput 994658.682873
+179004	[1728197990]	2000000 OPS in 2.001334 seconds, throughput 999333.444592
+179004	[1728197991]	2000000 OPS in 2.014525 seconds, throughput 992789.863615
+179004	[1728197991]	2000000 OPS in 2.018223 seconds, throughput 990970.769831
+179004	[1728197992]	2000000 OPS in 2.007403 seconds, throughput 996312.150575
+179004	[1728197992]	2000000 OPS in 2.006250 seconds, throughput 996884.735202
+179004	[1728197993]	2000000 OPS in 2.013080 seconds, throughput 993502.493691
+179004	[1728197993]	2000000 OPS in 2.020444 seconds, throughput 989881.432002
+179004	[1728197994]	2000000 OPS in 2.008315 seconds, throughput 995859.713242
+179004	[1728197994]	2000000 OPS in 2.003515 seconds, throughput 998245.583387
+179004	[1728197995]	2000000 OPS in 2.011592 seconds, throughput 994237.400029
+179004	[1728197995]	2000000 OPS in 2.024188 seconds, throughput 988050.517047
+179004	[1728197996]	2000000 OPS in 2.010988 seconds, throughput 994536.019111
+179004	[1728197996]	2000000 OPS in 2.006994 seconds, throughput 996515.186393
+179004	[1728197997]	2000000 OPS in 2.013563 seconds, throughput 993264.178970
+179004	[1728197997]	2000000 OPS in 2.022099 seconds, throughput 989071.257144
+179004	[1728197998]	2000000 OPS in 2.008340 seconds, throughput 995847.316689
+179004	[1728197998]	2000000 OPS in 2.005990 seconds, throughput 997013.943240
+179004	[1728197999]	2000000 OPS in 2.010993 seconds, throughput 994533.546362
+179004	[1728197999]	2000000 OPS in 2.016316 seconds, throughput 991908.014418
+179004	[1728198000]	2000000 OPS in 2.007528 seconds, throughput 996250.114569
+179004	[1728198000]	2000000 OPS in 2.005346 seconds, throughput 997334.125882
+179004	[1728198001]	2000000 OPS in 2.014002 seconds, throughput 993047.673240
+179004	[1728198001]	2000000 OPS in 2.016476 seconds, throughput 991829.310143
+179004	[1728198002]	2000000 OPS in 2.008872 seconds, throughput 995583.591189
+179004	[1728198002]	2000000 OPS in 2.002453 seconds, throughput 998775.002459
+179004	[1728198003]	2000000 OPS in 2.013207 seconds, throughput 993439.820148
+179004	[1728198003]	2000000 OPS in 2.017558 seconds, throughput 991297.400124
+179004	[1728198004]	2000000 OPS in 2.010996 seconds, throughput 994532.062719
+179004	[1728198004]	2000000 OPS in 2.006656 seconds, throughput 996683.038847
+179004	[1728198005]	2000000 OPS in 2.012254 seconds, throughput 993910.311521
+179004	[1728198005]	2000000 OPS in 2.019279 seconds, throughput 990452.532810
+179004	[1728198006]	2000000 OPS in 2.010358 seconds, throughput 994847.683845
+179004	[1728198006]	2000000 OPS in 2.001146 seconds, throughput 999427.328141
+179004	[1728198007]	2000000 OPS in 2.015568 seconds, throughput 992276.122661
+179004	[1728198007]	2000000 OPS in 2.021236 seconds, throughput 989493.557407
+179004	[1728198008]	2000000 OPS in 2.007011 seconds, throughput 996506.745603
+179004	[1728198008]	2000000 OPS in 2.004853 seconds, throughput 997579.373650
+179004	[1728198009]	2000000 OPS in 2.014302 seconds, throughput 992899.773718
+179004	[1728198009]	2000000 OPS in 2.022342 seconds, throughput 988952.412599
+179004	[1728198010]	2000000 OPS in 2.011076 seconds, throughput 994492.500532
+179004	[1728198010]	2000000 OPS in 2.003142 seconds, throughput 998431.464170
+179004	[1728198011]	2000000 OPS in 2.013063 seconds, throughput 993510.883663
+179004	[1728198012]	2000000 OPS in 2.019106 seconds, throughput 990537.396254
+179004	[1728198012]	2000000 OPS in 2.008355 seconds, throughput 995839.878906
+179004	[1728198012]	2000000 OPS in 2.007506 seconds, throughput 996261.032346
+179004	[1728198013]	2000000 OPS in 2.012429 seconds, throughput 993823.881488
+179004	[1728198014]	2000000 OPS in 2.020673 seconds, throughput 989769.250146
+179004	[1728198014]	2000000 OPS in 2.008284 seconds, throughput 995875.085396
+179004	[1728198014]	2000000 OPS in 2.006049 seconds, throughput 996984.620017
+179004	[1728198015]	2000000 OPS in 2.011351 seconds, throughput 994356.529517
+179004	[1728198016]	2000000 OPS in 2.023586 seconds, throughput 988344.453856
+179004	[1728198016]	2000000 OPS in 2.015515 seconds, throughput 992302.215563
+179004	[1728198016]	2000000 OPS in 2.004746 seconds, throughput 997632.617798
+179004	[1728198017]	2000000 OPS in 2.011878 seconds, throughput 994096.063479
+179004	[1728198018]	2000000 OPS in 2.019451 seconds, throughput 990368.174321
+179004	[1728198018]	2000000 OPS in 2.008634 seconds, throughput 995701.556381
+179004	[1728198018]	2000000 OPS in 2.004845 seconds, throughput 997583.354324
+179004	[1728198019]	2000000 OPS in 2.011815 seconds, throughput 994127.193604
+179004	[1728198020]	2000000 OPS in 2.020321 seconds, throughput 989941.697384
+179004	[1728198020]	2000000 OPS in 2.007684 seconds, throughput 996172.704469
+179004	[1728198020]	2000000 OPS in 2.005805 seconds, throughput 997105.900125
+179004	[1728198021]	2000000 OPS in 2.011892 seconds, throughput 994089.145938
+179004	[1728198022]	2000000 OPS in 2.023197 seconds, throughput 988534.482801
+179004	[1728198022]	2000000 OPS in 2.016198 seconds, throughput 991966.066825
+179004	[1728198022]	2000000 OPS in 2.004217 seconds, throughput 997895.936418
+179004	[1728198023]	2000000 OPS in 2.015673 seconds, throughput 992224.433229
+179004	[1728198024]	2000000 OPS in 2.016979 seconds, throughput 991581.964909
+179004	[1728198024]	2000000 OPS in 2.007346 seconds, throughput 996340.441558
+179004	[1728198024]	2000000 OPS in 2.003438 seconds, throughput 998283.949890
+179004	[1728198025]	2000000 OPS in 2.012274 seconds, throughput 993900.433042
+179004	[1728198026]	2000000 OPS in 2.018076 seconds, throughput 991042.953784
+179004	[1728198026]	2000000 OPS in 2.012067 seconds, throughput 994002.684801
+179004	[1728198026]	2000000 OPS in 2.005250 seconds, throughput 997381.872584
+179004	[1728198027]	2000000 OPS in 2.014266 seconds, throughput 992917.519335
+179004	[1728198028]	2000000 OPS in 2.020221 seconds, throughput 989990.699037
+179004	[1728198028]	2000000 OPS in 2.011996 seconds, throughput 994037.761506
+179004	[1728198028]	2000000 OPS in 2.005953 seconds, throughput 997032.333260
+179004	[1728198029]	2000000 OPS in 2.016071 seconds, throughput 992028.554550
+179004	[1728198030]	2000000 OPS in 2.023322 seconds, throughput 988473.411548
+179004	[1728198030]	2000000 OPS in 2.012204 seconds, throughput 993935.008578
+179004	[1728198030]	2000000 OPS in 2.013607 seconds, throughput 993242.474823
+179004	[1728198031]	2000000 OPS in 2.015079 seconds, throughput 992516.918692
+179004	[1728198032]	2000000 OPS in 2.021872 seconds, throughput 989182.302342
+179004	[1728198032]	2000000 OPS in 2.011712 seconds, throughput 994178.093087
+179004	[1728198032]	2000000 OPS in 2.002086 seconds, throughput 998958.086716
+179004	[1728198033]	2000000 OPS in 2.014762 seconds, throughput 992673.079997
+179004	[1728198034]	2000000 OPS in 2.019766 seconds, throughput 990213.717827
+179004	[1728198034]	2000000 OPS in 2.008203 seconds, throughput 995915.253587
+179004	[1728198034]	2000000 OPS in 2.005822 seconds, throughput 997097.449325
+179004	[1728198035]	2000000 OPS in 2.012613 seconds, throughput 993733.022692
+179004	[1728198036]	2000000 OPS in 2.019502 seconds, throughput 990343.163810
+179004	[1728198036]	2000000 OPS in 2.009740 seconds, throughput 995153.601958
+179004	[1728198036]	2000000 OPS in 2.003347 seconds, throughput 998329.295923
+179004	[1728198037]	2000000 OPS in 2.015341 seconds, throughput 992387.888700
+179004	[1728198038]	2000000 OPS in 2.016861 seconds, throughput 991639.979156
+179004	[1728198038]	2000000 OPS in 2.007264 seconds, throughput 996381.143686
+179004	[1728198038]	2000000 OPS in 2.004039 seconds, throughput 997984.570161
+179004	[1728198039]	2000000 OPS in 2.015281 seconds, throughput 992417.434591
+179004	[1728198040]	2000000 OPS in 2.011388 seconds, throughput 994338.238072
+179004	[1728198040]	2000000 OPS in 2.007007 seconds, throughput 996508.731659
+179004	[1728198040]	2000000 OPS in 2.007148 seconds, throughput 996438.727986
+179004	[1728198041]	2000000 OPS in 2.013101 seconds, throughput 993492.129804
+179004	[1728198042]	2000000 OPS in 2.016157 seconds, throughput 991986.239167
+179004	[1728198042]	2000000 OPS in 2.002904 seconds, throughput 998550.105247
+179004	[1728198042]	2000000 OPS in 2.002608 seconds, throughput 998697.698202
+179004	[1728198043]	2000000 OPS in 2.015246 seconds, throughput 992434.670507
+179004	[1728198044]	2000000 OPS in 2.019845 seconds, throughput 990174.988675
+179004	[1728198044]	2000000 OPS in 2.010590 seconds, throughput 994732.889351
+179004	[1728198044]	2000000 OPS in 2.007449 seconds, throughput 996289.320426
+179004	[1728198045]	2000000 OPS in 2.015625 seconds, throughput 992248.062016
+179004	[1728198046]	2000000 OPS in 2.017415 seconds, throughput 991367.666048
+179004	[1728198046]	2000000 OPS in 2.007516 seconds, throughput 996256.069690
+179004	[1728198046]	2000000 OPS in 2.005500 seconds, throughput 997257.541760
+179004	[1728198047]	2000000 OPS in 2.013195 seconds, throughput 993445.741719
+179004	[1728198048]	2000000 OPS in 2.018799 seconds, throughput 990688.027882
+179004	[1728198048]	2000000 OPS in 2.009881 seconds, throughput 995083.788543
+179004	[1728198048]	2000000 OPS in 2.006678 seconds, throughput 996672.111819
+179004	[1728198049]	2000000 OPS in 2.008979 seconds, throughput 995530.565526
+179004	[1728198050]	2000000 OPS in 2.018563 seconds, throughput 990803.854029
+179004	[1728198050]	2000000 OPS in 2.012219 seconds, throughput 993927.599332
+179004	[1728198050]	2000000 OPS in 2.006651 seconds, throughput 996685.522296
+179004	[1728198051]	2000000 OPS in 2.012960 seconds, throughput 993561.720054
+179004	[1728198052]	2000000 OPS in 2.016711 seconds, throughput 991713.735880
+179004	[1728198052]	2000000 OPS in 2.008519 seconds, throughput 995758.566386
+179004	[1728198052]	2000000 OPS in 2.005173 seconds, throughput 997420.172723
+179004	[1728198054]	2000000 OPS in 2.014920 seconds, throughput 992595.239513
+179004	[1728198054]	2000000 OPS in 2.015052 seconds, throughput 992530.217582
+179004	[1728198054]	2000000 OPS in 2.007022 seconds, throughput 996501.283992
+179004	[1728198054]	2000000 OPS in 2.004908 seconds, throughput 997552.007374
+179004	[1728198056]	2000000 OPS in 2.012883 seconds, throughput 993599.727356
+179004	[1728198056]	2000000 OPS in 2.018008 seconds, throughput 991076.348558
+179004	[1728198056]	2000000 OPS in 2.005592 seconds, throughput 997211.795819
+179004	[1728198056]	2000000 OPS in 2.004254 seconds, throughput 997877.514527
+179004	[1728198058]	2000000 OPS in 2.014740 seconds, throughput 992683.919513
+179004	[1728198058]	2000000 OPS in 2.019235 seconds, throughput 990474.115197
+179004	[1728198058]	2000000 OPS in 2.006778 seconds, throughput 996622.446529
+179004	[1728198058]	2000000 OPS in 2.005905 seconds, throughput 997056.191594
+179004	[1728198060]	2000000 OPS in 2.008338 seconds, throughput 995848.308402
+179004	[1728198060]	2000000 OPS in 2.017246 seconds, throughput 991450.720438
+179004	[1728198060]	2000000 OPS in 2.008420 seconds, throughput 995807.649794
+179004	[1728198060]	2000000 OPS in 2.002540 seconds, throughput 998731.610854
+179004	[1728198062]	2000000 OPS in 2.011953 seconds, throughput 994059.006349
+179004	[1728198062]	2000000 OPS in 2.017837 seconds, throughput 991160.336539
+179004	[1728198062]	2000000 OPS in 2.008016 seconds, throughput 996007.999936
+179004	[1728198062]	2000000 OPS in 2.005663 seconds, throughput 997176.494755
+179004	[1728198064]	2000000 OPS in 2.015679 seconds, throughput 992221.479710
+179004	[1728198064]	2000000 OPS in 2.022410 seconds, throughput 988919.160803
+179004	[1728198064]	2000000 OPS in 2.011332 seconds, throughput 994365.922682
+179004	[1728198064]	2000000 OPS in 2.005348 seconds, throughput 997333.131207
+179004	[1728198066]	2000000 OPS in 2.011195 seconds, throughput 994433.657602
+179004	[1728198066]	2000000 OPS in 2.019335 seconds, throughput 990425.065678
+179004	[1728198066]	2000000 OPS in 2.011324 seconds, throughput 994369.877752
+179004	[1728198066]	2000000 OPS in 2.006870 seconds, throughput 996576.758833
+179004	[1728198068]	2000000 OPS in 2.008924 seconds, throughput 995557.821003
+179004	[1728198068]	2000000 OPS in 2.020514 seconds, throughput 989847.137906
+179004	[1728198068]	2000000 OPS in 2.012572 seconds, throughput 993753.266964
+179004	[1728198068]	2000000 OPS in 2.004325 seconds, throughput 997842.166315
+179004	[1728198070]	2000000 OPS in 2.012669 seconds, throughput 993705.373313
+179004	[1728198070]	2000000 OPS in 2.007521 seconds, throughput 996253.588381
+179004	[1728198070]	2000000 OPS in 2.020451 seconds, throughput 989878.002486
+179004	[1728198070]	2000000 OPS in 2.004164 seconds, throughput 997922.325718
+179004	[1728198072]	2000000 OPS in 2.014517 seconds, throughput 992793.806158
+179004	[1728198072]	2000000 OPS in 2.010526 seconds, throughput 994764.554152
+179004	[1728198072]	2000000 OPS in 2.020063 seconds, throughput 990068.131538
+179004	[1728198072]	2000000 OPS in 2.001705 seconds, throughput 999148.226137
+179004	[1728198074]	2000000 OPS in 2.012543 seconds, throughput 993767.586581
+179004	[1728198074]	2000000 OPS in 2.011636 seconds, throughput 994215.653329
+179004	[1728198074]	2000000 OPS in 2.023566 seconds, throughput 988354.222200
+179004	[1728198074]	2000000 OPS in 2.005475 seconds, throughput 997269.973448
+179004	[1728198076]	2000000 OPS in 2.014268 seconds, throughput 992916.533450
+179004	[1728198076]	2000000 OPS in 2.013860 seconds, throughput 993117.694378
+179004	[1728198076]	2000000 OPS in 2.025005 seconds, throughput 987651.882341
+179004	[1728198076]	2000000 OPS in 2.003059 seconds, throughput 998472.835798
+179004	[1728198078]	2000000 OPS in 2.009598 seconds, throughput 995223.920406
+179004	[1728198078]	2000000 OPS in 2.009144 seconds, throughput 995448.808050
+179004	[1728198078]	2000000 OPS in 2.018137 seconds, throughput 991012.998622
+179004	[1728198078]	2000000 OPS in 2.005398 seconds, throughput 997308.264993
+179004	[1728198080]	2000000 OPS in 2.010806 seconds, throughput 994626.035530
+179004	[1728198080]	2000000 OPS in 2.013502 seconds, throughput 993294.270381
+179004	[1728198080]	2000000 OPS in 2.018665 seconds, throughput 990753.790252
+179004	[1728198080]	2000000 OPS in 2.007394 seconds, throughput 996316.617465
+179004	[1728198082]	2000000 OPS in 2.016728 seconds, throughput 991705.376233
+179004	[1728198082]	2000000 OPS in 2.007733 seconds, throughput 996148.392241
+179004	[1728198082]	2000000 OPS in 2.018468 seconds, throughput 990850.486607
+179004	[1728198082]	2000000 OPS in 2.006012 seconds, throughput 997003.008955
+179004	[1728198084]	2000000 OPS in 2.014912 seconds, throughput 992599.180510
+179004	[1728198084]	2000000 OPS in 2.017844 seconds, throughput 991156.898155
+179004	[1728198084]	2000000 OPS in 2.023999 seconds, throughput 988142.780703
+179004	[1728198084]	2000000 OPS in 2.009308 seconds, throughput 995367.559379
+179004	[1728198086]	2000000 OPS in 2.012394 seconds, throughput 993841.166292
+179004	[1728198086]	2000000 OPS in 2.008953 seconds, throughput 995543.449747
+179004	[1728198086]	2000000 OPS in 2.020064 seconds, throughput 990067.641421
+179004	[1728198086]	2000000 OPS in 2.003885 seconds, throughput 998061.265991
+179004	[1728198088]	2000000 OPS in 2.012733 seconds, throughput 993673.775906
+179004	[1728198088]	2000000 OPS in 2.007485 seconds, throughput 996271.454083
+179004	[1728198088]	2000000 OPS in 2.001982 seconds, throughput 999009.981109
+179004	[1728198088]	2000000 OPS in 2.019354 seconds, throughput 990415.746818
+179004	[1728198090]	2000000 OPS in 2.010651 seconds, throughput 994702.710714
+179004	[1728198090]	2000000 OPS in 2.006471 seconds, throughput 996774.934699
+179004	[1728198090]	2000000 OPS in 2.005174 seconds, throughput 997419.675300
+179004	[1728198090]	2000000 OPS in 2.020292 seconds, throughput 989955.907364
+179004	[1728198092]	2000000 OPS in 2.011907 seconds, throughput 994081.734394
+179004	[1728198092]	2000000 OPS in 2.005458 seconds, throughput 997278.427172
+179004	[1728198092]	2000000 OPS in 2.006582 seconds, throughput 996719.795154
+179004	[1728198092]	2000000 OPS in 2.018955 seconds, throughput 990611.479701
+179004	[1728198094]	2000000 OPS in 2.010258 seconds, throughput 994897.172403
+179004	[1728198094]	2000000 OPS in 2.009493 seconds, throughput 995275.922832
+179004	[1728198094]	2000000 OPS in 2.004231 seconds, throughput 997888.965893
+179004	[1728198094]	2000000 OPS in 2.019790 seconds, throughput 990201.951688
+179004	[1728198096]	2000000 OPS in 2.013872 seconds, throughput 993111.776717
+179004	[1728198096]	2000000 OPS in 2.010061 seconds, throughput 994994.679266
+179004	[1728198096]	2000000 OPS in 2.007898 seconds, throughput 996066.533260
+179004	[1728198096]	2000000 OPS in 2.016918 seconds, throughput 991611.954477
+179004	[1728198098]	2000000 OPS in 2.014858 seconds, throughput 992625.783058
+179004	[1728198098]	2000000 OPS in 2.007716 seconds, throughput 996156.826962
+179004	[1728198098]	2000000 OPS in 2.006309 seconds, throughput 996855.419579
+179004	[1728198098]	2000000 OPS in 2.016451 seconds, throughput 991841.606863
+179004	[1728198100]	2000000 OPS in 2.013190 seconds, throughput 993448.209061
+179004	[1728198100]	2000000 OPS in 2.011649 seconds, throughput 994209.228349
+179004	[1728198100]	2000000 OPS in 2.003941 seconds, throughput 998033.375234
+179004	[1728198100]	2000000 OPS in 2.018794 seconds, throughput 990690.481545
+179004	[1728198102]	2000000 OPS in 2.013940 seconds, throughput 993078.244635
+179004	[1728198102]	2000000 OPS in 2.008186 seconds, throughput 995923.684360
+179004	[1728198102]	2000000 OPS in 2.007338 seconds, throughput 996344.412351
+179004	[1728198102]	2000000 OPS in 2.017268 seconds, throughput 991439.907836
+179004	[1728198104]	2000000 OPS in 2.012288 seconds, throughput 993893.518224
+179004	[1728198104]	2000000 OPS in 2.007375 seconds, throughput 996326.047699
+179004	[1728198104]	2000000 OPS in 2.004848 seconds, throughput 997581.861568
+179004	[1728198104]	2000000 OPS in 2.018851 seconds, throughput 990662.510507
+179004	[1728198106]	2000000 OPS in 2.013407 seconds, throughput 993341.137684
+179004	[1728198106]	2000000 OPS in 2.010235 seconds, throughput 994908.555467
+179004	[1728198106]	2000000 OPS in 2.008964 seconds, throughput 995537.998690
+179004	[1728198106]	2000000 OPS in 2.021753 seconds, throughput 989240.525425
+179004	[1728198108]	2000000 OPS in 2.010757 seconds, throughput 994650.273504
+179004	[1728198108]	2000000 OPS in 2.006486 seconds, throughput 996767.483052
+179004	[1728198108]	2000000 OPS in 2.002691 seconds, throughput 998656.307938
+179004	[1728198108]	2000000 OPS in 2.020358 seconds, throughput 989923.568001
+179004	[1728198110]	2000000 OPS in 2.013353 seconds, throughput 993367.780017
+179004	[1728198110]	2000000 OPS in 2.006810 seconds, throughput 996606.554681
+179004	[1728198110]	2000000 OPS in 2.007119 seconds, throughput 996453.125101
+179004	[1728198110]	2000000 OPS in 2.021916 seconds, throughput 989160.776214
+179004	[1728198112]	2000000 OPS in 2.014080 seconds, throughput 993009.215126
+179004	[1728198112]	2000000 OPS in 2.009000 seconds, throughput 995520.159283
+179004	[1728198112]	2000000 OPS in 2.002163 seconds, throughput 998919.668379
+179004	[1728198112]	2000000 OPS in 2.021412 seconds, throughput 989407.404329
+179004	[1728198114]	2000000 OPS in 2.011776 seconds, throughput 994146.465610
+179004	[1728198114]	2000000 OPS in 2.006976 seconds, throughput 996524.123856
+179004	[1728198114]	2000000 OPS in 2.002591 seconds, throughput 998706.176149
+179004	[1728198115]	2000000 OPS in 2.019420 seconds, throughput 990383.377405
+179004	[1728198116]	2000000 OPS in 2.012005 seconds, throughput 994033.315027
+179004	[1728198116]	2000000 OPS in 2.010694 seconds, throughput 994681.438349
+179004	[1728198116]	2000000 OPS in 2.002617 seconds, throughput 998693.209935
+179004	[1728198117]	2000000 OPS in 2.016532 seconds, throughput 991801.766597
+179004	[1728198118]	2000000 OPS in 2.009953 seconds, throughput 995048.142917
+179004	[1728198118]	2000000 OPS in 2.012069 seconds, throughput 994001.696761
+179004	[1728198118]	2000000 OPS in 2.007830 seconds, throughput 996100.267453
+179004	[1728198119]	2000000 OPS in 2.020562 seconds, throughput 989823.623329
+179004	[1728198120]	2000000 OPS in 2.011066 seconds, throughput 994497.445633
+179004	[1728198120]	2000000 OPS in 2.006448 seconds, throughput 996786.360773
+179004	[1728198120]	2000000 OPS in 2.007694 seconds, throughput 996167.742694
+179004	[1728198121]	2000000 OPS in 2.019070 seconds, throughput 990555.057526
+179004	[1728198122]	2000000 OPS in 2.011919 seconds, throughput 994075.805239
+179004	[1728198122]	2000000 OPS in 2.009093 seconds, throughput 995474.077108
+179004	[1728198122]	2000000 OPS in 2.003123 seconds, throughput 998440.934481
+179004	[1728198123]	2000000 OPS in 2.020007 seconds, throughput 990095.578877
+179004	[1728198124]	2000000 OPS in 2.009034 seconds, throughput 995503.311542
+179004	[1728198124]	2000000 OPS in 2.009705 seconds, throughput 995170.933047
+179004	[1728198124]	2000000 OPS in 2.001772 seconds, throughput 999114.784301
+179004	[1728198125]	2000000 OPS in 2.017206 seconds, throughput 991470.380318
+179004	[1728198126]	2000000 OPS in 2.009393 seconds, throughput 995325.454005
+179004	[1728198126]	2000000 OPS in 2.010003 seconds, throughput 995023.390512
+179004	[1728198126]	2000000 OPS in 2.006207 seconds, throughput 996906.101913
+179004	[1728198127]	2000000 OPS in 2.020254 seconds, throughput 989974.527955
+179004	[1728198128]	2000000 OPS in 2.013963 seconds, throughput 993066.903414
+179004	[1728198128]	2000000 OPS in 2.008121 seconds, throughput 995955.920983
+179004	[1728198128]	2000000 OPS in 2.002373 seconds, throughput 998814.906114
+179004	[1728198129]	2000000 OPS in 2.018111 seconds, throughput 991025.766174
+179004	[1728198130]	2000000 OPS in 2.013983 seconds, throughput 993057.041693
+179004	[1728198130]	2000000 OPS in 2.009917 seconds, throughput 995065.965411
+179004	[1728198130]	2000000 OPS in 2.003194 seconds, throughput 998405.546342
+179004	[1728198131]	2000000 OPS in 2.013277 seconds, throughput 993405.279055
+179004	[1728198132]	2000000 OPS in 2.016911 seconds, throughput 991615.396019
+179004	[1728198132]	2000000 OPS in 2.008768 seconds, throughput 995635.135566
+179004	[1728198132]	2000000 OPS in 2.005003 seconds, throughput 997504.741888
+179004	[1728198133]	2000000 OPS in 2.017832 seconds, throughput 991162.792542
+179004	[1728198134]	2000000 OPS in 2.011195 seconds, throughput 994433.657602
+179004	[1728198134]	2000000 OPS in 2.002536 seconds, throughput 998733.605788
+179004	[1728198134]	2000000 OPS in 2.010920 seconds, throughput 994569.649713
+179004	[1728198135]	2000000 OPS in 2.018206 seconds, throughput 990979.117097
+179004	[1728198136]	2000000 OPS in 2.013242 seconds, throughput 993422.549301
+179004	[1728198136]	2000000 OPS in 2.001329 seconds, throughput 999335.941267
+179004	[1728198136]	2000000 OPS in 2.006917 seconds, throughput 996553.419997
+179004	[1728198137]	2000000 OPS in 2.022253 seconds, throughput 988995.936710
+179004	[1728198138]	2000000 OPS in 2.015827 seconds, throughput 992148.631802
+179004	[1728198138]	2000000 OPS in 2.003360 seconds, throughput 998322.817666
+179004	[1728198138]	2000000 OPS in 2.009373 seconds, throughput 995335.360831
+179004	[1728198139]	2000000 OPS in 2.023707 seconds, throughput 988285.359491
+179004	[1728198140]	2000000 OPS in 2.018713 seconds, throughput 990730.232579
+179004	[1728198140]	2000000 OPS in 2.007430 seconds, throughput 996298.750143
+179004	[1728198140]	2000000 OPS in 2.014669 seconds, throughput 992718.903204
+179004	[1728198141]	2000000 OPS in 2.019666 seconds, throughput 990262.746415
+179004	[1728198142]	2000000 OPS in 2.012948 seconds, throughput 993567.643079
+179004	[1728198142]	2000000 OPS in 2.003054 seconds, throughput 998475.328174
+179004	[1728198142]	2000000 OPS in 2.007663 seconds, throughput 996183.124359
+179004	[1728198143]	2000000 OPS in 2.015752 seconds, throughput 992185.546635
+179004	[1728198144]	2000000 OPS in 2.012541 seconds, throughput 993768.574156
+179004	[1728198144]	2000000 OPS in 2.004300 seconds, throughput 997854.612583
+179004	[1728198144]	2000000 OPS in 2.005503 seconds, throughput 997256.049978
+179004	[1728198145]	2000000 OPS in 2.017388 seconds, throughput 991380.934158
+179004	[1728198146]	2000000 OPS in 2.012805 seconds, throughput 993638.231225
+179004	[1728198146]	2000000 OPS in 2.011076 seconds, throughput 994492.500532
+179004	[1728198146]	2000000 OPS in 2.010389 seconds, throughput 994832.343392
+179004	[1728198147]	2000000 OPS in 2.015347 seconds, throughput 992384.934207
+179004	[1728198148]	2000000 OPS in 2.012357 seconds, throughput 993859.439453
+179004	[1728198148]	2000000 OPS in 2.002261 seconds, throughput 998870.776587
+179004	[1728198148]	2000000 OPS in 2.008355 seconds, throughput 995839.878906
+179004	[1728198149]	2000000 OPS in 2.017823 seconds, throughput 991167.213378
+179004	[1728198150]	2000000 OPS in 2.016315 seconds, throughput 991908.506359
+179004	[1728198150]	2000000 OPS in 2.003220 seconds, throughput 998392.587933
+179004	[1728198150]	2000000 OPS in 2.010395 seconds, throughput 994829.374327
+179004	[1728198151]	2000000 OPS in 2.014660 seconds, throughput 992723.337933
+179004	[1728198152]	2000000 OPS in 2.011612 seconds, throughput 994227.515048
+179004	[1728198152]	2000000 OPS in 2.004939 seconds, throughput 997536.583407
+179004	[1728198152]	2000000 OPS in 2.010135 seconds, throughput 994958.050081
+179004	[1728198153]	2000000 OPS in 2.016503 seconds, throughput 991816.030028
+179004	[1728198154]	2000000 OPS in 2.014172 seconds, throughput 992963.858101
+179004	[1728198154]	2000000 OPS in 2.004182 seconds, throughput 997913.363158
+179004	[1728198154]	2000000 OPS in 2.007773 seconds, throughput 996128.546404
+179004	[1728198155]	2000000 OPS in 2.021719 seconds, throughput 989257.161851
+179004	[1728198156]	2000000 OPS in 2.013786 seconds, throughput 993154.188181
+179004	[1728198156]	2000000 OPS in 2.004803 seconds, throughput 997604.253385
+179004	[1728198156]	2000000 OPS in 2.007525 seconds, throughput 996251.603342
+179004	[1728198157]	2000000 OPS in 2.018150 seconds, throughput 991006.614969
+179004	[1728198158]	2000000 OPS in 2.013325 seconds, throughput 993381.595122
+179004	[1728198158]	2000000 OPS in 2.002883 seconds, throughput 998560.574931
+179004	[1728198158]	2000000 OPS in 2.002879 seconds, throughput 998562.569182
+179004	[1728198159]	2000000 OPS in 2.019725 seconds, throughput 990233.818961
+179004	[1728198160]	2000000 OPS in 2.012276 seconds, throughput 993899.445205
+179004	[1728198160]	2000000 OPS in 2.002424 seconds, throughput 998789.467166
+179004	[1728198160]	2000000 OPS in 2.008690 seconds, throughput 995673.797351
+179004	[1728198161]	2000000 OPS in 2.019132 seconds, throughput 990524.641282
+179004	[1728198162]	2000000 OPS in 2.016432 seconds, throughput 991850.952574
+179004	[1728198162]	2000000 OPS in 2.007647 seconds, throughput 996191.063469
+179004	[1728198162]	2000000 OPS in 2.009102 seconds, throughput 995469.617770
+179004	[1728198163]	2000000 OPS in 2.020033 seconds, throughput 990082.835280
+179004	[1728198164]	2000000 OPS in 2.012072 seconds, throughput 994000.214704
+179004	[1728198164]	2000000 OPS in 2.002027 seconds, throughput 998987.526142
+179004	[1728198164]	2000000 OPS in 2.008679 seconds, throughput 995679.249895
+179004	[1728198165]	2000000 OPS in 2.018602 seconds, throughput 990784.711399
+179004	[1728198166]	2000000 OPS in 2.015156 seconds, throughput 992478.994182
+179004	[1728198166]	2000000 OPS in 2.001926 seconds, throughput 999037.926477
+179004	[1728198167]	2000000 OPS in 2.005672 seconds, throughput 997172.020151
+179004	[1728198167]	2000000 OPS in 2.018717 seconds, throughput 990728.269490
+179004	[1728198168]	2000000 OPS in 2.014980 seconds, throughput 992565.683034
+179004	[1728198168]	2000000 OPS in 2.004107 seconds, throughput 997950.708221
+179004	[1728198169]	2000000 OPS in 2.008862 seconds, throughput 995588.547148
+179004	[1728198169]	2000000 OPS in 2.017012 seconds, throughput 991565.741800
+179004	[1728198170]	2000000 OPS in 2.015849 seconds, throughput 992137.803972
+179004	[1728198170]	2000000 OPS in 2.006325 seconds, throughput 996847.469877
+179004	[1728198171]	2000000 OPS in 2.007685 seconds, throughput 996172.208290
+179004	[1728198171]	2000000 OPS in 2.016632 seconds, throughput 991752.585499
+179004	[1728198172]	2000000 OPS in 2.011353 seconds, throughput 994355.540773
+179004	[1728198172]	2000000 OPS in 2.001839 seconds, throughput 999081.344704
+179004	[1728198173]	2000000 OPS in 2.010556 seconds, throughput 994749.711025
+179004	[1728198173]	2000000 OPS in 2.020368 seconds, throughput 989918.668282
+179004	[1728198174]	2000000 OPS in 2.012344 seconds, throughput 993865.859913
+179004	[1728198174]	2000000 OPS in 2.005983 seconds, throughput 997017.422381
+179004	[1728198175]	2000000 OPS in 2.005701 seconds, throughput 997157.602255
+179004	[1728198175]	2000000 OPS in 2.015954 seconds, throughput 992086.128949
+179004	[1728198176]	2000000 OPS in 2.012939 seconds, throughput 993572.085394
+179004	[1728198176]	2000000 OPS in 2.003616 seconds, throughput 998195.262965
+179004	[1728198177]	2000000 OPS in 2.005789 seconds, throughput 997113.853950
+179004	[1728198177]	2000000 OPS in 2.014965 seconds, throughput 992573.071989
+179004	[1728198178]	2000000 OPS in 2.014560 seconds, throughput 992772.615360
+179004	[1728198178]	2000000 OPS in 2.003163 seconds, throughput 998420.997193
+179004	[1728198179]	2000000 OPS in 2.007616 seconds, throughput 996206.445854
+179004	[1728198179]	2000000 OPS in 2.016529 seconds, throughput 991803.242106
+179004	[1728198180]	2000000 OPS in 2.011638 seconds, throughput 994214.664865
+179004	[1728198180]	2000000 OPS in 2.001529 seconds, throughput 999236.084014
+179004	[1728198181]	2000000 OPS in 2.011502 seconds, throughput 994281.884880
+179004	[1728198181]	2000000 OPS in 2.019303 seconds, throughput 990440.760995
+179004	[1728198182]	2000000 OPS in 2.012089 seconds, throughput 993991.816465
+179004	[1728198182]	2000000 OPS in 2.008102 seconds, throughput 995965.344390
+179004	[1728198183]	2000000 OPS in 2.007891 seconds, throughput 996070.005792
+179004	[1728198183]	2000000 OPS in 2.018967 seconds, throughput 990605.591870
+179004	[1728198184]	2000000 OPS in 2.011774 seconds, throughput 994147.453939
+179004	[1728198184]	2000000 OPS in 2.005825 seconds, throughput 997095.958022
+179004	[1728198185]	2000000 OPS in 2.007864 seconds, throughput 996083.400071
+179004	[1728198185]	2000000 OPS in 2.017736 seconds, throughput 991209.950162
+179004	[1728198186]	2000000 OPS in 2.012159 seconds, throughput 993957.236978
+179004	[1728198186]	2000000 OPS in 2.005536 seconds, throughput 997239.640675
+179004	[1728198187]	2000000 OPS in 2.010167 seconds, throughput 994942.211269
+179004	[1728198187]	2000000 OPS in 2.019672 seconds, throughput 990259.804562
+179004	[1728198188]	2000000 OPS in 2.013434 seconds, throughput 993327.817053
+179004	[1728198188]	2000000 OPS in 2.006665 seconds, throughput 996678.568670
+179004	[1728198189]	2000000 OPS in 2.007113 seconds, throughput 996456.103867
+179004	[1728198189]	2000000 OPS in 2.019011 seconds, throughput 990584.003752
+179004	[1728198190]	2000000 OPS in 2.011109 seconds, throughput 994476.182047
+179004	[1728198190]	2000000 OPS in 2.007004 seconds, throughput 996510.221205
+179004	[1728198191]	2000000 OPS in 2.014239 seconds, throughput 992930.828963
+179004	[1728198191]	2000000 OPS in 2.019971 seconds, throughput 990113.224398
+179004	[1728198192]	2000000 OPS in 2.011790 seconds, throughput 994139.547368
+179004	[1728198192]	2000000 OPS in 2.002919 seconds, throughput 998542.627036
+179004	[1728198193]	2000000 OPS in 2.007488 seconds, throughput 996269.965250
+179004	[1728198193]	2000000 OPS in 2.017626 seconds, throughput 991263.990452
+179004	[1728198194]	2000000 OPS in 2.019069 seconds, throughput 990555.548126
+179004	[1728198195]	2000000 OPS in 2.010642 seconds, throughput 994707.163185
+179004	[1728198195]	2000000 OPS in 2.014719 seconds, throughput 992694.266545
+179004	[1728198195]	2000000 OPS in 2.023249 seconds, throughput 988509.076243
+179004	[1728198196]	2000000 OPS in 2.009875 seconds, throughput 995086.759127
+179004	[1728198197]	2000000 OPS in 1.999978 seconds, throughput 1000011.000121
+179004	[1728198197]	2000000 OPS in 2.007741 seconds, throughput 996144.423011
+179004	[1728198197]	2000000 OPS in 2.013839 seconds, throughput 993128.050455
+179004	[1728198198]	2000000 OPS in 2.011575 seconds, throughput 994245.802419
+179004	[1728198199]	2000000 OPS in 2.005518 seconds, throughput 997248.591137
+179004	[1728198199]	2000000 OPS in 2.008937 seconds, throughput 995551.378664
+179004	[1728198199]	2000000 OPS in 2.023024 seconds, throughput 988619.017866
+179004	[1728198200]	2000000 OPS in 2.015874 seconds, throughput 992125.499907
+179004	[1728198201]	2000000 OPS in 2.009013 seconds, throughput 995513.717432
+179004	[1728198201]	2000000 OPS in 2.008246 seconds, throughput 995893.929329
+179004	[1728198201]	2000000 OPS in 2.016727 seconds, throughput 991705.867973
+179004	[1728198202]	2000000 OPS in 2.011523 seconds, throughput 994271.504726
+179004	[1728198203]	2000000 OPS in 2.004054 seconds, throughput 997977.100417
+179004	[1728198203]	2000000 OPS in 2.008004 seconds, throughput 996013.952163
+179004	[1728198203]	2000000 OPS in 2.017719 seconds, throughput 991218.301458
+179004	[1728198204]	2000000 OPS in 2.013673 seconds, throughput 993209.920379
+179004	[1728198205]	2000000 OPS in 2.003935 seconds, throughput 998036.363455
+179004	[1728198205]	2000000 OPS in 2.008900 seconds, throughput 995569.714769
+179004	[1728198205]	2000000 OPS in 2.021100 seconds, throughput 989560.140518
+179004	[1728198206]	2000000 OPS in 2.011581 seconds, throughput 994242.836853
+179004	[1728198207]	2000000 OPS in 2.000636 seconds, throughput 999682.101092
+179004	[1728198207]	2000000 OPS in 2.008015 seconds, throughput 996008.495952
+179004	[1728198207]	2000000 OPS in 2.019775 seconds, throughput 990209.305492
+179004	[1728198209]	2000000 OPS in 2.013372 seconds, throughput 993358.405699
+179004	[1728198209]	2000000 OPS in 2.001657 seconds, throughput 999172.185844
+179004	[1728198209]	2000000 OPS in 2.010690 seconds, throughput 994683.417135
+179004	[1728198209]	2000000 OPS in 2.017575 seconds, throughput 991289.047495
+179004	[1728198211]	2000000 OPS in 2.012546 seconds, throughput 993766.105222
+179004	[1728198211]	2000000 OPS in 2.004426 seconds, throughput 997791.886555
+179004	[1728198211]	2000000 OPS in 2.006941 seconds, throughput 996541.502715
+179004	[1728198211]	2000000 OPS in 2.017922 seconds, throughput 991118.586348
+179004	[1728198213]	2000000 OPS in 2.014259 seconds, throughput 992920.969945
+179004	[1728198213]	2000000 OPS in 2.001863 seconds, throughput 999069.366885
+179004	[1728198213]	2000000 OPS in 2.008352 seconds, throughput 995841.366454
+179004	[1728198213]	2000000 OPS in 2.017789 seconds, throughput 991183.914671
+179004	[1728198215]	2000000 OPS in 2.004111 seconds, throughput 997948.716413
+179004	[1728198215]	2000000 OPS in 2.012141 seconds, throughput 993966.128616
+179004	[1728198215]	2000000 OPS in 2.008926 seconds, throughput 995556.829868
+179004	[1728198215]	2000000 OPS in 2.018956 seconds, throughput 990610.989046
+179004	[1728198217]	2000000 OPS in 2.005694 seconds, throughput 997161.082398
+179004	[1728198217]	2000000 OPS in 2.013814 seconds, throughput 993140.379399
+179004	[1728198217]	2000000 OPS in 2.010282 seconds, throughput 994885.294700
+179004	[1728198217]	2000000 OPS in 2.018216 seconds, throughput 990974.206923
+179004	[1728198219]	2000000 OPS in 2.006159 seconds, throughput 996929.954206
+179004	[1728198219]	2000000 OPS in 2.015038 seconds, throughput 992537.113444
+179004	[1728198219]	2000000 OPS in 2.007537 seconds, throughput 996245.648274
+179004	[1728198219]	2000000 OPS in 2.019634 seconds, throughput 990278.436588
+179004	[1728198221]	2000000 OPS in 2.003126 seconds, throughput 998439.439157
+179004	[1728198221]	2000000 OPS in 2.016955 seconds, throughput 991593.763867
+179004	[1728198221]	2000000 OPS in 2.008029 seconds, throughput 996001.551770
+179004	[1728198221]	2000000 OPS in 2.021663 seconds, throughput 989284.564242
+179004	[1728198223]	2000000 OPS in 2.009079 seconds, throughput 995481.013937
+179004	[1728198223]	2000000 OPS in 2.015173 seconds, throughput 992470.621629
+179004	[1728198223]	2000000 OPS in 2.005872 seconds, throughput 997072.594861
+179004	[1728198224]	2000000 OPS in 2.019121 seconds, throughput 990530.037576
+179004	[1728198225]	2000000 OPS in 2.004673 seconds, throughput 997668.946506
+179004	[1728198225]	2000000 OPS in 2.013970 seconds, throughput 993063.451789
+179004	[1728198225]	2000000 OPS in 2.006201 seconds, throughput 996909.083387
+179004	[1728198226]	2000000 OPS in 2.019100 seconds, throughput 990540.339755
+179004	[1728198227]	2000000 OPS in 2.004751 seconds, throughput 997630.129627
+179004	[1728198227]	2000000 OPS in 2.016760 seconds, throughput 991689.640810
+179004	[1728198227]	2000000 OPS in 2.012577 seconds, throughput 993750.798106
+179004	[1728198228]	2000000 OPS in 2.021150 seconds, throughput 989535.660391
+179004	[1728198229]	2000000 OPS in 2.001796 seconds, throughput 999102.805680
+179004	[1728198229]	2000000 OPS in 2.015894 seconds, throughput 992115.656875
+179004	[1728198229]	2000000 OPS in 2.010535 seconds, throughput 994760.101167
+179004	[1728198230]	2000000 OPS in 2.020510 seconds, throughput 989849.097505
+179004	[1728198231]	2000000 OPS in 2.006571 seconds, throughput 996725.259161
+179004	[1728198231]	2000000 OPS in 2.014245 seconds, throughput 992927.871237
+179004	[1728198231]	2000000 OPS in 2.009726 seconds, throughput 995160.534322
+179004	[1728198232]	2000000 OPS in 2.019082 seconds, throughput 990549.170366
+179004	[1728198233]	2000000 OPS in 2.006055 seconds, throughput 996981.638091
+179004	[1728198233]	2000000 OPS in 2.015476 seconds, throughput 992321.416876
+179004	[1728198233]	2000000 OPS in 2.010961 seconds, throughput 994549.372166
+179004	[1728198234]	2000000 OPS in 2.017439 seconds, throughput 991355.872470
+179004	[1728198235]	2000000 OPS in 2.005211 seconds, throughput 997401.270988
+179004	[1728198235]	2000000 OPS in 2.014697 seconds, throughput 992705.106525
+179004	[1728198235]	2000000 OPS in 2.006347 seconds, throughput 996836.539243
+179004	[1728198236]	2000000 OPS in 2.016891 seconds, throughput 991625.229127
+179004	[1728198237]	2000000 OPS in 2.006851 seconds, throughput 996586.193992
+179004	[1728198237]	2000000 OPS in 2.012601 seconds, throughput 993738.947760
+179004	[1728198237]	2000000 OPS in 2.009036 seconds, throughput 995502.320516
+179004	[1728198238]	2000000 OPS in 2.019577 seconds, throughput 990306.385941
+179004	[1728198239]	2000000 OPS in 2.006959 seconds, throughput 996532.564940
+179004	[1728198239]	2000000 OPS in 2.013496 seconds, throughput 993297.230290
+179004	[1728198239]	2000000 OPS in 2.006643 seconds, throughput 996689.495840
+179004	[1728198240]	2000000 OPS in 2.019589 seconds, throughput 990300.501736
+179004	[1728198241]	2000000 OPS in 2.005410 seconds, throughput 997302.297286
+179004	[1728198241]	2000000 OPS in 2.017325 seconds, throughput 991411.894464
+179004	[1728198241]	2000000 OPS in 2.007260 seconds, throughput 996383.129241
+179004	[1728198242]	2000000 OPS in 2.020276 seconds, throughput 989963.747528
+179004	[1728198243]	2000000 OPS in 2.006314 seconds, throughput 996852.935283
+179004	[1728198243]	2000000 OPS in 2.016028 seconds, throughput 992049.713595
+179004	[1728198243]	2000000 OPS in 2.009243 seconds, throughput 995399.760009
+179004	[1728198244]	2000000 OPS in 2.017444 seconds, throughput 991353.415510
+179004	[1728198245]	2000000 OPS in 2.004732 seconds, throughput 997639.584742
+179004	[1728198245]	2000000 OPS in 2.013160 seconds, throughput 993463.013372
+179004	[1728198245]	2000000 OPS in 2.007296 seconds, throughput 996365.259533
+179004	[1728198246]	2000000 OPS in 2.024061 seconds, throughput 988112.512419
+179004	[1728198247]	2000000 OPS in 2.001097 seconds, throughput 999451.800687
+179004	[1728198247]	2000000 OPS in 2.013016 seconds, throughput 993534.080206
+179004	[1728198247]	2000000 OPS in 2.009650 seconds, throughput 995198.168835
+179004	[1728198248]	2000000 OPS in 2.015600 seconds, throughput 992260.369121
+179004	[1728198249]	2000000 OPS in 2.004861 seconds, throughput 997575.393007
+179004	[1728198249]	2000000 OPS in 2.019165 seconds, throughput 990508.452752
+179004	[1728198249]	2000000 OPS in 2.009077 seconds, throughput 995482.004921
+179004	[1728198250]	2000000 OPS in 2.023190 seconds, throughput 988537.903015
+179004	[1728198251]	2000000 OPS in 2.004246 seconds, throughput 997881.497581
+179004	[1728198251]	2000000 OPS in 2.018940 seconds, throughput 990618.839589
+179004	[1728198251]	2000000 OPS in 2.015523 seconds, throughput 992298.276924
+179004	[1728198252]	2000000 OPS in 2.018798 seconds, throughput 990688.518614
+179004	[1728198253]	2000000 OPS in 2.021617 seconds, throughput 989307.074485
+179004	[1728198253]	2000000 OPS in 2.008214 seconds, throughput 995909.798458
+179004	[1728198254]	2000000 OPS in 1.985141 seconds, throughput 1007485.110629
+179004	[1728198255]	2000000 OPS in 2.030221 seconds, throughput 985114.428429
+179004	[1728198256]	2000000 OPS in 1.960941 seconds, throughput 1019918.498313
+179004	[1728198258]	2000000 OPS in 1.864982 seconds, throughput 1072396.409188
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     251190 ms      1004712 ms            4 CompactionCPUUsage=0.321249 CompactionThroughput=2.92411G Lat_Get_Avg=852.416 Lat_Get_P50=785.396 Lat_Get_P95=1.29655k Lat_Get_P99=3.1071k Lat_Put_Avg=1.16856k Lat_Put_P50=1.13313k Lat_Put_P95=1.82625k Lat_Put_P99=2.31344k items_per_second=3.98105M/s
+4482.35user 23.46system 17:17.25elapsed 434%CPU (0avgtext+0avgdata 9178304maxresident)k
+329587inputs+16649936outputs (5880major+1844935minor)pagefaults 0swaps

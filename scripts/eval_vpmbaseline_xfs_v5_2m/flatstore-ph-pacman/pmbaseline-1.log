@@ -1,0 +1,1200 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-09-19T11:37:03-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.49, 4.91, 4.63
+[1726763823]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1726763823]	Setup starts!
+[1726763823]	Setup starts!
+[1726763823]	Setup starts!
+Using MADVISE_HUGE
+idx_start_addr_ = 0x7f629f800000, is aligned to 2MB = 1
+idx_pool_size_ = 42949672960, is aligned to 2MB = 1
+DB index type: CCEH
+Using MADVISE_HUGE
+pool_start_ 0x7f60a3c00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1726763824]	Initializing log segments...
+Log: pool_start 0x7f60a3c00000 total segments: 2028  cleaners: 2
+[1726763824]Initialized 2026 free log segments...
+[1726763824]	DB init finished in 1.092426 seconds
+[1726763824]	DB init finished in 1.092313 seconds
+[1726763824]	DB init finished in 1.092541 seconds
+[1726763824]	DB init finished in 1.092477 seconds
+[1726763828]	DB load finished in 4.088391 seconds
+[1726763828]	DB load finished in 4.096799 seconds
+[1726763828]	DB load finished in 4.109380 seconds
+[1726763828]	DB load finished in 4.125327 seconds
+[1726763828]	DB warmup finished in 0.000013 seconds
+[1726763828]	DB warmup finished in 0.016168 seconds
+[1726763828]	DB warmup finished in 0.028752 seconds
+[1726763828]	DB warmup finished in 0.037171 seconds
+[1726763828]	ETC init!
+[1726763828]	ETC starts!
+[1726763828]	ETC init!
+[1726763828]	ETC starts!
+[1726763828]	ETC init!
+[1726763828]	ETC init!
+[1726763828]	ETC starts!
+[1726763828]	ETC starts!
+37483	[1726763830]	2000000 OPS in 1.572516 seconds, throughput 1271847.154496
+37483	[1726763830]	2000000 OPS in 1.576176 seconds, throughput 1268893.829116
+37483	[1726763830]	2000000 OPS in 1.580079 seconds, throughput 1265759.496835
+37483	[1726763830]	2000000 OPS in 1.597258 seconds, throughput 1252145.864976
+37483	[1726763831]	2000000 OPS in 1.478753 seconds, throughput 1352490.916333
+37483	[1726763831]	2000000 OPS in 1.488439 seconds, throughput 1343689.596954
+37483	[1726763831]	2000000 OPS in 1.485993 seconds, throughput 1345901.360235
+37483	[1726763831]	2000000 OPS in 1.501217 seconds, throughput 1332252.432526
+37483	[1726763833]	2000000 OPS in 1.481462 seconds, throughput 1350017.752733
+37483	[1726763833]	2000000 OPS in 1.489964 seconds, throughput 1342314.310950
+37483	[1726763833]	2000000 OPS in 1.489105 seconds, throughput 1343088.633777
+37483	[1726763833]	2000000 OPS in 1.500639 seconds, throughput 1332765.575198
+37483	[1726763834]	2000000 OPS in 1.475184 seconds, throughput 1355763.077691
+37483	[1726763834]	2000000 OPS in 1.482569 seconds, throughput 1349009.725686
+37483	[1726763834]	2000000 OPS in 1.486798 seconds, throughput 1345172.646183
+37483	[1726763834]	2000000 OPS in 1.497079 seconds, throughput 1335934.843786
+37483	[1726763836]	2000000 OPS in 1.483976 seconds, throughput 1347730.691062
+37483	[1726763836]	2000000 OPS in 1.484494 seconds, throughput 1347260.413313
+37483	[1726763836]	2000000 OPS in 1.482398 seconds, throughput 1349165.338863
+37483	[1726763836]	2000000 OPS in 1.505722 seconds, throughput 1328266.439622
+37483	[1726763837]	2000000 OPS in 1.434031 seconds, throughput 1394669.989700
+37483	[1726763837]	2000000 OPS in 1.436371 seconds, throughput 1392397.925049
+37483	[1726763837]	2000000 OPS in 1.444196 seconds, throughput 1384853.579431
+37483	[1726763837]	2000000 OPS in 1.613564 seconds, throughput 1239492.204834
+37483	[1726763839]	2000000 OPS in 1.456871 seconds, throughput 1372805.141979
+37483	[1726763839]	2000000 OPS in 1.453079 seconds, throughput 1376387.656831
+37483	[1726763839]	2000000 OPS in 1.470623 seconds, throughput 1359967.850360
+37483	[1726763839]	2000000 OPS in 1.452801 seconds, throughput 1376651.034794
+37483	[1726763840]	2000000 OPS in 1.466431 seconds, throughput 1363855.510420
+37483	[1726763840]	2000000 OPS in 1.471753 seconds, throughput 1358923.678090
+37483	[1726763840]	2000000 OPS in 1.484459 seconds, throughput 1347292.178497
+37483	[1726763840]	2000000 OPS in 1.467302 seconds, throughput 1363045.916928
+37483	[1726763842]	2000000 OPS in 1.486685 seconds, throughput 1345274.890108
+37483	[1726763842]	2000000 OPS in 1.491263 seconds, throughput 1341145.056238
+37483	[1726763842]	2000000 OPS in 1.500763 seconds, throughput 1332655.455925
+37483	[1726763842]	2000000 OPS in 1.481780 seconds, throughput 1349728.029802
+37483	[1726763843]	2000000 OPS in 1.485633 seconds, throughput 1346227.500332
+37483	[1726763843]	2000000 OPS in 1.490136 seconds, throughput 1342159.373373
+37483	[1726763843]	2000000 OPS in 1.483999 seconds, throughput 1347709.803039
+37483	[1726763843]	2000000 OPS in 1.502747 seconds, throughput 1330896.019090
+37483	[1726763845]	2000000 OPS in 1.483617 seconds, throughput 1348056.809810
+37483	[1726763845]	2000000 OPS in 1.487879 seconds, throughput 1344195.327711
+37483	[1726763845]	2000000 OPS in 1.479346 seconds, throughput 1351948.766550
+37483	[1726763845]	2000000 OPS in 1.497151 seconds, throughput 1335870.596887
+37483	[1726763846]	2000000 OPS in 1.486653 seconds, throughput 1345303.846964
+37483	[1726763846]	2000000 OPS in 1.488255 seconds, throughput 1343855.723650
+37483	[1726763846]	2000000 OPS in 1.482078 seconds, throughput 1349456.641283
+37483	[1726763846]	2000000 OPS in 1.503444 seconds, throughput 1330279.012720
+37483	[1726763848]	2000000 OPS in 1.485120 seconds, throughput 1346692.523163
+37483	[1726763848]	2000000 OPS in 1.490659 seconds, throughput 1341688.474695
+37483	[1726763848]	2000000 OPS in 1.480670 seconds, throughput 1350739.867763
+37483	[1726763848]	2000000 OPS in 1.501759 seconds, throughput 1331771.609160
+37483	[1726763849]	2000000 OPS in 1.482903 seconds, throughput 1348705.882988
+37483	[1726763849]	2000000 OPS in 1.487859 seconds, throughput 1344213.396565
+37483	[1726763849]	2000000 OPS in 1.481828 seconds, throughput 1349684.308840
+37483	[1726763849]	2000000 OPS in 1.502794 seconds, throughput 1330854.395213
+37483	[1726763851]	2000000 OPS in 1.486370 seconds, throughput 1345559.988428
+37483	[1726763851]	2000000 OPS in 1.487824 seconds, throughput 1344245.018228
+37483	[1726763851]	2000000 OPS in 1.481547 seconds, throughput 1349940.298890
+37483	[1726763851]	2000000 OPS in 1.500156 seconds, throughput 1333194.681087
+37483	[1726763852]	2000000 OPS in 1.481899 seconds, throughput 1349619.643444
+37483	[1726763852]	2000000 OPS in 1.485845 seconds, throughput 1346035.420922
+37483	[1726763852]	2000000 OPS in 1.479237 seconds, throughput 1352048.387108
+37483	[1726763852]	2000000 OPS in 1.500953 seconds, throughput 1332486.760078
+37483	[1726763854]	2000000 OPS in 1.484270 seconds, throughput 1347463.736382
+37483	[1726763854]	2000000 OPS in 1.487857 seconds, throughput 1344215.203477
+37483	[1726763854]	2000000 OPS in 1.480456 seconds, throughput 1350935.117288
+37483	[1726763854]	2000000 OPS in 1.498501 seconds, throughput 1334667.110666
+37483	[1726763855]	2000000 OPS in 1.480423 seconds, throughput 1350965.230883
+37483	[1726763855]	2000000 OPS in 1.482337 seconds, throughput 1349220.858685
+37483	[1726763855]	2000000 OPS in 1.477676 seconds, throughput 1353476.675536
+37483	[1726763855]	2000000 OPS in 1.497328 seconds, throughput 1335712.682859
+37483	[1726763857]	2000000 OPS in 1.481029 seconds, throughput 1350412.449722
+37483	[1726763857]	2000000 OPS in 1.485230 seconds, throughput 1346592.783609
+37483	[1726763857]	2000000 OPS in 1.479035 seconds, throughput 1352233.043843
+37483	[1726763857]	2000000 OPS in 1.497800 seconds, throughput 1335291.761250
+37483	[1726763858]	2000000 OPS in 1.484174 seconds, throughput 1347550.893628
+37483	[1726763858]	2000000 OPS in 1.487183 seconds, throughput 1344824.409639
+37483	[1726763858]	2000000 OPS in 1.482271 seconds, throughput 1349280.934458
+37483	[1726763858]	2000000 OPS in 1.498980 seconds, throughput 1334240.616953
+37483	[1726763860]	2000000 OPS in 1.486444 seconds, throughput 1345493.002091
+37483	[1726763860]	2000000 OPS in 1.489339 seconds, throughput 1342877.612149
+37483	[1726763860]	2000000 OPS in 1.481171 seconds, throughput 1350282.985557
+37483	[1726763860]	2000000 OPS in 1.502374 seconds, throughput 1331226.445612
+37483	[1726763861]	2000000 OPS in 1.492972 seconds, throughput 1339609.852027
+37483	[1726763861]	2000000 OPS in 1.495329 seconds, throughput 1337498.303049
+37483	[1726763861]	2000000 OPS in 1.485759 seconds, throughput 1346113.333320
+37483	[1726763861]	2000000 OPS in 1.509279 seconds, throughput 1325136.041779
+37483	[1726763863]	2000000 OPS in 1.489965 seconds, throughput 1342313.410047
+37483	[1726763863]	2000000 OPS in 1.492418 seconds, throughput 1340107.128164
+37483	[1726763863]	2000000 OPS in 1.486225 seconds, throughput 1345691.264782
+37483	[1726763863]	2000000 OPS in 1.504244 seconds, throughput 1329571.532278
+37483	[1726763864]	2000000 OPS in 1.490200 seconds, throughput 1342101.731311
+37483	[1726763864]	2000000 OPS in 1.492442 seconds, throughput 1340085.577865
+37483	[1726763864]	2000000 OPS in 1.487390 seconds, throughput 1344637.250486
+37483	[1726763864]	2000000 OPS in 1.506654 seconds, throughput 1327444.788253
+37483	[1726763865]	2000000 OPS in 1.491209 seconds, throughput 1341193.622088
+37483	[1726763866]	2000000 OPS in 1.493426 seconds, throughput 1339202.611981
+37483	[1726763866]	2000000 OPS in 1.489017 seconds, throughput 1343168.009499
+37483	[1726763866]	2000000 OPS in 1.507692 seconds, throughput 1326530.882965
+37483	[1726763867]	2000000 OPS in 1.492793 seconds, throughput 1339770.483918
+37483	[1726763867]	2000000 OPS in 1.497380 seconds, throughput 1335666.297132
+37483	[1726763867]	2000000 OPS in 1.488640 seconds, throughput 1343508.168530
+37483	[1726763867]	2000000 OPS in 1.509130 seconds, throughput 1325266.875617
+37483	[1726763868]	2000000 OPS in 1.495555 seconds, throughput 1337296.187703
+37483	[1726763869]	2000000 OPS in 1.499898 seconds, throughput 1333424.006166
+37483	[1726763869]	2000000 OPS in 1.492094 seconds, throughput 1340398.125051
+37483	[1726763869]	2000000 OPS in 1.511755 seconds, throughput 1322965.692192
+37483	[1726763870]	2000000 OPS in 1.500409 seconds, throughput 1332969.876880
+37483	[1726763870]	2000000 OPS in 1.500284 seconds, throughput 1333080.936676
+37483	[1726763870]	2000000 OPS in 1.494826 seconds, throughput 1337948.363221
+37483	[1726763870]	2000000 OPS in 1.513494 seconds, throughput 1321445.608638
+37483	[1726763871]	2000000 OPS in 1.499046 seconds, throughput 1334181.873005
+37483	[1726763872]	2000000 OPS in 1.498281 seconds, throughput 1334863.086430
+37483	[1726763872]	2000000 OPS in 1.501238 seconds, throughput 1332233.796373
+37483	[1726763872]	2000000 OPS in 1.516596 seconds, throughput 1318742.763399
+37483	[1726763873]	2000000 OPS in 1.503353 seconds, throughput 1330359.536316
+37483	[1726763873]	2000000 OPS in 1.500891 seconds, throughput 1332541.803502
+37483	[1726763873]	2000000 OPS in 1.506651 seconds, throughput 1327447.431422
+37483	[1726763873]	2000000 OPS in 1.520319 seconds, throughput 1315513.388966
+37483	[1726763874]	2000000 OPS in 1.502362 seconds, throughput 1331237.078680
+37483	[1726763875]	2000000 OPS in 1.501696 seconds, throughput 1331827.480395
+37483	[1726763875]	2000000 OPS in 1.507655 seconds, throughput 1326563.437922
+37483	[1726763875]	2000000 OPS in 1.520985 seconds, throughput 1314937.359672
+37483	[1726763876]	2000000 OPS in 1.504783 seconds, throughput 1329095.291481
+37483	[1726763876]	2000000 OPS in 1.500374 seconds, throughput 1333000.971758
+37483	[1726763876]	2000000 OPS in 1.506650 seconds, throughput 1327448.312481
+37483	[1726763876]	2000000 OPS in 1.520684 seconds, throughput 1315197.634749
+37483	[1726763877]	2000000 OPS in 1.506063 seconds, throughput 1327965.695990
+37483	[1726763878]	2000000 OPS in 1.502639 seconds, throughput 1330991.675313
+37483	[1726763878]	2000000 OPS in 1.506252 seconds, throughput 1327799.066823
+37483	[1726763878]	2000000 OPS in 1.521709 seconds, throughput 1314311.737658
+37483	[1726763879]	2000000 OPS in 1.506964 seconds, throughput 1327171.717440
+37483	[1726763879]	2000000 OPS in 1.504027 seconds, throughput 1329763.361961
+37483	[1726763879]	2000000 OPS in 1.510679 seconds, throughput 1323907.991042
+37483	[1726763880]	2000000 OPS in 1.526061 seconds, throughput 1310563.601324
+37483	[1726763881]	2000000 OPS in 1.507184 seconds, throughput 1326977.993397
+37483	[1726763881]	2000000 OPS in 1.503379 seconds, throughput 1330336.528580
+37483	[1726763881]	2000000 OPS in 1.510242 seconds, throughput 1324291.073881
+37483	[1726763881]	2000000 OPS in 1.524242 seconds, throughput 1312127.601785
+37483	[1726763882]	2000000 OPS in 1.511011 seconds, throughput 1323617.101398
+37483	[1726763882]	2000000 OPS in 1.504611 seconds, throughput 1329247.227356
+37483	[1726763882]	2000000 OPS in 1.510550 seconds, throughput 1324021.051935
+37483	[1726763883]	2000000 OPS in 1.525541 seconds, throughput 1311010.323551
+37483	[1726763884]	2000000 OPS in 1.510146 seconds, throughput 1324375.259081
+37483	[1726763884]	2000000 OPS in 1.506841 seconds, throughput 1327280.051445
+37483	[1726763884]	2000000 OPS in 1.514691 seconds, throughput 1320401.322778
+37483	[1726763884]	2000000 OPS in 1.526204 seconds, throughput 1310440.806078
+37483	[1726763885]	2000000 OPS in 1.508679 seconds, throughput 1325663.046944
+37483	[1726763885]	2000000 OPS in 1.506699 seconds, throughput 1327405.141969
+37483	[1726763885]	2000000 OPS in 1.511789 seconds, throughput 1322935.938812
+37483	[1726763886]	2000000 OPS in 1.528388 seconds, throughput 1308568.243142
+37483	[1726763887]	2000000 OPS in 1.509315 seconds, throughput 1325104.434793
+37483	[1726763887]	2000000 OPS in 1.506169 seconds, throughput 1327872.237445
+37483	[1726763887]	2000000 OPS in 1.511990 seconds, throughput 1322760.071164
+37483	[1726763887]	2000000 OPS in 1.525637 seconds, throughput 1310927.828835
+37483	[1726763888]	2000000 OPS in 1.513463 seconds, throughput 1321472.675579
+37483	[1726763888]	2000000 OPS in 1.507821 seconds, throughput 1326417.393046
+37483	[1726763888]	2000000 OPS in 1.513856 seconds, throughput 1321129.618669
+37483	[1726763889]	2000000 OPS in 1.528331 seconds, throughput 1308617.046962
+37483	[1726763890]	2000000 OPS in 1.510511 seconds, throughput 1324055.236936
+37483	[1726763890]	2000000 OPS in 1.507492 seconds, throughput 1326706.874730
+37483	[1726763890]	2000000 OPS in 1.513584 seconds, throughput 1321367.033478
+37483	[1726763890]	2000000 OPS in 1.527710 seconds, throughput 1309148.987701
+37483	[1726763891]	2000000 OPS in 1.512036 seconds, throughput 1322719.829422
+37483	[1726763891]	2000000 OPS in 1.508369 seconds, throughput 1325935.497216
+37483	[1726763891]	2000000 OPS in 1.515386 seconds, throughput 1319795.748410
+37483	[1726763892]	2000000 OPS in 1.529239 seconds, throughput 1307840.043316
+37483	[1726763893]	2000000 OPS in 1.510491 seconds, throughput 1324072.768391
+37483	[1726763893]	2000000 OPS in 1.510182 seconds, throughput 1324343.688377
+37483	[1726763893]	2000000 OPS in 1.516600 seconds, throughput 1318739.285243
+37483	[1726763893]	2000000 OPS in 1.530347 seconds, throughput 1306893.142536
+37483	[1726763894]	2000000 OPS in 1.513369 seconds, throughput 1321554.756309
+37483	[1726763894]	2000000 OPS in 1.511623 seconds, throughput 1323081.218002
+37483	[1726763894]	2000000 OPS in 1.516725 seconds, throughput 1318630.602120
+37483	[1726763895]	2000000 OPS in 1.528058 seconds, throughput 1308850.842049
+37483	[1726763896]	2000000 OPS in 1.510424 seconds, throughput 1324131.502148
+37483	[1726763896]	2000000 OPS in 1.507424 seconds, throughput 1326766.722568
+37483	[1726763896]	2000000 OPS in 1.514140 seconds, throughput 1320881.820704
+37483	[1726763896]	2000000 OPS in 1.529381 seconds, throughput 1307718.612955
+37483	[1726763897]	2000000 OPS in 1.512531 seconds, throughput 1322286.948168
+37483	[1726763897]	2000000 OPS in 1.509146 seconds, throughput 1325252.825108
+37483	[1726763897]	2000000 OPS in 1.515108 seconds, throughput 1320037.911489
+37483	[1726763898]	2000000 OPS in 1.527963 seconds, throughput 1308932.218908
+37483	[1726763899]	2000000 OPS in 1.513385 seconds, throughput 1321540.784401
+37483	[1726763899]	2000000 OPS in 1.508485 seconds, throughput 1325833.534971
+37483	[1726763899]	2000000 OPS in 1.514888 seconds, throughput 1320229.614335
+37483	[1726763899]	2000000 OPS in 1.528850 seconds, throughput 1308172.809628
+37483	[1726763900]	2000000 OPS in 1.513467 seconds, throughput 1321469.183008
+37483	[1726763900]	2000000 OPS in 1.509438 seconds, throughput 1324996.455634
+37483	[1726763900]	2000000 OPS in 1.515609 seconds, throughput 1319601.559505
+37483	[1726763901]	2000000 OPS in 1.535375 seconds, throughput 1302613.368070
+37483	[1726763902]	2000000 OPS in 1.513191 seconds, throughput 1321710.213714
+37483	[1726763902]	2000000 OPS in 1.510882 seconds, throughput 1323730.112610
+37483	[1726763902]	2000000 OPS in 1.517386 seconds, throughput 1318056.183463
+37483	[1726763902]	2000000 OPS in 1.531370 seconds, throughput 1306020.099649
+37483	[1726763903]	2000000 OPS in 1.515833 seconds, throughput 1319406.557319
+37483	[1726763903]	2000000 OPS in 1.510198 seconds, throughput 1324329.657436
+37483	[1726763903]	2000000 OPS in 1.518197 seconds, throughput 1317352.095940
+37483	[1726763904]	2000000 OPS in 1.530899 seconds, throughput 1306421.912876
+37483	[1726763905]	2000000 OPS in 1.511741 seconds, throughput 1322977.943973
+37483	[1726763905]	2000000 OPS in 1.514862 seconds, throughput 1320252.273804
+37483	[1726763905]	2000000 OPS in 1.518940 seconds, throughput 1316707.704057
+37483	[1726763906]	2000000 OPS in 1.529764 seconds, throughput 1307391.205441
+37483	[1726763906]	2000000 OPS in 1.515201 seconds, throughput 1319956.890208
+37483	[1726763906]	2000000 OPS in 1.518226 seconds, throughput 1317326.932881
+37483	[1726763906]	2000000 OPS in 1.520158 seconds, throughput 1315652.715047
+37483	[1726763907]	2000000 OPS in 1.534245 seconds, throughput 1303572.767061
+37483	[1726763908]	2000000 OPS in 1.513384 seconds, throughput 1321541.657636
+37483	[1726763908]	2000000 OPS in 1.515294 seconds, throughput 1319875.878872
+37483	[1726763908]	2000000 OPS in 1.521377 seconds, throughput 1314598.551181
+37483	[1726763909]	2000000 OPS in 1.533491 seconds, throughput 1304213.718894
+37483	[1726763909]	2000000 OPS in 1.519572 seconds, throughput 1316160.076653
+37483	[1726763909]	2000000 OPS in 1.524268 seconds, throughput 1312105.220342
+37483	[1726763909]	2000000 OPS in 1.526190 seconds, throughput 1310452.826974
+37483	[1726763910]	2000000 OPS in 1.538895 seconds, throughput 1299633.828169
+37483	[1726763911]	2000000 OPS in 1.515525 seconds, throughput 1319674.700186
+37483	[1726763911]	2000000 OPS in 1.518482 seconds, throughput 1317104.845497
+37483	[1726763911]	2000000 OPS in 1.521813 seconds, throughput 1314221.918199
+37483	[1726763912]	2000000 OPS in 1.533752 seconds, throughput 1303991.779636
+37483	[1726763912]	2000000 OPS in 1.516500 seconds, throughput 1318826.244642
+37483	[1726763912]	2000000 OPS in 1.520519 seconds, throughput 1315340.354182
+37483	[1726763912]	2000000 OPS in 1.522271 seconds, throughput 1313826.513150
+37483	[1726763913]	2000000 OPS in 1.534930 seconds, throughput 1302991.015877
+37483	[1726763914]	2000000 OPS in 1.516949 seconds, throughput 1318435.886770
+37483	[1726763914]	2000000 OPS in 1.517068 seconds, throughput 1318332.467628
+37483	[1726763914]	2000000 OPS in 1.522090 seconds, throughput 1313982.747407
+37483	[1726763915]	2000000 OPS in 1.536896 seconds, throughput 1301324.227534
+37483	[1726763915]	2000000 OPS in 1.515990 seconds, throughput 1319269.916028
+37483	[1726763915]	2000000 OPS in 1.522939 seconds, throughput 1313250.235236
+37483	[1726763915]	2000000 OPS in 1.523870 seconds, throughput 1312447.912223
+37483	[1726763916]	2000000 OPS in 1.539202 seconds, throughput 1299374.611000
+37483	[1726763917]	2000000 OPS in 1.516349 seconds, throughput 1318957.575070
+37483	[1726763917]	2000000 OPS in 1.519719 seconds, throughput 1316032.766584
+37483	[1726763917]	2000000 OPS in 1.524580 seconds, throughput 1311836.702567
+37483	[1726763918]	2000000 OPS in 1.536946 seconds, throughput 1301281.892793
+37483	[1726763918]	2000000 OPS in 1.520132 seconds, throughput 1315675.217678
+37483	[1726763918]	2000000 OPS in 1.523016 seconds, throughput 1313183.840485
+37483	[1726763919]	2000000 OPS in 1.525432 seconds, throughput 1311104.002014
+37483	[1726763919]	2000000 OPS in 1.536837 seconds, throughput 1301374.186072
+37483	[1726763920]	2000000 OPS in 1.515967 seconds, throughput 1319289.931773
+37483	[1726763920]	2000000 OPS in 1.520639 seconds, throughput 1315236.555159
+37483	[1726763920]	2000000 OPS in 1.526815 seconds, throughput 1309916.394586
+37483	[1726763921]	2000000 OPS in 1.537572 seconds, throughput 1300752.094861
+37483	[1726763921]	2000000 OPS in 1.518502 seconds, throughput 1317087.498074
+37483	[1726763921]	2000000 OPS in 1.524714 seconds, throughput 1311721.411360
+37483	[1726763922]	2000000 OPS in 1.529978 seconds, throughput 1307208.338943
+37483	[1726763922]	2000000 OPS in 1.540935 seconds, throughput 1297913.279924
+37483	[1726763923]	2000000 OPS in 1.519934 seconds, throughput 1315846.609129
+37483	[1726763923]	2000000 OPS in 1.522180 seconds, throughput 1313905.057221
+37483	[1726763923]	2000000 OPS in 1.524177 seconds, throughput 1312183.558734
+37483	[1726763924]	2000000 OPS in 1.538756 seconds, throughput 1299751.227615
+37483	[1726763924]	2000000 OPS in 1.517300 seconds, throughput 1318130.890397
+37483	[1726763924]	2000000 OPS in 1.522708 seconds, throughput 1313449.459778
+37483	[1726763925]	2000000 OPS in 1.527273 seconds, throughput 1309523.575680
+37483	[1726763926]	2000000 OPS in 1.539320 seconds, throughput 1299275.004547
+37483	[1726763926]	2000000 OPS in 1.519583 seconds, throughput 1316150.549197
+37483	[1726763926]	2000000 OPS in 1.523369 seconds, throughput 1312879.545271
+37483	[1726763926]	2000000 OPS in 1.526956 seconds, throughput 1309795.436149
+37483	[1726763927]	2000000 OPS in 1.537462 seconds, throughput 1300845.159100
+37483	[1726763927]	2000000 OPS in 1.520857 seconds, throughput 1315048.028842
+37483	[1726763928]	2000000 OPS in 1.522463 seconds, throughput 1313660.824598
+37483	[1726763928]	2000000 OPS in 1.522794 seconds, throughput 1313375.282540
+37483	[1726763929]	2000000 OPS in 1.537549 seconds, throughput 1300771.552646
+37483	[1726763929]	2000000 OPS in 1.517453 seconds, throughput 1317997.987417
+37483	[1726763929]	2000000 OPS in 1.523374 seconds, throughput 1312875.236153
+37483	[1726763929]	2000000 OPS in 1.527405 seconds, throughput 1309410.405230
+37483	[1726763930]	2000000 OPS in 1.537845 seconds, throughput 1300521.183864
+37483	[1726763930]	2000000 OPS in 1.519598 seconds, throughput 1316137.557433
+37483	[1726763931]	2000000 OPS in 1.521708 seconds, throughput 1314312.601366
+37483	[1726763931]	2000000 OPS in 1.523502 seconds, throughput 1312764.932373
+37483	[1726763932]	2000000 OPS in 1.539362 seconds, throughput 1299239.555088
+37483	[1726763932]	2000000 OPS in 1.519108 seconds, throughput 1316562.087751
+37483	[1726763932]	2000000 OPS in 1.522595 seconds, throughput 1313546.937958
+37483	[1726763932]	2000000 OPS in 1.527077 seconds, throughput 1309691.652746
+37483	[1726763933]	2000000 OPS in 1.541631 seconds, throughput 1297327.311140
+37483	[1726763934]	2000000 OPS in 1.521532 seconds, throughput 1314464.631700
+37483	[1726763934]	2000000 OPS in 1.524587 seconds, throughput 1311830.679391
+37483	[1726763934]	2000000 OPS in 1.525613 seconds, throughput 1310948.451540
+37483	[1726763935]	2000000 OPS in 1.539530 seconds, throughput 1299097.776594
+37483	[1726763935]	2000000 OPS in 1.520926 seconds, throughput 1314988.368928
+37483	[1726763935]	2000000 OPS in 1.524168 seconds, throughput 1312191.306995
+37483	[1726763935]	2000000 OPS in 1.528853 seconds, throughput 1308170.242659
+37483	[1726763936]	2000000 OPS in 1.540496 seconds, throughput 1298283.150362
+37483	[1726763937]	2000000 OPS in 1.520744 seconds, throughput 1315145.744451
+37483	[1726763937]	2000000 OPS in 1.521973 seconds, throughput 1314083.758385
+37483	[1726763937]	2000000 OPS in 1.526012 seconds, throughput 1310605.683310
+37483	[1726763938]	2000000 OPS in 1.536608 seconds, throughput 1301568.129282
+37483	[1726763938]	2000000 OPS in 1.521900 seconds, throughput 1314146.790196
+37483	[1726763938]	2000000 OPS in 1.524291 seconds, throughput 1312085.422009
+37483	[1726763938]	2000000 OPS in 1.526998 seconds, throughput 1309759.410294
+37483	[1726763939]	2000000 OPS in 1.540630 seconds, throughput 1298170.229062
+37483	[1726763940]	2000000 OPS in 1.522485 seconds, throughput 1313641.842120
+37483	[1726763940]	2000000 OPS in 1.525296 seconds, throughput 1311220.904008
+37483	[1726763940]	2000000 OPS in 1.528874 seconds, throughput 1308152.274157
+37483	[1726763941]	2000000 OPS in 1.541231 seconds, throughput 1297664.010132
+37483	[1726763941]	2000000 OPS in 1.522204 seconds, throughput 1313884.341389
+37483	[1726763941]	2000000 OPS in 1.526010 seconds, throughput 1310607.401000
+37483	[1726763941]	2000000 OPS in 1.530821 seconds, throughput 1306488.479058
+37483	[1726763942]	2000000 OPS in 1.550592 seconds, throughput 1289829.948820
+37483	[1726763943]	2000000 OPS in 1.528529 seconds, throughput 1308447.533544
+37483	[1726763943]	2000000 OPS in 1.530906 seconds, throughput 1306415.939320
+37483	[1726763943]	2000000 OPS in 1.533741 seconds, throughput 1304001.131873
+37483	[1726763944]	2000000 OPS in 1.542098 seconds, throughput 1296934.436073
+37483	[1726763944]	2000000 OPS in 1.523954 seconds, throughput 1312375.570391
+37483	[1726763944]	2000000 OPS in 1.525812 seconds, throughput 1310777.474551
+37483	[1726763945]	2000000 OPS in 1.530029 seconds, throughput 1307164.766158
+37483	[1726763946]	2000000 OPS in 1.543012 seconds, throughput 1296166.199615
+37483	[1726763946]	2000000 OPS in 1.524522 seconds, throughput 1311886.611016
+37483	[1726763946]	2000000 OPS in 1.525453 seconds, throughput 1311085.952828
+37483	[1726763946]	2000000 OPS in 1.529038 seconds, throughput 1308011.965693
+37483	[1726763947]	2000000 OPS in 1.539059 seconds, throughput 1299495.340984
+37483	[1726763947]	2000000 OPS in 1.520557 seconds, throughput 1315307.482719
+37483	[1726763947]	2000000 OPS in 1.526632 seconds, throughput 1310073.416514
+37483	[1726763948]	2000000 OPS in 1.529703 seconds, throughput 1307443.340309
+37483	[1726763949]	2000000 OPS in 1.544352 seconds, throughput 1295041.544933
+37483	[1726763949]	2000000 OPS in 1.523705 seconds, throughput 1312590.035473
+37483	[1726763949]	2000000 OPS in 1.526631 seconds, throughput 1310074.274661
+37483	[1726763949]	2000000 OPS in 1.528200 seconds, throughput 1308729.223924
+37483	[1726763950]	2000000 OPS in 1.542025 seconds, throughput 1296995.833401
+37483	[1726763950]	2000000 OPS in 1.523949 seconds, throughput 1312379.876229
+37483	[1726763950]	2000000 OPS in 1.526276 seconds, throughput 1310378.987811
+37483	[1726763951]	2000000 OPS in 1.528952 seconds, throughput 1308085.538330
+37483	[1726763952]	2000000 OPS in 1.543202 seconds, throughput 1296006.614818
+37483	[1726763952]	2000000 OPS in 1.524313 seconds, throughput 1312066.485033
+37483	[1726763952]	2000000 OPS in 1.528542 seconds, throughput 1308436.405411
+37483	[1726763952]	2000000 OPS in 1.527203 seconds, throughput 1309583.598251
+37483	[1726763953]	2000000 OPS in 1.544090 seconds, throughput 1295261.286583
+37483	[1726763953]	2000000 OPS in 1.526635 seconds, throughput 1310070.842081
+37483	[1726763953]	2000000 OPS in 1.529140 seconds, throughput 1307924.715853
+37483	[1726763954]	2000000 OPS in 1.531744 seconds, throughput 1305701.213780
+37483	[1726763955]	2000000 OPS in 1.545459 seconds, throughput 1294113.916966
+37483	[1726763955]	2000000 OPS in 1.523399 seconds, throughput 1312853.690990
+37483	[1726763955]	2000000 OPS in 1.527690 seconds, throughput 1309166.126636
+37483	[1726763955]	2000000 OPS in 1.528438 seconds, throughput 1308525.435772
+37483	[1726763956]	2000000 OPS in 1.542032 seconds, throughput 1296989.945734
+37483	[1726763956]	2000000 OPS in 1.524454 seconds, throughput 1311945.129207
+37483	[1726763956]	2000000 OPS in 1.528233 seconds, throughput 1308700.963793
+37483	[1726763957]	2000000 OPS in 1.530168 seconds, throughput 1307046.023705
+37483	[1726763958]	2000000 OPS in 1.550144 seconds, throughput 1290202.716651
+37483	[1726763958]	2000000 OPS in 1.521052 seconds, throughput 1314879.438704
+37483	[1726763958]	2000000 OPS in 1.526569 seconds, throughput 1310127.481955
+37483	[1726763958]	2000000 OPS in 1.531638 seconds, throughput 1305791.577383
+37483	[1726763959]	2000000 OPS in 1.545039 seconds, throughput 1294465.706044
+37483	[1726763959]	2000000 OPS in 1.525902 seconds, throughput 1310700.162920
+37483	[1726763960]	2000000 OPS in 1.528947 seconds, throughput 1308089.816063
+37483	[1726763960]	2000000 OPS in 1.532040 seconds, throughput 1305448.943892
+37483	[1726763961]	2000000 OPS in 1.524573 seconds, throughput 1311842.725799
+37483	[1726763961]	2000000 OPS in 1.544059 seconds, throughput 1295287.291483
+37483	[1726763961]	2000000 OPS in 1.527223 seconds, throughput 1309566.448384
+37483	[1726763961]	2000000 OPS in 1.528315 seconds, throughput 1308630.746934
+37483	[1726763962]	2000000 OPS in 1.525522 seconds, throughput 1311026.651861
+37483	[1726763963]	2000000 OPS in 1.546066 seconds, throughput 1293605.835715
+37483	[1726763963]	2000000 OPS in 1.529846 seconds, throughput 1307321.129055
+37483	[1726763963]	2000000 OPS in 1.531503 seconds, throughput 1305906.681214
+37483	[1726763964]	2000000 OPS in 1.525342 seconds, throughput 1311181.361295
+37483	[1726763964]	2000000 OPS in 1.545752 seconds, throughput 1293868.615405
+37483	[1726763964]	2000000 OPS in 1.527578 seconds, throughput 1309262.112966
+37483	[1726763964]	2000000 OPS in 1.530589 seconds, throughput 1306686.510879
+37483	[1726763966]	2000000 OPS in 1.525740 seconds, throughput 1310839.330423
+37483	[1726763966]	2000000 OPS in 1.544087 seconds, throughput 1295263.803141
+37483	[1726763966]	2000000 OPS in 1.528203 seconds, throughput 1308726.654770
+37483	[1726763966]	2000000 OPS in 1.530278 seconds, throughput 1306952.070147
+37483	[1726763967]	2000000 OPS in 1.524588 seconds, throughput 1311829.818941
+37483	[1726763967]	2000000 OPS in 1.542784 seconds, throughput 1296357.753256
+37483	[1726763967]	2000000 OPS in 1.528421 seconds, throughput 1308539.989963
+37483	[1726763967]	2000000 OPS in 1.532618 seconds, throughput 1304956.616717
+37483	[1726763969]	2000000 OPS in 1.528333 seconds, throughput 1308615.334485
+37483	[1726763969]	2000000 OPS in 1.545795 seconds, throughput 1293832.623343
+37483	[1726763969]	2000000 OPS in 1.529850 seconds, throughput 1307317.710887
+37483	[1726763969]	2000000 OPS in 1.531536 seconds, throughput 1305878.542848
+37483	[1726763970]	2000000 OPS in 1.523810 seconds, throughput 1312499.589844
+37483	[1726763970]	2000000 OPS in 1.542829 seconds, throughput 1296319.942132
+37483	[1726763970]	2000000 OPS in 1.527725 seconds, throughput 1309136.133794
+37483	[1726763971]	2000000 OPS in 1.532383 seconds, throughput 1305156.739536
+37483	[1726763972]	2000000 OPS in 1.526003 seconds, throughput 1310613.412949
+37483	[1726763972]	2000000 OPS in 1.531001 seconds, throughput 1306334.875026
+37483	[1726763972]	2000000 OPS in 1.545006 seconds, throughput 1294493.354718
+37483	[1726763972]	2000000 OPS in 1.531845 seconds, throughput 1305615.124246
+37483	[1726763973]	2000000 OPS in 1.524923 seconds, throughput 1311541.631938
+37483	[1726763973]	2000000 OPS in 1.524674 seconds, throughput 1311755.824524
+37483	[1726763973]	2000000 OPS in 1.544589 seconds, throughput 1294842.835214
+37483	[1726763974]	2000000 OPS in 1.531517 seconds, throughput 1305894.743578
+37483	[1726763975]	2000000 OPS in 1.526963 seconds, throughput 1309789.431702
+37483	[1726763975]	2000000 OPS in 1.528757 seconds, throughput 1308252.390668
+37483	[1726763975]	2000000 OPS in 1.549617 seconds, throughput 1290641.493995
+37483	[1726763975]	2000000 OPS in 1.531465 seconds, throughput 1305939.084471
+37483	[1726763976]	2000000 OPS in 1.524865 seconds, throughput 1311591.517938
+37483	[1726763976]	2000000 OPS in 1.529031 seconds, throughput 1308017.953854
+37483	[1726763976]	2000000 OPS in 1.543920 seconds, throughput 1295403.906938
+37483	[1726763977]	2000000 OPS in 1.532339 seconds, throughput 1305194.216162
+37483	[1726763978]	2000000 OPS in 1.526454 seconds, throughput 1310226.184346
+37483	[1726763978]	2000000 OPS in 1.527236 seconds, throughput 1309555.301211
+37483	[1726763978]	2000000 OPS in 1.545601 seconds, throughput 1293995.022001
+37483	[1726763978]	2000000 OPS in 1.529683 seconds, throughput 1307460.434613
+37483	[1726763979]	2000000 OPS in 1.525343 seconds, throughput 1311180.501697
+37483	[1726763979]	2000000 OPS in 1.527112 seconds, throughput 1309661.635820
+37483	[1726763980]	2000000 OPS in 1.545311 seconds, throughput 1294237.858916
+37483	[1726763980]	2000000 OPS in 1.534054 seconds, throughput 1303735.070604
+37483	[1726763981]	2000000 OPS in 1.525871 seconds, throughput 1310726.791452
+37483	[1726763981]	2000000 OPS in 1.530190 seconds, throughput 1307027.231912
+37483	[1726763981]	2000000 OPS in 1.547272 seconds, throughput 1292597.552337
+37483	[1726763981]	2000000 OPS in 1.533305 seconds, throughput 1304371.928612
+37483	[1726763982]	2000000 OPS in 1.526666 seconds, throughput 1310044.240194
+37483	[1726763982]	2000000 OPS in 1.529549 seconds, throughput 1307574.977984
+37483	[1726763983]	2000000 OPS in 1.545255 seconds, throughput 1294284.762062
+37483	[1726763983]	2000000 OPS in 1.532164 seconds, throughput 1305343.292232
+37483	[1726763984]	2000000 OPS in 1.526188 seconds, throughput 1310454.544263
+37483	[1726763984]	2000000 OPS in 1.529632 seconds, throughput 1307504.027112
+37483	[1726763984]	2000000 OPS in 1.545452 seconds, throughput 1294119.778550
+37483	[1726763984]	2000000 OPS in 1.531535 seconds, throughput 1305879.395508
+37483	[1726763985]	2000000 OPS in 1.525562 seconds, throughput 1310992.276944
+37483	[1726763986]	2000000 OPS in 1.526760 seconds, throughput 1309963.583012
+37483	[1726763986]	2000000 OPS in 1.544453 seconds, throughput 1294956.855275
+37483	[1726763986]	2000000 OPS in 1.532978 seconds, throughput 1304650.164582
+37483	[1726763987]	2000000 OPS in 1.525434 seconds, throughput 1311102.283022
+37483	[1726763987]	2000000 OPS in 1.529740 seconds, throughput 1307411.717024
+37483	[1726763987]	2000000 OPS in 1.545709 seconds, throughput 1293904.609470
+37483	[1726763987]	2000000 OPS in 1.530317 seconds, throughput 1306918.762583
+37483	[1726763988]	2000000 OPS in 1.525820 seconds, throughput 1310770.602037
+37483	[1726763989]	2000000 OPS in 1.527112 seconds, throughput 1309661.635820
+37483	[1726763989]	2000000 OPS in 1.544778 seconds, throughput 1294684.414201
+37483	[1726763989]	2000000 OPS in 1.535260 seconds, throughput 1302710.941469
+37483	[1726763990]	2000000 OPS in 1.532327 seconds, throughput 1305204.437434
+37483	[1726763990]	2000000 OPS in 1.534833 seconds, throughput 1303073.363682
+37483	[1726763990]	2000000 OPS in 1.552924 seconds, throughput 1287893.032756
+37483	[1726763990]	2000000 OPS in 1.538514 seconds, throughput 1299955.671512
+37483	[1726763991]	2000000 OPS in 1.526219 seconds, throughput 1310427.926792
+37483	[1726763992]	2000000 OPS in 1.531452 seconds, throughput 1305950.170165
+37483	[1726763992]	2000000 OPS in 1.546573 seconds, throughput 1293181.763809
+37483	[1726763992]	2000000 OPS in 1.532618 seconds, throughput 1304956.616717
+37483	[1726763993]	2000000 OPS in 1.527550 seconds, throughput 1309286.111748
+37483	[1726763993]	2000000 OPS in 1.529458 seconds, throughput 1307652.776343
+37483	[1726763993]	2000000 OPS in 1.544780 seconds, throughput 1294682.737995
+37483	[1726763994]	2000000 OPS in 1.532896 seconds, throughput 1304719.954909
+37483	[1726763995]	2000000 OPS in 1.526368 seconds, throughput 1310300.006289
+37483	[1726763995]	2000000 OPS in 1.527847 seconds, throughput 1309031.598059
+37483	[1726763995]	2000000 OPS in 1.548549 seconds, throughput 1291531.620892
+37483	[1726763995]	2000000 OPS in 1.531183 seconds, throughput 1306179.601001
+37483	[1726763996]	2000000 OPS in 1.528765 seconds, throughput 1308245.544606
+37483	[1726763996]	2000000 OPS in 1.531433 seconds, throughput 1305966.372672
+37483	[1726763997]	2000000 OPS in 1.545518 seconds, throughput 1294064.514292
+37483	[1726763997]	2000000 OPS in 1.532770 seconds, throughput 1304827.208257
+37483	[1726763998]	2000000 OPS in 1.526489 seconds, throughput 1310196.142914
+37483	[1726763998]	2000000 OPS in 1.530623 seconds, throughput 1306657.485220
+37483	[1726763998]	2000000 OPS in 1.546504 seconds, throughput 1293239.461392
+37483	[1726763998]	2000000 OPS in 1.534045 seconds, throughput 1303742.719412
+37483	[1726763999]	2000000 OPS in 1.526507 seconds, throughput 1310180.693570
+37483	[1726763999]	2000000 OPS in 1.529882 seconds, throughput 1307290.366185
+37483	[1726764000]	2000000 OPS in 1.551097 seconds, throughput 1289410.011108
+37483	[1726764000]	2000000 OPS in 1.533919 seconds, throughput 1303849.812148
+37483	[1726764001]	2000000 OPS in 1.527832 seconds, throughput 1309044.449913
+37483	[1726764001]	2000000 OPS in 1.531605 seconds, throughput 1305819.712001
+37483	[1726764001]	2000000 OPS in 1.547052 seconds, throughput 1292781.367401
+37483	[1726764001]	2000000 OPS in 1.534045 seconds, throughput 1303742.719412
+37483	[1726764002]	2000000 OPS in 1.526336 seconds, throughput 1310327.477043
+37483	[1726764002]	2000000 OPS in 1.530776 seconds, throughput 1306526.885710
+37483	[1726764003]	2000000 OPS in 1.532867 seconds, throughput 1304744.638641
+37483	[1726764003]	2000000 OPS in 1.545659 seconds, throughput 1293946.465553
+37483	[1726764004]	2000000 OPS in 1.527485 seconds, throughput 1309341.826597
+37483	[1726764004]	2000000 OPS in 1.533570 seconds, throughput 1304146.533905
+37483	[1726764004]	2000000 OPS in 1.533460 seconds, throughput 1304240.084515
+37483	[1726764004]	2000000 OPS in 1.549436 seconds, throughput 1290792.262475
+37483	[1726764005]	2000000 OPS in 1.526773 seconds, throughput 1309952.429078
+37483	[1726764005]	2000000 OPS in 1.529048 seconds, throughput 1308003.411273
+37483	[1726764006]	2000000 OPS in 1.560013 seconds, throughput 1282040.598380
+37483	[1726764006]	2000000 OPS in 1.561681 seconds, throughput 1280671.276656
+37483	[1726764007]	2000000 OPS in 1.527035 seconds, throughput 1309727.674873
+37483	[1726764007]	2000000 OPS in 1.530545 seconds, throughput 1306724.075411
+37483	[1726764007]	2000000 OPS in 1.528097 seconds, throughput 1308817.437636
+37483	[1726764007]	2000000 OPS in 1.548227 seconds, throughput 1291800.233428
+37483	[1726764008]	2000000 OPS in 1.527837 seconds, throughput 1309040.165934
+37483	[1726764008]	2000000 OPS in 1.529757 seconds, throughput 1307397.187919
+37483	[1726764009]	2000000 OPS in 1.529981 seconds, throughput 1307205.775758
+37483	[1726764009]	2000000 OPS in 1.551255 seconds, throughput 1289278.680810
+37483	[1726764010]	2000000 OPS in 1.528841 seconds, throughput 1308180.510596
+37483	[1726764010]	2000000 OPS in 1.533439 seconds, throughput 1304257.945702
+37483	[1726764010]	2000000 OPS in 1.527750 seconds, throughput 1309114.711177
+37483	[1726764010]	2000000 OPS in 1.545051 seconds, throughput 1294455.652273
+37483	[1726764011]	2000000 OPS in 1.527530 seconds, throughput 1309303.254273
+37483	[1726764012]	2000000 OPS in 1.529859 seconds, throughput 1307310.020074
+37483	[1726764012]	2000000 OPS in 1.527535 seconds, throughput 1309298.968600
+37483	[1726764012]	2000000 OPS in 1.545650 seconds, throughput 1293953.999935
+37483	[1726764013]	2000000 OPS in 1.527759 seconds, throughput 1309106.999206
+37483	[1726764013]	2000000 OPS in 1.532493 seconds, throughput 1305063.057384
+37483	[1726764013]	2000000 OPS in 1.525583 seconds, throughput 1310974.230835
+37483	[1726764014]	2000000 OPS in 1.544101 seconds, throughput 1295252.059289
+37483	[1726764014]	2000000 OPS in 1.529253 seconds, throughput 1307828.070306
+37483	[1726764015]	2000000 OPS in 1.530919 seconds, throughput 1306404.845717
+37483	[1726764015]	2000000 OPS in 1.528539 seconds, throughput 1308438.973425
+37483	[1726764015]	2000000 OPS in 1.544810 seconds, throughput 1294657.595432
+37483	[1726764016]	2000000 OPS in 1.527693 seconds, throughput 1309163.555767
+37483	[1726764016]	2000000 OPS in 1.533478 seconds, throughput 1304224.775315
+37483	[1726764016]	2000000 OPS in 1.528320 seconds, throughput 1308626.465662
+37483	[1726764017]	2000000 OPS in 1.548459 seconds, throughput 1291606.687681
+37483	[1726764017]	2000000 OPS in 1.531662 seconds, throughput 1305771.116604
+37483	[1726764018]	2000000 OPS in 1.530711 seconds, throughput 1306582.365972
+37483	[1726764018]	2000000 OPS in 1.527201 seconds, throughput 1309585.313263
+37483	[1726764018]	2000000 OPS in 1.548119 seconds, throughput 1291890.352098
+37483	[1726764019]	2000000 OPS in 1.528774 seconds, throughput 1308237.842873
+37483	[1726764019]	2000000 OPS in 1.533238 seconds, throughput 1304428.927538
+37483	[1726764020]	2000000 OPS in 1.528682 seconds, throughput 1308316.575979
+37483	[1726764020]	2000000 OPS in 1.546549 seconds, throughput 1293201.831950
+37483	[1726764021]	2000000 OPS in 1.531403 seconds, throughput 1305991.956396
+37483	[1726764021]	2000000 OPS in 1.531038 seconds, throughput 1306303.305339
+37483	[1726764021]	2000000 OPS in 1.529128 seconds, throughput 1307934.979936
+37483	[1726764021]	2000000 OPS in 1.550696 seconds, throughput 1289743.444234
+37483	[1726764022]	2000000 OPS in 1.529436 seconds, throughput 1307671.586127
+37483	[1726764022]	2000000 OPS in 1.533394 seconds, throughput 1304296.221323
+37483	[1726764023]	2000000 OPS in 1.528646 seconds, throughput 1308347.387165
+37483	[1726764023]	2000000 OPS in 1.547349 seconds, throughput 1292533.229414
+37483	[1726764024]	2000000 OPS in 1.530604 seconds, throughput 1306673.705282
+37483	[1726764024]	2000000 OPS in 1.532490 seconds, throughput 1305065.612174
+37483	[1726764024]	2000000 OPS in 1.529953 seconds, throughput 1307229.699213
+37483	[1726764024]	2000000 OPS in 1.548833 seconds, throughput 1291294.800666
+37483	[1726764025]	2000000 OPS in 1.530484 seconds, throughput 1306776.157085
+37483	[1726764025]	2000000 OPS in 1.533346 seconds, throughput 1304337.051129
+37483	[1726764026]	2000000 OPS in 1.528856 seconds, throughput 1308167.675700
+37483	[1726764026]	2000000 OPS in 1.550406 seconds, throughput 1289984.687882
+37483	[1726764027]	2000000 OPS in 1.526782 seconds, throughput 1309944.707234
+37483	[1726764027]	2000000 OPS in 1.527295 seconds, throughput 1309504.712580
+37483	[1726764027]	2000000 OPS in 1.529421 seconds, throughput 1307684.411290
+37483	[1726764027]	2000000 OPS in 1.547088 seconds, throughput 1292751.284995
+37483	[1726764028]	2000000 OPS in 1.529550 seconds, throughput 1307574.123108
+37483	[1726764028]	2000000 OPS in 1.530138 seconds, throughput 1307071.649747
+37483	[1726764029]	2000000 OPS in 1.529104 seconds, throughput 1307955.508585
+37483	[1726764029]	2000000 OPS in 1.550198 seconds, throughput 1290157.773394
+37483	[1726764030]	2000000 OPS in 1.526990 seconds, throughput 1309766.272209
+37483	[1726764030]	2000000 OPS in 1.531662 seconds, throughput 1305771.116604
+37483	[1726764030]	2000000 OPS in 1.529270 seconds, throughput 1307813.531947
+37483	[1726764031]	2000000 OPS in 1.546607 seconds, throughput 1293153.335010
+37483	[1726764031]	2000000 OPS in 1.529485 seconds, throughput 1307629.692347
+37483	[1726764031]	2000000 OPS in 1.530484 seconds, throughput 1306776.157085
+37483	[1726764032]	2000000 OPS in 1.528995 seconds, throughput 1308048.750977
+37483	[1726764032]	2000000 OPS in 1.546435 seconds, throughput 1293297.164123
+37483	[1726764033]	2000000 OPS in 1.529079 seconds, throughput 1307976.893280
+37483	[1726764033]	2000000 OPS in 1.529378 seconds, throughput 1307721.178152
+37483	[1726764033]	2000000 OPS in 1.529509 seconds, throughput 1307609.173924
+37483	[1726764034]	2000000 OPS in 1.549430 seconds, throughput 1290797.260928
+37483	[1726764034]	2000000 OPS in 1.530645 seconds, throughput 1306638.704598
+37483	[1726764035]	2000000 OPS in 1.533144 seconds, throughput 1304508.904578
+37483	[1726764035]	2000000 OPS in 1.527798 seconds, throughput 1309073.581717
+37483	[1726764035]	2000000 OPS in 1.546324 seconds, throughput 1293390.001061
+37483	[1726764036]	2000000 OPS in 1.531093 seconds, throughput 1306256.380246
+37483	[1726764036]	2000000 OPS in 1.531856 seconds, throughput 1305605.748843
+37483	[1726764036]	2000000 OPS in 1.531595 seconds, throughput 1305828.237883
+37483	[1726764037]	2000000 OPS in 1.548148 seconds, throughput 1291866.152332
+37483	[1726764037]	2000000 OPS in 1.528664 seconds, throughput 1308331.981390
+37483	[1726764038]	2000000 OPS in 1.532849 seconds, throughput 1304759.960048
+37483	[1726764038]	2000000 OPS in 1.530113 seconds, throughput 1307093.005549
+37483	[1726764038]	2000000 OPS in 1.571522 seconds, throughput 1272651.607804
+37483	[1726764039]	2000000 OPS in 1.533311 seconds, throughput 1304366.824473
+37483	[1726764039]	2000000 OPS in 1.536696 seconds, throughput 1301493.594049
+37483	[1726764039]	2000000 OPS in 1.533792 seconds, throughput 1303957.772631
+37483	[1726764040]	2000000 OPS in 1.553079 seconds, throughput 1287764.498780
+37483	[1726764040]	2000000 OPS in 1.535068 seconds, throughput 1302873.879203
+37483	[1726764041]	2000000 OPS in 1.538436 seconds, throughput 1300021.580358
+37483	[1726764041]	2000000 OPS in 1.533874 seconds, throughput 1303888.063817
+37483	[1726764041]	2000000 OPS in 1.552026 seconds, throughput 1288638.205803
+37483	[1726764042]	2000000 OPS in 1.530464 seconds, throughput 1306793.233947
+37483	[1726764042]	2000000 OPS in 1.532326 seconds, throughput 1305205.289214
+37483	[1726764043]	2000000 OPS in 1.533148 seconds, throughput 1304505.501100
+37483	[1726764043]	2000000 OPS in 1.552575 seconds, throughput 1288182.535465
+37483	[1726764043]	2000000 OPS in 1.531417 seconds, throughput 1305980.017200
+37483	[1726764044]	2000000 OPS in 1.533018 seconds, throughput 1304616.123229
+37483	[1726764044]	2000000 OPS in 1.528642 seconds, throughput 1308350.810720
+37483	[1726764045]	2000000 OPS in 1.551670 seconds, throughput 1288933.858359
+37483	[1726764045]	2000000 OPS in 1.531196 seconds, throughput 1306168.511412
+37483	[1726764045]	2000000 OPS in 1.534456 seconds, throughput 1303393.515357
+37483	[1726764046]	2000000 OPS in 1.530656 seconds, throughput 1306629.314490
+37483	[1726764046]	2000000 OPS in 1.548871 seconds, throughput 1291263.120040
+37483	[1726764047]	2000000 OPS in 1.529673 seconds, throughput 1307468.981933
+37483	[1726764047]	2000000 OPS in 1.533507 seconds, throughput 1304200.111248
+37483	[1726764047]	2000000 OPS in 1.524904 seconds, throughput 1311557.973486
+37483	[1726764048]	2000000 OPS in 1.549782 seconds, throughput 1290504.083800
+37483	[1726764048]	2000000 OPS in 1.530861 seconds, throughput 1306454.341707
+37483	[1726764048]	2000000 OPS in 1.533634 seconds, throughput 1304092.110634
+37483	[1726764049]	2000000 OPS in 1.531646 seconds, throughput 1305784.757052
+37483	[1726764049]	2000000 OPS in 1.549221 seconds, throughput 1290971.397883
+37483	[1726764050]	2000000 OPS in 1.530237 seconds, throughput 1306987.087621
+37483	[1726764050]	2000000 OPS in 1.535156 seconds, throughput 1302799.194349
+37483	[1726764050]	2000000 OPS in 1.528178 seconds, throughput 1308748.064689
+37483	[1726764051]	2000000 OPS in 1.547296 seconds, throughput 1292577.502947
+37483	[1726764051]	2000000 OPS in 1.526259 seconds, throughput 1310393.583265
+37483	[1726764051]	2000000 OPS in 1.531283 seconds, throughput 1306094.301315
+37483	[1726764052]	2000000 OPS in 1.527250 seconds, throughput 1309543.296775
+37483	[1726764052]	2000000 OPS in 1.548860 seconds, throughput 1291272.290588
+37483	[1726764053]	2000000 OPS in 1.529583 seconds, throughput 1307545.912840
+37483	[1726764053]	2000000 OPS in 1.532569 seconds, throughput 1304998.339390
+37483	[1726764053]	2000000 OPS in 1.529000 seconds, throughput 1308044.473512
+37483	[1726764054]	2000000 OPS in 1.549499 seconds, throughput 1290739.781052
+37483	[1726764054]	2000000 OPS in 1.528935 seconds, throughput 1308100.082737
+37483	[1726764054]	2000000 OPS in 1.532817 seconds, throughput 1304787.198994
+37483	[1726764055]	2000000 OPS in 1.530288 seconds, throughput 1306943.529584
+37483	[1726764055]	2000000 OPS in 1.549509 seconds, throughput 1290731.451060
+37483	[1726764056]	2000000 OPS in 1.531063 seconds, throughput 1306281.975333
+37483	[1726764056]	2000000 OPS in 1.532005 seconds, throughput 1305478.768020
+37483	[1726764056]	2000000 OPS in 1.527758 seconds, throughput 1309107.856087
+37483	[1726764057]	2000000 OPS in 1.549506 seconds, throughput 1290733.950046
+37483	[1726764057]	2000000 OPS in 1.528981 seconds, throughput 1308060.728027
+37483	[1726764058]	2000000 OPS in 1.531972 seconds, throughput 1305506.889160
+37483	[1726764058]	2000000 OPS in 1.530094 seconds, throughput 1307109.236426
+37483	[1726764059]	2000000 OPS in 1.548335 seconds, throughput 1291710.127330
+37483	[1726764059]	2000000 OPS in 1.528395 seconds, throughput 1308562.249942
+37483	[1726764059]	2000000 OPS in 1.530663 seconds, throughput 1306623.339037
+37483	[1726764059]	2000000 OPS in 1.529010 seconds, throughput 1308035.918666
+37483	[1726764060]	2000000 OPS in 1.548124 seconds, throughput 1291886.179660
+37483	[1726764060]	2000000 OPS in 1.530776 seconds, throughput 1306526.885710
+37483	[1726764061]	2000000 OPS in 1.534317 seconds, throughput 1303511.595062
+37483	[1726764061]	2000000 OPS in 1.532257 seconds, throughput 1305264.064710
+37483	[1726764062]	2000000 OPS in 1.547991 seconds, throughput 1291997.175694
+37483	[1726764062]	2000000 OPS in 1.529668 seconds, throughput 1307473.255635
+37483	[1726764062]	2000000 OPS in 1.530657 seconds, throughput 1306628.460850
+37483	[1726764062]	2000000 OPS in 1.530096 seconds, throughput 1307107.527894
+37483	[1726764063]	2000000 OPS in 1.549861 seconds, throughput 1290438.303822
+37483	[1726764063]	2000000 OPS in 1.527747 seconds, throughput 1309117.281854
+37483	[1726764064]	2000000 OPS in 1.532159 seconds, throughput 1305347.552049
+37483	[1726764064]	2000000 OPS in 1.529118 seconds, throughput 1307943.533462
+37483	[1726764065]	2000000 OPS in 1.550772 seconds, throughput 1289680.236682
+37483	[1726764065]	2000000 OPS in 1.529623 seconds, throughput 1307511.720208
+37483	[1726764065]	2000000 OPS in 1.533845 seconds, throughput 1303912.716083
+37483	[1726764065]	2000000 OPS in 1.530502 seconds, throughput 1306760.788290
+37483	[1726764066]	2000000 OPS in 1.546903 seconds, throughput 1292905.890027
+37483	[1726764066]	2000000 OPS in 1.530850 seconds, throughput 1306463.729301
+37483	[1726764067]	2000000 OPS in 1.532259 seconds, throughput 1305262.360998
+37483	[1726764067]	2000000 OPS in 1.529004 seconds, throughput 1308041.051560
+37483	[1726764068]	2000000 OPS in 1.549169 seconds, throughput 1291014.731124
+37483	[1726764068]	2000000 OPS in 1.531087 seconds, throughput 1306261.499183
+37483	[1726764068]	2000000 OPS in 1.532140 seconds, throughput 1305363.739606
+37483	[1726764069]	2000000 OPS in 1.529666 seconds, throughput 1307474.965123
+37483	[1726764069]	2000000 OPS in 1.549434 seconds, throughput 1290793.928622
+37483	[1726764069]	2000000 OPS in 1.526754 seconds, throughput 1309968.731046
+37483	[1726764070]	2000000 OPS in 1.531300 seconds, throughput 1306079.801476
+37483	[1726764070]	2000000 OPS in 1.528087 seconds, throughput 1308826.002708
+37483	[1726764071]	2000000 OPS in 1.548045 seconds, throughput 1291952.107335
+37483	[1726764071]	2000000 OPS in 1.531804 seconds, throughput 1305650.070113
+37483	[1726764071]	2000000 OPS in 1.532210 seconds, throughput 1305304.103223
+37483	[1726764072]	2000000 OPS in 1.528675 seconds, throughput 1308322.566929
+37483	[1726764072]	2000000 OPS in 1.545829 seconds, throughput 1293804.165920
+37483	[1726764073]	2000000 OPS in 1.528995 seconds, throughput 1308048.750977
+37483	[1726764073]	2000000 OPS in 1.533936 seconds, throughput 1303835.362101
+37483	[1726764073]	2000000 OPS in 1.527551 seconds, throughput 1309285.254633
+37483	[1726764074]	2000000 OPS in 1.547832 seconds, throughput 1292129.895234
+37483	[1726764074]	2000000 OPS in 1.529243 seconds, throughput 1307836.622433
+37483	[1726764074]	2000000 OPS in 1.531581 seconds, throughput 1305840.174304
+37483	[1726764075]	2000000 OPS in 1.526856 seconds, throughput 1309881.219971
+37483	[1726764076]	2000000 OPS in 1.546430 seconds, throughput 1293301.345680
+37483	[1726764076]	2000000 OPS in 1.528911 seconds, throughput 1308120.616570
+37483	[1726764076]	2000000 OPS in 1.536255 seconds, throughput 1301867.203036
+37483	[1726764076]	2000000 OPS in 1.527739 seconds, throughput 1309124.137042
+37483	[1726764077]	2000000 OPS in 1.548160 seconds, throughput 1291856.138900
+37483	[1726764077]	2000000 OPS in 1.529332 seconds, throughput 1307760.512433
+37483	[1726764077]	2000000 OPS in 1.533451 seconds, throughput 1304247.739250
+37483	[1726764078]	2000000 OPS in 1.528701 seconds, throughput 1308300.315104
+37483	[1726764079]	2000000 OPS in 1.548401 seconds, throughput 1291655.068681
+37483	[1726764079]	2000000 OPS in 1.530701 seconds, throughput 1306590.901816
+37483	[1726764079]	2000000 OPS in 1.534478 seconds, throughput 1303374.828443
+37483	[1726764079]	2000000 OPS in 1.530473 seconds, throughput 1306785.549304
+37483	[1726764080]	2000000 OPS in 1.531972 seconds, throughput 1305506.889160
+37483	[1726764080]	2000000 OPS in 1.550711 seconds, throughput 1289730.968569
+37483	[1726764081]	2000000 OPS in 1.533383 seconds, throughput 1304305.577928
+37483	[1726764081]	2000000 OPS in 1.531475 seconds, throughput 1305930.557143
+37483	[1726764082]	2000000 OPS in 1.532397 seconds, throughput 1305144.815606
+37483	[1726764082]	2000000 OPS in 1.552166 seconds, throughput 1288521.975098
+37483	[1726764082]	2000000 OPS in 1.534921 seconds, throughput 1302998.655957
+37483	[1726764082]	2000000 OPS in 1.530141 seconds, throughput 1307069.087097
+37483	[1726764083]	2000000 OPS in 1.532165 seconds, throughput 1305342.440272
+37483	[1726764083]	2000000 OPS in 1.550836 seconds, throughput 1289627.014075
+37483	[1726764084]	2000000 OPS in 1.534959 seconds, throughput 1302966.398451
+37483	[1726764084]	2000000 OPS in 1.532411 seconds, throughput 1305132.891894
+37483	[1726764085]	2000000 OPS in 1.536447 seconds, throughput 1301704.516980
+37483	[1726764085]	2000000 OPS in 1.557907 seconds, throughput 1283773.678403
+37483	[1726764085]	2000000 OPS in 1.538982 seconds, throughput 1299560.358731
+37483	[1726764085]	2000000 OPS in 1.534218 seconds, throughput 1303595.708041
+37483	[1726764086]	2000000 OPS in 1.532831 seconds, throughput 1304775.281815
+37483	[1726764086]	2000000 OPS in 1.552301 seconds, throughput 1288409.915345
+37483	[1726764087]	2000000 OPS in 1.536467 seconds, throughput 1301687.572854
+37483	[1726764087]	2000000 OPS in 1.531572 seconds, throughput 1305847.847832
+37483	[1726764088]	2000000 OPS in 1.533194 seconds, throughput 1304466.362378
+37483	[1726764088]	2000000 OPS in 1.548695 seconds, throughput 1291409.864434
+37483	[1726764088]	2000000 OPS in 1.534014 seconds, throughput 1303769.065993
+37483	[1726764088]	2000000 OPS in 1.529548 seconds, throughput 1307575.832860
+37483	[1726764089]	2000000 OPS in 1.530136 seconds, throughput 1307073.358185
+37483	[1726764089]	2000000 OPS in 1.550178 seconds, throughput 1290174.418680
+37483	[1726764090]	2000000 OPS in 1.533936 seconds, throughput 1303835.362101
+37483	[1726764090]	2000000 OPS in 1.529606 seconds, throughput 1307526.251858
+37483	[1726764091]	2000000 OPS in 1.530726 seconds, throughput 1306569.562417
+37483	[1726764091]	2000000 OPS in 1.550469 seconds, throughput 1289932.272106
+37483	[1726764091]	2000000 OPS in 1.534373 seconds, throughput 1303464.020808
+37483	[1726764091]	2000000 OPS in 1.533036 seconds, throughput 1304600.805200
+37483	[1726764092]	2000000 OPS in 1.531748 seconds, throughput 1305697.804077
+37483	[1726764093]	2000000 OPS in 1.549345 seconds, throughput 1290868.076510
+37483	[1726764093]	2000000 OPS in 1.532868 seconds, throughput 1304743.787462
+37483	[1726764093]	2000000 OPS in 1.530849 seconds, throughput 1306464.582725
+37483	[1726764094]	2000000 OPS in 1.530484 seconds, throughput 1306776.157085
+37483	[1726764094]	2000000 OPS in 1.550831 seconds, throughput 1289631.171933
+37483	[1726764094]	2000000 OPS in 1.535494 seconds, throughput 1302512.416200
+37483	[1726764095]	2000000 OPS in 1.530111 seconds, throughput 1307094.714044
+37483	[1726764095]	2000000 OPS in 1.530933 seconds, throughput 1306392.898971
+37483	[1726764096]	2000000 OPS in 1.549314 seconds, throughput 1290893.905303
+37483	[1726764096]	2000000 OPS in 1.533992 seconds, throughput 1303787.764213
+37483	[1726764096]	2000000 OPS in 1.529142 seconds, throughput 1307923.005189
+37483	[1726764097]	2000000 OPS in 1.531846 seconds, throughput 1305614.271931
+37483	[1726764097]	2000000 OPS in 1.553766 seconds, throughput 1287195.111748
+37483	[1726764097]	2000000 OPS in 1.533046 seconds, throughput 1304592.295339
+37483	[1726764098]	2000000 OPS in 1.531587 seconds, throughput 1305835.058668
+37483	[1726764099]	2000000 OPS in 1.530197 seconds, throughput 1307021.252819
+37483	[1726764099]	2000000 OPS in 1.547804 seconds, throughput 1292153.270052
+37483	[1726764099]	2000000 OPS in 1.535885 seconds, throughput 1302180.827341
+37483	[1726764099]	2000000 OPS in 1.529943 seconds, throughput 1307238.243516
+37483	[1726764100]	2000000 OPS in 1.532991 seconds, throughput 1304639.100947
+37483	[1726764100]	2000000 OPS in 1.549262 seconds, throughput 1290937.233341
+37483	[1726764100]	2000000 OPS in 1.535819 seconds, throughput 1302236.787017
+37483	[1726764101]	2000000 OPS in 1.531318 seconds, throughput 1306064.449056
+37483	[1726764102]	2000000 OPS in 1.530107 seconds, throughput 1307098.131046
+37483	[1726764102]	2000000 OPS in 1.553007 seconds, throughput 1287824.201694
+37483	[1726764102]	2000000 OPS in 1.533994 seconds, throughput 1303786.064352
+37483	[1726764102]	2000000 OPS in 1.531057 seconds, throughput 1306287.094471
+37483	[1726764103]	2000000 OPS in 1.531736 seconds, throughput 1305708.033238
+37483	[1726764103]	2000000 OPS in 1.549676 seconds, throughput 1290592.356080
+37483	[1726764104]	2000000 OPS in 1.532933 seconds, throughput 1304688.463227
+37483	[1726764104]	2000000 OPS in 1.527660 seconds, throughput 1309191.835880
+37483	[1726764105]	2000000 OPS in 1.531796 seconds, throughput 1305656.889037
+37483	[1726764105]	2000000 OPS in 1.551834 seconds, throughput 1288797.642016
+37483	[1726764105]	2000000 OPS in 1.535028 seconds, throughput 1302907.829694
+37483	[1726764105]	2000000 OPS in 1.531261 seconds, throughput 1306113.066290
+37483	[1726764106]	2000000 OPS in 1.529464 seconds, throughput 1307647.646496
+37483	[1726764107]	2000000 OPS in 1.547343 seconds, throughput 1292538.241360
+37483	[1726764107]	2000000 OPS in 1.532138 seconds, throughput 1305365.443583
+37483	[1726764107]	2000000 OPS in 1.529833 seconds, throughput 1307332.238225
+37483	[1726764108]	2000000 OPS in 1.528476 seconds, throughput 1308492.904043
+37483	[1726764108]	2000000 OPS in 1.547676 seconds, throughput 1292260.137135
+37483	[1726764108]	2000000 OPS in 1.534040 seconds, throughput 1303746.968788
+37483	[1726764108]	2000000 OPS in 1.531412 seconds, throughput 1305984.281173
+37483	[1726764109]	2000000 OPS in 1.528883 seconds, throughput 1308144.573522
+37483	[1726764110]	2000000 OPS in 1.549511 seconds, throughput 1290729.785074
+37483	[1726764110]	2000000 OPS in 1.531054 seconds, throughput 1306289.654055
+37483	[1726764110]	2000000 OPS in 1.530394 seconds, throughput 1306853.006481
+37483	[1726764111]	2000000 OPS in 1.529066 seconds, throughput 1307988.013598
+37483	[1726764111]	2000000 OPS in 1.549511 seconds, throughput 1290729.785074
+37483	[1726764111]	2000000 OPS in 1.533572 seconds, throughput 1304144.833109
+37483	[1726764111]	2000000 OPS in 1.531154 seconds, throughput 1306204.339995
+37483	[1726764112]	2000000 OPS in 1.533128 seconds, throughput 1304522.518668
+37483	[1726764113]	2000000 OPS in 1.549618 seconds, throughput 1290640.661118
+37483	[1726764113]	2000000 OPS in 1.534726 seconds, throughput 1303164.213026
+37483	[1726764113]	2000000 OPS in 1.528708 seconds, throughput 1308294.324358
+37483	[1726764114]	2000000 OPS in 1.531566 seconds, throughput 1305852.963568
+37483	[1726764114]	2000000 OPS in 1.535912 seconds, throughput 1302157.936132
+37483	[1726764114]	2000000 OPS in 1.551213 seconds, throughput 1289313.588785
+37483	[1726764114]	2000000 OPS in 1.531613 seconds, throughput 1305812.891377
+37483	[1726764115]	2000000 OPS in 1.532049 seconds, throughput 1305441.275051
+37483	[1726764116]	2000000 OPS in 1.535859 seconds, throughput 1302202.871488
+37483	[1726764116]	2000000 OPS in 1.551388 seconds, throughput 1289168.151359
+37483	[1726764116]	2000000 OPS in 1.530723 seconds, throughput 1306572.123108
+37483	[1726764117]	2000000 OPS in 1.531944 seconds, throughput 1305530.750471
+37483	[1726764117]	2000000 OPS in 1.532864 seconds, throughput 1304747.192184
+37483	[1726764117]	2000000 OPS in 1.550243 seconds, throughput 1290120.323072
+37483	[1726764117]	2000000 OPS in 1.529672 seconds, throughput 1307469.836671
+37483	[1726764118]	2000000 OPS in 1.533595 seconds, throughput 1304125.274274
+37483	[1726764119]	2000000 OPS in 1.535215 seconds, throughput 1302749.126344
+37483	[1726764119]	2000000 OPS in 1.549907 seconds, throughput 1290400.004645
+37483	[1726764119]	2000000 OPS in 1.529721 seconds, throughput 1307427.955817
+37483	[1726764120]	2000000 OPS in 1.530196 seconds, throughput 1307022.106972
+37483	[1726764120]	2000000 OPS in 1.533563 seconds, throughput 1304152.486725
+37483	[1726764120]	2000000 OPS in 1.553968 seconds, throughput 1287027.789504
+37483	[1726764121]	2000000 OPS in 1.528475 seconds, throughput 1308493.760120
+37483	[1726764122]	2000000 OPS in 1.531427 seconds, throughput 1305971.489336
+37483	[1726764122]	2000000 OPS in 1.532197 seconds, throughput 1305315.178140
+37483	[1726764122]	2000000 OPS in 1.549460 seconds, throughput 1290772.269049
+37483	[1726764122]	2000000 OPS in 1.531470 seconds, throughput 1305934.820793
+37483	[1726764123]	2000000 OPS in 1.531358 seconds, throughput 1306030.333861
+37483	[1726764123]	2000000 OPS in 1.533234 seconds, throughput 1304432.330616
+37483	[1726764124]	2000000 OPS in 1.529691 seconds, throughput 1307453.596838
+37483	[1726764124]	2000000 OPS in 1.548247 seconds, throughput 1291783.546165
+37483	[1726764125]	2000000 OPS in 1.529455 seconds, throughput 1307655.341282
+37483	[1726764125]	2000000 OPS in 1.533648 seconds, throughput 1304080.206149
+37483	[1726764125]	2000000 OPS in 1.531178 seconds, throughput 1306183.866278
+37483	[1726764125]	2000000 OPS in 1.549151 seconds, throughput 1291029.731769
+37483	[1726764126]	2000000 OPS in 1.532076 seconds, throughput 1305418.269068
+37483	[1726764127]	2000000 OPS in 1.533649 seconds, throughput 1304079.355837
+37483	[1726764127]	2000000 OPS in 1.531269 seconds, throughput 1306106.242600
+37483	[1726764127]	2000000 OPS in 1.550236 seconds, throughput 1290126.148535
+37483	[1726764128]	2000000 OPS in 1.530115 seconds, throughput 1307091.297059
+37483	[1726764128]	2000000 OPS in 1.532113 seconds, throughput 1305386.743667
+37483	[1726764128]	2000000 OPS in 1.531908 seconds, throughput 1305561.430582
+37483	[1726764128]	2000000 OPS in 1.551209 seconds, throughput 1289316.913453
+37483	[1726764129]	2000000 OPS in 1.532552 seconds, throughput 1305012.815226
+37483	[1726764130]	2000000 OPS in 1.532324 seconds, throughput 1305206.992777
+37483	[1726764130]	2000000 OPS in 1.528563 seconds, throughput 1308418.429597
+37483	[1726764130]	2000000 OPS in 1.547766 seconds, throughput 1292184.994373
+37483	[1726764131]	2000000 OPS in 1.535357 seconds, throughput 1302628.639463
+37483	[1726764131]	2000000 OPS in 1.537291 seconds, throughput 1300989.858134
+37483	[1726764131]	2000000 OPS in 1.534819 seconds, throughput 1303085.249792
+37483	[1726764131]	2000000 OPS in 1.552820 seconds, throughput 1287979.289293
+37483	[1726764132]	2000000 OPS in 1.530221 seconds, throughput 1307000.753486
+37483	[1726764133]	2000000 OPS in 1.532470 seconds, throughput 1305082.644358
+37483	[1726764133]	2000000 OPS in 1.529691 seconds, throughput 1307453.596838
+37483	[1726764133]	2000000 OPS in 1.550017 seconds, throughput 1290308.428875
+37483	[1726764134]	2000000 OPS in 1.532681 seconds, throughput 1304902.977201
+37483	[1726764134]	2000000 OPS in 1.533664 seconds, throughput 1304066.601289
+37483	[1726764134]	2000000 OPS in 1.530685 seconds, throughput 1306604.559397
+37483	[1726764134]	2000000 OPS in 1.549201 seconds, throughput 1290988.064170
+37483	[1726764135]	2000000 OPS in 1.532085 seconds, throughput 1305410.600587
+37483	[1726764136]	2000000 OPS in 1.534973 seconds, throughput 1302954.514509
+37483	[1726764136]	2000000 OPS in 1.530354 seconds, throughput 1306887.164669
+37483	[1726764136]	2000000 OPS in 1.551094 seconds, throughput 1289412.504980
+37483	[1726764137]	2000000 OPS in 1.528680 seconds, throughput 1308318.287673
+37483	[1726764137]	2000000 OPS in 1.534787 seconds, throughput 1303112.418857
+37483	[1726764137]	2000000 OPS in 1.532889 seconds, throughput 1304725.912966
+37483	[1726764138]	2000000 OPS in 1.553716 seconds, throughput 1287236.534862
+37483	[1726764138]	2000000 OPS in 1.531943 seconds, throughput 1305531.602677
+37483	[1726764139]	2000000 OPS in 1.534017 seconds, throughput 1303766.516277
+37483	[1726764139]	2000000 OPS in 1.529116 seconds, throughput 1307945.244180
+37483	[1726764139]	2000000 OPS in 1.547794 seconds, throughput 1292161.618407
+37483	[1726764140]	2000000 OPS in 1.531155 seconds, throughput 1306203.486910
+37483	[1726764140]	2000000 OPS in 1.534874 seconds, throughput 1303038.555608
+37483	[1726764140]	2000000 OPS in 1.530362 seconds, throughput 1306880.332889
+37483	[1726764141]	2000000 OPS in 1.550619 seconds, throughput 1289807.489783
+37483	[1726764141]	2000000 OPS in 1.531783 seconds, throughput 1305667.969941
+37483	[1726764142]	2000000 OPS in 1.536409 seconds, throughput 1301736.712034
+37483	[1726764142]	2000000 OPS in 1.530202 seconds, throughput 1307016.982072
+37483	[1726764142]	2000000 OPS in 1.549062 seconds, throughput 1291103.906751
+37483	[1726764143]	2000000 OPCommand terminated by signal 2
+1426.49user 11.34system 5:38.96elapsed 424%CPU (0avgtext+0avgdata 10634692maxresident)k
+310597inputs+20861992outputs (6747major+1338173minor)pagefaults 0swaps

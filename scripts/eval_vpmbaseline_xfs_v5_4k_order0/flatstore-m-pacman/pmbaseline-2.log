@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-04T00:38:36-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 2.95, 4.25, 4.79
+[1728020316]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728020316]	Setup starts!
+[1728020316]	Setup starts!
+[1728020316]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f4047000000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728020316]	Initializing log segments...
+Log: pool_start 0x7f4047000000 total segments: 2028  cleaners: 2
+[1728020321]Initialized 2026 free log segments...
+[1728020321]	DB init finished in 4.318727 seconds
+[1728020321]	DB init finished in 4.319038 seconds
+[1728020321]	DB init finished in 4.318973 seconds
+[1728020321]	DB init finished in 4.318937 seconds
+[1728020326]	DB load finished in 5.538811 seconds
+[1728020326]	DB load finished in 5.551685 seconds
+[1728020326]	DB load finished in 5.565608 seconds
+[1728020326]	DB load finished in 5.584183 seconds
+[1728020326]	DB warmup finished in 0.000018 seconds
+[1728020326]	DB warmup finished in 0.018601 seconds
+[1728020326]	DB warmup finished in 0.032547 seconds
+[1728020326]	DB warmup finished in 0.045419 seconds
+[1728020326]	ETC init!
+[1728020326]	ETC starts!
+[1728020326]	ETC init!
+[1728020326]	ETC init!
+[1728020326]	ETC starts!
+[1728020326]	ETC starts!
+[1728020326]	ETC init!
+[1728020326]	ETC starts!
+445460	[1728020329]	2000000 OPS in 2.350095 seconds, throughput 851029.426470
+445460	[1728020329]	2000000 OPS in 2.356161 seconds, throughput 848838.428274
+445460	[1728020329]	2000000 OPS in 2.369114 seconds, throughput 844197.451030
+445460	[1728020329]	2000000 OPS in 2.371017 seconds, throughput 843519.890410
+445460	[1728020331]	2000000 OPS in 2.276755 seconds, throughput 878443.222920
+445460	[1728020331]	2000000 OPS in 2.293089 seconds, throughput 872185.946555
+445460	[1728020331]	2000000 OPS in 2.290207 seconds, throughput 873283.506687
+445460	[1728020331]	2000000 OPS in 2.299337 seconds, throughput 869815.951294
+445460	[1728020333]	2000000 OPS in 2.284255 seconds, throughput 875558.989692
+445460	[1728020333]	2000000 OPS in 2.274357 seconds, throughput 879369.421775
+445460	[1728020333]	2000000 OPS in 2.294253 seconds, throughput 871743.438932
+445460	[1728020333]	2000000 OPS in 2.302422 seconds, throughput 868650.490657
+445460	[1728020335]	2000000 OPS in 2.280669 seconds, throughput 876935.671068
+445460	[1728020335]	2000000 OPS in 2.288511 seconds, throughput 873930.691179
+445460	[1728020336]	2000000 OPS in 2.293346 seconds, throughput 872088.206490
+445460	[1728020336]	2000000 OPS in 2.313582 seconds, throughput 864460.390857
+445460	[1728020338]	2000000 OPS in 2.230105 seconds, throughput 896818.759655
+445460	[1728020338]	2000000 OPS in 2.228063 seconds, throughput 897640.686103
+445460	[1728020338]	2000000 OPS in 2.232665 seconds, throughput 895790.456696
+445460	[1728020338]	2000000 OPS in 2.242059 seconds, throughput 892037.185462
+445460	[1728020340]	2000000 OPS in 1.984865 seconds, throughput 1007625.203729
+445460	[1728020340]	2000000 OPS in 1.989246 seconds, throughput 1005406.068430
+445460	[1728020340]	2000000 OPS in 1.998973 seconds, throughput 1000513.763818
+445460	[1728020340]	2000000 OPS in 2.009828 seconds, throughput 995110.029316
+445460	[1728020342]	2000000 OPS in 2.009292 seconds, throughput 995375.485494
+445460	[1728020342]	2000000 OPS in 2.011181 seconds, throughput 994440.579938
+445460	[1728020342]	2000000 OPS in 2.024788 seconds, throughput 987757.730686
+445460	[1728020342]	2000000 OPS in 2.040318 seconds, throughput 980239.354846
+445460	[1728020344]	2000000 OPS in 2.013223 seconds, throughput 993431.924829
+445460	[1728020344]	2000000 OPS in 2.022134 seconds, throughput 989054.137856
+445460	[1728020344]	2000000 OPS in 2.032437 seconds, throughput 984040.341718
+445460	[1728020344]	2000000 OPS in 2.047354 seconds, throughput 976870.633999
+445460	[1728020346]	2000000 OPS in 2.050879 seconds, throughput 975191.612962
+445460	[1728020346]	2000000 OPS in 2.061832 seconds, throughput 970011.135728
+445460	[1728020346]	2000000 OPS in 2.066241 seconds, throughput 967941.300168
+445460	[1728020346]	2000000 OPS in 2.085791 seconds, throughput 958868.841605
+445460	[1728020348]	2000000 OPS in 2.054790 seconds, throughput 973335.474671
+445460	[1728020348]	2000000 OPS in 2.059488 seconds, throughput 971115.150950
+445460	[1728020348]	2000000 OPS in 2.063000 seconds, throughput 969461.948619
+445460	[1728020348]	2000000 OPS in 2.085970 seconds, throughput 958786.559730
+445460	[1728020350]	2000000 OPS in 2.060046 seconds, throughput 970852.107186
+445460	[1728020350]	2000000 OPS in 2.064450 seconds, throughput 968781.031267
+445460	[1728020350]	2000000 OPS in 2.075431 seconds, throughput 963655.260040
+445460	[1728020350]	2000000 OPS in 2.091949 seconds, throughput 956046.251606
+445460	[1728020352]	2000000 OPS in 2.063746 seconds, throughput 969111.508878
+445460	[1728020352]	2000000 OPS in 2.060961 seconds, throughput 970421.080263
+445460	[1728020352]	2000000 OPS in 2.071161 seconds, throughput 965641.975684
+445460	[1728020352]	2000000 OPS in 2.084616 seconds, throughput 959409.310875
+445460	[1728020354]	2000000 OPS in 2.055788 seconds, throughput 972862.960578
+445460	[1728020354]	2000000 OPS in 2.058399 seconds, throughput 971628.921312
+445460	[1728020354]	2000000 OPS in 2.070404 seconds, throughput 965995.042513
+445460	[1728020354]	2000000 OPS in 2.089236 seconds, throughput 957287.735804
+445460	[1728020356]	2000000 OPS in 2.053108 seconds, throughput 974132.875621
+445460	[1728020356]	2000000 OPS in 2.054924 seconds, throughput 973272.004220
+445460	[1728020356]	2000000 OPS in 2.064442 seconds, throughput 968784.785429
+445460	[1728020356]	2000000 OPS in 2.092371 seconds, throughput 955853.431347
+445460	[1728020358]	2000000 OPS in 2.053238 seconds, throughput 974071.198760
+445460	[1728020358]	2000000 OPS in 2.056338 seconds, throughput 972602.753049
+445460	[1728020358]	2000000 OPS in 2.064561 seconds, throughput 968728.945282
+445460	[1728020358]	2000000 OPS in 2.081741 seconds, throughput 960734.308447
+445460	[1728020360]	2000000 OPS in 2.051315 seconds, throughput 974984.339314
+445460	[1728020360]	2000000 OPS in 2.055694 seconds, throughput 972907.446342
+445460	[1728020360]	2000000 OPS in 2.068095 seconds, throughput 967073.562868
+445460	[1728020361]	2000000 OPS in 2.083404 seconds, throughput 959967.437905
+445460	[1728020362]	2000000 OPS in 2.048791 seconds, throughput 976185.467429
+445460	[1728020362]	2000000 OPS in 2.056620 seconds, throughput 972469.391526
+445460	[1728020362]	2000000 OPS in 2.069292 seconds, throughput 966514.150734
+445460	[1728020363]	2000000 OPS in 2.081017 seconds, throughput 961068.554462
+445460	[1728020364]	2000000 OPS in 2.044474 seconds, throughput 978246.727520
+445460	[1728020364]	2000000 OPS in 2.047909 seconds, throughput 976605.894110
+445460	[1728020364]	2000000 OPS in 2.057740 seconds, throughput 971940.089613
+445460	[1728020365]	2000000 OPS in 2.071429 seconds, throughput 965517.041617
+445460	[1728020366]	2000000 OPS in 2.044279 seconds, throughput 978340.040670
+445460	[1728020366]	2000000 OPS in 2.051680 seconds, throughput 974810.886688
+445460	[1728020367]	2000000 OPS in 2.061568 seconds, throughput 970135.353284
+445460	[1728020367]	2000000 OPS in 2.076662 seconds, throughput 963084.026192
+445460	[1728020368]	2000000 OPS in 2.043129 seconds, throughput 978890.711257
+445460	[1728020368]	2000000 OPS in 2.050113 seconds, throughput 975555.981548
+445460	[1728020369]	2000000 OPS in 2.055336 seconds, throughput 973076.908107
+445460	[1728020369]	2000000 OPS in 2.070661 seconds, throughput 965875.148081
+445460	[1728020370]	2000000 OPS in 2.048347 seconds, throughput 976397.065536
+445460	[1728020370]	2000000 OPS in 2.050941 seconds, throughput 975162.132894
+445460	[1728020371]	2000000 OPS in 2.062009 seconds, throughput 969927.871314
+445460	[1728020371]	2000000 OPS in 2.078289 seconds, throughput 962330.070553
+445460	[1728020372]	2000000 OPS in 2.043826 seconds, throughput 978556.883022
+445460	[1728020372]	2000000 OPS in 2.051456 seconds, throughput 974917.327011
+445460	[1728020373]	2000000 OPS in 2.062471 seconds, throughput 969710.604416
+445460	[1728020373]	2000000 OPS in 2.076838 seconds, throughput 963002.410395
+445460	[1728020374]	2000000 OPS in 2.048453 seconds, throughput 976346.540536
+445460	[1728020375]	2000000 OPS in 2.052568 seconds, throughput 974389.155438
+445460	[1728020375]	2000000 OPS in 2.056516 seconds, throughput 972518.570242
+445460	[1728020375]	2000000 OPS in 2.071574 seconds, throughput 965449.460169
+445460	[1728020377]	2000000 OPS in 2.048274 seconds, throughput 976431.864096
+445460	[1728020377]	2000000 OPS in 2.058730 seconds, throughput 971472.704046
+445460	[1728020377]	2000000 OPS in 2.062310 seconds, throughput 969786.307587
+445460	[1728020377]	2000000 OPS in 2.080490 seconds, throughput 961311.998616
+445460	[1728020379]	2000000 OPS in 2.044797 seconds, throughput 978092.201818
+445460	[1728020379]	2000000 OPS in 2.051741 seconds, throughput 974781.904734
+445460	[1728020379]	2000000 OPS in 2.060106 seconds, throughput 970823.831395
+445460	[1728020379]	2000000 OPS in 2.072419 seconds, throughput 965055.811590
+445460	[1728020381]	2000000 OPS in 2.052452 seconds, throughput 974444.225736
+445460	[1728020381]	2000000 OPS in 2.054236 seconds, throughput 973597.970243
+445460	[1728020381]	2000000 OPS in 2.070230 seconds, throughput 966076.233076
+445460	[1728020381]	2000000 OPS in 2.083568 seconds, throughput 959891.877779
+445460	[1728020383]	2000000 OPS in 2.047960 seconds, throughput 976581.573859
+445460	[1728020383]	2000000 OPS in 2.053030 seconds, throughput 974169.885486
+445460	[1728020383]	2000000 OPS in 2.066900 seconds, throughput 967632.686632
+445460	[1728020383]	2000000 OPS in 2.086442 seconds, throughput 958569.660695
+445460	[1728020385]	2000000 OPS in 2.050637 seconds, throughput 975306.697382
+445460	[1728020385]	2000000 OPS in 2.061737 seconds, throughput 970055.831563
+445460	[1728020385]	2000000 OPS in 2.062446 seconds, throughput 969722.358791
+445460	[1728020386]	2000000 OPS in 2.079349 seconds, throughput 961839.498805
+445460	[1728020387]	2000000 OPS in 2.054056 seconds, throughput 973683.288090
+445460	[1728020387]	2000000 OPS in 2.060490 seconds, throughput 970642.905328
+445460	[1728020387]	2000000 OPS in 2.069181 seconds, throughput 966565.998818
+445460	[1728020388]	2000000 OPS in 2.082050 seconds, throughput 960591.724502
+445460	[1728020389]	2000000 OPS in 2.048823 seconds, throughput 976170.220658
+445460	[1728020389]	2000000 OPS in 2.055094 seconds, throughput 973191.493917
+445460	[1728020389]	2000000 OPS in 2.063375 seconds, throughput 969285.757557
+445460	[1728020390]	2000000 OPS in 2.082410 seconds, throughput 960425.660653
+445460	[1728020391]	2000000 OPS in 2.051170 seconds, throughput 975053.262284
+445460	[1728020391]	2000000 OPS in 2.062763 seconds, throughput 969573.334406
+445460	[1728020391]	2000000 OPS in 2.068125 seconds, throughput 967059.534603
+445460	[1728020392]	2000000 OPS in 2.087324 seconds, throughput 958164.616514
+445460	[1728020393]	2000000 OPS in 2.049012 seconds, throughput 976080.179130
+445460	[1728020393]	2000000 OPS in 2.057559 seconds, throughput 972025.589546
+445460	[1728020393]	2000000 OPS in 2.066914 seconds, throughput 967626.132485
+445460	[1728020394]	2000000 OPS in 2.087781 seconds, throughput 957954.881283
+445460	[1728020395]	2000000 OPS in 2.055392 seconds, throughput 973050.396226
+445460	[1728020395]	2000000 OPS in 2.060259 seconds, throughput 970751.735583
+445460	[1728020395]	2000000 OPS in 2.064561 seconds, throughput 968728.945282
+445460	[1728020396]	2000000 OPS in 2.081844 seconds, throughput 960686.775762
+445460	[1728020397]	2000000 OPS in 2.059290 seconds, throughput 971208.523326
+445460	[1728020397]	2000000 OPS in 2.059947 seconds, throughput 970898.765842
+445460	[1728020397]	2000000 OPS in 2.069526 seconds, throughput 966404.867588
+445460	[1728020398]	2000000 OPS in 2.087558 seconds, throughput 958057.213261
+445460	[1728020399]	2000000 OPS in 2.058215 seconds, throughput 971715.782851
+445460	[1728020399]	2000000 OPS in 2.063055 seconds, throughput 969436.103255
+445460	[1728020400]	2000000 OPS in 2.071918 seconds, throughput 965289.166849
+445460	[1728020400]	2000000 OPS in 2.173993 seconds, throughput 919966.163645
+445460	[1728020401]	2000000 OPS in 2.055913 seconds, throughput 972803.810278
+445460	[1728020401]	2000000 OPS in 2.062986 seconds, throughput 969468.527658
+445460	[1728020402]	2000000 OPS in 2.075972 seconds, throughput 963404.130692
+445460	[1728020402]	2000000 OPS in 2.084270 seconds, throughput 959568.577967
+445460	[1728020403]	2000000 OPS in 2.060467 seconds, throughput 970653.740147
+445460	[1728020403]	2000000 OPS in 2.070594 seconds, throughput 965906.401738
+445460	[1728020404]	2000000 OPS in 2.075726 seconds, throughput 963518.306366
+445460	[1728020404]	2000000 OPS in 2.085404 seconds, throughput 959046.784220
+445460	[1728020405]	2000000 OPS in 2.065507 seconds, throughput 968285.268460
+445460	[1728020405]	2000000 OPS in 2.065867 seconds, throughput 968116.534123
+445460	[1728020406]	2000000 OPS in 2.067805 seconds, throughput 967209.190422
+445460	[1728020406]	2000000 OPS in 2.087119 seconds, throughput 958258.728899
+445460	[1728020407]	2000000 OPS in 2.061046 seconds, throughput 970381.058938
+445460	[1728020408]	2000000 OPS in 2.064192 seconds, throughput 968902.117632
+445460	[1728020408]	2000000 OPS in 2.075477 seconds, throughput 963633.901990
+445460	[1728020409]	2000000 OPS in 2.089314 seconds, throughput 957251.997546
+445460	[1728020409]	2000000 OPS in 2.059818 seconds, throughput 970959.570214
+445460	[1728020410]	2000000 OPS in 2.059811 seconds, throughput 970962.869894
+445460	[1728020410]	2000000 OPS in 2.073105 seconds, throughput 964736.470174
+445460	[1728020411]	2000000 OPS in 2.086240 seconds, throughput 958662.474116
+445460	[1728020411]	2000000 OPS in 2.061887 seconds, throughput 969985.261074
+445460	[1728020412]	2000000 OPS in 2.062057 seconds, throughput 969905.293598
+445460	[1728020412]	2000000 OPS in 2.076291 seconds, throughput 963256.113907
+445460	[1728020413]	2000000 OPS in 2.086035 seconds, throughput 958756.684332
+445460	[1728020414]	2000000 OPS in 2.068615 seconds, throughput 966830.463861
+445460	[1728020414]	2000000 OPS in 2.067165 seconds, throughput 967508.641062
+445460	[1728020414]	2000000 OPS in 2.074674 seconds, throughput 964006.875297
+445460	[1728020415]	2000000 OPS in 2.083929 seconds, throughput 959725.595258
+445460	[1728020416]	2000000 OPS in 2.056448 seconds, throughput 972550.728246
+445460	[1728020416]	2000000 OPS in 2.059957 seconds, throughput 970894.052643
+445460	[1728020416]	2000000 OPS in 2.074859 seconds, throughput 963920.921855
+445460	[1728020417]	2000000 OPS in 2.092236 seconds, throughput 955915.107091
+445460	[1728020418]	2000000 OPS in 2.058191 seconds, throughput 971727.113762
+445460	[1728020418]	2000000 OPS in 2.063820 seconds, throughput 969076.760570
+445460	[1728020418]	2000000 OPS in 2.071024 seconds, throughput 965705.853723
+445460	[1728020419]	2000000 OPS in 2.085880 seconds, throughput 958827.928740
+445460	[1728020420]	2000000 OPS in 2.058326 seconds, throughput 971663.380825
+445460	[1728020420]	2000000 OPS in 2.061149 seconds, throughput 970332.566932
+445460	[1728020420]	2000000 OPS in 2.074200 seconds, throughput 964227.171922
+445460	[1728020421]	2000000 OPS in 2.085463 seconds, throughput 959019.651751
+445460	[1728020422]	2000000 OPS in 2.061394 seconds, throughput 970217.241343
+445460	[1728020422]	2000000 OPS in 2.070631 seconds, throughput 965889.142006
+445460	[1728020422]	2000000 OPS in 2.073481 seconds, throughput 964561.527210
+445460	[1728020423]	2000000 OPS in 2.085755 seconds, throughput 958885.391621
+445460	[1728020424]	2000000 OPS in 2.056085 seconds, throughput 972722.431222
+445460	[1728020424]	2000000 OPS in 2.065908 seconds, throughput 968097.320887
+445460	[1728020424]	2000000 OPS in 2.069753 seconds, throughput 966298.877209
+445460	[1728020425]	2000000 OPS in 2.088820 seconds, throughput 957478.384925
+445460	[1728020426]	2000000 OPS in 2.054701 seconds, throughput 973377.634994
+445460	[1728020426]	2000000 OPS in 2.062940 seconds, throughput 969490.145133
+445460	[1728020427]	2000000 OPS in 2.070430 seconds, throughput 965982.911762
+445460	[1728020427]	2000000 OPS in 2.084783 seconds, throughput 959332.458102
+445460	[1728020428]	2000000 OPS in 2.054782 seconds, throughput 973339.264214
+445460	[1728020428]	2000000 OPS in 2.069093 seconds, throughput 966607.107559
+445460	[1728020429]	2000000 OPS in 2.073639 seconds, throughput 964488.032874
+445460	[1728020429]	2000000 OPS in 2.086582 seconds, throughput 958505.345105
+445460	[1728020430]	2000000 OPS in 2.057223 seconds, throughput 972184.347540
+445460	[1728020430]	2000000 OPS in 2.072118 seconds, throughput 965195.997525
+445460	[1728020431]	2000000 OPS in 2.072280 seconds, throughput 965120.543556
+445460	[1728020431]	2000000 OPS in 2.086838 seconds, throughput 958387.761772
+445460	[1728020432]	2000000 OPS in 2.062460 seconds, throughput 969715.776306
+445460	[1728020432]	2000000 OPS in 2.068522 seconds, throughput 966873.932209
+445460	[1728020433]	2000000 OPS in 2.069975 seconds, throughput 966195.243904
+445460	[1728020434]	2000000 OPS in 2.087678 seconds, throughput 958002.144009
+445460	[1728020434]	2000000 OPS in 2.053987 seconds, throughput 973715.997229
+445460	[1728020434]	2000000 OPS in 2.063747 seconds, throughput 969111.039289
+445460	[1728020435]	2000000 OPS in 2.074246 seconds, throughput 964205.788513
+445460	[1728020436]	2000000 OPS in 2.087371 seconds, throughput 958143.042133
+445460	[1728020436]	2000000 OPS in 2.058092 seconds, throughput 971773.856562
+445460	[1728020436]	2000000 OPS in 2.065441 seconds, throughput 968316.209468
+445460	[1728020437]	2000000 OPS in 2.078865 seconds, throughput 962063.433652
+445460	[1728020438]	2000000 OPS in 2.087650 seconds, throughput 958014.992935
+445460	[1728020438]	2000000 OPS in 2.059189 seconds, throughput 971256.159585
+445460	[1728020438]	2000000 OPS in 2.073809 seconds, throughput 964408.969196
+445460	[1728020439]	2000000 OPS in 2.073359 seconds, throughput 964618.283664
+445460	[1728020440]	2000000 OPS in 2.088208 seconds, throughput 957758.997188
+445460	[1728020440]	2000000 OPS in 2.065416 seconds, throughput 968327.930063
+445460	[1728020441]	2000000 OPS in 2.066497 seconds, throughput 967821.390498
+445460	[1728020441]	2000000 OPS in 2.074736 seconds, throughput 963978.067571
+445460	[1728020442]	2000000 OPS in 2.090706 seconds, throughput 956614.655528
+445460	[1728020442]	2000000 OPS in 2.057341 seconds, throughput 972128.587337
+445460	[1728020443]	2000000 OPS in 2.069039 seconds, throughput 966632.335108
+445460	[1728020443]	2000000 OPS in 2.072829 seconds, throughput 964864.926147
+445460	[1728020444]	2000000 OPS in 2.087425 seconds, throughput 958118.255746
+445460	[1728020444]	2000000 OPS in 2.055719 seconds, throughput 972895.614624
+445460	[1728020445]	2000000 OPS in 2.067114 seconds, throughput 967532.511511
+445460	[1728020445]	2000000 OPS in 2.076836 seconds, throughput 963003.337770
+445460	[1728020446]	2000000 OPS in 2.088397 seconds, throughput 957672.319966
+445460	[1728020446]	2000000 OPS in 2.056785 seconds, throughput 972391.377806
+445460	[1728020447]	2000000 OPS in 2.066661 seconds, throughput 967744.588977
+445460	[1728020447]	2000000 OPS in 2.073744 seconds, throughput 964439.197895
+445460	[1728020448]	2000000 OPS in 2.086463 seconds, throughput 958560.012806
+445460	[1728020448]	2000000 OPS in 2.061304 seconds, throughput 970259.602659
+445460	[1728020449]	2000000 OPS in 2.073512 seconds, throughput 964547.106552
+445460	[1728020449]	2000000 OPS in 2.069987 seconds, throughput 966189.642737
+445460	[1728020450]	2000000 OPS in 2.091582 seconds, throughput 956214.004519
+445460	[1728020451]	2000000 OPS in 2.059952 seconds, throughput 970896.409237
+445460	[1728020451]	2000000 OPS in 2.066990 seconds, throughput 967590.554381
+445460	[1728020451]	2000000 OPS in 2.071723 seconds, throughput 965380.024260
+445460	[1728020452]	2000000 OPS in 2.087872 seconds, throughput 957913.128774
+445460	[1728020453]	2000000 OPS in 2.055151 seconds, throughput 973164.502268
+445460	[1728020453]	2000000 OPS in 2.067330 seconds, throughput 967431.421205
+445460	[1728020453]	2000000 OPS in 2.073162 seconds, throughput 964709.945484
+445460	[1728020454]	2000000 OPS in 2.090564 seconds, throughput 956679.632865
+445460	[1728020455]	2000000 OPS in 2.058757 seconds, throughput 971459.963463
+445460	[1728020455]	2000000 OPS in 2.067900 seconds, throughput 967164.756516
+445460	[1728020456]	2000000 OPS in 2.079359 seconds, throughput 961834.873151
+445460	[1728020457]	2000000 OPS in 2.087917 seconds, throughput 957892.483274
+445460	[1728020457]	2000000 OPS in 2.063697 seconds, throughput 969134.519263
+445460	[1728020457]	2000000 OPS in 2.076883 seconds, throughput 962981.544940
+445460	[1728020458]	2000000 OPS in 2.071001 seconds, throughput 965716.578601
+445460	[1728020459]	2000000 OPS in 2.090057 seconds, throughput 956911.701451
+445460	[1728020459]	2000000 OPS in 2.063815 seconds, throughput 969079.108350
+445460	[1728020459]	2000000 OPS in 2.068693 seconds, throughput 966794.009551
+445460	[1728020460]	2000000 OPS in 2.070179 seconds, throughput 966100.032896
+445460	[1728020461]	2000000 OPS in 2.086554 seconds, throughput 958518.207533
+445460	[1728020461]	2000000 OPS in 2.062540 seconds, throughput 969678.163817
+445460	[1728020461]	2000000 OPS in 2.069044 seconds, throughput 966629.999169
+445460	[1728020462]	2000000 OPS in 2.068502 seconds, throughput 966883.280751
+445460	[1728020463]	2000000 OPS in 2.090255 seconds, throughput 956821.057718
+445460	[1728020463]	2000000 OPS in 2.058650 seconds, throughput 971510.455881
+445460	[1728020463]	2000000 OPS in 2.067082 seconds, throughput 967547.489650
+445460	[1728020464]	2000000 OPS in 2.080718 seconds, throughput 961206.660393
+445460	[1728020465]	2000000 OPS in 2.092326 seconds, throughput 955873.989044
+445460	[1728020465]	2000000 OPS in 2.060759 seconds, throughput 970516.203011
+445460	[1728020465]	2000000 OPS in 2.073165 seconds, throughput 964708.549488
+445460	[1728020466]	2000000 OPS in 2.072507 seconds, throughput 965014.834691
+445460	[1728020467]	2000000 OPS in 2.097085 seconds, throughput 953704.785452
+445460	[1728020467]	2000000 OPS in 2.063516 seconds, throughput 969219.526284
+445460	[1728020467]	2000000 OPS in 2.068558 seconds, throughput 966857.105288
+445460	[1728020468]	2000000 OPS in 2.073328 seconds, throughput 964632.706451
+445460	[1728020469]	2000000 OPS in 2.089292 seconds, throughput 957262.077297
+445460	[1728020469]	2000000 OPS in 2.060871 seconds, throughput 970463.459382
+445460	[1728020470]	2000000 OPS in 2.065880 seconds, throughput 968110.442039
+445460	[1728020470]	2000000 OPS in 2.070423 seconds, throughput 965986.177704
+445460	[1728020471]	2000000 OPS in 2.058323 seconds, throughput 971664.797022
+445460	[1728020471]	2000000 OPS in 2.084618 seconds, throughput 959408.390410
+445460	[1728020472]	2000000 OPS in 2.068527 seconds, throughput 966871.595101
+445460	[1728020472]	2000000 OPS in 2.077704 seconds, throughput 962601.024978
+445460	[1728020473]	2000000 OPS in 2.059887 seconds, throughput 970927.045998
+445460	[1728020473]	2000000 OPS in 2.088147 seconds, throughput 957786.975725
+445460	[1728020474]	2000000 OPS in 2.071116 seconds, throughput 965662.956590
+445460	[1728020474]	2000000 OPS in 2.074313 seconds, throughput 964174.644810
+445460	[1728020475]	2000000 OPS in 2.063404 seconds, throughput 969272.134783
+445460	[1728020475]	2000000 OPS in 2.094300 seconds, throughput 954973.022012
+445460	[1728020476]	2000000 OPS in 2.064360 seconds, throughput 968823.267260
+445460	[1728020476]	2000000 OPS in 2.072574 seconds, throughput 964983.638702
+445460	[1728020477]	2000000 OPS in 2.064364 seconds, throughput 968821.390026
+445460	[1728020477]	2000000 OPS in 2.088060 seconds, throughput 957826.882369
+445460	[1728020478]	2000000 OPS in 2.066347 seconds, throughput 967891.646466
+445460	[1728020478]	2000000 OPS in 2.070816 seconds, throughput 965802.852595
+445460	[1728020479]	2000000 OPS in 2.059432 seconds, throughput 971141.557478
+445460	[1728020480]	2000000 OPS in 2.087430 seconds, throughput 958115.960775
+445460	[1728020480]	2000000 OPS in 2.066202 seconds, throughput 967959.570265
+445460	[1728020480]	2000000 OPS in 2.084315 seconds, throughput 959547.861048
+445460	[1728020481]	2000000 OPS in 2.057262 seconds, throughput 972165.917613
+445460	[1728020482]	2000000 OPS in 2.087300 seconds, throughput 958175.633594
+445460	[1728020482]	2000000 OPS in 2.067246 seconds, throughput 967470.731592
+445460	[1728020483]	2000000 OPS in 2.077447 seconds, throughput 962720.107902
+445460	[1728020484]	2000000 OPS in 2.056182 seconds, throughput 972676.543224
+445460	[1728020484]	2000000 OPS in 2.093527 seconds, throughput 955325.629906
+445460	[1728020484]	2000000 OPS in 2.073738 seconds, throughput 964441.988332
+445460	[1728020485]	2000000 OPS in 2.074828 seconds, throughput 963935.323796
+445460	[1728020486]	2000000 OPS in 2.067234 seconds, throughput 967476.347622
+445460	[1728020486]	2000000 OPS in 2.085742 seconds, throughput 958891.368156
+445460	[1728020486]	2000000 OPS in 2.067885 seconds, throughput 967171.772125
+445460	[1728020487]	2000000 OPS in 2.074421 seconds, throughput 964124.447255
+445460	[1728020488]	2000000 OPS in 2.055975 seconds, throughput 972774.474398
+445460	[1728020488]	2000000 OPS in 2.089016 seconds, throughput 957388.550399
+445460	[1728020488]	2000000 OPS in 2.066547 seconds, throughput 967797.974109
+445460	[1728020489]	2000000 OPS in 2.077260 seconds, throughput 962806.774308
+445460	[1728020490]	2000000 OPS in 2.058084 seconds, throughput 971777.633955
+445460	[1728020490]	2000000 OPS in 2.083278 seconds, throughput 960025.498277
+445460	[1728020490]	2000000 OPS in 2.066847 seconds, throughput 967657.499563
+445460	[1728020491]	2000000 OPS in 2.074090 seconds, throughput 964278.310006
+445460	[1728020492]	2000000 OPS in 2.062684 seconds, throughput 969610.468690
+445460	[1728020492]	2000000 OPS in 2.095135 seconds, throughput 954592.424832
+445460	[1728020492]	2000000 OPS in 2.076592 seconds, throughput 963116.490866
+445460	[1728020493]	2000000 OPS in 2.078424 seconds, throughput 962267.564270
+445460	[1728020494]	2000000 OPS in 2.064158 seconds, throughput 968918.077008
+445460	[1728020494]	2000000 OPS in 2.087884 seconds, throughput 957907.623220
+445460	[1728020494]	2000000 OPS in 2.070591 seconds, throughput 965907.801203
+445460	[1728020495]	2000000 OPS in 2.071044 seconds, throughput 965696.527935
+445460	[1728020496]	2000000 OPS in 2.061901 seconds, throughput 969978.675019
+445460	[1728020496]	2000000 OPS in 2.087753 seconds, throughput 957967.728941
+445460	[1728020496]	2000000 OPS in 2.068570 seconds, throughput 966851.496444
+445460	[1728020497]	2000000 OPS in 2.075772 seconds, throughput 963496.954386
+445460	[1728020498]	2000000 OPS in 2.060713 seconds, throughput 970537.867233
+445460	[1728020498]	2000000 OPS in 2.093730 seconds, throughput 955233.005211
+445460	[1728020498]	2000000 OPS in 2.064246 seconds, throughput 968876.771470
+445460	[1728020499]	2000000 OPS in 2.078664 seconds, throughput 962156.462035
+445460	[1728020500]	2000000 OPS in 2.058009 seconds, throughput 971813.048437
+445460	[1728020500]	2000000 OPS in 2.094991 seconds, throughput 954658.039104
+445460	[1728020501]	2000000 OPS in 2.074577 seconds, throughput 964051.948903
+445460	[1728020501]	2000000 OPS in 2.073860 seconds, throughput 964385.252621
+445460	[1728020502]	2000000 OPS in 2.065319 seconds, throughput 968373.408660
+445460	[1728020503]	2000000 OPS in 2.086083 seconds, throughput 958734.623694
+445460	[1728020503]	2000000 OPS in 2.074571 seconds, throughput 964054.737100
+445460	[1728020503]	2000000 OPS in 2.075194 seconds, throughput 963765.315436
+445460	[1728020504]	2000000 OPS in 2.057328 seconds, throughput 972134.730097
+445460	[1728020505]	2000000 OPS in 2.086737 seconds, throughput 958434.148625
+445460	[1728020505]	2000000 OPS in 2.067832 seconds, throughput 967196.561423
+445460	[1728020505]	2000000 OPS in 2.077590 seconds, throughput 962653.844117
+445460	[1728020506]	2000000 OPS in 2.060828 seconds, throughput 970483.708490
+445460	[1728020507]	2000000 OPS in 2.087341 seconds, throughput 958156.812902
+445460	[1728020507]	2000000 OPS in 2.069226 seconds, throughput 966544.978654
+445460	[1728020507]	2000000 OPS in 2.078999 seconds, throughput 962001.424724
+445460	[1728020508]	2000000 OPS in 2.063546 seconds, throughput 969205.435692
+445460	[1728020509]	2000000 OPS in 2.092804 seconds, throughput 955655.665796
+445460	[1728020509]	2000000 OPS in 2.072633 seconds, throughput 964956.169278
+445460	[1728020509]	2000000 OPS in 2.071922 seconds, throughput 965287.303287
+445460	[1728020510]	2000000 OPS in 2.062137 seconds, throughput 969867.666406
+445460	[1728020511]	2000000 OPS in 2.088047 seconds, throughput 957832.845717
+445460	[1728020511]	2000000 OPS in 2.066835 seconds, throughput 967663.117762
+445460	[1728020512]	2000000 OPS in 2.073379 seconds, throughput 964608.978870
+445460	[1728020512]	2000000 OPS in 2.067328 seconds, throughput 967432.357130
+445460	[1728020513]	2000000 OPS in 2.086981 seconds, throughput 958322.093014
+445460	[1728020513]	2000000 OPS in 2.067465 seconds, throughput 967368.250490
+445460	[1728020514]	2000000 OPS in 2.073874 seconds, throughput 964378.742392
+445460	[1728020514]	2000000 OPS in 2.060454 seconds, throughput 970659.864282
+445460	[1728020515]	2000000 OPS in 2.068758 seconds, throughput 966763.633059
+445460	[1728020515]	2000000 OPS in 2.086091 seconds, throughput 958730.947020
+445460	[1728020516]	2000000 OPS in 2.080188 seconds, throughput 961451.561109
+445460	[1728020517]	2000000 OPS in 2.056609 seconds, throughput 972474.592886
+445460	[1728020517]	2000000 OPS in 2.071575 seconds, throughput 965448.994123
+445460	[1728020517]	2000000 OPS in 2.091446 seconds, throughput 956276.184037
+445460	[1728020518]	2000000 OPS in 2.076381 seconds, throughput 963214.361911
+445460	[1728020519]	2000000 OPS in 2.060440 seconds, throughput 970666.459591
+445460	[1728020519]	2000000 OPS in 2.070736 seconds, throughput 965840.165043
+445460	[1728020519]	2000000 OPS in 2.090385 seconds, throughput 956761.553494
+445460	[1728020520]	2000000 OPS in 2.075993 seconds, throughput 963394.385241
+445460	[1728020521]	2000000 OPS in 2.065131 seconds, throughput 968461.564908
+445460	[1728020521]	2000000 OPS in 2.065780 seconds, throughput 968157.306199
+445460	[1728020521]	2000000 OPS in 2.087785 seconds, throughput 957953.045931
+445460	[1728020522]	2000000 OPS in 2.076179 seconds, throughput 963308.077001
+445460	[1728020523]	2000000 OPS in 2.058815 seconds, throughput 971432.595935
+445460	[1728020523]	2000000 OPS in 2.065872 seconds, throughput 968114.191005
+445460	[1728020523]	2000000 OPS in 2.094678 seconds, throughput 954800.690130
+445460	[1728020524]	2000000 OPS in 2.078555 seconds, throughput 962206.917787
+445460	[1728020525]	2000000 OPS in 2.063470 seconds, throughput 969241.132655
+445460	[1728020525]	2000000 OPS in 2.066692 seconds, throughput 967730.072986
+445460	[1728020526]	2000000 OPS in 2.094428 seconds, throughput 954914.659277
+445460	[1728020526]	2000000 OPS in 2.079059 seconds, throughput 961973.662123
+445460	[1728020527]	2000000 OPS in 2.058375 seconds, throughput 971640.250197
+445460	[1728020527]	2000000 OPS in 2.073563 seconds, throughput 964523.383182
+445460	[1728020528]	2000000 OPS in 2.091778 seconds, throughput 956124.407083
+445460	[1728020528]	2000000 OPS in 2.078039 seconds, throughput 962445.844375
+445460	[1728020529]	2000000 OPS in 2.065541 seconds, throughput 968269.329924
+445460	[1728020530]	2000000 OPS in 2.065818 seconds, throughput 968139.497284
+445460	[1728020530]	2000000 OPS in 2.089821 seconds, throughput 957019.763894
+445460	[1728020530]	2000000 OPS in 2.076906 seconds, throughput 962970.880724
+445460	[1728020531]	2000000 OPS in 2.061644 seconds, throughput 970099.590424
+445460	[1728020532]	2000000 OPS in 2.064623 seconds, throughput 968699.854647
+445460	[1728020532]	2000000 OPS in 2.088123 seconds, throughput 957797.984123
+445460	[1728020532]	2000000 OPS in 2.078660 seconds, throughput 962158.313529
+445460	[1728020533]	2000000 OPS in 2.058635 seconds, throughput 971517.534677
+445460	[1728020534]	2000000 OPS in 2.065958 seconds, throughput 968073.891144
+445460	[1728020534]	2000000 OPS in 2.094802 seconds, throughput 954744.171526
+445460	[1728020534]	2000000 OPS in 2.073397 seconds, throughput 964600.604708
+445460	[1728020535]	2000000 OPS in 2.054377 seconds, throughput 973531.148372
+445460	[1728020536]	2000000 OPS in 2.074762 seconds, throughput 963965.987424
+445460	[1728020536]	2000000 OPS in 2.086981 seconds, throughput 958322.093014
+445460	[1728020536]	2000000 OPS in 2.071848 seconds, throughput 965321.780362
+445460	[1728020537]	2000000 OPS in 2.059622 seconds, throughput 971051.969730
+445460	[1728020538]	2000000 OPS in 2.070188 seconds, throughput 966095.832842
+445460	[1728020538]	2000000 OPS in 2.086628 seconds, throughput 958484.214723
+445460	[1728020539]	2000000 OPS in 2.079062 seconds, throughput 961972.274035
+445460	[1728020539]	2000000 OPS in 2.066207 seconds, throughput 967957.227906
+445460	[1728020540]	2000000 OPS in 2.067722 seconds, throughput 967248.014965
+445460	[1728020540]	2000000 OPS in 2.088419 seconds, throughput 957662.231573
+445460	[1728020541]	2000000 OPS in 2.079604 seconds, throughput 961721.558527
+445460	[1728020541]	2000000 OPS in 2.060081 seconds, throughput 970835.612774
+445460	[1728020542]	2000000 OPS in 2.068939 seconds, throughput 966679.056270
+445460	[1728020542]	2000000 OPS in 2.088573 seconds, throughput 957591.618775
+445460	[1728020543]	2000000 OPS in 2.075690 seconds, throughput 963535.017271
+445460	[1728020543]	2000000 OPS in 2.058672 seconds, throughput 971500.073834
+445460	[1728020544]	2000000 OPS in 2.078237 seconds, throughput 962354.149214
+445460	[1728020544]	2000000 OPS in 2.095005 seconds, throughput 954651.659543
+445460	[1728020545]	2000000 OPS in 2.075990 seconds, throughput 963395.777436
+445460	[1728020545]	2000000 OPS in 2.057087 seconds, throughput 972248.621473
+445460	[1728020546]	2000000 OPS in 2.072743 seconds, throughput 964904.959274
+445460	[1728020546]	2000000 OPS in 2.089849 seconds, throughput 957006.941650
+445460	[1728020547]	2000000 OPS in 2.077242 seconds, throughput 962815.117353
+445460	[1728020547]	2000000 OPS in 2.065067 seconds, throughput 968491.579208
+445460	[1728020548]	2000000 OPS in 2.072150 seconds, throughput 965181.092102
+445460	[1728020548]	2000000 OPS in 2.088747 seconds, throughput 957511.848012
+445460	[1728020549]	2000000 OPS in 2.078749 seconds, throughput 962117.119479
+445460	[1728020549]	2000000 OPS in 2.063076 seconds, throughput 969426.235388
+445460	[1728020550]	2000000 OPS in 2.069939 seconds, throughput 966212.047795
+445460	[1728020551]	2000000 OPS in 2.090349 seconds, throughput 956778.030846
+445460	[1728020551]	2000000 OPS in 2.073647 seconds, throughput 964484.311939
+445460	[1728020552]	2000000 OPS in 2.059476 seconds, throughput 971120.809371
+445460	[1728020552]	2000000 OPS in 2.070805 seconds, throughput 965807.982886
+445460	[1728020553]	2000000 OPS in 2.096465 seconds, throughput 953986.830212
+445460	[1728020553]	2000000 OPS in 2.075574 seconds, throughput 963588.867465
+445460	[1728020554]	2000000 OPS in 2.056332 seconds, throughput 972605.590926
+445460	[1728020554]	2000000 OPS in 2.069760 seconds, throughput 966295.609153
+445460	[1728020555]	2000000 OPS in 2.090028 seconds, throughput 956924.978995
+445460	[1728020555]	2000000 OPS in 2.075368 seconds, throughput 963684.512819
+445460	[1728020556]	2000000 OPS in 2.066726 seconds, throughput 967714.152723
+445460	[1728020556]	2000000 OPS in 2.069743 seconds, throughput 966303.545899
+445460	[1728020557]	2000000 OPS in 2.091955 seconds, throughput 956043.509540
+445460	[1728020557]	2000000 OPS in 2.074202 seconds, throughput 964226.242189
+445460	[1728020558]	2000000 OPS in 2.062601 seconds, throughput 969649.486255
+445460	[1728020559]	2000000 OPS in 2.067379 seconds, throughput 967408.491622
+445460	[1728020559]	2000000 OPS in 2.091112 seconds, throughput 956428.923941
+445460	[1728020559]	2000000 OPS in 2.081782 seconds, throughput 960715.387106
+445460	[1728020560]	2000000 OPS in 2.059187 seconds, throughput 971257.102925
+445460	[1728020561]	2000000 OPS in 2.068411 seconds, throughput 966925.818902
+445460	[1728020561]	2000000 OPS in 2.093032 seconds, throughput 955551.563473
+445460	[1728020561]	2000000 OPS in 2.074125 seconds, throughput 964262.038209
+445460	[1728020562]	2000000 OPS in 2.065603 seconds, throughput 968240.266886
+445460	[1728020563]	2000000 OPS in 2.076527 seconds, throughput 963146.638594
+445460	[1728020563]	2000000 OPS in 2.089215 seconds, throughput 957297.358099
+445460	[1728020563]	2000000 OPS in 2.076088 seconds, throughput 963350.301143
+445460	[1728020564]	2000000 OPS in 2.061677 seconds, throughput 970084.062634
+445460	[1728020565]	2000000 OPS in 2.069340 seconds, throughput 966491.731663
+445460	[1728020565]	2000000 OPS in 2.092881 seconds, throughput 955620.505896
+445460	[1728020566]	2000000 OPS in 2.074088 seconds, throughput 964279.239839
+445460	[1728020566]	2000000 OPS in 2.063283 seconds, throughput 969328.977169
+445460	[1728020567]	2000000 OPS in 2.069437 seconds, throughput 966446.429633
+445460	[1728020567]	2000000 OPS in 2.089553 seconds, throughput 957142.508470
+445460	[1728020568]	2000000 OPS in 2.078185 seconds, throughput 962378.229080
+445460	[1728020568]	2000000 OPS in 2.060235 seconds, throughput 970763.044022
+445460	[1728020569]	2000000 OPS in 2.070990 seconds, throughput 965721.707975
+445460	[1728020569]	2000000 OPS in 2.093182 seconds, throughput 955483.087472
+445460	[1728020570]	2000000 OPS in 2.076776 seconds, throughput 963031.159836
+445460	[1728020570]	2000000 OPS in 2.058626 seconds, throughput 971521.782004
+445460	[1728020571]	2000000 OPS in 2.075970 seconds, throughput 963405.058840
+445460	[1728020572]	2000000 OPS in 2.087713 seconds, throughput 957986.083336
+445460	[1728020572]	2000000 OPS in 2.077808 seconds, throughput 962552.844151
+445460	[1728020572]	2000000 OPS in 2.059315 seconds, throughput 971196.732894
+445460	[1728020573]	2000000 OPS in 2.069621 seconds, throughput 966360.507552
+445460	[1728020574]	2000000 OPS in 2.093379 seconds, throughput 955393.170563
+445460	[1728020574]	2000000 OPS in 2.078608 seconds, throughput 962182.383595
+445460	[1728020574]	2000000 OPS in 2.065662 seconds, throughput 968212.611744
+445460	[1728020575]	2000000 OPS in 2.067578 seconds, throughput 967315.380605
+445460	[1728020576]	2000000 OPS in 2.088344 seconds, throughput 957696.624694
+445460	[1728020576]	2000000 OPS in 2.080359 seconds, throughput 961372.532337
+445460	[1728020576]	2000000 OPS in 2.060627 seconds, throughput 970578.372505
+445460	[1728020577]	2000000 OPS in 2.069060 seconds, throughput 966622.524238
+445460	[1728020578]	2000000 OPS in 2.093775 seconds, throughput 955212.475075
+445460	[1728020578]	2000000 OPS in 2.072990 seconds, throughput 964789.989339
+445460	[1728020578]	2000000 OPS in 2.061492 seconds, throughput 970171.118782
+445460	[1728020579]	2000000 OPS in 2.076095 seconds, throughput 963347.053001
+445460	[1728020580]	2000000 OPS in 2.085597 seconds, throughput 958958.034558
+445460	[1728020580]	2000000 OPS in 2.071793 seconds, throughput 965347.406811
+445460	[1728020580]	2000000 OPS in 2.062909 seconds, throughput 969504.713974
+445460	[1728020581]	2000000 OPS in 2.068980 seconds, throughput 966659.900047
+445460	[1728020582]	2000000 OPS in 2.090748 seconds, throughput 956595.438570
+445460	[1728020582]	2000000 OPS in 2.070865 seconds, throughput 965780.000145
+445460	[1728020582]	2000000 OPS in 2.063553 seconds, throughput 969202.147946
+445460	[1728020583]	2000000 OPS in 2.064623 seconds, throughput 968699.854647
+445460	[1728020584]	2000000 OPS in 2.087905 seconds, throughput 957897.988654
+445460	[1728020584]	2000000 OPS in 2.077046 seconds, throughput 962905.973195
+445460	[1728020585]	2000000 OPS in 2.060713 seconds, throughput 970537.867233
+445460	[1728020585]	2000000 OPS in 2.065327 seconds, throughput 968369.657686
+445460	[1728020586]	2000000 OPS in 2.095072 seconds, throughput 954621.129966
+445460	[1728020586]	2000000 OPS in 2.075008 seconds, throughput 963851.705632
+445460	[1728020587]	2000000 OPS in 2.062319 seconds, throughput 969782.075421
+445460	[1728020588]	2000000 OPS in 2.081433 seconds, throughput 960876.473084
+445460	[1728020588]	2000000 OPS in 2.093225 seconds, throughput 955463.459494
+445460	[1728020588]	2000000 OPS in 2.075922 seconds, throughput 963427.334938
+445460	[1728020589]	2000000 OPS in 2.058687 seconds, throughput 971492.995293
+445460	[1728020590]	2000000 OPS in 2.068492 seconds, throughput 966887.955090
+445460	[1728020590]	2000000 OPS in 2.088751 seconds, throughput 957510.014358
+445460	[1728020590]	2000000 OPS in 2.076212 seconds, throughput 963292.765864
+445460	[1728020591]	2000000 OPS in 2.060884 seconds, throughput 970457.337725
+445460	[1728020592]	2000000 OPS in 2.068167 seconds, throughput 967039.895714
+445460	[1728020592]	2000000 OPS in 2.092096 seconds, throughput 955979.075530
+445460	[1728020593]	2000000 OPS in 2.077725 seconds, throughput 962591.295768
+445460	[1728020593]	2000000 OPS in 2.064615 seconds, throughput 968703.608179
+445460	[1728020594]	2000000 OPS in 2.069875 seconds, throughput 966241.922821
+445460	[1728020595]	2000000 OPS in 2.096512 seconds, throughput 953965.443556
+445460	[1728020595]	2000000 OPS in 2.075798 seconds, throughput 963484.886294
+445460	[1728020595]	2000000 OPS in 2.058659 seconds, throughput 971506.208653
+445460	[1728020596]	2000000 OPS in 2.073658 seconds, throughput 964479.195702
+445460	[1728020597]	2000000 OPS in 2.088152 seconds, throughput 957784.682341
+445460	[1728020597]	2000000 OPS in 2.074456 seconds, throughput 964108.180651
+445460	[1728020597]	2000000 OPS in 2.057862 seconds, throughput 971882.468309
+445460	[1728020598]	2000000 OPS in 2.076348 seconds, throughput 963229.670556
+445460	[1728020599]	2000000 OPS in 2.088712 seconds, throughput 957527.892788
+445460	[1728020599]	2000000 OPS in 2.075746 seconds, throughput 963509.022780
+445460	[1728020599]	2000000 OPS in 2.060501 seconds, throughput 970637.723544
+445460	[1728020600]	2000000 OPS in 2.071942 seconds, throughput 965277.985581
+445460	[1728020601]	2000000 OPS in 2.091107 seconds, throughput 956431.210837
+445460	[1728020601]	2000000 OPS in 2.082180 seconds, throughput 960531.750377
+445460	[1728020601]	2000000 OPS in 2.066019 seconds, throughput 968045.308393
+445460	[1728020602]	2000000 OPS in 2.068384 seconds, throughput 966938.440831
+445460	[1728020603]	2000000 OPS in 2.089199 seconds, throughput 957304.689501
+445460	[1728020603]	2000000 OPS in 2.071501 seconds, throughput 965483.482750
+445460	[1728020603]	2000000 OPS in 2.060034 seconds, throughput 970857.762542
+445460	[1728020604]	2000000 OPS in 2.068405 seconds, throughput 966928.623746
+445460	[1728020605]	2000000 OPS in 2.089284 seconds, throughput 957265.742714
+445460	[1728020605]	2000000 OPS in 2.075657 seconds, throughput 963550.336110
+445460	[1728020605]	2000000 OPS in 2.060850 seconds, throughput 970473.348376
+445460	[1728020606]	2000000 OPS in 2.072854 seconds, throughput 964853.289233
+445460	[1728020607]	2000000 OPS in 2.090668 seconds, throughput 956632.042964
+445460	[1728020607]	2000000 OPS in 2.072200 seconds, throughput 965157.803301
+445460	[1728020607]	2000000 OPS in 2.065127 seconds, throughput 968463.440747
+445460	[1728020608]	2000000 OPS in 2.068561 seconds, throughput 966855.703071
+445460	[1728020609]	2000000 OPS in 2.090405 seconds, throughput 956752.399655
+445460	[1728020609]	2000000 OPS in 2.074237 seconds, throughput 964209.972149
+445460	[1728020609]	2000000 OPS in 2.064492 seconds, throughput 968761.322398
+445460	[1728020610]	2000000 OPS in 2.069858 seconds, throughput 966249.858686
+445460	[1728020611]	2000000 OPS in 2.079593 seconds, throughput 961726.645550
+445460	[1728020611]	2000000 OPS in 2.092949 seconds, throughput 955589.457746
+445460	[1728020611]	2000000 OPS in 2.065354 seconds, throughput 968356.998364
+445460	[1728020612]	2000000 OPS in 2.069998 seconds, throughput 966184.508391
+445460	[1728020613]	2000000 OPS in 2.076450 seconds, throughput 963182.354499
+445460	[1728020613]	2000000 OPS in 2.092980 seconds, throughput 955575.304112
+445460	[1728020613]	2000000 OPS in 2.060691 seconds, throughput 970548.228725
+445460	[1728020614]	2000000 OPS in 2.070789 seconds, throughput 965815.445224
+445460	[1728020615]	2000000 OPS in 2.076881 seconds, throughput 962982.472275
+445460	[1728020615]	2000000 OPS in 2.091291 seconds, throughput 956347.060261
+445460	[1728020615]	2000000 OPS in 2.060416 seconds, throughput 970677.766043
+445460	[1728020617]	2000000 OPS in 2.074744 seconds, throughput 963974.350570
+445460	[1728020617]	2000000 OPS in 2.079110 seconds, throughput 961950.065172
+445460	[1728020618]	2000000 OPS in 2.088975 seconds, throughput 957407.340921
+445460	[1728020618]	2000000 OPS in 2.059099 seconds, throughput 971298.611674
+445460	[1728020619]	2000000 OPS in 2.066621 seconds, throughput 967763.319931
+445460	[1728020620]	2000000 OPS in 2.073702 seconds, throughput 964458.731293
+445460	[1728020620]	2000000 OPS in 2.063476 seconds, throughput 969238.314378
+445460	[1728020620]	2000000 OPS in 2.087999 seconds, throughput 957854.864873
+445460	[1728020621]	2000000 OPS in 2.069781 seconds, throughput 966285.805117
+445460	[1728020622]	2000000 OPS in 2.080931 seconds, throughput 961108.273172
+445460	[1728020622]	2000000 OPS in 2.065775 seconds, throughput 968159.649526
+445460	[1728020622]	2000000 OPS in 2.096458 seconds, throughput 953990.015540
+445460	[1728020623]	2000000 OPS in 2.070604 seconds, throughput 965901.736885
+445460	[1728020624]	2000000 OPS in 2.074026 seconds, throughput 964308.065569
+445460	[1728020624]	2000000 OPS in 2.060639 seconds, throughput 970572.720404
+445460	[1728020624]	2000000 OPS in 2.086116 seconds, throughput 958719.457595
+445460	[1728020625]	2000000 OPS in 2.071604 seconds, throughput 965435.478982
+445460	[1728020626]	2000000 OPS in 2.073099 seconds, throughput 964739.262331
+445460	[1728020626]	2000000 OPS in 2.060065 seconds, throughput 970843.153007
+445460	[1728020626]	2000000 OPS in 2.086708 seconds, throughput 958447.468453
+445460	[1728020627]	2000000 OPS in 2.077687 seconds, throughput 962608.901148
+445460	[1728020628]	2000000 OPS in 2.063883 seconds, throughput 969047.179516
+445460	[1728020628]	2000000 OPS in 2.072783 seconds, throughput 964886.338802
+445460	[1728020628]	2000000 OPS in 2.089619 seconds, throughput 957112.277406
+445460	[1728020629]	2000000 OPS in 2.071983 seconds, throughput 965258.884846
+445460	[1728020630]	2000000 OPS in 2.058637 seconds, throughput 971516.590832
+445460	[1728020630]	2000000 OPS in 2.079581 seconds, throughput 961732.195091
+445460	[1728020630]	2000000 OPS in 2.087753 seconds, throughput 957967.728941
+445460	[1728020631]	2000000 OPS in 2.070182 seconds, throughput 966098.632874
+445460	[1728020632]	2000000 OPS in 2.064782 seconds, throughput 968625.259228
+445460	[1728020632]	2000000 OPS in 2.075636 seconds, throughput 963560.084716
+445460	[1728020632]	2000000 OPS in 2.094249 seconds, throughput 954996.277902
+445460	[1728020633]	2000000 OPS in 2.070493 seconds, throughput 965953.519283
+445460	[1728020634]	2000000 OPS in 2.061193 seconds, throughput 970311.853378
+445460	[1728020634]	2000000 OPS in 2.075651 seconds, throughput 963553.121406
+445460	[1728020634]	2000000 OPS in 2.090875 seconds, throughput 956537.334848
+445460	[1728020635]	2000000 OPS in 2.070012 seconds, throughput 966177.973847
+445460	[1728020636]	2000000 OPS in 2.059716 seconds, throughput 971007.653482
+445460	[1728020636]	2000000 OPS in 2.077712 seconds, throughput 962597.318589
+445460	[1728020636]	2000000 OPS in 2.091662 seconds, throughput 956177.432109
+445460	[1728020637]	2000000 OPS in 2.077590 seconds, throughput 962653.844117
+445460	[1728020638]	2000000 OPS in 2.060572 seconds, throughput 970604.278812
+445460	[1728020638]	2000000 OPS in 2.071304 seconds, throughput 965575.309081
+445460	[1728020638]	2000000 OPS in 2.092359 seconds, throughput 955858.913313
+445460	[1728020639]	2000000 OPS in 2.071856 seconds, throughput 965318.052992
+445460	[1728020640]	2000000 OPS in 2.061679 seconds, throughput 970083.121572
+445460	[1728020640]	2000000 OPS in 2.075531 seconds, throughput 963608.830704
+445460	[1728020641]	2000000 OPS in 2.094021 seconds, throughput 955100.259262
+445460	[1728020641]	2000000 OPS in 2.068847 seconds, throughput 966722.043728
+445460	[1728020642]	2000000 OPS in 2.063193 seconds, throughput 969371.260953
+445460	[1728020642]	2000000 OPS in 2.080769 seconds, throughput 961183.101055
+445460	[1728020643]	2000000 OPS in 2.090998 seconds, throughput 956481.067892
+445460	[1728020643]	2000000 OPS in 2.068795 seconds, throughput 966746.342678
+445460	[1728020644]	2000000 OPS in 2.060259 seconds, throughput 970751.735583
+445460	[1728020644]	2000000 OPS in 2.074775 seconds, throughput 963959.947464
+445460	[1728020645]	2000000 OPS in 2.092489 seconds, throughput 955799.528695
+445460	[1728020645]	2000000 OPS in 2.069488 seconds, throughput 966422.612743
+445460	[1728020646]	2000000 OPS in 2.059598 seconds, throughput 971063.285165
+445460	[1728020647]	2000000 OPS in 2.073311 seconds, throughput 964640.615904
+445460	[1728020647]	2000000 OPS in 2.089555 seconds, throughput 957141.592349
+445460	[1728020648]	2000000 OPS in 2.072229 seconds, throughput 965144.296311
+445460	[1728020648]	2000000 OPS in 2.062657 seconds, throughput 969623.160807
+445460	[1728020649]	2000000 OPS in 2.076797 seconds, throughput 963021.421930
+445460	[1728020649]	2000000 OPS in 2.087007 seconds, throughput 958310.154206
+445460	[1728020650]	2000000 OPS in 2.069136 seconds, throughput 966587.019896
+445460	[1728020651]	2000000 OPS in 2.063653 seconds, throughput 969155.182582
+445460	[1728020651]	2000000 OPS in 2.075157 seconds, throughput 963782.499348
+445460	[1728020651]	2000000 OPS in 2.092859 seconds, throughput 955630.551318
+445460	[1728020652]	2000000 OPS in 2.068426 seconds, throughput 966918.806861
+445460	[1728020653]	2000000 OPS in 2.063548 seconds, throughput 969204.496333
+445460	[1728020653]	2000000 OPS in 2.079270 seconds, throughput 961876.043034
+445460	[1728020653]	2000000 OPS in 2.094069 seconds, throughput 955078.366568
+445460	[1728020654]	2000000 OPS in 2.065207 seconds, throughput 968425.925343
+445460	[1728020655]	2000000 OPS in 2.057945 seconds, throughput 971843.270836
+445460	[1728020655]	2000000 OPS in 2.073013 seconds, throughput 964779.285031
+445460	[1728020655]	2000000 OPS in 2.090166 seconds, throughput 956861.799493
+445460	[1728020656]	2000000 OPS in 2.067173 seconds, throughput 967504.896784
+445460	[1728020657]	2000000 OPS in 2.058996 seconds, throughput 971347.200286
+445460	[1728020657]	2000000 OPS in 2.076517 seconds, throughput 963151.276874
+445460	[1728020657]	2000000 OPS in 2.090152 seconds, throughput 956868.208628
+445460	[1728020658]	2000000 OPS in 2.073824 seconds, throughput 964401.993612
+445460	[1728020659]	2000000 OPS in 2.061186 seconds, throughput 970315.148657
+445460	[1728020659]	2000000 OPS in 2.075898 seconds, throughput 963438.473374
+445460	[1728020659]	2000000 OPS in 2.088199 seconds, throughput 957763.125066
+445460	[1728020660]	2000000 OPS in 2.066375 seconds, throughput 967878.531244
+445460	[1728020661]	2000000 OPS in 2.061862 seconds, throughput 969997.022109
+445460	[1728020661]	2000000 OPS in 2.072174 seconds, throughput 965169.913337
+445460	[1728020661]	2000000 OPS in 2.093317 seconds, throughput 955421.467460
+445460	[1728020662]	2000000 OPS in 2.067953 seconds, throughput 967139.968848
+445460	[1728020663]	2000000 OPS in 2.069161 seconds, throughput 966575.341406
+445460	[1728020663]	2000000 OPS in 2.080783 seconds, throughput 961176.633988
+445460	[1728020664]	2000000 OPS in 2.094850 seconds, throughput 954722.295152
+445460	[1728020664]	2000000 OPS in 2.067535 seconds, throughput 967335.498553
+445460	[1728020665]	2000000 OPS in 2.061360 seconds, throughput 970233.244072
+445460	[1728020665]	2000000 OPS in 2.076121 seconds, throughput 963334.988664
+445460	[1728020666]	2000000 OPS in 2.091070 seconds, throughput 956448.134209
+445460	[1728020666]	2000000 OPS in 2.066258 seconds, throughput 967933.336495
+445460	[1728020667]	2000000 OPS in 2.063245 seconds, throughput 969346.829872
+445460	[1728020667]	2000000 OPS in 2.075260 seconds, throughput 963734.664572
+445460	[1728020668]	2000000 OPS in 2.092551 seconds, throughput 955771.209399
+445460	[1728020668]	2000000 OPS in 2.075350 seconds, throughput 963692.871082
+445460	[1728020669]	2000000 OPS in 2.068267 seconds, throughput 966993.139667
+445460	[1728020669]	2000000 OPS in 2.075618 seconds, throughput 963568.440821
+445460	[1728020670]	2000000 OPS in 2.095911 seconds, throughput 954238.992018
+445460	[1728020670]	2000000 OPS in 2.066702 seconds, throughput 967725.390501
+445460	[1728020671]	2000000 OPS in 2.058768 seconds, throughput 971454.772952
+445460	[1728020671]	2000000 OPS in 2.078719 seconds, throughput 962131.004720
+445460	[1728020672]	2000000 OPS in 2.091221 seconds, throughput 956379.072322
+445460	[1728020672]	2000000 OPS in 2.068230 seconds, throughput 967010.438878
+445460	[1728020673]	2000000 OPS in 2.068499 seconds, throughput 966884.683048
+445460	[1728020674]	2000000 OPS in 2.081292 seconds, throughput 960941.568987
+445460	[1728020674]	2000000 OPS in 2.089711 seconds, throughput 957070.140321
+445460	[1728020674]	2000000 OPS in 2.070985 seconds, throughput 965724.039527
+445460	[1728020675]	2000000 OPS in 2.061037 seconds, throughput 970385.296334
+445460	[1728020676]	2000000 OPS in 2.071471 seconds, throughput 965497.465328
+445460	[1728020676]	2000000 OPS in 2.092326 seconds, throughput 955873.989044
+445460	[1728020677]	2000000 OPS in 2.069111 seconds, throughput 966598.698668
+445460	[1728020677]	2000000 OPS in 2.064032 seconds, throughput 968977.225159
+445460	[1728020678]	2000000 OPS in 2.075242 seconds, throughput 963743.023705
+445460	[1728020678]	2000000 OPS in 2.090176 seconds, throughput 956857.221593
+445460	[1728020679]	2000000 OPS in 2.072740 seconds, throughput 964906.355838
+445460	[1728020679]	2000000 OPS in 2.065312 seconds, throughput 968376.690786
+445460	[1728020680]	2000000 OPS in 2.075757 seconds, throughput 963503.916884
+445460	[1728020680]	2000000 OPS in 2.093796 seconds, throughput 955202.894647
+445460	[1728020681]	2000000 OPS in 2.066879 seconds, throughput 967642.518019
+445460	[1728020681]	2000000 OPS in 2.060959 seconds, throughput 970422.021981
+445460	[1728020682]	2000000 OPS in 2.081498 seconds, throughput 960846.467304
+445460	[1728020682]	2000000 OPS in 2.087771 seconds, throughput 957959.469693
+445460	[1728020683]	2000000 OPS in 2.067359 seconds, throughput 967417.850504
+445460	[1728020684]	2000000 OPS in 2.064931 seconds, throughput 968555.365773
+445460	[1728020684]	2000000 OPS in 2.073025 seconds, throughput 964773.700269
+445460	[1728020684]	2000000 OPS in 2.090742 seconds, throughput 956598.183803
+445460	[1728020685]	2000000 OPS in 2.067963 seconds, throughput 967135.292072
+445460	[1728020686]	2000000 OPS in 2.063753 seconds, throughput 969108.221769
+445460	[1728020686]	2000000 OPS in 2.077751 seconds, throughput 962579.250353
+445460	[1728020687]	2000000 OPS in 2.090009 seconds, throughput 956933.678276
+445460	[1728020687]	2000000 OPS in 2.067686 seconds, throughput 967264.855495
+445460	[1728020688]	2000000 OPS in 2.063266 seconds, throughput 969336.963823
+445460	[1728020688]	2000000 OPS in 2.076494 seconds, throughput 963161.945086
+445460	[1728020689]	2000000 OPS in 2.088874 seconds, throughput 957453.632914
+445460	[1728020689]	2000000 OPS in 2.075061 seconds, throughput 963827.087493
+445460	[1728020690]	2000000 OPS in 2.062320 seconds, throughput 969781.605183
+445460	[1728020690]	2000000 OPS in 2.075821 seconds, throughput 963474.210927
+445460	[1728020691]	2000000 OPS in 2.096550 seconds, throughput 953948.152918
+445460	[1728020691]	2000000 OPS in 2.070835 seconds, throughput 965793.991313
+445460	[1728020692]	2000000 OPS in 2.064853 seconds, throughput 968591.953035
+445460	[1728020692]	2000000 OPS in 2.078883 seconds, throughput 962055.103630
+445460	[1728020693]	2000000 OPS in 2.091192 seconds, throughput 956392.335089
+445460	[1728020693]	2000000 OPS in 2.065340 seconds, throughput 968363.562416
+445460	[1728020694]	2000000 OPS in 2.063342 seconds, throughput 969301.259801
+445460	[1728020694]	2000000 OPS in 2.075957 seconds, throughput 963411.091848
+445460	[1728020695]	2000000 OPS in 2.089750 seconds, throughput 957052.278981
+445460	[1728020695]	2000000 OPS in 2.071608 seconds, throughput 965433.614854
+445460	[1728020696]	2000000 OPS in 2.066970 seconds, throughput 967599.916786
+445460	[1728020696]	2000000 OPS in 2.074886 seconds, throughput 963908.378581
+445460	[1728020697]	2000000 OPS in 2.090210 seconds, throughput 956841.657058
+445460	[1728020697]	2000000 OPS in 2.069613 seconds, throughput 966364.242977
+445460	[1728020698]	2000000 OPS in 2.058473 seconds, throughput 971593.992246
+445460	[1728020698]	2000000 OPS in 2.074196 seconds, throughput 964229.031393
+445460	[1728020699]	2000000 OPS in 2.094903 seconds, throughput 954698.141155
+445460	[1728020699]	2000000 OPS in 2.075485 seconds, throughput 963630.187643
+445460	[1728020700]	2000000 OPS in 2.063700 seconds, throughput 969133.110433
+445460	[1728020701]	2000000 OPS in 2.076041 seconds, throughput 963372.110666
+445460	[1728020701]	2000000 OPS in 2.093117 seconds, throughput 955512.759201
+445460	[1728020701]	2000000 OPS in 2.069487 seconds, throughput 966423.079729
+445460	[1728020702]	2000000 OPS in 2.060259 seconds, throughput 970751.735583
+445460	[1728020703]	2000000 OPS in 2.081275 seconds, throughput 960949.418025
+445460	[1728020703]	2000000 OPS in 2.093594 seconds, throughput 955295.057208
+445460	[1728020703]	2000000 OPS in 2.068454 seconds, throughput 966905.717990
+445460	[1728020704]	2000000 OPS in 2.063928 seconds, throughput 969026.051296
+445460	[1728020705]	2000000 OPS in 2.078280 seconds, throughput 962334.237928
+445460	[1728020705]	2000000 OPS in 2.089691 seconds, throughput 957079.300241
+445460	[1728020706]	2000000 OPS in 2.069860 seconds, throughput 966248.925048
+445460	[1728020706]	2000000 OPS in 2.064096 seconds, throughput 968947.180751
+445460	[1728020707]	2000000 OPS in 2.075209 seconds, throughput 963758.349159
+445460	[1728020707]	2000000 OPS in 2.088327 seconds, throughput 957704.420811
+445460	[1728020708]	2000000 OPS in 2.068498 seconds, throughput 966885.150481
+445460	[1728020708]	2000000 OPS in 2.058158 seconds, throughput 971742.694195
+445460	[1728020709]	2000000 OPS in 2.076606 seconds, throughput 963109.997756
+445460	[1728020710]	2000000 OPS in 2.096771 seconds, throughput 953847.606629
+445460	[1728020710]	2000000 OPS in 2.074929 seconds, throughput 963888.402928
+445460	[1728020710]	2000000 OPS in 2.061698 seconds, throughput 970074.181573
+445460	[1728020711]	2000000 OPS in 2.074367 seconds, throughput 964149.545379
+445460	[1728020712]	2000000 OPS in 2.091203 seconds, throughput 956387.304341
+445460	[1728020712]	2000000 OPS in 2.071201 seconds, throughput 965623.326756
+445460	[1728020712]	2000000 OPS in 2.059952 seconds, throughput 970896.409237
+445460	[1728020713]	2000000 OPS in 2.081504 seconds, throughput 960843.697634
+445460	[1728020714]	2000000 OPS in 2.093983 seconds, throughput 955117.591690
+445460	[1728020714]	2000000 OPS in 2.066171 seconds, throughput 967974.093141
+445460	[1728020714]	2000000 OPS in 2.056987 seconds, throughput 972295.887140
+445460	[1728020715]	2000000 OPS in 2.077337 seconds, throughput 962771.086251
+445460	[1728020716]	2000000 OPS in 2.092103 seconds, throughput 955975.876905
+445460	[1728020716]	2000000 OPS in 2.066772 seconds, throughput 967692.614376
+445460	[1728020717]	2000000 OPS in 2.064552 seconds, throughput 968733.168261
+445460	[1728020717]	2000000 OPS in 2.077145 seconds, throughput 962860.079580
+445460	[1728020718]	2000000 OPS in 2.088597 seconds, throughput 957580.615121
+445460	[1728020718]	2000000 OPS in 2.073549 seconds, throughput 964529.895363
+445460	[1728020719]	2000000 OPS in 2.062676 seconds, throughput 969614.229283
+445460	[1728020719]	2000000 OPS in 2.077894 seconds, throughput 962513.005957
+445460	[1728020720]	2000000 OPS in 2.094839 seconds, throughput 954727.308399
+445460	[1728020720]	2000000 OPS in 2.070798 seconds, throughput 965811.247645
+445460	[1728020721]	2000000 OPS in 2.061884 seconds, throughput 969986.672383
+445460	[1728020721]	2000000 OPS in 2.073554 seconds, throughput 964527.569574
+445460	[1728020722]	2000000 OPS in 2.071667 seconds, throughput 965406.119806
+445460	[1728020722]	2000000 OPS in 2.090743 seconds, throughput 956597.726263
+445460	[1728020723]	2000000 OPS in 2.066518 seconds, throughput 967811.555476
+445460	[1728020723]	2000000 OPS in 2.078759 seconds, throughput 962112.491155
+445460	[1728020724]	2000000 OPS in 2.069482 seconds, throughput 966425.414669
+445460	[1728020724]	2000000 OPS in 2.091154 seconds, throughput 956409.714445
+445460	[1728020725]	2000000 OPS in 2.062339 seconds, throughput 969772.670739
+445460	[1728020725]	2000000 OPS in 2.077918 seconds, throughput 962501.888910
+445460	[1728020726]	2000000 OPS in 2.069131 seconds, throughput 966589.355628
+445460	[1728020726]	2000000 OPS in 2.092080 seconds, throughput 955986.386754
+445460	[1728020727]	2000000 OPS in 2.069741 seconds, throughput 966304.479643
+445460	[1728020728]	2000000 OPS in 2.074514 seconds, throughput 964081.225771
+445460	[1728020728]	2000000 OPS in 2.076703 seconds, throughput 963065.012185
+445460	[1728020728]	2000000 OPS in 2.094308 seconds, throughput 954969.374132
+445460	[1728020729]	2000000 OPS in 2.060172 seconds, throughput 970792.729927
+445460	[1728020730]	2000000 OPS in 2.075793 seconds, throughput 963487.207058
+445460	[1728020730]	2000000 OPS in 2.066936 seconds, throughput 967615.833291
+445460	[1728020730]	2000000 OPS in 2.091102 seconds, throughput 956433.497744
+445460	[1728020731]	2000000 OPS in 2.061099 seconds, throughput 970356.106136
+445460	[1728020732]	2000000 OPS in 2.074554 seconds, throughput 964062.637078
+445460	[1728020732]	2000000 OPS in 2.068527 seconds, throughput 966871.595101
+445460	[1728020733]	2000000 OPS in 2.092789 seconds, throughput 955662.515428
+445460	[1728020733]	2000000 OPS in 2.058773 seconds, throughput 971452.413646
+445460	[1728020734]	2000000 OPS in 2.078980 seconds, throughput 962010.216548
+445460	[1728020734]	2000000 OPS in 2.073420 seconds, throughput 964589.904602
+445460	[1728020735]	2000000 OPS in 2.092381 seconds, throughput 955848.863089
+445460	[1728020735]	2000000 OPS in 2.061853 seconds, throughput 970001.256152
+445460	[1728020736]	2000000 OPS in 2.075149 seconds, throughput 963786.214869
+445460	[1728020737]	2000000 OPS in 2.070030 seconds, throughput 966169.572422
+445460	[1728020737]	2000000 OPS in 2.093024 seconds, throughput 955555.215803
+445460	[1728020737]	2000000 OPS in 2.062671 seconds, throughput 969616.579668
+445460	[1728020738]	2000000 OPS in 2.078307 seconds, throughput 962321.735913
+445460	[1728020739]	2000000 OPS in 2.073771 seconds, throughput 964426.641129
+445460	[1728020739]	2000000 OPS in 2.095706 seconds, throughput 954332.334784
+445460	[1728020739]	2000000 OPS in 2.063212 seconds, throughput 969362.334069
+445460	[1728020740]	2000000 OPS in 2.072846 seconds, throughput 964857.013015
+445460	[1728020741]	2000000 OPS in 2.071812 seconds, throughput 965338.553884
+445460	[1728020741]	2000000 OPS in 2.087408 seconds, throughput 958126.058729
+445460	[1728020741]	2000000 OPS in 2.062583 seconds, throughput 969657.948310
+445460	[1728020742]	2000000 OPS in 2.076967 seconds, throughput 962942.598510
+445460	[1728020743]	2000000 OPS in 2.068806 seconds, throughput 966741.202413
+445460	[1728020743]	2000000 OPS in 2.088788 seconds, throughput 957493.053388
+445460	[1728020743]	2000000 OPS in 2.063577 seconds, throughput 969190.875843
+445460	[1728020744]	2000000 OPS in 2.080936 seconds, throughput 961105.963855
+445460	[1728020745]	2000000 OPS in 2.069222 seconds, throughput 966546.847076
+445460	[1728020745]	2000000 OPS in 2.095862 seconds, throughput 954261.301555
+445460	[1728020745]	2000000 OPS in 2.059830 seconds, throughput 970953.913672
+445460	[1728020746]	2000000 OPS in 2.074145 seconds, throughput 964252.740286
+445460	[1728020747]	2000000 OPS in 2.072073 seconds, throughput 965216.959055
+445460	[1728020747]	2000000 OPS in 2.091638 seconds, throughput 956188.403538
+445460	[1728020747]	2000000 OPS in 2.066198 seconds, throughput 967961.444160
+445460	[1728020748]	2000000 OPS in 2.078861 seconds, throughput 962065.284788
+445460	[1728020749]	2000000 OPS in 2.072830 seconds, throughput 964864.460665
+445460	[1728020749]	2000000 OPS in 2.097855 seconds, throughput 953354.736147
+445460	[1728020750]	2000000 OPS in 2.062804 seconds, throughput 969554.063304
+445460	[1728020750]	2000000 OPS in 2.078241 seconds, throughput 962352.296967
+445460	[1728020751]	2000000 OPS in 2.068353 seconds, throughput 966952.933083
+445460	[1728020751]	2000000 OPS in 2.093496 seconds, throughput 955339.776145
+445460	[1728020752]	2000000 OPS in 2.063217 seconds, throughput 969359.984917
+445460	[1728020752]	2000000 OPS in 2.080771 seconds, throughput 961182.177183
+445460	[1728020753]	2000000 OPS in 2.066043 seconds, throughput 968034.063183
+445460	[1728020753]	2000000 OPS in 2.093934 seconds, throughput 955139.942329
+445460	[1728020754]	2000000 OPS in 2.065654 seconds, throughput 968216.361501
+445460	[1728020755]	2000000 OPS in 2.078318 seconds, throughput 962316.642593
+445460	[1728020755]	2000000 OPS in 2.072410 seconds, throughput 965060.002606
+445460	[1728020756]	2000000 OPS in 2.093467 seconds, throughput 955353.010102
+445460	[1728020756]	2000000 OPS in 2.063265 seconds, throughput 969337.433631
+445460	[1728020757]	2000000 OPS in 2.078246 seconds, throughput 962349.981667
+445460	[1728020757]	2000000 OPS in 2.067556 seconds, throughput 967325.673404
+445460	[1728020758]	2000000 OPS in 2.096373 seconds, throughput 954028.696229
+445460	[1728020758]	2000000 OPS in 2.070461 seconds, throughput 965968.448573
+445460	[1728020759]	2000000 OPS in 2.077727 seconds, throughput 962590.369187
+445460	[1728020759]	2000000 OPS in 2.069946 seconds, throughput 966208.780326
+445460	[1728020760]	2000000 OPS in 2.092871 seconds, throughput 955625.071971
+445460	[1728020760]	2000000 OPS in 2.063959 seconds, throughput 969011.496837
+445460	[1728020761]	2000000 OPS in 2.081556 seconds, throughput 960819.694498
+445460	[1728020761]	2000000 OPS in 2.069706 seconds, throughput 966320.820445
+445460	[1728020762]	2000000 OPS in 2.088706 seconds, throughput 957530.643374
+445460	[1728020762]	2000000 OPS in 2.064430 seconds, throughput 968790.416725
+445460	[1728020763]	2000000 OPS in 2.076024 seconds, throughput 963379.999461
+445460	[1728020763]	2000000 OPS in 2.068304 seconds, throughput 966975.841076
+445460	[1728020764]	2000000 OPS in 2.092345 seconds, throughput 955865.309019
+445460	[1728020764]	2000000 OPS in 2.060238 seconds, throughput 970761.630452
+445460	[1728020765]	2000000 OPS in 2.076426 seconds, throughput 963193.487271
+445460	[1728020766]	2000000 OPS in 2.070511 seconds, throughput 965945.121760
+445460	[1728020766]	2000000 OPS in 2.097021 seconds, throughput 953733.892031
+445460	[1728020766]	2000000 OPS in 2.072259 seconds, throughput 965130.323960
+445460	[1728020767]	2000000 OPS in 2.073767 seconds, throughput 964428.501370
+445460	[1728020768]	2000000 OPS in 2.073139 seconds, throughput 964720.648254
+445460	[1728020768]	2000000 OPS in 2.062069 seconds, throughput 969899.649333
+445460	[1728020768]	2000000 OPS in 2.088532 seconds, throughput 957610.417269
+445460	[1728020769]	2000000 OPS in 2.074599 seconds, throughput 964041.725654
+445460	[1728020770]	2000000 OPS in 2.069813 seconds, throughput 966270.866015
+445460	[1728020770]	2000000 OPS in 2.064616 seconds, throughput 968703.138986
+445460	[1728020770]	2000000 OPS in 2.091971 seconds, throughput 956036.197443
+445460	[1728020771]	2000000 OPS in 2.077992 seconds, throughput 962467.612965
+445460	[1728020772]	2000000 OPS in 2.070068 seconds, throughput 966151.836558
+445460	[1728020772]	2000000 OPS in 2.065537 seconds, throughput 968271.205018
+445460	[1728020772]	2000000 OPS in 2.091237 seconds, throughput 956371.755090
+445460	[1728020773]	2000000 OPS in 2.074342 seconds, throughput 964161.165324
+445460	[1728020774]	2000000 OPS in 2.067279 seconds, throughput 967455.287845
+445460	[1728020774]	2000000 OPS in 2.067089 seconds, throughput 967544.213142
+445460	[1728020774]	2000000 OPS in 2.094185 seconds, throughput 955025.463366
+445460	[1728020775]	2000000 OPS in 2.075947 seconds, throughput 963415.732675
+445460	[1728020776]	2000000 OPS in 2.071831 seconds, throughput 965329.701119
+445460	[1728020776]	2000000 OPS in 2.060375 seconds, throughput 970697.081842
+445460	[1728020776]	2000000 OPS in 2.088667 seconds, throughput 957548.522574
+445460	[1728020777]	2000000 OPS in 2.075885 seconds, throughput 963444.506801
+445460	[1728020778]	2000000 OPS in 2.069667 seconds, throughput 966339.029419
+445460	[1728020778]	2000000 OPS in 2.060712 seconds, throughput 970538.338205
+445460	[1728020779]	2000000 OPS in 2.092562 seconds, throughput 955766.185184
+445460	[1728020779]	2000000 OPS in 2.084221 seconds, throughput 959591.137408
+445460	[1728020780]	2000000 OPS in 2.066808 seconds, throughput 967675.758948
+445460	[1728020780]	2000000 OPS in 2.061780 seconds, throughput 970035.600307
+445460	[1728020781]	2000000 OPS in 2.089480 seconds, throughput 957175.948083
+445460	[1728020782]	2000000 OPS in 2.080265 seconds, throughput 961415.973446
+445460	[1728020782]	2000000 OPS in 2.066288 seconds, throughput 967919.283275
+445460	[1728020783]	2000000 OPS in 2.063667 seconds, throughput 969148.607794
+445460	[1728020783]	2000000 OPS in 2.095488 seconds, throughput 954431.616884
+445460	[1728020784]	2000000 OPS in 2.074737 seconds, throughput 963977.602944
+445460	[1728020784]	2000000 OPS in 2.065971 seconds, throughput 968067.799596
+445460	[1728020785]	2000000 OPS in 2.063436 seconds, throughput 969257.103201
+445460	[1728020785]	2000000 OPS in 2.089569 seconds, throughput 957135.179551
+445460	[1728020786]	2000000 OPS in 2.081050 seconds, throughput 961053.314433
+445460	[1728020786]	2000000 OPS in 2.070903 seconds, throughput 965762.278581
+445460	[1728020787]	2000000 OPS in 2.061398 seconds, throughput 970215.358703
+445460	[1728020787]	2000000 OPS in 2.089886 seconds, throughput 956989.998498
+445460	[1728020788]	2000000 OPS in 2.072604 seconds, throughput 964969.671003
+445460	[1728020788]	2000000 OPS in 2.069539 seconds, throughput 966398.797027
+445460	[1728020789]	2000000 OPS in 2.064400 seconds, throughput 968804.495253
+445460	[1728020789]	2000000 OPS in 2.094540 seconds, throughput 954863.597735
+445460	[1728020790]	2000000 OPS in 2.078560 seconds, throughput 962204.603187
+445460	[1728020790]	2000000 OPS in 2.067121 seconds, throughput 967529.235105
+445460	[1728020791]	2000000 OPS in 2.065500 seconds, throughput 968288.549988
+445460	[1728020791]	2000000 OPS in 2.092092 seconds, throughput 955980.903325
+445460	[1728020792]	2000000 OPS in 2.076563 seconds, throughput 963129.941158
+445460	[1728020792]	2000000 OPS in 2.069351 seconds, throughput 966486.594106
+445460	[1728020793]	2000000 OPS in 2.067672 seconds, throughput 967271.404749
+445460	[1728020793]	2000000 OPS in 2.095175 seconds, throughput 954574.200246
+445460	[1728020794]	2000000 OPS in 2.073664 seconds, throughput 964476.405049
+445460	[1728020795]	2000000 OPS in 2.070881 seconds, throughput 965772.538354
+445460	[1728020795]	2000000 OPS in 2.066736 seconds, throughput 967709.470392
+445460	[1728020795]	2000000 OPS in 2.091975 seconds, throughput 956034.369436
+445460	[1728020796]	2000000 OPS in 2.082527 seconds, throughput 960371.702264
+445460	[1728020797]	2000000 OPS in 2.065983 seconds, throughput 968062.176697
+445460	[1728020797]	2000000 OPS in 2.062892 seconds, throughput 969512.703525
+445460	[1728020797]	2000000 OPS in 2.091361 seconds, throughput 956315.050343
+445460	[1728020798]	2000000 OPS in 2.076938 seconds, throughput 962956.043945
+445460	[1728020799]	2000000 OPS in 2.069236 seconds, throughput 966540.307630
+445460	[1728020799]	2000000 OPS in 2.062261 seconds, throughput 969809.350029
+445460	[1728020800]	2000000 OPS in 2.096677 seconds, throughput 953890.370334
+445460	[1728020800]	2000000 OPS in 2.073430 seconds, throughput 964585.252456
+445460	[1728020801]	2000000 OPS in 2.067081 seconds, throughput 967547.957724
+445460	[1728020801]	2000000 OPS in 2.070513 seconds, throughput 965944.188711
+445460	[1728020802]	2000000 OPS in 2.095330 seconds, throughput 954503.586547
+445460	[1728020802]	2000000 OPS in 2.076328 seconds, throughput 963238.948760
+445460	[1728020803]	2000000 OPS in 2.074745 seconds, throughput 963973.885947
+445460	[1728020803]	2000000 OPS in 2.060156 seconds, throughput 970800.269494
+445460	[1728020804]	2000000 OPS in 2.091787 seconds, throughput 956120.293319
+445460	[1728020804]	2000000 OPS in 2.078811 seconds, throughput 962088.424585
+445460	[1728020805]	2000000 OPS in 2.066857 seconds, throughput 967652.817781
+445460	[1728020805]	2000000 OPS in 2.062137 seconds, throughput 969867.666406
+445460	[1728020806]	2000000 OPS in 2.090002 seconds, throughput 956936.883314
+445460	[1728020806]	2000000 OPS in 2.076406 seconds, throughput 963202.764777
+445460	[1728020807]	2000000 OPS in 2.067367 seconds, throughput 967414.106929
+445460	[1728020807]	2000000 OPS in 2.062522 seconds, throughput 969686.626373
+445460	[1728020808]	2000000 OPS in 2.094939 seconds, throughput 954681.735363
+445460	[1728020809]	2000000 OPS in 2.073381 seconds, throughput 964608.048400
+445460	[1728020809]	2000000 OPS in 2.069190 seconds, throughput 966561.794712
+445460	[1728020809]	2000000 OPS in 2.067258 seconds, throughput 967465.115627
+445460	[1728020810]	2000000 OPS in 2.091409 seconds, throughput 956293.101923
+445460	[1728020811]	2000000 OPS in 2.076538 seconds, throughput 963141.536538
+445460	[1728020811]	2000000 OPS in 2.071166 seconds, throughput 965639.644529
+445460	[1728020811]	2000000 OPS in 2.061922 seconds, throughput 969968.796104
+445460	[1728020812]	2000000 OPS in 2.092622 seconds, throughput 955738.781299
+445460	[1728020813]	2000000 OPS in 2.081322 seconds, throughput 960927.718056
+445460	[1728020813]	2000000 OPS in 2.066492 seconds, throughput 967823.732199
+445460	[1728020814]	2000000 OPS in 2.063876 seconds, throughput 969050.466210
+445460	[1728020814]	2000000 OPS in 2.091081 seconds, throughput 956443.102874
+445460	[1728020815]	2000000 OPS in 2.077063 seconds, throughput 962898.092162
+445460	[1728020815]	2000000 OPS in 2.068640 seconds, throughput 966818.779488
+445460	[1728020816]	2000000 OPS in 2.061134 seconds, throughput 970339.628573
+445460	[1728020816]	2000000 OPS in 2.096380 seconds, throughput 954025.510642
+445460	[1728020817]	2000000 OPS in 2.080405 seconds, throughput 961351.275353
+445460	[1728020817]	2000000 OPS in 2.070586 seconds, throughput 965910.133653
+445460	[1728020818]	2000000 OPS in 2.064357 seconds, throughput 968824.675189
+445460	[1728020818]	2000000 OPS in 2.087856 seconds, throughput 957920.469611
+445460	[1728020819]	2000000 OPS in 2.073025 seconds, throughput 964773.700269
+445460	[1728020819]	2000000 OPS in 2.068541 seconds, throughput 966865.051261
+445460	[1728020820]	2000000 OPS in 2.070687 seconds, throughput 965863.020341
+445460	[1728020820]	2000000 OPS in 2.090689 seconds, throughput 956622.434040
+445460	[1728020821]	2000000 OPS in 2.073041 seconds, throughput 964766.254020
+445460	[1728020821]	2000000 OPS in 2.069880 seconds, throughput 966239.588768
+445460	[1728020822]	2000000 OPS in 2.067860 seconds, throughput 967183.465031
+445460	[1728020823]	2000000 OPS in 2.089110 seconds, throughput 957345.472474
+445460	[1728020823]	2000000 OPS in 2.079218 seconds, throughput 961900.098980
+445460	[1728020823]	2000000 OPS in 2.064942 seconds, throughput 968550.206253
+445460	[1728020824]	2000000 OPS in 2.063734 seconds, throughput 969117.143973
+445460	[1728020825]	2000000 OPS in 2.095393 seconds, throughput 954474.888482
+445460	[1728020825]	2000000 OPS in 2.074862 seconds, throughput 963919.528142
+445460	[1728020826]	2000000 OPS in 2.064647 seconds, throughput 968688.594225
+445460	[1728020826]	2000000 OPS in 2.065620 seconds, throughput 968232.298293
+445460	[1728020827]	2000000 OPS in 2.090094 seconds, throughput 956894.761671
+445460	[1728020827]	2000000 OPS in 2.076610 seconds, throughput 963108.142598
+445460	[1728020828]	2000000 OPS in 2.068762 seconds, throughput 966761.763799
+445460	[1728020828]	2000000 OPS in 2.070312 seconds, throughput 966037.969156
+445460	[1728020829]	2000000 OPS in 2.089635 seconds, throughput 957104.948950
+445460	[1728020829]	2000000 OPS in 2.075432 seconds, throughput 963654.795724
+445460	[1728020830]	2000000 OPS in 2.073443 seconds, throughput 964579.204733
+445460	[1728020830]	2000000 OPS in 2.063004 seconds, throughput 969460.068909
+445460	[1728020831]	2000000 OPS in 2.089996 seconds, throughput 956939.630506
+445460	[1728020831]	2000000 OPS in 2.077384 seconds, throughput 962749.303932
+445460	[1728020832]	2000000 OPS in 2.067726 seconds, throughput 967246.143831
+445460	[1728020832]	2000000 OPS in 2.066121 seconds, throughput 967997.518054
+445460	[1728020833]	2000000 OPS in 2.094897 seconds, throughput 954700.875508
+445460	[1728020833]	2000000 OPS in 2.075264 seconds, throughput 963732.807007
+445460	[1728020834]	2000000 OPS in 2.068187 seconds, throughput 967030.544143
+445460	[1728020834]	2000000 OPS in 2.063526 seconds, throughput 969214.829375
+445460	[1728020835]	2000000 OPS in 2.091435 seconds, throughput 956281.213616
+445460	[1728020836]	2000000 OPS in 2.076255 seconds, throughput 963272.815719
+445460	[1728020836]	2000000 OPS in 2.065624 seconds, throughput 968230.423349
+445460	[1728020836]	2000000 OPS in 2.072325 seconds, throughput 965099.586214
+445460	[1728020837]	2000000 OPS in 2.093723 seconds, throughput 955236.198867
+445460	[1728020838]	2000000 OPS in 2.075826 seconds, throughput 963471.890226
+445460	[1728020838]	2000000 OPS in 2.067194 seconds, throughput 967495.068194
+445460	[1728020838]	2000000 OPS in 2.064909 seconds, throughput 968565.684977
+445460	[1728020839]	2000000 OPS in 2.092953 seconds, throughput 955587.631447
+445460	[1728020840]	2000000 OPS in 2.078606 seconds, throughput 962183.309391
+445460	[1728020840]	2000000 OPS in 2.066887 seconds, throughput 967638.772705
+445460	[1728020840]	2000000 OPS in 2.063637 seconds, throughput 969162.696734
+445460	[1728020841]	2000000 OPS in 2.098307 seconds, throughput 953149.372327
+445460	[1728020842]	2000000 OPS in 2.076618 seconds, throughput 963104.432303
+445460	[1728020842]	2000000 OPS in 2.064036 seconds, throughput 968975.347329
+445460	[1728020842]	2000000 OPS in 2.062908 seconds, throughput 969505.183944
+445460	[1728020843]	2000000 OPS in 2.092218 seconds, throughput 955923.331125
+445460	[1728020844]	2000000 OPS in 2.074546 seconds, throughput 964066.354759
+445460	[1728020844]	2000000 OPS in 2.068208 seconds, throughput 967020.725188
+445460	[1728020845]	2000000 OPS in 2.069134 seconds, throughput 966587.954188
+445460	[1728020846]	2000000 OPS in 2.088268 seconds, throughput 957731.478910
+445460	[1728020846]	2000000 OPS in 2.070589 seconds, throughput 965908.734181
+445460	[1728020846]	2000000 OPS in 2.072294 seconds, throughput 965114.023396
+445460	[1728020847]	2000000 OPS in 2.064931 seconds, throughput 968555.365773
+445460	[1728020848]	2000000 OPS in 2.093732 seconds, throughput 955232.092742
+445460	[1728020848]	2000000 OPS in 2.081840 seconds, throughput 960688.621604
+445460	[1728020848]	2000000 OPS in 2.065243 seconds, throughput 968409.044359
+445460	[1728020849]	2000000 OPS in 2.063961 seconds, throughput 969010.557855
+445460	[1728020850]	2000000 OPS in 2.096650 seconds, throughput 953902.654234
+445460	[1728020850]	2000000 OPS in 2.075676 seconds, throughput 963541.516113
+445460	[1728020850]	2000000 OPS in 2.066650 seconds, throughput 967749.739917
+445460	[1728020851]	2000000 OPS in 2.064097 seconds, throughput 968946.711322
+445460	[1728020852]	2000000 OPS in 2.090958 seconds, throughput 956499.365363
+445460	[1728020852]	2000000 OPS in 2.075849 seconds, throughput 963461.215146
+445460	[1728020852]	2000000 OPS in 2.066090 seconds, throughput 968012.042070
+445460	[1728020853]	2000000 OPS in 2.064289 seconds, throughput 968856.589363
+445460	[1728020854]	2000000 OPS in 2.089125 seconds, throughput 957338.598696
+445460	[1728020854]	2000000 OPS in 2.074394 seconds, throughput 964136.996154
+445460	[1728020854]	2000000 OPS in 2.068309 seconds, throughput 966973.503476
+445460	[1728020855]	2000000 OPS in 2.069269 seconds, throughput 966524.893574
+445460	[1728020856]	2000000 OPS in 2.093287 seconds, throughput 955435.160109
+445460	[1728020856]	2000000 OPS in 2.078531 seconds, throughput 962218.028021
+445460	[1728020857]	2000000 OPS in 2.072539 seconds, throughput 964999.934863
+445460	[1728020857]	2000000 OPS in 2.060460 seconds, throughput 970657.037749
+445460	[1728020858]	2000000 OPS in 2.094465 seconds, throughput 954897.790128
+445460	[1728020858]	2000000 OPS in 2.073885 seconds, throughput 964373.627274
+445460	[1728020859]	2000000 OPS in 2.067650 seconds, throughput 967281.696612
+445460	[1728020859]	2000000 OPS in 2.065886 seconds, throughput 968107.630334
+445460	[1728020860]	2000000 OPS in 2.092623 seconds, throughput 955738.324581
+445460	[1728020860]	2000000 OPS in 2.073221 seconds, throughput 964682.491640
+445460	[1728020861]	2000000 OPS in 2.066226 seconds, throughput 967948.327047
+445460	[1728020861]	2000000 OPS in 2.063391 seconds, throughput 969278.241497
+445460	[1728020862]	2000000 OPS in 2.088232 seconds, throughput 957747.989687
+445460	[1728020862]	2000000 OPS in 2.076558 seconds, throughput 963132.260211
+445460	[1728020863]	2000000 OPS in 2.064072 seconds, throughput 968958.447186
+445460	[1728020863]	2000000 OPS in 2.071170 seconds, throughput 965637.779612
+445460	[1728020864]	2000000 OPS in 2.092691 seconds, throughput 955707.268775
+445460	[1728020865]	2000000 OPS in 2.076537 seconds, throughput 963142.000359
+445460	[1728020865]	2000000 OPS in 2.071459 seconds, throughput 965503.058472
+445460	[1728020865]	2000000 OPS in 2.065405 seconds, throughput 968333.087215
+445460	[1728020866]	2000000 OPS in 2.095133 seconds, throughput 954593.336079
+445460	[1728020867]	2000000 OPS in 2.075025 seconds, throughput 963843.809111
+445460	[1728020867]	2000000 OPS in 2.069959 seconds, throughput 966202.712228
+445460	[1728020867]	2000000 OPS in 2.062705 seconds, throughput 969600.597274
+445460	[1728020869]	2000000 OPS in 2.093093 seconds, throughput 955523.715382
+445460	[1728020869]	2000000 OPS in 2.073649 seconds, throughput 964483.381710
+445460	[1728020869]	2000000 OPS in 2.066955 seconds, throughput 967606.938709
+445460	[1728020869]	2000000 OPS in 2.062241 seconds, throughput 969818.755422
+445460	[1728020871]	2000000 OPS in 2.087691 seconds, throughput 957996.178553
+445460	[1728020871]	2000000 OPS in 2.074560 seconds, throughput 964059.848835
+445460	[1728020871]	2000000 OPS in 2.068078 seconds, throughput 967081.512399
+445460	[1728020871]	2000000 OPS in 2.068882 seconds, throughput 966705.689353
+445460	[1728020873]	2000000 OPS in 2.092151 seconds, throughput 955953.944051
+445460	[1728020873]	2000000 OPS in 2.080652 seconds, throughput 961237.150662
+445460	[1728020873]	2000000 OPS in 2.067364 seconds, throughput 967415.510766
+445460	[1728020873]	2000000 OPS in 2.062501 seconds, throughput 969696.499541
+445460	[1728020875]	2000000 OPS in 2.097954 seconds, throughput 953309.748450
+445460	[1728020875]	2000000 OPS in 2.078412 seconds, throughput 962273.120055
+445460	[1728020875]	2000000 OPS in 2.067868 seconds, throughput 967179.723271
+445460	[1728020875]	2000000 OPS in 2.061439 seconds, throughput 970196.062071
+445460	[1728020877]	2000000 OPS in 2.089983 seconds, throughput 956945.582811
+445460	[1728020877]	2000000 OPS in 2.075868 seconds, throughput 963452.396781
+445460	[1728020877]	2000000 OPS in 2.070710 seconds, throughput 965852.292209
+445460	[1728020878]	2000000 OPS in 2.060758 seconds, throughput 970516.673962
+445460	[1728020879]	2000000 OPS in 2.089786 seconds, throughput 957035.792182
+445460	[1728020879]	2000000 OPS in 2.074351 seconds, throughput 964156.982112
+445460	[1728020879]	2000000 OPS in 2.069438 seconds, throughput 966445.962624
+445460	[1728020880]	2000000 OPS in 2.063652 seconds, throughput 969155.652213
+445460	[1728020881]	2000000 OPS in 2.094078 seconds, throughput 955074.261799
+445460	[1728020881]	2000000 OPS in 2.075872 seconds, throughput 963450.540303
+445460	[1728020881]	2000000 OPS in 2.068958 seconds, throughput 966670.178902
+445460	[1728020882]	2000000 OPS in 2.068329 seconds, throughput 966964.153188
+445460	[1728020883]	2000000 OPS in 2.099573 seconds, throughput 952574.642558
+445460	[1728020883]	2000000 OPS in 2.080719 seconds, throughput 961206.198434
+445460	[1728020883]	2000000 OPS in 2.066394 seconds, throughput 967869.631832
+445460	[1728020884]	2000000 OPS in 2.063038 seconds, throughput 969444.091675
+445460	[1728020885]	2000000 OPS in 2.092339 seconds, throughput 955868.050063
+445460	[1728020885]	2000000 OPS in 2.077082 seconds, throughput 962889.284101
+445460	[1728020886]	2000000 OPS in 2.064370 seconds, throughput 968818.574190
+445460	[1728020886]	2000000 OPS in 2.061643 seconds, throughput 970100.060971
+445460	[1728020887]	2000000 OPS in 2.094542 seconds, throughput 954862.685971
+445460	[1728020887]	2000000 OPS in 2.076447 seconds, throughput 963183.746082
+445460	[1728020888]	2000000 OPS in 2.068088 seconds, throughput 967076.836189
+445460	[1728020888]	2000000 OPS in 2.061760 seconds, throughput 970045.010088
+445460	[1728020889]	2000000 OPS in 2.089495 seconds, throughput 957169.076739
+445460	[1728020889]	2000000 OPS in 2.073530 seconds, throughput 964538.733464
+445460	[1728020890]	2000000 OPS in 2.064702 seconds, throughput 968662.790078
+445460	[1728020890]	2000000 OPS in 2.068706 seconds, throughput 966787.934100
+445460	[1728020892]	2000000 OPS in 2.083025 seconds, throughput 960142.101031
+445460	[1728020892]	2000000 OPS in 2.099414 seconds, throughput 952646.786198
+445460	[1728020892]	2000000 OPS in 2.073126 seconds, throughput 964726.697750
+445460	[1728020892]	2000000 OPS in 2.060976 seconds, throughput 970414.017436
+445460	[1728020894]	2000000 OPS in 2.077026 seconds, throughput 962915.245163
+445460	[1728020894]	2000000 OPS in 2.093685 seconds, throughput 955253.536229
+445460	[1728020894]	2000000 OPS in 2.068792 seconds, throughput 966747.744578
+445460	[1728020894]	2000000 OPS in 2.065168 seconds, throughput 968444.213740
+445460	[1728020896]	2000000 OPS in 2.076566 seconds, throughput 963128.549731
+445460	[1728020896]	2000000 OPS in 2.089087 seconds, throughput 957356.012459
+445460	[1728020896]	2000000 OPS in 2.066659 seconds, throughput 967745.525508
+445460	[1728020896]	2000000 OPS in 2.064264 seconds, throughput 968868.323044
+445460	[1728020898]	2000000 OPS in 2.074961 seconds, throughput 963873.537864
+445460	[1728020898]	2000000 OPS in 2.088002 seconds, throughput 957853.488646
+445460	[1728020898]	2000000 OPS in 2.066899 seconds, throughput 967633.154789
+445460	[1728020898]	2000000 OPS in 2.067929 seconds, throughput 967151.193295
+445460	[1728020900]	2000000 OPS in 2.079521 seconds, throughput 961759.943756
+445460	[1728020900]	2000000 OPS in 2.091567 seconds, throughput 956220.862157
+445460	[1728020900]	2000000 OPS in 2.076281 seconds, throughput 963260.753241
+445460	[1728020900]	2000000 OPS in 2.063642 seconds, throughput 969160.348549
+445460	[1728020902]	2000000 OPS in 2.078470 seconds, throughput 962246.267687
+445460	[1728020902]	2000000 OPS in 2.091112 seconds, throughput 956428.923941
+445460	[1728020902]	2000000 OPS in 2.067102 seconds, throughput 967538.128259
+445460	[1728020902]	2000000 OPS in 2.062359 seconds, throughput 969763.266240
+445460	[1728020904]	2000000 OPS in 2.074640 seconds, throughput 964022.673813
+445460	[1728020904]	2000000 OPS in 2.092156 seconds, throughput 955951.659436
+445460	[1728020904]	2000000 OPS in 2.067180 seconds, throughput 967501.620565
+445460	[1728020904]	2000000 OPS in 2.063338 seconds, throughput 969303.138894
+445460	[1728020906]	2000000 OPS in 2.076090 seconds, throughput 963349.373100
+445460	[1728020906]	2000000 OPS in 2.066648 seconds, throughput 967750.676458
+445460	[1728020906]	2000000 OPS in 2.088092 seconds, throughput 957812.203677
+445460	[1728020906]	2000000 OPS in 2.069561 seconds, throughput 966388.523943
+445460	[1728020908]	2000000 OPS in 2.079861 seconds, throughput 961602.722490
+445460	[1728020908]	2000000 OPS in 2.070795 seconds, throughput 965812.646834
+445460	[1728020908]	2000000 OPS in 2.095379 seconds, throughput 954481.265680
+445460	[1728020909]	2000000 OPS in 2.066340 seconds, throughput 967894.925327
+445460	[1728020910]	2000000 OPS in 2.078095 seconds, throughput 962419.908618
+445460	[1728020910]	2000000 OPS in 2.063597 seconds, throughput 969181.482625
+445460	[1728020910]	2000000 OPS in 2.091499 seconds, throughput 956251.951352
+445460	[1728020911]	2000000 OPS in 2.065002 seconds, throughput 968522.064385
+445460	[1728020912]	2000000 OPS in 2.076647 seconds, throughput 963090.982724
+445460	[1728020912]	2000000 OPS in 2.067120 seconds, throughput 967529.703162
+445460	[1728020912]	2000000 OPS in 2.089252 seconds, throughput 957280.404662
+445460	[1728020913]	2000000 OPS in 2.061973 seconds, throughput 969944.805291
+445460	[1728020914]	2000000 OPS in 2.074972 seconds, throughput 963868.428104
+445460	[1728020914]	2000000 OPS in 2.068799 seconds, throughput 966744.473484
+445460	[1728020915]	2000000 OPS in 2.093710 seconds, throughput 955242.129999
+445460	[1728020915]	2000000 OPS in 2.062341 seconds, throughput 969771.730281
+445460	[1728020916]	2000000 OPS in 2.081110 seconds, throughput 961025.606527
+445460	[1728020917]	2000000 OPS in 2.069361 seconds, throughput 966481.923647
+445460	[1728020917]	2000000 OPS in 2.094496 seconds, throughput 954883.656975
+445460	[1728020917]	2000000 OPS in 2.070619 seconds, throughput 965894.739689
+445460	[1728020919]	2000000 OPS in 2.073597 seconds, throughput 964507.568250
+445460	[1728020919]	2000000 OPS in 2.069210 seconds, throughput 966552.452385
+445460	[1728020919]	2000000 OPS in 2.092219 seconds, throughput 955922.874231
+445460	[1728020919]	2000000 OPS in 2.065255 seconds, throughput 968403.417496
+445460	[1728020921]	2000000 OPS in 2.076189 seconds, throughput 963303.437211
+445460	[1728020921]	2000000 OPS in 2.064191 seconds, throughput 968902.587018
+445460	[1728020921]	2000000 OPS in 2.092847 seconds, throughput 955636.030728
+445460	[1728020921]	2000000 OPS in 2.061702 seconds, throughput 970072.299488
+445460	[1728020923]	2000000 OPS in 2.078978 seconds, throughput 962011.142013
+445460	[1728020923]	2000000 OPS in 2.066344 seconds, throughput 967893.051689
+445460	[1728020923]	2000000 OPS in 2.090007 seconds, throughput 956934.593999
+445460	[1728020923]	2000000 OPS in 2.063240 seconds, throughput 969349.178961
+445460	[1728020925]	2000000 OPS in 2.080496 seconds, throughput 961309.226261
+445460	[1728020925]	2000000 OPS in 2.070882 seconds, throughput 965772.071996
+445460	[1728020925]	2000000 OPS in 2.067939 seconds, throughput 967146.516411
+445460	[1728020925]	2000000 OPS in 2.096840 seconds, throughput 953816.218691
+445460	[1728020927]	2000000 OPS in 2.070043 seconds, throughput 966163.504816
+445460	[1728020927]	2000000 OPS in 2.084502 seconds, throughput 959461.780320
+445460	[1728020927]	2000000 OPS in 2.063311 seconds, throughput 969315.822966
+445460	[1728020927]	2000000 OPS in 2.092509 seconds, throughput 955790.393255
+445460	[1728020929]	2000000 OPS in 2.066369 seconds, throughput 967881.341619
+445460	[1728020929]	2000000 OPS in 2.076997 seconds, throughput 962928.689834
+445460	[1728020929]	2000000 OPS in 2.063635 seconds, throughput 969163.636011
+445460	[1728020929]	2000000 OPS in 2.096737 seconds, throughput 953863.073910
+445460	[1728020931]	2000000 OPS in 2.061945 seconds, throughput 969957.976571
+445460	[1728020931]	2000000 OPS in 2.079859 seconds, throughput 961603.647170
+445460	[1728020931]	2000000 OPS in 2.063700 seconds, throughput 969133.110433
+445460	[1728020931]	2000000 OPS in 2.090056 seconds, throughput 956912.159291
+445460	[1728020933]	2000000 OPS in 2.068263 seconds, throughput 966995.009822
+445460	[1728020933]	2000000 OPS in 2.078288 seconds, throughput 962330.533593
+445460	[1728020933]	2000000 OPS in 2.069493 seconds, throughput 966420.277817
+445460	[1728020933]	2000000 OPS in 2.095406 seconds, throughput 954468.966873
+445460	[1728020935]	2000000 OPS in 2.071732 seconds, throughput 965375.830465
+445460	[1728020935]	2000000 OPS in 2.080257 seconds, throughput 961419.670743
+445460	[1728020935]	2000000 OPS in 2.064932 seconds, throughput 968554.896723
+445460	[1728020936]	2000000 OPS in 2.092891 seconds, throughput 955615.939865
+445460	[1728020937]	2000000 OPS in 2.066674 seconds, throughput 967738.501573
+445460	[1728020937]	2000000 OPS in 2.078183 seconds, throughput 962379.155252
+445460	[1728020937]	2000000 OPS in 2.062221 seconds, throughput 969828.160997
+445460	[1728020938]	2000000 OPS in 2.091844 seconds, throughput 956094.240297
+445460	[1728020939]	2000000 OPS in 2.066677 seconds, throughput 967737.096798
+445460	[1728020939]	2000000 OPS in 2.074950 seconds, throughput 963878.647678
+445460	[1728020939]	2000000 OPS in 2.065912 seconds, throughput 968095.446466
+445460	[1728020940]	2000000 OPS in 2.090071 seconds, throughput 956905.291734
+445460	[1728020941]	2000000 OPS in 2.068265 seconds, throughput 966994.074744
+445460	[1728020941]	2000000 OPS in 2.075424 seconds, throughput 963658.510261
+445460	[1728020942]	2000000 OPS in 2.065686 seconds, throughput 968201.362647
+445460	[1728020942]	2000000 OPS in 2.092915 seconds, throughput 955604.981569
+445460	[1728020943]	2000000 OPS in 2.073714 seconds, throughput 964453.150242
+445460	[1728020944]	2000000 OPS in 2.077368 seconds, throughput 962756.719079
+445460	[1728020944]	2000000 OPS in 2.072535 seconds, throughput 965001.797316
+445460	[1728020944]	2000000 OPS in 2.089452 seconds, throughput 957188.774856
+445460	[1728020945]	2000000 OPS in 2.068880 seconds, throughput 966706.623874
+445460	[1728020946]	2000000 OPS in 2.072150 seconds, throughput 965181.092102
+445460	[1728020946]	2000000 OPS in 2.065151 seconds, throughput 968452.185821
+445460	[1728020946]	2000000 OPS in 2.088373 seconds, throughput 957683.325728
+445460	[1728020948]	2000000 OPS in 2.065586 seconds, throughput 968248.235610
+445460	[1728020948]	2000000 OPS in 2.075691 seconds, throughput 963534.553072
+445460	[1728020948]	2000000 OPS in 2.065079 seconds, throughput 968485.951385
+445460	[1728020948]	2000000 OPS in 2.092058 seconds, throughput 955996.439869
+445460	[1728020950]	2000000 OPS in 2.068002 seconds, throughput 967117.053078
+445460	[1728020950]	2000000 OPS in 2.077601 seconds, throughput 962648.747281
+445460	[1728020950]	2000000 OPS in 2.065004 seconds, throughput 968521.126351
+445460	[1728020950]	2000000 OPS in 2.099121 seconds, throughput 952779.758766
+445460	[1728020952]	2000000 OPS in 2.073186 seconds, throughput 964698.777630
+445460	[1728020952]	2000000 OPS in 2.082059 seconds, throughput 960587.572206
+445460	[1728020952]	2000000 OPS in 2.066220 seconds, throughput 967951.137827
+445460	[1728020952]	2000000 OPS in 2.094668 seconds, throughput 954805.248373
+445460	[1728020954]	2000000 OPS in 2.068499 seconds, throughput 966884.683048
+445460	[1728020954]	2000000 OPS in 2.077325 seconds, throughput 962776.647852
+445460	[1728020954]	2000000 OPS in 2.062814 seconds, throughput 969549.363152
+445460	[1728020954]	2000000 OPS in 2.092414 seconds, throughput 955833.788151
+445460	[1728020956]	2000000 OPS in 2.069469 seconds, throughput 966431.485565
+445460	[1728020956]	2000000 OPS in 2.075477 seconds, throughput 963633.901990
+445460	[1728020956]	2000000 OPS in 2.065598 seconds, throughput 968242.610614
+445460	[1728020956]	2000000 OPS in 2.090749 seconds, throughput 956594.981033
+445460	[1728020958]	2000000 OPS in 2.067240 seconds, throughput 967473.539599
+445460	[1728020958]	2000000 OPS in 2.075049 seconds, throughput 963832.661301
+445460	[1728020958]	2000000 OPS in 2.064194 seconds, throughput 968901.178862
+445460	[1728020959]	2000000 OPS in 2.096269 seconds, throughput 954076.027456
+445460	[1728020960]	2000000 OPS in 2.069831 seconds, throughput 966262.462974
+445460	[1728020960]	2000000 OPS in 2.082183 seconds, throughput 960530.366447
+445460	[1728020960]	2000000 OPS in 2.071274 seconds, throughput 965589.294318
+445460	[1728020961]	2000000 OPS in 2.090789 seconds, throughput 956576.679904
+445460	[1728020962]	2000000 OPS in 2.066074 seconds, throughput 968019.538506
+445460	[1728020962]	2000000 OPS in 2.063216 seconds, throughput 969360.454746
+445460	[1728020962]	2000000 OPS in 2.080026 seconds, throughput 961526.442458
+445460	[1728020963]	2000000 OPS in 2.087996 seconds, throughput 957856.241104
+445460	[1728020964]	2000000 OPS in 2.066631 seconds, throughput 967758.637125
+445460	[1728020964]	2000000 OPS in 2.064385 seconds, throughput 968811.534670
+445460	[1728020964]	2000000 OPS in 2.076246 seconds, throughput 963276.991262
+445460	[1728020965]	2000000 OPS in 2.091322 seconds, throughput 956332.884176
+445460	[1728020966]	2000000 OPS in 2.066478 seconds, throughput 967830.289023
+445460	[1728020966]	2000000 OPS in 2.068226 seconds, throughput 967012.309100
+445460	[1728020966]	2000000 OPS in 2.075606 seconds, throughput 963574.011638
+445460	[1728020967]	2000000 OPS in 2.093202 seconds, throughput 955473.958080
+445460	[1728020968]	2000000 OPS in 2.066476 seconds, throughput 967831.225720
+445460	[1728020968]	2000000 OPS in 2.070357 seconds, throughput 966016.971952
+445460	[1728020968]	2000000 OPS in 2.080401 seconds, throughput 961353.123749
+445460	[1728020969]	2000000 OPS in 2.093113 seconds, throughput 955514.585214
+445460	[1728020970]	2000000 OPS in 2.071399 seconds, throughput 965531.025167
+445460	[1728020970]	2000000 OPS in 2.061962 seconds, throughput 969949.979680
+445460	[1728020971]	2000000 OPS in 2.076144 seconds, throughput 963324.316618
+445460	[1728020971]	2000000 OPS in 2.087934 seconds, throughput 957884.684094
+445460	[1728020972]	2000000 OPS in 2.071623 seconds, throughput 965426.624439
+445460	[1728020973]	2000000 OPS in 2.062946 seconds, throughput 969487.325407
+445460	[1728020973]	2000000 OPS in 2.072479 seconds, throughput 965027.872418
+445460	[1728020973]	2000000 OPS in 2.093266 seconds, throughput 955444.745197
+445460	[1728020974]	2000000 OPS in 2.068537 seconds, throughput 966866.920920
+445460	[1728020975]	2000000 OPS in 2.065551 seconds, throughput 968264.642219
+445460	[1728020975]	2000000 OPS in 2.074252 seconds, throughput 964202.999443
+445460	[1728020975]	2000000 OPS in 2.095764 seconds, throughput 954305.923759
+445460	[1728020977]	2000000 OPS in 2.067834 seconds, throughput 967195.625955
+445460	[1728020977]	2000000 OPS in 2.068732 seconds, throughput 966775.783427
+445460	[1728020977]	2000000 OPS in 2.078979 seconds, throughput 962010.679281
+445460	[1728020977]	2000000 OPS in 2.096040 seconds, throughput 954180.263735
+445460	[1728020979]	2000000 OPS in 2.070887 seconds, throughput 965769.740213
+445460	[1728020979]	2000000 OPS in 2.070501 seconds, throughput 965949.787032
+445460	[1728020979]	2000000 OPS in 2.078196 seconds, throughput 962373.135161
+445460	[1728020979]	2000000 OPS in 2.089576 seconds, throughput 957131.973185
+445460	[1728020981]	2000000 OPS in 2.069391 seconds, throughput 966467.912540
+445460	[1728020981]	2000000 OPS in 2.064740 seconds, throughput 968644.962562
+445460	[1728020981]	2000000 OPS in 2.075601 seconds, throughput 963576.332831
+445460	[1728020982]	2000000 OPS in 2.088177 seconds, throughput 957773.215585
+445460	[1728020983]	2000000 OPS in 2.067752 seconds, throughput 967233.981638
+445460	[1728020983]	2000000 OPS in 2.064010 seconds, throughput 968987.553355
+445460	[1728020983]	2000000 OPS in 2.075896 seconds, throughput 963439.401589
+445460	[1728020984]	2000000 OPS in 2.099414 seconds, throughput 952646.786198
+445460	[1728020985]	2000000 OPS in 2.064873 seconds, throughput 968582.571422
+445460	[1728020985]	2000000 OPS in 2.061705 seconds, throughput 970070.887930
+445460	[1728020985]	2000000 OPS in 2.075597 seconds, throughput 963578.189793
+445460	[1728020986]	2000000 OPS in 2.091780 seconds, throughput 956123.492910
+445460	[1728020987]	2000000 OPS in 2.070332 seconds, throughput 966028.636953
+445460	[1728020987]	2000000 OPS in 2.074608 seconds, throughput 964037.543478
+445460	[1728020987]	2000000 OPS in 2.081269 seconds, throughput 960952.188304
+445460	[1728020988]	2000000 OPS in 2.090182 seconds, throughput 956854.474873
+445460	[1728020989]	2000000 OPS in 2.066006 seconds, throughput 968051.399657
+445460	[1728020989]	2000000 OPS in 2.062054 seconds, throughput 969906.704674
+445460	[1728020989]	2000000 OPS in 2.079160 seconds, throughput 961926.932030
+445460	[1728020990]	2000000 OPS in 2.091226 seconds, throughput 956376.785675
+445460	[1728020991]	2000000 OPS in 2.065331 seconds, throughput 968367.782210
+445460	[1728020991]	2000000 OPS in 2.063956 seconds, throughput 969012.905314
+445460	[1728020991]	2000000 OPS in 2.074864 seconds, throughput 963918.599002
+445460	[1728020992]	2000000 OPS in 2.097890 seconds, throughput 953338.830921
+445460	[1728020993]	2000000 OPS in 2.064323 seconds, throughput 968840.632013
+445460	[1728020993]	2000000 OPS in 2.063271 seconds, throughput 969334.614794
+445460	[1728020993]	2000000 OPS in 2.078431 seconds, throughput 962264.323425
+445460	[1728020994]	2000000 OPS in 2.092043 seconds, throughput 956003.294387
+445460	[1728020995]	2000000 OPS in 2.068209 seconds, throughput 967020.257624
+445460	[1728020995]	2000000 OPS in 2.066485 seconds, throughput 967827.010600
+445460	[1728020995]	2000000 OPS in 2.080903 seconds, throughput 961121.205554
+445460	[1728020996]	2000000 OPS in 2.092581 seconds, throughput 955757.507117
+445460	[1728020997]	2000000 OPS in 2.068111 seconds, throughput 967066.081076
+445460	[1728020997]	2000000 OPS in 2.061993 seconds, throughput 969935.397453
+445460	[1728020998]	2000000 OPS in 2.077660 seconds, throughput 962621.410625
+445460	[1728020998]	2000000 OPS in 2.091352 seconds, throughput 956319.165784
+445460	[1728020999]	2000000 OPS in 2.066994 seconds, throughput 967588.681922
+445460	[1728020999]	2000000 OPS in 2.063759 seconds, throughput 969105.404265
+445460	[1728021000]	2000000 OPS in 2.076692 seconds, throughput 963070.113430
+445460	[1728021000]	2000000 OPS in 2.093026 seconds, throughput 955554.302718
+445460	[1728021001]	2000000 OPS in 2.067311 seconds, throughput 967440.312561
+445460	[1728021001]	2000000 OPS in 2.061154 seconds, throughput 970330.213075
+445460	[1728021002]	2000000 OPS in 2.073017 seconds, throughput 964777.423436
+445460	[1728021002]	2000000 OPS in 2.089705 seconds, throughput 957072.888278
+445460	[1728021003]	2000000 OPS in 2.068829 seconds, throughput 966730.454765
+445460	[1728021004]	2000000 OPS in 2.067285 seconds, throughput 967452.479944
+445460	[1728021004]	2000000 OPS in 2.081146 seconds, throughput 961008.982551
+445460	[1728021005]	2000000 OPS in 2.091803 seconds, throughput 956112.980046
+445460	[1728021005]	2000000 OPS in 2.074245 seconds, throughput 964206.253360
+445460	[1728021006]	2000000 OPS in 2.062034 seconds, throughput 969916.111955
+445460	[1728021006]	2000000 OPS in 2.077221 seconds, throughput 962824.851087
+445460	[1728021007]	2000000 OPS in 2.090472 seconds, throughput 956721.735570
+445460	[1728021008]	2000000 OPS in 2.066682 seconds, throughput 967734.755516
+445460	[1728021008]	2000000 OPS in 2.061390 seconds, throughput 970219.123989
+445460	[1728021008]	2000000 OPS in 2.079075 seconds, throughput 961966.259033
+445460	[1728021009]	2000000 OPS in 2.097469 seconds, throughput 953530.183283
+445460	[1728021010]	2000000 OPS in 2.068468 seconds, throughput 966899.173688
+445460	[1728021010]	2000000 OPS in 2.061642 seconds, throughput 970100.531518
+445460	[1728021010]	2000000 OPS in 2.072927 seconds, throughput 964819.311051
+445460	[1728021011]	2000000 OPS in 2.087709 seconds, throughput 957987.918814
+445460	[1728021012]	2000000 OPS in 2.068343 seconds, throughput 966957.608095
+445460	[1728021012]	2000000 OPS in 2.064097 seconds, throughput 968946.711322
+445460	[1728021012]	2000000 OPS in 2.078648 seconds, throughput 962163.868053
+445460	[1728021013]	2000000 OPS in 2.088974 seconds, throughput 957407.799235
+445460	[1728021014]	2000000 OPS in 2.071847 seconds, throughput 965322.246286
+445460	[1728021014]	2000000 OPS in 2.068899 seconds, throughput 966697.745999
+445460	[1728021014]	2000000 OPS in 2.078845 seconds, throughput 962072.689402
+445460	[1728021015]	2000000 OPS in 2.090167 seconds, throughput 956861.341701
+445460	[1728021016]	2000000 OPS in 2.069136 seconds, throughput 966587.019896
+445460	[1728021016]	2000000 OPS in 2.059451 seconds, throughput 971132.597959
+445460	[1728021016]	2000000 OPS in 2.073521 seconds, throughput 964542.919990
+445460	[1728021017]	2000000 OPS in 2.097581 seconds, throughput 953479.269692
+445460	[1728021018]	2000000 OPS in 2.068085 seconds, throughput 967078.239047
+445460	[1728021018]	2000000 OPS in 2.057839 seconds, throughput 971893.330819
+445460	[1728021018]	2000000 OPS in 2.072972 seconds, throughput 964798.366789
+445460	[1728021019]	2000000 OPS in 2.089066 seconds, throughput 957365.636126
+445460	[1728021020]	2000000 OPS in 2.067673 seconds, throughput 967270.936942
+445460	[1728021020]	2000000 OPS in 2.063345 seconds, throughput 969299.850485
+445460	[1728021020]	2000000 OPS in 2.081345 seconds, throughput 960917.099280
+445460	[1728021021]	2000000 OPS in 2.091198 seconds, throughput 956389.591038
+445460	[1728021022]	2000000 OPS in 2.072096 seconds, throughput 965206.245270
+445460	[1728021022]	2000000 OPS in 2.064386 seconds, throughput 968811.065372
+445460	[1728021022]	2000000 OPS in 2.077428 seconds, throughput 962728.912867
+445460	[1728021023]	2000000 OPS in 2.092579 seconds, throughput 955758.420590
+445460	[1728021024]	2000000 OPS in 2.067931 seconds, throughput 967150.257915
+445460	[1728021024]	2000000 OPS in 2.063585 seconds, throughput 969187.118534
+445460	[1728021025]	2000000 OPS in 2.076026 seconds, throughput 963379.071360
+445460	[1728021025]	2000000 OPS in 2.093889 seconds, throughput 955160.469347
+445460	[1728021026]	2000000 OPS in 2.067638 seconds, throughput 967287.310448
+445460	[1728021026]	2000000 OPS in 2.061302 seconds, throughput 970260.544064
+445460	[1728021027]	2000000 OPS in 2.071595 seconds, throughput 965439.673295
+445460	[1728021028]	2000000 OPS in 2.088868 seconds, throughput 957456.383074
+445460	[1728021028]	2000000 OPS in 2.066785 seconds, throughput 967686.527626
+445460	[1728021028]	2000000 OPS in 2.062626 seconds, throughput 969637.733646
+445460	[1728021029]	2000000 OPS in 2.080284 seconds, throughput 961407.192479
+445460	[1728021030]	2000000 OPS in 2.089010 seconds, throughput 957391.300185
+445460	[1728021030]	2000000 OPS in 2.068720 seconds, throughput 966781.391392
+445460	[1728021030]	2000000 OPS in 2.065988 seconds, throughput 968059.833842
+445460	[1728021031]	2000000 OPS in 2.075818 seconds, throughput 963475.603353
+445460	[1728021032]	2000000 OPS in 2.090774 seconds, throughput 956583.542745
+445460	[1728021032]	2000000 OPS in 2.070640 seconds, throughput 965884.943785
+445460	[1728021032]	2000000 OPS in 2.065109 seconds, throughput 968471.882114
+445460	[1728021033]	2000000 OPS in 2.075068 seconds, throughput 963823.836135
+445460	[1728021034]	2000000 OPS in 2.097684 seconds, throughput 953432.452171
+445460	[1728021034]	2000000 OPS in 2.066523 seconds, throughput 967809.213834
+445460	[1728021034]	2000000 OPS in 2.065826 seconds, throughput 968135.748122
+445460	[1728021035]	2000000 OPS in 2.077318 seconds, throughput 962779.892149
+445460	[1728021036]	2000000 OPS in 2.090584 seconds, throughput 956670.480593
+445460	[1728021036]	2000000 OPS in 2.068292 seconds, throughput 966981.451362
+445460	[1728021037]	2000000 OPS in 2.061204 seconds, throughput 970306.675128
+445460	[1728021037]	2000000 OPS in 2.079409 seconds, throughput 961811.745549
+445460	[1728021038]	2000000 OPS in 2.090583 seconds, throughput 956670.938202
+445460	[1728021039]	2000000 OPS in 2.067931 seconds, throughput 967150.257915
+445460	[1728021039]	2000000 OPS in 2.062184 seconds, throughput 969845.561793
+445460	[1728021039]	2000000 OPS in 2.074281 seconds, throughput 964189.519164
+445460	[1728021040]	2000000 OPS in 2.091016 seconds, throughput 956472.834259
+445460	[1728021041]	2000000 OPS in 2.069744 seconds, throughput 966303.079028
+445460	[1728021041]	2000000 OPS in 2.072334 seconds, throughput 965095.394854
+445460	[1728021041]	2000000 OPS in 2.074072 seconds, throughput 964286.678572
+445460	[1728021042]	2000000 OPS in 2.096715 seconds, throughput 953873.082417
+445460	[1728021043]	2000000 OPS in 2.063875 seconds, throughput 969050.935740
+445460	[1728021043]	2000000 OPS in 2.063990 seconds, throughput 968996.942815
+445460	[1728021043]	2000000 OPS in 2.076183 seconds, throughput 963306.221080
+445460	[1728021044]	2000000 OPS in 2.093539 seconds, throughput 955320.154055
+445460	[1728021045]	2000000 OPS in 2.066845 seconds, throughput 967658.435925
+445460	[1728021045]	2000000 OPS in 2.061614 seconds, throughput 970113.707028
+445460	[1728021045]	2000000 OPS in 2.075360 seconds, throughput 963688.227585
+445460	[1728021046]	2000000 OPS in 2.092192 seconds, throughput 955935.210535
+445460	[1728021047]	2000000 OPS in 2.064291 seconds, throughput 968855.650681
+445460	[1728021047]	2000000 OPS in 2.059713 seconds, throughput 971009.067768
+445460	[1728021047]	2000000 OPS in 2.080539 seconds, throughput 961289.358190
+445460	[1728021048]	2000000 OPS in 2.098641 seconds, throughput 952997.678021
+445460	[1728021049]	2000000 OPS in 2.068981 seconds, throughput 966659.432832
+445460	[1728021049]	2000000 OPS in 2.068699 seconds, throughput 966791.205487
+445460	[1728021049]	2000000 OPS in 2.073706 seconds, throughput 964456.870935
+445460	[1728021051]	2000000 OPS in 2.096655 seconds, throughput 953900.379414
+445460	[1728021051]	2000000 OPS in 2.068912 seconds, throughput 966691.671758
+445460	[1728021051]	2000000 OPS in 2.066291 seconds, throughput 967917.877976
+445460	[1728021052]	2000000 OPS in 2.074747 seconds, throughput 963972.956703
+445460	[1728021053]	2000000 OPS in 2.091870 seconds, throughput 956082.356934
+445460	[1728021053]	2000000 OPS in 2.064226 seconds, throughput 968886.158783
+445460	[1728021053]	2000000 OPS in 2.062984 seconds, throughput 969469.467529
+445460	[1728021054]	2000000 OPS in 2.072009 seconds, throughput 965246.772577
+445460	[1728021055]	2000000 OPS in 2.090751 seconds, throughput 956594.065960
+445460	[1728021055]	2000000 OPS in 2.065355 seconds, throughput 968356.529507
+445460	[1728021055]	2000000 OPS in 2.069133 seconds, throughput 966588.421334
+445460	[1728021056]	2000000 OPS in 2.080936 seconds, throughput 961105.963855
+445460	[1728021057]	2000000 OPS in 2.088244 seconds, throughput 957742.486031
+445460	[1728021057]	2000000 OPS in 2.068335 seconds, throughput 966961.348138
+445460	[1728021057]	2000000 OPS in 2.073662 seconds, throughput 964477.335265
+445460	[1728021058]	2000000 OPS in 2.077945 seconds, throughput 962489.382539
+445460	[1728021059]	2000000 OPS in 2.096952 seconds, throughput 953765.274551
+445460	[1728021059]	2000000 OPS in 2.066134 seconds, throughput 967991.427468
+445460	[1728021059]	2000000 OPS in 2.070454 seconds, throughput 965971.714416
+445460	[1728021060]	2000000 OPS in 2.076042 seconds, throughput 963371.646624
+445460	[1728021061]	2000000 OPS in 2.093198 seconds, throughput 955475.783944
+445460	[1728021061]	2000000 OPS in 2.067515 seconds, throughput 967344.856023
+445460	[1728021061]	2000000 OPS in 2.063860 seconds, throughput 969057.978739
+445460	[1728021062]	2000000 OPS in 2.071744 seconds, throughput 965370.238794
+445460	[1728021063]	2000000 OPS in 2.086396 seconds, throughput 958590.794844
+445460	[1728021063]	2000000 OPS in 2.061588 seconds, throughput 970125.941750
+445460	[1728021063]	2000000 OPS in 2.067478 seconds, throughput 967362.167820
+445460	[1728021064]	2000000 OPS in 2.079882 seconds, throughput 961593.013450
+445460	[1728021065]	2000000 OPS in 2.091419 seconds, throughput 956288.529463
+445460	[1728021065]	2000000 OPS in 2.064742 seconds, throughput 968644.024290
+445460	[1728021065]	2000000 OPS in 2.069370 seconds, throughput 966477.720272
+445460	[1728021066]	2000000 OPS in 2.074906 seconds, throughput 963899.087477
+445460	[1728021067]	2000000 OPS in 2.095804 seconds, throughput 954287.710110
+445460	[1728021067]	2000000 OPS in 2.067433 seconds, throughput 967383.223543
+445460	[1728021068]	2000000 OPS in 2.070675 seconds, throughput 965868.617721
+445460	[1728021068]	2000000 OPS in 2.080880 seconds, throughput 961131.828842
+445460	[1728021069]	2000000 OPS in 2.094182 seconds, throughput 955026.831479
+445460	[1728021070]	2000000 OPS in 2.062287 seconds, throughput 969797.123291
+445460	[1728021070]	2000000 OPS in 2.062592 seconds, throughput 969653.717264
+445460	[1728021070]	2000000 OPS in 2.079911 seconds, throughput 961579.606050
+445460	[1728021072]	2000000 OPS in 2.091254 seconds, throughput 956363.980655
+445460	[1728021072]	2000000 OPS in 2.061966 seconds, throughput 969948.098077
+445460	[1728021072]	2000000 OPS in 2.067179 seconds, throughput 967502.088595
+445460	[1728021072]	2000000 OPS in 2.082394 seconds, throughput 960433.040049
+445460	[1728021074]	2000000 OPS in 2.093807 seconds, throughput 955197.876404
+445460	[1728021074]	2000000 OPS in 2.062338 seconds, throughput 969773.140969
+445460	[1728021074]	2000000 OPS in 2.067767 seconds, throughput 967226.965127
+445460	[1728021074]	2000000 OPS in 2.076019 seconds, throughput 963382.319719
+445460	[1728021076]	2000000 OPS in 2.095550 seconds, throughput 954403.378588
+445460	[1728021076]	2000000 OPS in 2.068111 seconds, throughput 967066.081076
+445460	[1728021076]	2000000 OPS in 2.072060 seconds, throughput 965223.014778
+445460	[1728021076]	2000000 OPS in 2.073880 seconds, throughput 964375.952321
+445460	[1728021078]	2000000 OPS in 2.090983 seconds, throughput 956487.929361
+445460	[1728021078]	2000000 OPS in 2.065164 seconds, throughput 968446.089512
+445460	[1728021078]	2000000 OPS in 2.070588 seconds, throughput 965909.200672
+445460	[1728021079]	2000000 OPS in 2.078569 seconds, throughput 962200.436935
+445460	[1728021080]	2000000 OPS in 2.059759 seconds, throughput 970987.382504
+445460	[1728021080]	2000000 OPS in 2.094109 seconds, throughput 955060.123422
+445460	[1728021080]	2000000 OPS in 2.072679 seconds, throughput 964934.753524
+445460	[1728021081]	2000000 OPS in 2.080864 seconds, throughput 961139.219094
+445460	[1728021082]	2000000 OPS in 2.060113 seconds, throughput 970820.532660
+445460	[1728021082]	2000000 OPS in 2.092376 seconds, throughput 955851.147213
+445460	[1728021082]	2000000 OPS in 2.067271 seconds, throughput 967459.031738
+445460	[1728021083]	2000000 OPS in 2.072685 seconds, throughput 964931.960235
+445460	[1728021084]	2000000 OPS in 2.067899 seconds, throughput 967165.224220
+445460	[1728021084]	2000000 OPS in 2.072856 seconds, throughput 964852.358292
+445460	[1728021084]	2000000 OPS in 2.092869 seconds, throughput 955625.985191
+445460	[1728021085]	2000000 OPS in 2.078053 seconds, throughput 962439.360305
+445460	[1728021086]	2000000 OPS in 2.063336 seconds, throughput 969304.078444
+445460	[1728021086]	2000000 OPS in 2.068675 seconds, throughput 966802.421840
+445460	[1728021086]	2000000 OPS in 2.095123 seconds, throughput 954597.892343
+445460	[1728021087]	2000000 OPS in 2.074499 seconds, throughput 964088.196716
+445460	[1728021088]	2000000 OPS in 2.060189 seconds, throughput 970784.719266
+445460	[1728021088]	2000000 OPS in 2.069188 seconds, throughput 966562.728955
+445460	[1728021088]	2000000 OPS in 2.090586 seconds, throughput 956669.565375
+445460	[1728021089]	2000000 OPS in 2.080845 seconds, throughput 961147.995165
+445460	[1728021090]	2000000 OPS in 2.064537 seconds, throughput 968740.206642
+445460	[1728021090]	2000000 OPS in 2.067003 seconds, throughput 967584.468915
+445460	[1728021090]	2000000 OPS in 2.088396 seconds, throughput 957672.778534
+445460	[1728021091]	2000000 OPS in 2.076777 seconds, throughput 963030.696122
+445460	[1728021092]	2000000 OPS in 2.065538 seconds, throughput 968270.736244
+445460	[1728021092]	2000000 OPS in 2.075823 seconds, throughput 963473.282645
+445460	[1728021092]	2000000 OPS in 2.093408 seconds, throughput 955379.935493
+445460	[1728021093]	2000000 OPS in 2.075824 seconds, throughput 963472.818505
+445460	[1728021094]	2000000 OPS in 2.061911 seconds, throughput 969973.970748
+445460	[1728021094]	2000000 OPS in 2.069686 seconds, throughput 966330.158295
+445460	[1728021095]	2000000 OPS in 2.091397 seconds, throughput 956298.588934
+445460	[1728021095]	2000000 OPS in 2.076795 seconds, throughput 963022.349341
+445460	[1728021096]	2000000 OPS in 2.063648 seconds, throughput 969157.530742
+445460	[1728021096]	2000000 OPS in 2.070913 seconds, throughput 965757.615120
+445460	[1728021097]	2000000 OPS in 2.093359 seconds, throughput 955402.298411
+445460	[1728021097]	2000000 OPS in 2.079531 seconds, throughput 961755.318868
+445460	[1728021098]	2000000 OPS in 2.061588 seconds, throughput 970125.941750
+445460	[1728021099]	2000000 OPS in 2.068127 seconds, throughput 967058.599399
+445460	[1728021099]	2000000 OPS in 2.091801 seconds, throughput 956113.894199
+445460	[1728021099]	2000000 OPS in 2.077603 seconds, throughput 962647.820589
+445460	[1728021101]	2000000 OPS in 2.058309 seconds, throughput 971671.405994
+445460	[1728021101]	2000000 OPS in 2.073130 seconds, throughput 964724.836359
+445460	[1728021101]	2000000 OPS in 2.097747 seconds, throughput 953403.818478
+445460	[1728021101]	2000000 OPS in 2.077274 seconds, throughput 962800.285374
+445460	[1728021103]	2000000 OPS in 2.065438 seconds, throughput 968317.615925
+445460	[1728021103]	2000000 OPS in 2.068503 seconds, throughput 966882.813320
+445460	[1728021103]	2000000 OPS in 2.090073 seconds, throughput 956904.376067
+445460	[1728021103]	2000000 OPS in 2.079990 seconds, throughput 961543.084342
+445460	[1728021105]	2000000 OPS in 2.063761 seconds, throughput 969104.465100
+445460	[1728021105]	2000000 OPS in 2.071561 seconds, throughput 965455.518809
+445460	[1728021105]	2000000 OPS in 2.090470 seconds, throughput 956722.650887
+445460	[1728021106]	2000000 OPS in 2.074998 seconds, throughput 963856.350705
+445460	[1728021107]	2000000 OPS in 2.060924 seconds, throughput 970438.502342
+445460	[1728021107]	2000000 OPS in 2.070741 seconds, throughput 965837.832930
+445460	[1728021107]	2000000 OPS in 2.093647 seconds, throughput 955270.874221
+445460	[1728021108]	2000000 OPS in 2.086428 seconds, throughput 958576.092729
+445460	[1728021109]	2000000 OPS in 2.062262 seconds, throughput 969808.879764
+445460	[1728021109]	2000000 OPS in 2.067370 seconds, throughput 967412.703096
+445460	[1728021109]	2000000 OPS in 2.095631 seconds, throughput 954366.489139
+445460	[1728021110]	2000000 OPS in 2.075280 seconds, throughput 963725.376817
+445460	[1728021111]	2000000 OPS in 2.071293 seconds, throughput 965580.436954
+445460	[1728021111]	2000000 OPS in 2.074990 seconds, throughput 963860.066796
+445460	[1728021111]	2000000 OPS in 2.090420 seconds, throughput 956745.534390
+445460	[1728021112]	2000000 OPS in 2.073191 seconds, throughput 964696.451026
+445460	[1728021113]	2000000 OPS in 2.060918 seconds, throughput 970441.327603
+445460	[1728021113]	2000000 OPS in 2.071828 seconds, throughput 965331.098914
+445460	[1728021113]	2000000 OPS in 2.094011 seconds, throughput 955104.820366
+445460	[1728021114]	2000000 OPS in 2.076861 seconds, throughput 962991.745716
+445460	[1728021115]	2000000 OPS in 2.061149 seconds, throughput 970332.566932
+445460	[1728021115]	2000000 OPS in 2.070050 seconds, throughput 966160.237675
+445460	[1728021115]	2000000 OPS in 2.089330 seconds, throughput 957244.666951
+445460	[1728021116]	2000000 OPS in 2.079680 seconds, throughput 961686.413294
+445460	[1728021117]	2000000 OPS in 2.059776 seconds, throughput 970979.368630
+445460	[1728021117]	2000000 OPS in 2.071148 seconds, throughput 965648.036741
+445460	[1728021118]	2000000 OPS in 2.096404 seconds, throughput 954014.588791
+445460	[1728021118]	2000000 OPS in 2.074632 seconds, throughput 964026.391186
+445460	[1728021119]	2000000 OPS in 2.068185 seconds, throughput 967031.479292
+445460	[1728021119]	2000000 OPS in 2.079651 seconds, throughput 961699.823672
+445460	[1728021120]	2000000 OPS in 2.093382 seconds, throughput 955391.801401
+445460	[1728021120]	2000000 OPS in 2.076161 seconds, throughput 963316.428736
+445460	[1728021121]	2000000 OPS in 2.062959 seconds, throughput 969481.216059
+445460	[1728021121]	2000000 OPS in 2.073119 seconds, throughput 964729.955203
+445460	[1728021122]	2000000 OPS in 2.090630 seconds, throughput 956649.431033
+445460	[1728021122]	2000000 OPS in 2.072087 seconds, throughput 965210.437593
+445460	[1728021123]	2000000 OPS in 2.057466 seconds, throughput 972069.526301
+445460	[1728021123]	2000000 OPS in 2.073005 seconds, throughput 964783.008242
+445460	[1728021124]	2000000 OPS in 2.089687 seconds, throughput 957081.132246
+445460	[1728021124]	2000000 OPS in 2.080051 seconds, throughput 961514.885933
+445460	[1728021125]	2000000 OPS in 2.058952 seconds, throughput 971367.958068
+445460	[1728021125]	2000000 OPS in 2.066105 seconds, throughput 968005.014266
+445460	[1728021126]	2000000 OPS in 2.097801 seconds, throughput 953379.276681
+445460	[1728021126]	2000000 OPS in 2.076447 seconds, throughput 963183.746082
+445460	[1728021127]	2000000 OPS in 2.061648 seconds, throughput 970097.708241
+445460	[1728021128]	2000000 OPS in 2.076035 seconds, throughput 963374.894932
+445460	[1728021128]	2000000 OPS in 2.089214 seconds, throughput 957297.816308
+445460	[1728021128]	2000000 OPS in 2.071936 seconds, throughput 965280.780874
+445460	[1728021129]	2000000 OPS in 2.065027 seconds, throughput 968510.339090
+445460	[1728021130]	2000000 OPS in 2.068611 seconds, throughput 966832.333387
+445460	[1728021130]	2000000 OPS in 2.088899 seconds, throughput 957442.174083
+445460	[1728021130]	2000000 OPS in 2.078261 seconds, throughput 962343.035836
+445460	[1728021131]	2000000 OPS in 2.062622 seconds, throughput 969639.614045
+445460	[1728021132]	2000000 OPS in 2.069826 seconds, throughput 966264.797138
+445460	[1728021132]	2000000 OPS in 2.091744 seconds, throughput 956139.948292
+445460	[1728021133]	2000000 OPS in 2.082996 seconds, throughput 960155.468373
+445460	[1728021134]	2000000 OPS in 2.061775 seconds, throughput 970037.952735
+445460	[1728021134]	2000000 OPS in 2.068443 seconds, throughput 966910.860004
+445460	[1728021134]	2000000 OPS in 2.095497 seconds, throughput 954427.517672
+445460	[1728021135]	2000000 OPS in 2.074482 seconds, throughput 964096.097243
+445460	[1728021136]	2000000 OPS in 2.064713 seconds, throughput 968657.629414
+445460	[1728021136]	2000000 OPS in 2.074186 seconds, throughput 964233.680104
+445460	[1728021136]	2000000 OPS in 2.087101 seconds, throughput 958266.993308
+445460	[1728021137]	2000000 OPS in 2.073728 seconds, throughput 964446.639096
+445460	[1728021138]	2000000 OPS in 2.066990 seconds, throughput 967590.554381
+445460	[1728021138]	2000000 OPS in 2.068184 seconds, throughput 967031.946867
+445460	[1728021138]	2000000 OPS in 2.093069 seconds, throughput 955534.671814
+445460	[1728021139]	2000000 OPS in 2.077390 seconds, throughput 962746.523282
+445460	[1728021140]	2000000 OPS in 2.058492 seconds, throughput 971585.024377
+445460	[1728021140]	2000000 OPS in 2.064265 seconds, throughput 968867.853691
+445460	[1728021141]	2000000 OPS in 2.094324 seconds, throughput 954962.078456
+445460	[1728021141]	2000000 OPS in 2.082059 seconds, throughput 960587.572206
+445460	[1728021142]	2000000 OPS in 2.060200 seconds, throughput 970779.535967
+445460	[1728021142]	2000000 OPS in 2.071384 seconds, throughput 965538.017094
+445460	[1728021143]	2000000 OPS in 2.091570 seconds, throughput 956219.490622
+445460	[1728021143]	2000000 OPS in 2.075134 seconds, throughput 963793.181549
+445460	[1728021144]	2000000 OPS in 2.060217 seconds, throughput 970771.525524
+445460	[1728021144]	2000000 OPS in 2.077922 seconds, throughput 962500.036094
+445460	[1728021145]	2000000 OPS in 2.091146 seconds, throughput 956413.373337
+445460	[1728021145]	2000000 OPS in 2.077646 seconds, throughput 962627.897149
+445460	[1728021146]	2000000 OPS in 2.064283 seconds, throughput 968859.405421
+445460	[1728021146]	2000000 OPS in 2.069722 seconds, throughput 966313.350295
+445460	[1728021147]	2000000 OPS in 2.089919 seconds, throughput 956974.887543
+445460	[1728021147]	2000000 OPS in 2.075343 seconds, throughput 963696.121557
+445460	[1728021148]	2000000 OPS in 2.063364 seconds, throughput 969290.924917
+445460	[1728021148]	2000000 OPS in 2.070411 seconds, throughput 965991.776512
+445460	[1728021149]	2000000 OPS in 2.090469 seconds, throughput 956723.108546
+445460	[1728021149]	2000000 OPS in 2.076915 seconds, throughput 962966.707833
+445460	[1728021150]	2000000 OPS in 2.062375 seconds, throughput 969755.742772
+445460	[1728021150]	2000000 OPS in 2.070373 seconds, throughput 966009.506500
+445460	[1728021151]	2000000 OPS in 2.095595 seconds, throughput 954382.884097
+445460	[1728021151]	2000000 OPS in 2.076771 seconds, throughput 963033.478414
+445460	[1728021152]	2000000 OPS in 2.062273 seconds, throughput 969803.706881
+445460	[1728021152]	2000000 OPS in 2.069553 seconds, throughput 966392.259585
+445460	[1728021153]	2000000 OPS in 2.092965 seconds, throughput 955582.152592
+445460	[1728021153]	2000000 OPS in 2.079453 seconds, throughput 961791.394179
+445460	[1728021154]	2000000 OPS in 2.062620 seconds, throughput 969640.554247
+445460	[1728021154]	2000000 OPS in 2.078579 seconds, throughput 962195.807809
+445460	[1728021155]	2000000 OPS in 2.092422 seconds, throughput 955830.133692
+445460	[1728021155]	2000000 OPS in 2.077044 seconds, throughput 962906.900383
+445460	[1728021156]	2000000 OPS in 2.064527 seconds, throughput 968744.898953
+445460	[1728021157]	2000000 OPS in 2.070340 seconds, throughput 966024.904122
+445460	[1728021157]	2000000 OPS in 2.087331 seconds, throughput 958161.403247
+445460	[1728021157]	2000000 OPS in 2.076758 seconds, throughput 963039.506770
+445460	[1728021158]	2000000 OPS in 2.063099 seconds, throughput 969415.427956
+445460	[1728021159]	2000000 OPS in 2.069485 seconds, throughput 966424.013704
+445460	[1728021159]	2000000 OPS in 2.096778 seconds, throughput 953844.422252
+445460	[1728021160]	2000000 OPS in 2.077614 seconds, throughput 962642.723817
+445460	[1728021160]	2000000 OPS in 2.061110 seconds, throughput 970350.927413
+445460	[1728021161]	2000000 OPS in 2.065711 seconds, throughput 968189.645115
+445460	[1728021161]	2000000 OPS in 2.093420 seconds, throughput 955374.459019
+445460	[1728021162]	2000000 OPS in 2.073161 seconds, throughput 964710.410817
+445460	[1728021162]	2000000 OPS in 2.059014 seconds, throughput 971338.708722
+445460	[1728021163]	2000000 OPS in 2.075980 seconds, throughput 963400.418116
+445460	[1728021164]	2000000 OPS in 2.093887 seconds, throughput 955161.381679
+445460	[1728021164]	2000000 OPS in 2.075863 seconds, throughput 963454.717387
+445460	[1728021164]	2000000 OPS in 2.067196 seconds, throughput 967494.132148
+445460	[1728021165]	2000000 OPS in 2.069454 seconds, throughput 966438.490539
+445460	[1728021166]	2000000 OPS in 2.090388 seconds, throughput 956760.180407
+445460	[1728021166]	2000000 OPS in 2.076738 seconds, throughput 963048.781310
+445460	[1728021167]	2000000 OPS in 2.063554 seconds, throughput 969201.678270
+445460	[1728021167]	2000000 OPS in 2.070065 seconds, throughput 966153.236734
+445460	[1728021168]	2000000 OPS in 2.097092 seconds, throughput 953701.602028
+445460	[1728021168]	2000000 OPS in 2.081383 seconds, throughput 960899.555728
+445460	[1728021169]	2000000 OPS in 2.063212 seconds, throughput 969362.334069
+445460	[1728021169]	2000000 OPS in 2.069782 seconds, throughput 966285.338263
+445460	[1728021170]	2000000 OPS in 2.091444 seconds, throughput 956277.098502
+445460	[1728021170]	2000000 OPS in 2.072736 seconds, throughput 964908.217930
+445460	[1728021171]	2000000 OPS in 2.062879 seconds, throughput 969518.813270
+445460	[1728021171]	2000000 OPS in 2.075822 seconds, throughput 963473.746786
+445460	[1728021172]	2000000 OPS in 2.093132 seconds, throughput 955505.911715
+445460	[1728021172]	2000000 OPS in 2.078806 seconds, throughput 962090.738626
+445460	[1728021173]	2000000 OPS in 2.068800 seconds, throughput 966744.006187
+445460	[1728021173]	2000000 OPS in 2.071309 seconds, throughput 965572.978247
+445460	[1728021174]	2000000 OPS in 2.089451 seconds, throughput 957189.232961
+445460	[1728021174]	2000000 OPS in 2.074350 seconds, throughput 964157.446911
+445460	[1728021175]	2000000 OPS in 2.063108 seconds, throughput 969411.199026
+445460	[1728021175]	2000000 OPS in 2.066463 seconds, throughput 967837.314290
+445460	[1728021176]	2000000 OPS in 2.080780 seconds, throughput 961178.019781
+445460	[1728021176]	2000000 OPS in 2.095044 seconds, throughput 954633.888357
+445460	[1728021177]	2000000 OPS in 2.061879 seconds, throughput 969989.024574
+445460	[1728021177]	2000000 OPS in 2.071729 seconds, throughput 965377.228392
+445460	[1728021178]	2000000 OPS in 2.078574 seconds, throughput 962198.122367
+445460	[1728021178]	2000000 OPS in 2.094879 seconds, throughput 954709.078663
+445460	[1728021179]	2000000 OPS in 2.061555 seconds, throughput 970141.470880
+445460	[1728021179]	2000000 OPS in 2.074615 seconds, throughput 964034.290700
+445460	[1728021180]	2000000 OPS in 2.080141 seconds, throughput 961473.284744
+445460	[1728021180]	2000000 OPS in 2.095380 seconds, throughput 954480.810163
+445460	[1728021181]	2000000 OPS in 2.065437 seconds, throughput 968318.084744
+445460	[1728021181]	2000000 OPS in 2.072616 seconds, throughput 964964.084037
+445460	[1728021182]	2000000 OPS in 2.072864 seconds, throughput 964848.634546
+445460	[1728021182]	2000000 OPS in 2.091496 seconds, throughput 956253.322980
+445460	[1728021183]	2000000 OPS in 2.062057 seconds, throughput 969905.293598
+445460	[1728021183]	2000000 OPS in 2.067057 seconds, throughput 967559.191643
+445460	[1728021184]	2000000 OPS in 2.080596 seconds, throughput 961263.022711
+445460	[1728021185]	2000000 OPS in 2.096122 seconds, throughput 954142.936337
+445460	[1728021185]	2000000 OPS in 2.060760 seconds, throughput 970515.732060
+445460	[1728021186]	2000000 OPS in 2.070264 seconds, throughput 966060.367180
+445460	[1728021187]	2000000 OPS in 2.076073 seconds, throughput 963357.261522
+445460	[1728021187]	2000000 OPS in 2.095668 seconds, throughput 954349.639351
+445460	[1728021187]	2000000 OPS in 2.058892 seconds, throughput 971396.265564
+445460	[1728021188]	2000000 OPS in 2.069923 seconds, throughput 966219.516378
+445460	[1728021189]	2000000 OPS in 2.072826 seconds, throughput 964866.322595
+445460	[1728021189]	2000000 OPS in 2.092396 seconds, throughput 955842.010786
+445460	[1728021189]	2000000 OPS in 2.061941 seconds, throughput 969959.858211
+445460	[1728021190]	2000000 OPS in 2.069967 seconds, throughput 966198.978051
+445460	[1728021191]	2000000 OPS in 2.078311 seconds, throughput 962319.883790
+445460	[1728021191]	2000000 OPS in 2.093069 seconds, throughput 955534.671814
+445460	[1728021191]	2000000 OPS in 2.065899 seconds, throughput 968101.538362
+445460	[1728021192]	2000000 OPS in 2.066000 seconds, throughput 968054.211036
+445460	[1728021193]	2000000 OPS in 2.080434 seconds, throughput 961337.874693
+445460	[1728021193]	2000000 OPS in 2.093582 seconds, throughput 955300.532771
+445460	[1728021193]	2000000 OPS in 2.063543 seconds, throughput 969206.844733
+445460	[1728021194]	2000000 OPS in 2.069481 seconds, throughput 966425.881658
+445460	[1728021195]	2000000 OPS in 2.075327 seconds, throughput 963703.551296
+445460	[1728021195]	2000000 OPS in 2.088189 seconds, throughput 957767.711639
+445460	[1728021195]	2000000 OPS in 2.061670 seconds, throughput 970087.356366
+445460	[1728021196]	2000000 OPS in 2.069741 seconds, throughput 966304.479643
+445460	[1728021197]	2000000 OPS in 2.075484 seconds, throughput 963630.651935
+445460	[1728021197]	2000000 OPS in 2.091962 seconds, throughput 956040.310484
+445460	[1728021197]	2000000 OPS in 2.063252 seconds, throughput 969343.541167
+445460	[1728021198]	2000000 OPS in 2.073446 seconds, throughput 964577.809116
+445460	[1728021199]	2000000 OPS in 2.075621 seconds, throughput 963567.048127
+445460	[1728021199]	2000000 OPS in 2.089874 seconds, throughput 956995.493508
+445460	[1728021200]	2000000 OPS in 2.064375 seconds, throughput 968816.227672
+445460	[1728021200]	2000000 OPS in 2.067854 seconds, throughput 967186.271371
+445460	[1728021201]	2000000 OPS in 2.083864 seconds, throughput 959755.531071
+445460	[1728021201]	2000000 OPS in 2.096413 seconds, throughput 954010.493161
+445460	[1728021202]	2000000 OPS in 2.060771 seconds, throughput 970510.551633
+445460	[1728021202]	2000000 OPS in 2.069010 seconds, throughput 966645.883780
+445460	[1728021203]	2000000 OPS in 2.079280 seconds, throughput 961871.417029
+445460	[1728021203]	2000000 OPS in 2.091606 seconds, throughput 956203.032502
+445460	[1728021204]	2000000 OPS in 2.060188 seconds, throughput 970785.190478
+445460	[1728021204]	2000000 OPS in 2.069155 seconds, throughput 966578.144218
+445460	[1728021205]	2000000 OPS in 2.077312 seconds, throughput 962782.672993
+445460	[1728021205]	2000000 OPS in 2.090752 seconds, throughput 956593.608424
+445460	[1728021206]	2000000 OPS in 2.059974 seconds, throughput 970886.040309
+445460	[1728021206]	2000000 OPS in 2.073354 seconds, throughput 964620.609891
+445460	[1728021207]	2000000 OPS in 2.077904 seconds, throughput 962508.373823
+445460	[1728021208]	2000000 OPS in 2.092295 seconds, throughput 955888.151527
+445460	[1728021208]	2000000 OPS in 2.064455 seconds, throughput 968778.684931
+445460	[1728021208]	2000000 OPS in 2.065773 seconds, throughput 968160.586860
+445460	[1728021209]	2000000 OPS in 2.078589 seconds, throughput 962191.178727
+445460	[1728021210]	2000000 OPS in 2.095752 seconds, throughput 954311.387989
+445460	[1728021210]	2000000 OPS in 2.062654 seconds, throughput 969624.571062
+445460	[1728021210]	2000000 OPS in 2.067548 seconds, throughput 967329.416294
+445460	[1728021211]	2000000 OPS in 2.078080 seconds, throughput 962426.855559
+445460	[1728021212]	2000000 OPS in 2.093265 seconds, throughput 955445.201635
+445460	[1728021212]	2000000 OPS in 2.063784 seconds, throughput 969093.664841
+445460	[1728021212]	2000000 OPS in 2.067771 seconds, throughput 967225.094075
+445460	[1728021214]	2000000 OPS in 2.077173 seconds, throughput 962847.100362
+445460	[1728021214]	2000000 OPS in 2.090540 seconds, throughput 956690.615822
+445460	[1728021214]	2000000 OPS in 2.062078 seconds, throughput 969895.416177
+445460	[1728021215]	2000000 OPS in 2.075413 seconds, throughput 963663.617796
+445460	[1728021216]	2000000 OPS in 2.077173 seconds, throughput 962847.100362
+445460	[1728021216]	2000000 OPS in 2.091405 seconds, throughput 956294.930920
+445460	[1728021216]	2000000 OPS in 2.063186 seconds, throughput 969374.549847
+445460	[1728021217]	2000000 OPS in 2.068491 seconds, throughput 966888.422526
+445460	[1728021218]	2000000 OPS in 2.074795 seconds, throughput 963950.655366
+445460	[1728021218]	2000000 OPS in 2.094092 seconds, throughput 955067.876674
+445460	[1728021218]	2000000 OPS in 2.070355 seconds, throughput 966017.905142
+445460	[1728021219]	2000000 OPS in 2.069665 seconds, throughput 966339.963231
+445460	[1728021220]	2000000 OPS in 2.081045 seconds, throughput 961055.623497
+445460	[1728021220]	2000000 OPS in 2.091186 seconds, throughput 956395.079156
+445460	[1728021220]	2000000 OPS in 2.061184 seconds, throughput 970316.090170
+445460	[1728021221]	2000000 OPS in 2.067260 seconds, throughput 967464.179639
+445460	[1728021222]	2000000 OPS in 2.078279 seconds, throughput 962334.700971
+445460	[1728021222]	2000000 OPS in 2.089647 seconds, throughput 957099.452683
+445460	[1728021222]	2000000 OPS in 2.062122 seconds, throughput 969874.721282
+445460	[1728021223]	2000000 OPS in 2.075218 seconds, throughput 963754.169441
+445460	[1728021224]	2000000 OPS in 2.076296 seconds, throughput 963253.794257
+445460	[1728021224]	2000000 OPS in 2.062227 seconds, throughput 969825.339306
+445460	[1728021224]	2000000 OPS in 2.093827 seconds, throughput 955188.752461
+445460	[1728021225]	2000000 OPS in 2.068851 seconds, throughput 966720.174628
+445460	[1728021226]	2000000 OPS in 2.077958 seconds, throughput 962483.361069
+445460	[1728021226]	2000000 OPS in 2.066584 seconds, throughput 967780.646710
+445460	[1728021226]	2000000 OPS in 2.094918 seconds, throughput 954691.305340
+445460	[1728021227]	2000000 OPS in 2.067623 seconds, throughput 967294.327834
+445460	[1728021228]	2000000 OPS in 2.079711 seconds, throughput 961672.078476
+445460	[1728021228]	2000000 OPS in 2.062778 seconds, throughput 969566.283914
+445460	[1728021228]	2000000 OPS in 2.080295 seconds, throughput 961402.108836
+445460	[1728021229]	2000000 OPS in 2.069463 seconds, throughput 966434.287542
+445460	[1728021230]	2000000 OPS in 2.076984 seconds, throughput 962934.716878
+445460	[1728021230]	2000000 OPS in 2.060224 seconds, throughput 970768.227144
+445460	[1728021231]	2000000 OPS in 2.067862 seconds, throughput 967182.529589
+445460	[1728021231]	2000000 OPS in 2.072263 seconds, throughput 965128.461011
+445460	[1728021232]	2000000 OPS in 2.079479 seconds, throughput 961779.368775
+445460	[1728021233]	2000000 OPS in 2.058934 seconds, throughput 971376.450144
+445460	[1728021233]	2000000 OPS in 2.080097 seconds, throughput 961493.622653
+445460	[1728021233]	2000000 OPS in 2.077665 seconds, throughput 962619.094031
+445460	[1728021234]	2000000 OPS in 2.074328 seconds, throughput 964167.672615
+445460	[1728021235]	2000000 OPS in 2.067516 seconds, throughput 967344.388145
+445460	[1728021235]	2000000 OPS in 2.098874 seconds, throughput 952891.883934
+445460	[1728021235]	2000000 OPS in 2.069138 seconds, throughput 966586.085607
+445460	[1728021236]	2000000 OPS in 2.084051 seconds, throughput 959669.413081
+445460	[1728021237]	2000000 OPS in 2.063484 seconds, throughput 969234.556701
+445460	[1728021237]	2000000 OPS in 2.091623 seconds, throughput 956195.260809
+445460	[1728021237]	2000000 OPS in 2.071017 seconds, throughput 965709.117791
+445460	[1728021238]	2000000 OPS in 2.074487 seconds, throughput 964093.773545
+445460	[1728021239]	2000000 OPS in 2.058552 seconds, throughput 971556.705879
+445460	[1728021239]	2000000 OPS in 2.089386 seconds, throughput 957219.010752
+445460	[1728021239]	2000000 OPS in 2.070310 seconds, throughput 966038.902387
+445460	[1728021241]	2000000 OPS in 2.075629 seconds, throughput 963563.334295
+445460	[1728021241]	2000000 OPS in 2.062547 seconds, throughput 969674.872864
+445460	[1728021241]	2000000 OPS in 2.089976 seconds, throughput 956948.787929
+445460	[1728021241]	2000000 OPS in 2.078341 seconds, throughput 962305.993097
+445460	[1728021243]	2000000 OPS in 2.077847 seconds, throughput 962534.777585
+445460	[1728021243]	2000000 OPS in 2.063323 seconds, throughput 969310.185560
+445460	[1728021243]	2000000 OPS in 2.095876 seconds, throughput 954254.927295
+445460	[1728021244]	2000000 OPS in 2.066647 seconds, throughput 967751.144729
+445460	[1728021245]	2000000 OPS in 2.081338 seconds, throughput 960920.331056
+445460	[1728021245]	2000000 OPS in 2.067177 seconds, throughput 967503.024656
+445460	[1728021245]	2000000 OPS in 2.091743 seconds, throughput 956140.405394
+445460	[1728021246]	2000000 OPS in 2.069793 seconds, throughput 966280.202900
+445460	[1728021247]	2000000 OPS in 2.074968 seconds, throughput 963870.286192
+445460	[1728021247]	2000000 OPS in 2.062348 seconds, throughput 969768.438692
+445460	[1728021247]	2000000 OPS in 2.088804 seconds, throughput 957485.719100
+445460	[1728021248]	2000000 OPS in 2.070048 seconds, throughput 966161.171142
+445460	[1728021249]	2000000 OPS in 2.079386 seconds, throughput 961822.384108
+445460	[1728021249]	2000000 OPS in 2.063198 seconds, throughput 969368.911757
+445460	[1728021249]	2000000 OPS in 2.088668 seconds, throughput 957548.064125
+445460	[1728021250]	2000000 OPS in 2.075660 seconds, throughput 963548.943469
+445460	[1728021251]	2000000 OPS in 2.074774 seconds, throughput 963960.412074
+445460	[1728021251]	2000000 OPS in 2.063385 seconds, throughput 969281.060006
+445460	[1728021251]	2000000 OPS in 2.094372 seconds, throughput 954940.192096
+445460	[1728021252]	2000000 OPS in 2.070165 seconds, throughput 966106.566385
+445460	[1728021253]	2000000 OPS in 2.084018 seconds, throughput 959684.609250
+445460	[1728021253]	2000000 OPS in 2.064984 seconds, throughput 968530.506774
+445460	[1728021254]	2000000 OPS in 2.091911 seconds, throughput 956063.618385
+445460	[1728021254]	2000000 OPS in 2.067766 seconds, throughput 967227.432891
+445460	[1728021255]	2000000 OPS in 2.077490 seconds, throughput 962700.181469
+445460	[1728021255]	2000000 OPS in 2.062711 seconds, throughput 969597.776906
+445460	[1728021256]	2000000 OPS in 2.087452 seconds, throughput 958105.863033
+445460	[1728021256]	2000000 OPS in 2.070735 seconds, throughput 965840.631467
+445460	[1728021257]	2000000 OPS in 2.075633 seconds, throughput 963561.477390
+445460	[1728021257]	2000000 OPS in 2.063800 seconds, throughput 969086.151759
+445460	[1728021258]	2000000 OPS in 2.088947 seconds, throughput 957420.173896
+445460	[1728021258]	2000000 OPS in 2.075906 seconds, throughput 963434.760533
+445460	[1728021259]	2000000 OPS in 2.082445 seconds, throughput 960409.518619
+445460	[1728021259]	2000000 OPS in 2.058550 seconds, throughput 971557.649802
+445460	[1728021260]	2000000 OPS in 2.098146 seconds, throughput 953222.511684
+445460	[1728021260]	2000000 OPS in 2.070297 seconds, throughput 966044.968427
+445460	[1728021261]	2000000 OPS in 2.081754 seconds, throughput 960728.308916
+445460	[1728021261]	2000000 OPS in 2.064416 seconds, throughput 968796.986654
+445460	[1728021262]	2000000 OPS in 2.089050 seconds, throughput 957372.968574
+445460	[1728021262]	2000000 OPS in 2.065300 seconds, throughput 968382.317339
+445460	[1728021263]	2000000 OPS in 2.079170 seconds, throughput 961922.305535
+445460	[1728021263]	2000000 OPS in 2.060141 seconds, throughput 970807.337944
+445460	[1728021264]	2000000 OPS in 2.093281 seconds, throughput 955437.898686
+445460	[1728021264]	2000000 OPS in 2.072152 seconds, throughput 965180.160529
+445460	[1728021265]	2000000 OPS in 2.072518 seconds, throughput 965009.712823
+445460	[1728021266]	2000000 OPS in 2.061683 seconds, throughput 970081.239453
+445460	[1728021266]	2000000 OPS in 2.090463 seconds, throughput 956725.854512
+445460	[1728021266]	2000000 OPS in 2.072550 seconds, throughput 964994.813153
+445460	[1728021268]	2000000 OPS in 2.075102 seconds, throughput 963808.044135
+445460	[1728021268]	2000000 OPS in 2.060790 seconds, throughput 970501.603754
+445460	[1728021268]	2000000 OPS in 2.099958 seconds, throughput 952400.000381
+445460	[1728021268]	2000000 OPS in 2.070720 seconds, throughput 965847.627878
+445460	[1728021270]	2000000 OPS in 2.079718 seconds, throughput 961668.841641
+445460	[1728021270]	2000000 OPS in 2.065105 seconds, throughput 968473.757993
+445460	[1728021270]	2000000 OPS in 2.091262 seconds, throughput 956360.322140
+445460	[1728021270]	2000000 OPS in 2.070135 seconds, throughput 966120.567016
+445460	[1728021272]	2000000 OPS in 2.066630 seconds, throughput 967759.105403
+445460	[1728021272]	2000000 OPS in 2.081399 seconds, throughput 960892.169161
+445460	[1728021272]	2000000 OPS in 2.096160 seconds, throughput 954125.639264
+445460	[1728021273]	2000000 OPS in 2.069576 seconds, throughput 966381.519693
+445460	[1728021274]	2000000 OPS in 2.060750 seconds, throughput 970520.441587
+445460	[1728021274]	2000000 OPS in 2.075621 seconds, throughput 963567.048127
+445460	[1728021274]	2000000 OPS in 2.089603 seconds, throughput 957119.605973
+445460	[1728021275]	2000000 OPS in 2.071074 seconds, throughput 965682.539591
+445460	[1728021276]	2000000 OPS in 2.060003 seconds, throughput 970872.372516
+445460	[1728021276]	2000000 OPS in 2.075442 seconds, throughput 963650.152594
+445460	[1728021277]	2000000 OPS in 2.091590 seconds, throughput 956210.347152
+445460	[1728021277]	2000000 OPS in 2.076587 seconds, throughput 963118.809855
+445460	[1728021278]	2000000 OPS in 2.063627 seconds, throughput 969167.393138
+445460	[1728021278]	2000000 OPS in 2.075018 seconds, throughput 963847.060604
+445460	[1728021279]	2000000 OPS in 2.091186 seconds, throughput 956395.079156
+445460	[1728021279]	2000000 OPS in 2.069737 seconds, throughput 966306.347135
+445460	[1728021280]	2000000 OPS in 2.067088 seconds, throughput 967544.681213
+445460	[1728021280]	2000000 OPS in 2.079756 seconds, throughput 961651.270630
+445460	[1728021281]	2000000 OPS in 2.090045 seconds, throughput 956917.195563
+445460	[1728021281]	2000000 OPS in 2.071493 seconds, throughput 965487.211398
+445460	[1728021282]	2000000 OPS in 2.062290 seconds, throughput 969795.712533
+445460	[1728021282]	2000000 OPS in 2.072757 seconds, throughput 964898.442027
+445460	[1728021283]	2000000 OPS in 2.094202 seconds, throughput 955017.710803
+445460	[1728021283]	2000000 OPS in 2.071108 seconds, throughput 965666.686624
+445460	[1728021284]	2000000 OPS in 2.059361 seconds, throughput 971175.039248
+445460	[1728021284]	2000000 OPS in 2.074736 seconds, throughput 963978.067571
+445460	[1728021285]	2000000 OPS in 2.094327 seconds, throughput 954960.710529
+445460	[1728021285]	2000000 OPS in 2.080971 seconds, throughput 961089.798945
+445460	[1728021286]	2000000 OPS in 2.063448 seconds, throughput 969251.466477
+445460	[1728021286]	2000000 OPS in 2.076717 seconds, throughput 963058.519769
+445460	[1728021287]	2000000 OPS in 2.092004 seconds, throughput 956021.116594
+445460	[1728021287]	2000000 OPS in 2.072984 seconds, throughput 964792.781806
+445460	[1728021288]	2000000 OPS in 2.066849 seconds, throughput 967656.563203
+445460	[1728021288]	2000000 OPS in 2.080415 seconds, throughput 961346.654393
+445460	[1728021289]	2000000 OPS in 2.089758 seconds, throughput 957048.615199
+445460	[1728021289]	2000000 OPS in 2.067322 seconds, throughput 967435.164914
+445460	[1728021290]	2000000 OPS in 2.062536 seconds, throughput 969680.044373
+445460	[1728021290]	2000000 OPS in 2.074650 seconds, throughput 964018.027137
+445460	[1728021291]	2000000 OPS in 2.069759 seconds, throughput 966296.076017
+445460	[1728021291]	2000000 OPS in 2.093489 seconds, throughput 955342.970515
+445460	[1728021292]	2000000 OPS in 2.065206 seconds, throughput 968426.394268
+445460	[1728021292]	2000000 OPS in 2.075691 seconds, throughput 963534.553072
+445460	[1728021293]	2000000 OPS in 2.077688 seconds, throughput 962608.437841
+445460	[1728021293]	2000000 OPS in 2.095796 seconds, throughput 954291.352784
+445460	[1728021294]	2000000 OPS in 2.061401 seconds, throughput 970213.946728
+445460	[1728021295]	2000000 OPS in 2.076208 seconds, throughput 963294.621733
+445460	[1728021295]	2000000 OPS in 2.069937 seconds, throughput 966212.981361
+445460	[1728021295]	2000000 OPS in 2.092282 seconds, throughput 955894.090758
+445460	[1728021296]	2000000 OPS in 2.066648 seconds, throughput 967750.676458
+445460	[1728021297]	2000000 OPS in 2.083226 seconds, throughput 960049.461748
+445460	[1728021297]	2000000 OPS in 2.073547 seconds, throughput 964530.825682
+445460	[1728021297]	2000000 OPS in 2.088274 seconds, throughput 957728.727169
+445460	[1728021299]	2000000 OPS in 2.063816 seconds, throughput 969078.638793
+445460	[1728021299]	2000000 OPS in 2.076020 seconds, throughput 963381.855666
+445460	[1728021299]	2000000 OPS in 2.071269 seconds, throughput 965591.625231
+445460	[1728021300]	2000000 OPS in 2.092785 seconds, throughput 955664.342013
+445460	[1728021301]	2000000 OPS in 2.059998 seconds, throughput 970874.729005
+445460	[1728021301]	2000000 OPS in 2.075981 seconds, throughput 963399.954046
+445460	[1728021302]	2000000 OPS in 2.075955 seconds, throughput 963412.020010
+445460	[1728021302]	2000000 OPS in 2.094976 seconds, throughput 954664.874442
+445460	[1728021303]	2000000 OPS in 2.060126 seconds, throughput 970814.406497
+445460	[1728021303]	2000000 OPS in 2.071000 seconds, throughput 965717.044906
+445460	[1728021304]	2000000 OPS in 2.072081 seconds, throughput 965213.232494
+445460	[1728021304]	2000000 OPS in 2.092044 seconds, throughput 956002.837416
+445460	[1728021305]	2000000 OPS in 2.064477 seconds, throughput 968768.361188
+445460	[1728021305]	2000000 OPS in 2.080324 seconds, throughput 961388.706759
+445460	[1728021306]	2000000 OPS in 2.069939 seconds, throughput 966212.047795
+445460	[1728021306]	2000000 OPS in 2.088617 seconds, throughput 957571.445603
+445460	[1728021307]	2000000 OPS in 2.069632 seconds, throughput 966355.371390
+445460	[1728021307]	2000000 OPS in 2.078715 seconds, throughput 962132.856115
+445460	[1728021308]	2000000 OPS in 2.072220 seconds, throughput 965148.488095
+445460	[1728021308]	2000000 OPS in 2.089006 seconds, throughput 957393.133385
+445460	[1728021309]	2000000 OPS in 2.062209 seconds, throughput 969833.804430
+445460	[1728021309]	2000000 OPS in 2.075717 seconds, throughput 963522.484038
+445460	[1728021310]	2000000 OPS in 2.072561 seconds, throughput 964989.691498
+445460	[1728021310]	2000000 OPS in 2.094057 seconds, throughput 955083.839647
+445460	[1728021311]	2000000 OPS in 2.062865 seconds, throughput 969525.393082
+445460	[1728021311]	2000000 OPS in 2.079451 seconds, throughput 961792.319223
+445460	[1728021312]	2000000 OPS in 2.071231 seconds, throughput 965609.340532
+445460	[1728021312]	2000000 OPS in 2.091874 seconds, throughput 956080.528751
+445460	[1728021313]	2000000 OPS in 2.059583 seconds, throughput 971070.357446
+445460	[1728021313]	2000000 OPS in 2.081492 seconds, throughput 960849.236990
+445460	[1728021314]	2000000 OPS in 2.070865 seconds, throughput 965780.000145
+445460	[1728021314]	2000000 OPS in 2.092180 seconds, throughput 955940.693439
+445460	[1728021315]	2000000 OPS in 2.062279 seconds, throughput 969800.885331
+445460	[1728021315]	2000000 OPS in 2.076261 seconds, throughput 963270.032043
+445460	[1728021316]	2000000 OPS in 2.069454 seconds, throughput 966438.490539
+445460	[1728021316]	2000000 OPS in 2.089755 seconds, throughput 957049.989114
+445460	[1728021317]	2000000 OPS in 2.059609 seconds, throughput 971058.098892
+445460	[1728021317]	2000000 OPS in 2.075590 seconds, throughput 963581.439494
+445460	[1728021318]	2000000 OPS in 2.071818 seconds, throughput 965335.758257
+445460	[1728021318]	2000000 OPS in 2.095306 seconds, throughput 954514.519598
+445460	[1728021319]	2000000 OPS in 2.063536 seconds, throughput 969210.132510
+445460	[1728021319]	2000000 OPS in 2.079305 seconds, throughput 961859.852210
+445460	[1728021320]	2000000 OPS in 2.076688 seconds, throughput 963071.968442
+445460	[1728021320]	2000000 OPS in 2.090307 seconds, throughput 956797.255140
+445460	[1728021321]	2000000 OPS in 2.060650 seconds, throughput 970567.539369
+445460	[1728021322]	2000000 OPS in 2.081669 seconds, throughput 960767.537971
+445460	[1728021322]	2000000 OPS in 2.067746 seconds, throughput 967236.788271
+445460	[1728021323]	2000000 OPS in 2.089834 seconds, throughput 957013.810666
+445460	[1728021323]	2000000 OPS in 2.063751 seconds, throughput 969109.160940
+445460	[1728021324]	2000000 OPS in 2.075051 seconds, throughput 963831.732329
+445460	[1728021324]	2000000 OPS in 2.068794 seconds, throughput 966746.809977
+445460	[1728021325]	2000000 OPS in 2.090613 seconds, throughput 956657.210110
+445460	[1728021325]	2000000 OPS in 2.059620 seconds, throughput 971052.912673
+445460	[1728021326]	2000000 OPS in 2.077515 seconds, throughput 962688.596713
+445460	[1728021326]	2000000 OPS in 2.068064 seconds, throughput 967088.059170
+445460	[1728021327]	2000000 OPS in 2.101582 seconds, throughput 951664.032143
+445460	[1728021327]	2000000 OPS in 2.060684 seconds, throughput 970551.525610
+445460	[1728021328]	2000000 OPS in 2.074465 seconds, throughput 964103.997898
+445460	[1728021328]	2000000 OPS in 2.074713 seconds, throughput 963988.754107
+445460	[1728021329]	2000000 OPS in 2.088314 seconds, throughput 957710.382634
+445460	[1728021329]	2000000 OPS in 2.063976 seconds, throughput 969003.515545
+445460	[1728021330]	2000000 OPS in 2.075438 seconds, throughput 963652.009841
+445460	[1728021331]	2000000 OPS in 2.072384 seconds, throughput 965072.110188
+445460	[1728021331]	2000000 OPS in 2.087864 seconds, throughput 957916.799178
+445460	[1728021332]	2000000 OPS in 2.065514 seconds, throughput 968281.986953
+445460	[1728021332]	2000000 OPS in 2.080452 seconds, throughput 961329.557231
+445460	[1728021333]	2000000 OPS in 2.068652 seconds, throughput 966813.171089
+445460	[1728021333]	2000000 OPS in 2.088706 seconds, throughput 957530.643374
+445460	[1728021334]	2000000 OPS in 2.067008 seconds, throughput 967582.128371
+445460	[1728021334]	2000000 OPS in 2.075597 seconds, throughput 963578.189793
+445460	[1728021335]	2000000 OPS in 2.067691 seconds, throughput 967262.516498
+445460	[1728021335]	2000000 OPS in 2.095864 seconds, throughput 954260.390941
+445460	[1728021336]	2000000 OPS in 2.063139 seconds, throughput 969396.632995
+445460	[1728021336]	2000000 OPS in 2.077618 seconds, throughput 962640.870458
+445460	[1728021337]	2000000 OPS in 2.075825 seconds, throughput 963472.354365
+445460	[1728021337]	2000000 OPS in 2.090057 seconds, throughput 956911.701451
+445460	[1728021338]	2000000 OPS in 2.066203 seconds, throughput 967959.101792
+445460	[1728021338]	2000000 OPS in 2.079065 seconds, throughput 961970.885951
+445460	[1728021339]	2000000 OPS in 2.068552 seconds, throughput 966859.909734
+445460	[1728021339]	2000000 OPS in 2.086572 seconds, throughput 958509.938790
+445460	[1728021340]	2000000 OPS in 2.060844 seconds, throughput 970476.173839
+445460	[1728021340]	2000000 OPS in 2.074832 seconds, throughput 963933.465456
+445460	[1728021341]	2000000 OPS in 2.071678 seconds, throughput 965400.993784
+445460	[1728021341]	2000000 OPS in 2.091839 seconds, throughput 956096.525593
+445460	[1728021342]	2000000 OPS in 2.065340 seconds, throughput 968363.562416
+445460	[1728021342]	2000000 OPS in 2.074408 seconds, throughput 964130.489277
+445460	[1728021343]	2000000 OPS in 2.068226 seconds, throughput 967012.309100
+445460	[1728021343]	2000000 OPS in 2.096947 seconds, throughput 953767.548727
+445460	[1728021344]	2000000 OPS in 2.062270 seconds, throughput 969805.117662
+445460	[1728021344]	2000000 OPS in 2.075855 seconds, throughput 963458.430382
+445460	[1728021345]	2000000 OPS in 2.077249 seconds, throughput 962811.872818
+445460	[1728021346]	2000000 OPS in 2.090230 seconds, throughput 956832.501686
+445460	[1728021346]	2000000 OPS in 2.061707 seconds, throughput 970069.946894
+445460	[1728021346]	2000000 OPS in 2.074326 seconds, throughput 964168.602235
+445460	[1728021347]	2000000 OPS in 2.068850 seconds, throughput 966720.641903
+445460	[1728021348]	2000000 OPS in 2.090022 seconds, throughput 956927.726120
+445460	[1728021348]	2000000 OPS in 2.059667 seconds, throughput 971030.754001
+445460	[1728021349]	2000000 OPS in 2.080340 seconds, throughput 961381.312670
+445460	[1728021349]	2000000 OPS in 2.070511 seconds, throughput 965945.121760
+445460	[1728021350]	2000000 OPS in 2.089847 seconds, throughput 957007.857513
+445460	[1728021350]	2000000 OPS in 2.063672 seconds, throughput 969146.259677
+445460	[1728021351]	2000000 OPS in 2.076458 seconds, throughput 963178.643633
+445460	[1728021351]	2000000 OPS in 2.072258 seconds, throughput 965130.789699
+445460	[1728021352]	2000000 OPS in 2.094693 seconds, throughput 954793.852846
+445460	[1728021352]	2000000 OPS in 2.059553 seconds, throughput 971084.502317
+445460	[1728021353]	2000000 OPS in 2.076509 seconds, throughput 963154.987530
+445460	[1728021353]	2000000 OPS in 2.070269 seconds, throughput 966058.034004
+445460	[1728021354]	2000000 OPS in 2.088487 seconds, throughput 957631.050612
+445460	[1728021354]	2000000 OPS in 2.063181 seconds, throughput 969376.899070
+445460	[1728021355]	2000000 OPS in 2.075824 seconds, throughput 963472.818505
+445460	[1728021355]	2000000 OPS in 2.076726 seconds, throughput 963054.346120
+445460	[1728021356]	2000000 OPS in 2.089743 seconds, throughput 957055.484813
+445460	[1728021356]	2000000 OPS in 2.062539 seconds, throughput 969678.633956
+445460	[1728021357]	2000000 OPS in 2.080141 seconds, throughput 961473.284744
+445460	[1728021357]	2000000 OPS in 2.069074 seconds, throughput 966615.983769
+445460	[1728021358]	2000000 OPS in 2.087261 seconds, throughput 958193.536889
+445460	[1728021359]	2000000 OPS in 2.060014 seconds, throughput 970867.188281
+445460	[1728021360]	2000000 OPS in 2.081685 seconds, throughput 960760.153433
+445460	[1728021360]	2000000 OPS in 2.041192 seconds, throughput 979819.634802
+445460	[1728021361]	2000000 OPS in 2.019773 seconds, throughput 990210.286007
+445460	[1728021362]	2000000 OPS in 2.027398 seconds, throughput 986486.126552
+445460	[1728021363]	2000000 OPS in 2.025761 seconds, throughput 987283.297487
+445460	[1728021364]	2000000 OPS in 2.022907 seconds, throughput 988676.197176
+445460	[1728021366]	2000000 OPS in 1.903300 seconds, throughput 1050806.493984
+445460	[1728021368]	2000000 OPS in 1.824219 seconds, throughput 1096359.592790
+445460	[1728021370]	2000000 OPS in 1.818237 seconds, throughput 1099966.616013
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     259471 ms      1037806 ms            4 CompactionCPUUsage=0.30939 CompactionThroughput=2.92854G Lat_Get_Avg=902.913 Lat_Get_P50=906.539 Lat_Get_P95=1.53481k Lat_Get_P99=2.64333k Lat_Put_Avg=1.18558k Lat_Put_P50=1.14095k Lat_Put_P95=1.8418k Lat_Put_P99=2.53579k items_per_second=3.854M/s
+4609.27user 44.98system 18:01.61elapsed 430%CPU (0avgtext+0avgdata 9176984maxresident)k
+317112inputs+16649936outputs (5819major+11119915minor)pagefaults 0swaps

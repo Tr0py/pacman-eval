@@ -1,0 +1,2352 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+[ 81%] Built target benchmark
+Scanning dependencies of target viper_bench
+[ 86%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/viper_bench.cpp.o
+[ 90%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/viper/hotkeyset.cpp.o
+[ 95%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/__/histogram.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/other/viper_bench.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable viper_bench
+[100%] Built target viper_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. ViperFixture/bench will be repeated at least 180 times.
+2024-10-04T01:14:40-05:00
+Running ./benchmarks/other/viper_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.30, 4.18, 4.35
+[1728022480]	Setup starts!
+[1728022480]	Setup starts!
+[1728022480]	Setup starts!
+[1728022480]	Setup starts!
+threads of service / gc : 4 / 2
+pool size 8141 MB, num_allocated_blocks 173693
+[1728022481]	DB init finished in 1.241005 seconds
+[1728022481]	DB init finished in 1.240952 seconds
+[1728022481]	DB init finished in 1.240971 seconds
+[1728022481]	DB init finished in 1.240970 seconds
+[1728022488]	DB load finished in 6.977071 seconds
+[1728022488]	DB load finished in 6.982629 seconds
+[1728022488]	DB load finished in 7.027931 seconds
+[1728022488]	DB load finished in 7.062651 seconds
+[1728022488]	DB warmup finished in 0.000009 seconds
+[1728022488]	DB warmup finished in 0.085780 seconds
+[1728022488]	DB warmup finished in 0.034913 seconds
+[1728022488]	DB warmup finished in 0.080217 seconds
+[1728022488]	ETC init!
+[1728022488]	ETC starts!
+[1728022488]	ETC init!
+[1728022488]	ETC starts!
+[1728022488]	ETC init!
+[1728022488]	ETC init!
+[1728022488]	ETC starts!
+[1728022488]	ETC starts!
+466449	[1728022490]	2000000 OPS in 2.623470 seconds, throughput 762349.102525
+466449	[1728022490]	2000000 OPS in 2.626138 seconds, throughput 761574.601182
+466449	[1728022490]	2000000 OPS in 2.631721 seconds, throughput 759958.977414
+466449	[1728022490]	2000000 OPS in 2.636337 seconds, throughput 758628.354418
+466449	[1728022493]	2000000 OPS in 2.464909 seconds, throughput 811388.980283
+466449	[1728022493]	2000000 OPS in 2.471521 seconds, throughput 809218.291085
+466449	[1728022493]	2000000 OPS in 2.479230 seconds, throughput 806702.080888
+466449	[1728022493]	2000000 OPS in 2.490026 seconds, throughput 803204.464532
+466449	[1728022495]	2000000 OPS in 2.387868 seconds, throughput 837567.235710
+466449	[1728022495]	2000000 OPS in 2.395141 seconds, throughput 835023.908822
+466449	[1728022495]	2000000 OPS in 2.404512 seconds, throughput 831769.606473
+466449	[1728022495]	2000000 OPS in 2.410915 seconds, throughput 829560.561032
+466449	[1728022498]	2000000 OPS in 2.315271 seconds, throughput 863829.763341
+466449	[1728022498]	2000000 OPS in 2.327665 seconds, throughput 859230.172727
+466449	[1728022498]	2000000 OPS in 2.327423 seconds, throughput 859319.513470
+466449	[1728022498]	2000000 OPS in 2.351610 seconds, throughput 850481.159716
+466449	[1728022500]	2000000 OPS in 2.308874 seconds, throughput 866223.102690
+466449	[1728022500]	2000000 OPS in 2.319025 seconds, throughput 862431.409752
+466449	[1728022500]	2000000 OPS in 2.331147 seconds, throughput 857946.753251
+466449	[1728022500]	2000000 OPS in 2.336309 seconds, throughput 856051.147344
+466449	[1728022502]	2000000 OPS in 2.292607 seconds, throughput 872369.315805
+466449	[1728022502]	2000000 OPS in 2.294574 seconds, throughput 871621.486167
+466449	[1728022502]	2000000 OPS in 2.313845 seconds, throughput 864362.133159
+466449	[1728022502]	2000000 OPS in 2.322805 seconds, throughput 861027.938204
+466449	[1728022504]	2000000 OPS in 2.200730 seconds, throughput 908789.356259
+466449	[1728022504]	2000000 OPS in 2.203018 seconds, throughput 907845.510114
+466449	[1728022505]	2000000 OPS in 2.212911 seconds, throughput 903786.912352
+466449	[1728022505]	2000000 OPS in 2.231509 seconds, throughput 896254.507600
+466449	[1728022507]	2000000 OPS in 2.158912 seconds, throughput 926392.553286
+466449	[1728022507]	2000000 OPS in 2.166272 seconds, throughput 923245.095722
+466449	[1728022507]	2000000 OPS in 2.175251 seconds, throughput 919434.125073
+466449	[1728022507]	2000000 OPS in 2.183413 seconds, throughput 915997.110945
+466449	[1728022509]	2000000 OPS in 2.186532 seconds, throughput 914690.477889
+466449	[1728022509]	2000000 OPS in 2.193429 seconds, throughput 911814.332718
+466449	[1728022509]	2000000 OPS in 2.201347 seconds, throughput 908534.638110
+466449	[1728022509]	2000000 OPS in 2.209393 seconds, throughput 905226.005514
+466449	[1728022511]	2000000 OPS in 2.206154 seconds, throughput 906555.027437
+466449	[1728022511]	2000000 OPS in 2.214197 seconds, throughput 903261.995206
+466449	[1728022511]	2000000 OPS in 2.222423 seconds, throughput 899918.692346
+466449	[1728022511]	2000000 OPS in 2.240114 seconds, throughput 892811.705119
+466449	[1728022513]	2000000 OPS in 2.184520 seconds, throughput 915532.931720
+466449	[1728022513]	2000000 OPS in 2.191258 seconds, throughput 912717.717403
+466449	[1728022513]	2000000 OPS in 2.204429 seconds, throughput 907264.420855
+466449	[1728022513]	2000000 OPS in 2.206185 seconds, throughput 906542.289065
+466449	[1728022515]	2000000 OPS in 2.202804 seconds, throughput 907933.706312
+466449	[1728022515]	2000000 OPS in 2.210909 seconds, throughput 904605.300354
+466449	[1728022516]	2000000 OPS in 2.226739 seconds, throughput 898174.415592
+466449	[1728022516]	2000000 OPS in 2.260659 seconds, throughput 884697.780603
+466449	[1728022518]	2000000 OPS in 2.207685 seconds, throughput 905926.343659
+466449	[1728022518]	2000000 OPS in 2.213711 seconds, throughput 903460.298115
+466449	[1728022518]	2000000 OPS in 2.216323 seconds, throughput 902395.544332
+466449	[1728022518]	2000000 OPS in 2.236654 seconds, throughput 894192.843417
+466449	[1728022520]	2000000 OPS in 2.204975 seconds, throughput 907039.762356
+466449	[1728022520]	2000000 OPS in 2.210332 seconds, throughput 904841.444634
+466449	[1728022520]	2000000 OPS in 2.217129 seconds, throughput 902067.493592
+466449	[1728022520]	2000000 OPS in 2.209998 seconds, throughput 904978.194550
+466449	[1728022522]	2000000 OPS in 2.186755 seconds, throughput 914597.199961
+466449	[1728022522]	2000000 OPS in 2.190480 seconds, throughput 913041.890362
+466449	[1728022522]	2000000 OPS in 2.198419 seconds, throughput 909744.684703
+466449	[1728022522]	2000000 OPS in 2.206866 seconds, throughput 906262.546072
+466449	[1728022524]	2000000 OPS in 2.204565 seconds, throughput 907208.451554
+466449	[1728022524]	2000000 OPS in 2.211615 seconds, throughput 904316.528871
+466449	[1728022524]	2000000 OPS in 2.219316 seconds, throughput 901178.561322
+466449	[1728022525]	2000000 OPS in 2.249263 seconds, throughput 889180.144785
+466449	[1728022526]	2000000 OPS in 2.206782 seconds, throughput 906297.042481
+466449	[1728022526]	2000000 OPS in 2.210705 seconds, throughput 904688.775753
+466449	[1728022527]	2000000 OPS in 2.217224 seconds, throughput 902028.843274
+466449	[1728022527]	2000000 OPS in 2.213697 seconds, throughput 903466.011835
+466449	[1728022529]	2000000 OPS in 2.187524 seconds, throughput 914275.683375
+466449	[1728022529]	2000000 OPS in 2.193169 seconds, throughput 911922.428231
+466449	[1728022529]	2000000 OPS in 2.198891 seconds, throughput 909549.404677
+466449	[1728022529]	2000000 OPS in 2.208762 seconds, throughput 905484.610836
+466449	[1728022531]	2000000 OPS in 2.164775 seconds, throughput 923883.544479
+466449	[1728022531]	2000000 OPS in 2.173510 seconds, throughput 920170.599629
+466449	[1728022531]	2000000 OPS in 2.178316 seconds, throughput 918140.435088
+466449	[1728022531]	2000000 OPS in 2.186391 seconds, throughput 914749.466129
+466449	[1728022533]	2000000 OPS in 2.190893 seconds, throughput 912869.775019
+466449	[1728022533]	2000000 OPS in 2.201451 seconds, throughput 908491.717508
+466449	[1728022533]	2000000 OPS in 2.205540 seconds, throughput 906807.403176
+466449	[1728022533]	2000000 OPS in 2.215482 seconds, throughput 902738.094916
+466449	[1728022535]	2000000 OPS in 2.185333 seconds, throughput 915192.329956
+466449	[1728022535]	2000000 OPS in 2.187926 seconds, throughput 914107.698341
+466449	[1728022535]	2000000 OPS in 2.213367 seconds, throughput 903600.713302
+466449	[1728022536]	2000000 OPS in 2.226717 seconds, throughput 898183.289569
+466449	[1728022537]	2000000 OPS in 2.201244 seconds, throughput 908577.150012
+466449	[1728022537]	2000000 OPS in 2.211505 seconds, throughput 904361.509470
+466449	[1728022538]	2000000 OPS in 2.204163 seconds, throughput 907373.910187
+466449	[1728022538]	2000000 OPS in 2.206513 seconds, throughput 906407.530796
+466449	[1728022539]	2000000 OPS in 2.187897 seconds, throughput 914119.814598
+466449	[1728022540]	2000000 OPS in 2.200352 seconds, throughput 908945.477814
+466449	[1728022540]	2000000 OPS in 2.197356 seconds, throughput 910184.785715
+466449	[1728022540]	2000000 OPS in 2.209395 seconds, throughput 905225.186080
+466449	[1728022542]	2000000 OPS in 2.189884 seconds, throughput 913290.384331
+466449	[1728022542]	2000000 OPS in 2.196688 seconds, throughput 910461.567596
+466449	[1728022542]	2000000 OPS in 2.203420 seconds, throughput 907679.879460
+466449	[1728022542]	2000000 OPS in 2.209955 seconds, throughput 904995.803082
+466449	[1728022544]	2000000 OPS in 2.190203 seconds, throughput 913157.364865
+466449	[1728022544]	2000000 OPS in 2.199738 seconds, throughput 909199.186449
+466449	[1728022544]	2000000 OPS in 2.205465 seconds, throughput 906838.240462
+466449	[1728022544]	2000000 OPS in 2.214174 seconds, throughput 903271.377950
+466449	[1728022546]	2000000 OPS in 2.179550 seconds, throughput 917620.609759
+466449	[1728022546]	2000000 OPS in 2.187575 seconds, throughput 914254.368422
+466449	[1728022546]	2000000 OPS in 2.195781 seconds, throughput 910837.647288
+466449	[1728022547]	2000000 OPS in 2.207690 seconds, throughput 905924.291907
+466449	[1728022548]	2000000 OPS in 2.174858 seconds, throughput 919600.268155
+466449	[1728022548]	2000000 OPS in 2.197278 seconds, throughput 910217.095880
+466449	[1728022549]	2000000 OPS in 2.197131 seconds, throughput 910277.994348
+466449	[1728022549]	2000000 OPS in 2.204187 seconds, throughput 907364.030366
+466449	[1728022550]	2000000 OPS in 2.195966 seconds, throughput 910760.913420
+466449	[1728022551]	2000000 OPS in 2.191929 seconds, throughput 912438.313467
+466449	[1728022551]	2000000 OPS in 2.196367 seconds, throughput 910594.631954
+466449	[1728022551]	2000000 OPS in 2.207611 seconds, throughput 905956.710670
+466449	[1728022553]	2000000 OPS in 2.181427 seconds, throughput 916831.046833
+466449	[1728022553]	2000000 OPS in 2.188854 seconds, throughput 913720.147621
+466449	[1728022553]	2000000 OPS in 2.202610 seconds, throughput 908013.674686
+466449	[1728022553]	2000000 OPS in 2.201769 seconds, throughput 908360.504667
+466449	[1728022555]	2000000 OPS in 2.192319 seconds, throughput 912275.996331
+466449	[1728022555]	2000000 OPS in 2.200695 seconds, throughput 908803.809706
+466449	[1728022555]	2000000 OPS in 2.218422 seconds, throughput 901541.726506
+466449	[1728022556]	2000000 OPS in 2.237047 seconds, throughput 894035.753384
+466449	[1728022557]	2000000 OPS in 2.201664 seconds, throughput 908403.825470
+466449	[1728022557]	2000000 OPS in 2.210680 seconds, throughput 904699.006640
+466449	[1728022557]	2000000 OPS in 2.205787 seconds, throughput 906705.860539
+466449	[1728022558]	2000000 OPS in 2.211213 seconds, throughput 904480.934220
+466449	[1728022559]	2000000 OPS in 2.182978 seconds, throughput 916179.640839
+466449	[1728022559]	2000000 OPS in 2.190619 seconds, throughput 912983.955676
+466449	[1728022560]	2000000 OPS in 2.207098 seconds, throughput 906167.283918
+466449	[1728022560]	2000000 OPS in 2.225705 seconds, throughput 898591.682186
+466449	[1728022561]	2000000 OPS in 2.180345 seconds, throughput 917286.025835
+466449	[1728022562]	2000000 OPS in 2.189888 seconds, throughput 913288.716135
+466449	[1728022562]	2000000 OPS in 2.186126 seconds, throughput 914860.351142
+466449	[1728022562]	2000000 OPS in 2.189640 seconds, throughput 913392.155788
+466449	[1728022564]	2000000 OPS in 2.178001 seconds, throughput 918273.223933
+466449	[1728022564]	2000000 OPS in 2.190074 seconds, throughput 913211.151769
+466449	[1728022564]	2000000 OPS in 2.194988 seconds, throughput 911166.712529
+466449	[1728022564]	2000000 OPS in 2.201776 seconds, throughput 908357.616760
+466449	[1728022566]	2000000 OPS in 2.183761 seconds, throughput 915851.139388
+466449	[1728022566]	2000000 OPS in 2.190412 seconds, throughput 913070.235189
+466449	[1728022566]	2000000 OPS in 2.196503 seconds, throughput 910538.251029
+466449	[1728022567]	2000000 OPS in 2.205667 seconds, throughput 906755.190153
+466449	[1728022568]	2000000 OPS in 2.182625 seconds, throughput 916327.816276
+466449	[1728022568]	2000000 OPS in 2.188762 seconds, throughput 913758.553922
+466449	[1728022568]	2000000 OPS in 2.195263 seconds, throughput 911052.570922
+466449	[1728022569]	2000000 OPS in 2.210597 seconds, throughput 904732.974848
+466449	[1728022570]	2000000 OPS in 2.181763 seconds, throughput 916689.851281
+466449	[1728022570]	2000000 OPS in 2.192592 seconds, throughput 912162.408693
+466449	[1728022571]	2000000 OPS in 2.198013 seconds, throughput 909912.725721
+466449	[1728022571]	2000000 OPS in 2.205606 seconds, throughput 906780.268099
+466449	[1728022572]	2000000 OPS in 2.180288 seconds, throughput 917310.006751
+466449	[1728022573]	2000000 OPS in 2.188985 seconds, throughput 913665.465958
+466449	[1728022573]	2000000 OPS in 2.195106 seconds, throughput 911117.731900
+466449	[1728022573]	2000000 OPS in 2.214764 seconds, throughput 903030.751809
+466449	[1728022574]	2000000 OPS in 2.188893 seconds, throughput 913703.867663
+466449	[1728022575]	2000000 OPS in 2.190835 seconds, throughput 912893.942264
+466449	[1728022575]	2000000 OPS in 2.207941 seconds, throughput 905821.305914
+466449	[1728022575]	2000000 OPS in 2.208071 seconds, throughput 905767.975758
+466449	[1728022577]	2000000 OPS in 2.181533 seconds, throughput 916786.498302
+466449	[1728022577]	2000000 OPS in 2.219239 seconds, throughput 901209.829135
+466449	[1728022577]	2000000 OPS in 2.208252 seconds, throughput 905693.734230
+466449	[1728022578]	2000000 OPS in 2.213716 seconds, throughput 903458.257518
+466449	[1728022579]	2000000 OPS in 2.190917 seconds, throughput 912859.775154
+466449	[1728022579]	2000000 OPS in 2.178360 seconds, throughput 918121.889862
+466449	[1728022579]	2000000 OPS in 2.181883 seconds, throughput 916639.434837
+466449	[1728022580]	2000000 OPS in 2.187240 seconds, throughput 914394.396591
+466449	[1728022581]	2000000 OPS in 2.181464 seconds, throughput 916815.496382
+466449	[1728022581]	2000000 OPS in 2.188445 seconds, throughput 913890.913411
+466449	[1728022582]	2000000 OPS in 2.196031 seconds, throughput 910733.955941
+466449	[1728022582]	2000000 OPS in 2.205173 seconds, throughput 906958.320277
+466449	[1728022583]	2000000 OPS in 2.181035 seconds, throughput 916995.829961
+466449	[1728022584]	2000000 OPS in 2.189195 seconds, throughput 913577.821985
+466449	[1728022584]	2000000 OPS in 2.195783 seconds, throughput 910836.817664
+466449	[1728022584]	2000000 OPS in 2.224509 seconds, throughput 899074.807070
+466449	[1728022585]	2000000 OPS in 2.191241 seconds, throughput 912724.798413
+466449	[1728022586]	2000000 OPS in 2.201356 seconds, throughput 908530.923667
+466449	[1728022586]	2000000 OPS in 2.217018 seconds, throughput 902112.657633
+466449	[1728022586]	2000000 OPS in 2.206635 seconds, throughput 906357.417516
+466449	[1728022588]	2000000 OPS in 2.201735 seconds, throughput 908374.531903
+466449	[1728022588]	2000000 OPS in 2.209650 seconds, throughput 905120.720476
+466449	[1728022588]	2000000 OPS in 2.205754 seconds, throughput 906719.425648
+466449	[1728022589]	2000000 OPS in 2.215052 seconds, throughput 902913.340183
+466449	[1728022590]	2000000 OPS in 2.187485 seconds, throughput 914291.983716
+466449	[1728022590]	2000000 OPS in 2.191324 seconds, throughput 912690.227461
+466449	[1728022590]	2000000 OPS in 2.196119 seconds, throughput 910697.462205
+466449	[1728022591]	2000000 OPS in 2.202751 seconds, throughput 907955.551944
+466449	[1728022592]	2000000 OPS in 2.188321 seconds, throughput 913942.698535
+466449	[1728022592]	2000000 OPS in 2.196528 seconds, throughput 910527.887648
+466449	[1728022593]	2000000 OPS in 2.204209 seconds, throughput 907354.974052
+466449	[1728022593]	2000000 OPS in 2.221918 seconds, throughput 900123.226870
+466449	[1728022594]	2000000 OPS in 2.182706 seconds, throughput 916293.811443
+466449	[1728022595]	2000000 OPS in 2.198639 seconds, throughput 909653.653920
+466449	[1728022595]	2000000 OPS in 2.195771 seconds, throughput 910841.795433
+466449	[1728022595]	2000000 OPS in 2.197168 seconds, throughput 910262.665395
+466449	[1728022596]	2000000 OPS in 2.167744 seconds, throughput 922618.168935
+466449	[1728022597]	2000000 OPS in 2.186025 seconds, throughput 914902.620052
+466449	[1728022597]	2000000 OPS in 2.197829 seconds, throughput 909988.902685
+466449	[1728022597]	2000000 OPS in 2.205043 seconds, throughput 907011.790700
+466449	[1728022598]	2000000 OPS in 2.199034 seconds, throughput 909490.257995
+466449	[1728022599]	2000000 OPS in 2.201433 seconds, throughput 908499.145784
+466449	[1728022599]	2000000 OPS in 2.204822 seconds, throughput 907102.704890
+466449	[1728022600]	2000000 OPS in 2.204249 seconds, throughput 907338.508490
+466449	[1728022601]	2000000 OPS in 2.194083 seconds, throughput 911542.544197
+466449	[1728022601]	2000000 OPS in 2.200016 seconds, throughput 909084.297569
+466449	[1728022601]	2000000 OPS in 2.203981 seconds, throughput 907448.839169
+466449	[1728022602]	2000000 OPS in 2.213676 seconds, throughput 903474.582550
+466449	[1728022603]	2000000 OPS in 2.180495 seconds, throughput 917222.924153
+466449	[1728022603]	2000000 OPS in 2.190655 seconds, throughput 912968.952208
+466449	[1728022604]	2000000 OPS in 2.196105 seconds, throughput 910703.267831
+466449	[1728022604]	2000000 OPS in 2.221244 seconds, throughput 900396.354475
+466449	[1728022605]	2000000 OPS in 2.182587 seconds, throughput 916343.770031
+466449	[1728022605]	2000000 OPS in 2.197528 seconds, throughput 910113.545766
+466449	[1728022606]	2000000 OPS in 2.209951 seconds, throughput 904997.441120
+466449	[1728022606]	2000000 OPS in 2.206396 seconds, throughput 906455.595460
+466449	[1728022607]	2000000 OPS in 2.188232 seconds, throughput 913979.870507
+466449	[1728022608]	2000000 OPS in 2.203934 seconds, throughput 907468.190971
+466449	[1728022608]	2000000 OPS in 2.205309 seconds, throughput 906902.388736
+466449	[1728022609]	2000000 OPS in 2.205903 seconds, throughput 906658.180346
+466449	[1728022609]	2000000 OPS in 2.193494 seconds, throughput 911787.312844
+466449	[1728022610]	2000000 OPS in 2.193746 seconds, throughput 911682.574008
+466449	[1728022610]	2000000 OPS in 2.192390 seconds, throughput 912246.452502
+466449	[1728022611]	2000000 OPS in 2.203674 seconds, throughput 907575.258409
+466449	[1728022612]	2000000 OPS in 2.171795 seconds, throughput 920897.230171
+466449	[1728022612]	2000000 OPS in 2.177352 seconds, throughput 918546.932237
+466449	[1728022612]	2000000 OPS in 2.178567 seconds, throughput 918034.653054
+466449	[1728022613]	2000000 OPS in 2.206365 seconds, throughput 906468.331396
+466449	[1728022614]	2000000 OPS in 2.181333 seconds, throughput 916870.555757
+466449	[1728022614]	2000000 OPS in 2.190812 seconds, throughput 912903.526181
+466449	[1728022615]	2000000 OPS in 2.191878 seconds, throughput 912459.543825
+466449	[1728022615]	2000000 OPS in 2.210971 seconds, throughput 904579.933432
+466449	[1728022616]	2000000 OPS in 2.188788 seconds, throughput 913747.699640
+466449	[1728022616]	2000000 OPS in 2.192111 seconds, throughput 912362.558283
+466449	[1728022617]	2000000 OPS in 2.208147 seconds, throughput 905736.801037
+466449	[1728022617]	2000000 OPS in 2.206072 seconds, throughput 906588.724212
+466449	[1728022618]	2000000 OPS in 2.180785 seconds, throughput 917100.952180
+466449	[1728022619]	2000000 OPS in 2.222100 seconds, throughput 900049.502723
+466449	[1728022619]	2000000 OPS in 2.203645 seconds, throughput 907587.202113
+466449	[1728022620]	2000000 OPS in 2.213895 seconds, throughput 903385.210229
+466449	[1728022620]	2000000 OPS in 2.203233 seconds, throughput 907756.919037
+466449	[1728022621]	2000000 OPS in 2.194224 seconds, throughput 911483.968820
+466449	[1728022621]	2000000 OPS in 2.192849 seconds, throughput 912055.504050
+466449	[1728022622]	2000000 OPS in 2.202136 seconds, throughput 908209.120599
+466449	[1728022623]	2000000 OPS in 2.182940 seconds, throughput 916195.589434
+466449	[1728022623]	2000000 OPS in 2.191683 seconds, throughput 912540.727833
+466449	[1728022623]	2000000 OPS in 2.194102 seconds, throughput 911534.650622
+466449	[1728022624]	2000000 OPS in 2.226903 seconds, throughput 898108.269646
+466449	[1728022625]	2000000 OPS in 2.189393 seconds, throughput 913495.201638
+466449	[1728022625]	2000000 OPS in 2.197865 seconds, throughput 909973.997493
+466449	[1728022626]	2000000 OPS in 2.213174 seconds, throughput 903679.511868
+466449	[1728022626]	2000000 OPS in 2.200564 seconds, throughput 908857.910972
+466449	[1728022627]	2000000 OPS in 2.189605 seconds, throughput 913406.756013
+466449	[1728022627]	2000000 OPS in 2.201230 seconds, throughput 908582.928635
+466449	[1728022628]	2000000 OPS in 2.189489 seconds, throughput 913455.148667
+466449	[1728022628]	2000000 OPS in 2.180369 seconds, throughput 917275.928983
+466449	[1728022629]	2000000 OPS in 2.166647 seconds, throughput 923085.301851
+466449	[1728022630]	2000000 OPS in 2.199296 seconds, throughput 909381.911303
+466449	[1728022630]	2000000 OPS in 2.202563 seconds, throughput 908033.050587
+466449	[1728022631]	2000000 OPS in 2.212327 seconds, throughput 904025.489903
+466449	[1728022631]	2000000 OPS in 2.204633 seconds, throughput 907180.469493
+466449	[1728022632]	2000000 OPS in 2.192433 seconds, throughput 912228.560690
+466449	[1728022632]	2000000 OPS in 2.200742 seconds, throughput 908784.400898
+466449	[1728022633]	2000000 OPS in 2.213871 seconds, throughput 903395.003593
+466449	[1728022633]	2000000 OPS in 2.183403 seconds, throughput 916001.306218
+466449	[1728022634]	2000000 OPS in 2.192408 seconds, throughput 912238.962821
+466449	[1728022634]	2000000 OPS in 2.194770 seconds, throughput 911257.216018
+466449	[1728022635]	2000000 OPS in 2.202268 seconds, throughput 908154.684171
+466449	[1728022636]	2000000 OPS in 2.186846 seconds, throughput 914559.141339
+466449	[1728022636]	2000000 OPS in 2.190268 seconds, throughput 913130.265337
+466449	[1728022637]	2000000 OPS in 2.212953 seconds, throughput 903769.759231
+466449	[1728022637]	2000000 OPS in 2.204399 seconds, throughput 907276.767954
+466449	[1728022638]	2000000 OPS in 2.180843 seconds, throughput 917076.561678
+466449	[1728022638]	2000000 OPS in 2.213026 seconds, throughput 903739.947023
+466449	[1728022639]	2000000 OPS in 2.199403 seconds, throughput 909337.670268
+466449	[1728022639]	2000000 OPS in 2.204508 seconds, throughput 907231.908435
+466449	[1728022640]	2000000 OPS in 2.196644 seconds, throughput 910479.804647
+466449	[1728022641]	2000000 OPS in 2.192331 seconds, throughput 912271.002873
+466449	[1728022641]	2000000 OPS in 2.194225 seconds, throughput 911483.553419
+466449	[1728022642]	2000000 OPS in 2.204150 seconds, throughput 907379.261847
+466449	[1728022642]	2000000 OPS in 2.193117 seconds, throughput 911944.050409
+466449	[1728022643]	2000000 OPS in 2.197419 seconds, throughput 910158.690719
+466449	[1728022643]	2000000 OPS in 2.201741 seconds, throughput 908372.056477
+466449	[1728022644]	2000000 OPS in 2.210923 seconds, throughput 904599.572215
+466449	[1728022644]	2000000 OPS in 2.166128 seconds, throughput 923306.471270
+466449	[1728022645]	2000000 OPS in 2.176062 seconds, throughput 919091.459710
+466449	[1728022645]	2000000 OPS in 2.178636 seconds, throughput 918005.577802
+466449	[1728022646]	2000000 OPS in 2.212654 seconds, throughput 903891.887299
+466449	[1728022647]	2000000 OPS in 2.180948 seconds, throughput 917032.409759
+466449	[1728022647]	2000000 OPS in 2.190769 seconds, throughput 912921.444479
+466449	[1728022648]	2000000 OPS in 2.208113 seconds, throughput 905750.747358
+466449	[1728022648]	2000000 OPS in 2.192808 seconds, throughput 912072.557196
+466449	[1728022649]	2000000 OPS in 2.180493 seconds, throughput 917223.765451
+466449	[1728022649]	2000000 OPS in 2.215952 seconds, throughput 902546.625559
+466449	[1728022650]	2000000 OPS in 2.193944 seconds, throughput 911600.296088
+466449	[1728022650]	2000000 OPS in 2.200484 seconds, throughput 908890.953081
+466449	[1728022651]	2000000 OPS in 2.201001 seconds, throughput 908677.460846
+466449	[1728022652]	2000000 OPS in 2.193941 seconds, throughput 911601.542612
+466449	[1728022652]	2000000 OPS in 2.193973 seconds, throughput 911588.246528
+466449	[1728022653]	2000000 OPS in 2.213723 seconds, throughput 903455.400698
+466449	[1728022653]	2000000 OPS in 2.185817 seconds, throughput 914989.681204
+466449	[1728022654]	2000000 OPS in 2.192148 seconds, throughput 912347.159042
+466449	[1728022654]	2000000 OPS in 2.201051 seconds, throughput 908656.818947
+466449	[1728022655]	2000000 OPS in 2.211118 seconds, throughput 904519.794963
+466449	[1728022655]	2000000 OPS in 2.183040 seconds, throughput 916153.620639
+466449	[1728022656]	2000000 OPS in 2.189977 seconds, throughput 913251.600359
+466449	[1728022656]	2000000 OPS in 2.203028 seconds, throughput 907841.389215
+466449	[1728022657]	2000000 OPS in 2.212363 seconds, throughput 904010.779425
+466449	[1728022658]	2000000 OPS in 2.181928 seconds, throughput 916620.530100
+466449	[1728022658]	2000000 OPS in 2.207504 seconds, throughput 906000.623328
+466449	[1728022659]	2000000 OPS in 2.199695 seconds, throughput 909216.959624
+466449	[1728022659]	2000000 OPS in 2.204278 seconds, throughput 907326.571331
+466449	[1728022660]	2000000 OPS in 2.181898 seconds, throughput 916633.133171
+466449	[1728022660]	2000000 OPS in 2.183973 seconds, throughput 915762.236987
+466449	[1728022661]	2000000 OPS in 2.180350 seconds, throughput 917283.922306
+466449	[1728022661]	2000000 OPS in 2.189064 seconds, throughput 913632.493157
+466449	[1728022662]	2000000 OPS in 2.187522 seconds, throughput 914276.519276
+466449	[1728022663]	2000000 OPS in 2.200720 seconds, throughput 908793.485768
+466449	[1728022663]	2000000 OPS in 2.203114 seconds, throughput 907805.951031
+466449	[1728022664]	2000000 OPS in 2.224697 seconds, throughput 898998.829953
+466449	[1728022664]	2000000 OPS in 2.183178 seconds, throughput 916095.710015
+466449	[1728022665]	2000000 OPS in 2.192130 seconds, throughput 912354.650500
+466449	[1728022665]	2000000 OPS in 2.201301 seconds, throughput 908553.623516
+466449	[1728022666]	2000000 OPS in 2.205935 seconds, throughput 906645.028072
+466449	[1728022666]	2000000 OPS in 2.181634 seconds, throughput 916744.055144
+466449	[1728022667]	2000000 OPS in 2.191155 seconds, throughput 912760.621681
+466449	[1728022667]	2000000 OPS in 2.215165 seconds, throughput 902867.280767
+466449	[1728022668]	2000000 OPS in 2.212515 seconds, throughput 903948.673794
+466449	[1728022668]	2000000 OPS in 2.191294 seconds, throughput 912702.722683
+466449	[1728022669]	2000000 OPS in 2.212299 seconds, throughput 904036.931717
+466449	[1728022670]	2000000 OPS in 2.194966 seconds, throughput 911175.845093
+466449	[1728022670]	2000000 OPS in 2.205378 seconds, throughput 906874.014341
+466449	[1728022671]	2000000 OPS in 2.183237 seconds, throughput 916070.953360
+466449	[1728022671]	2000000 OPS in 2.201542 seconds, throughput 908454.165308
+466449	[1728022672]	2000000 OPS in 2.193255 seconds, throughput 911886.670725
+466449	[1728022673]	2000000 OPS in 2.218958 seconds, throughput 901323.954757
+466449	[1728022673]	2000000 OPS in 2.204979 seconds, throughput 907038.116916
+466449	[1728022674]	2000000 OPS in 2.199948 seconds, throughput 909112.397202
+466449	[1728022674]	2000000 OPS in 2.199578 seconds, throughput 909265.322712
+466449	[1728022675]	2000000 OPS in 2.219540 seconds, throughput 901087.612749
+466449	[1728022675]	2000000 OPS in 2.189051 seconds, throughput 913637.918897
+466449	[1728022676]	2000000 OPS in 2.196868 seconds, throughput 910386.969085
+466449	[1728022676]	2000000 OPS in 2.200328 seconds, throughput 908955.392105
+466449	[1728022677]	2000000 OPS in 2.190748 seconds, throughput 912930.195531
+466449	[1728022677]	2000000 OPS in 2.167367 seconds, throughput 922778.652623
+466449	[1728022678]	2000000 OPS in 2.177251 seconds, throughput 918589.542501
+466449	[1728022678]	2000000 OPS in 2.193954 seconds, throughput 911596.141031
+466449	[1728022679]	2000000 OPS in 2.211121 seconds, throughput 904518.567731
+466449	[1728022679]	2000000 OPS in 2.180788 seconds, throughput 917099.690571
+466449	[1728022680]	2000000 OPS in 2.207745 seconds, throughput 905901.723252
+466449	[1728022681]	2000000 OPS in 2.194152 seconds, throughput 911513.878710
+466449	[1728022681]	2000000 OPS in 2.204540 seconds, throughput 907218.739510
+466449	[1728022682]	2000000 OPS in 2.182129 seconds, throughput 916536.098462
+466449	[1728022682]	2000000 OPS in 2.200692 seconds, throughput 908805.048594
+466449	[1728022683]	2000000 OPS in 2.201851 seconds, throughput 908326.676056
+466449	[1728022684]	2000000 OPS in 2.224859 seconds, throughput 898933.370609
+466449	[1728022684]	2000000 OPS in 2.213522 seconds, throughput 903537.439429
+466449	[1728022685]	2000000 OPS in 2.194345 seconds, throughput 911433.708009
+466449	[1728022685]	2000000 OPS in 2.194674 seconds, throughput 911297.076468
+466449	[1728022686]	2000000 OPS in 2.207268 seconds, throughput 906097.492466
+466449	[1728022686]	2000000 OPS in 2.181220 seconds, throughput 916918.055033
+466449	[1728022687]	2000000 OPS in 2.191791 seconds, throughput 912495.762598
+466449	[1728022687]	2000000 OPS in 2.211603 seconds, throughput 904321.435628
+466449	[1728022688]	2000000 OPS in 2.204212 seconds, throughput 907353.739114
+466449	[1728022688]	2000000 OPS in 2.180625 seconds, throughput 917168.243050
+466449	[1728022689]	2000000 OPS in 2.203356 seconds, throughput 907706.244474
+466449	[1728022689]	2000000 OPS in 2.194341 seconds, throughput 911435.369434
+466449	[1728022690]	2000000 OPS in 2.211768 seconds, throughput 904253.972388
+466449	[1728022690]	2000000 OPS in 2.181310 seconds, throughput 916880.223352
+466449	[1728022691]	2000000 OPS in 2.202645 seconds, throughput 907999.246361
+466449	[1728022692]	2000000 OPS in 2.194762 seconds, throughput 911260.537589
+466449	[1728022692]	2000000 OPS in 2.205174 seconds, throughput 906957.908990
+466449	[1728022692]	2000000 OPS in 2.182888 seconds, throughput 916217.414728
+466449	[1728022693]	2000000 OPS in 2.177924 seconds, throughput 918305.689271
+466449	[1728022694]	2000000 OPS in 2.179074 seconds, throughput 917821.056100
+466449	[1728022695]	2000000 OPS in 2.202256 seconds, throughput 908159.632668
+466449	[1728022695]	2000000 OPS in 2.188183 seconds, throughput 914000.337266
+466449	[1728022696]	2000000 OPS in 2.191972 seconds, throughput 912420.414129
+466449	[1728022696]	2000000 OPS in 2.191854 seconds, throughput 912469.534923
+466449	[1728022697]	2000000 OPS in 2.204629 seconds, throughput 907182.115449
+466449	[1728022697]	2000000 OPS in 2.183417 seconds, throughput 915995.432847
+466449	[1728022698]	2000000 OPS in 2.192605 seconds, throughput 912157.000463
+466449	[1728022698]	2000000 OPS in 2.214697 seconds, throughput 903058.070698
+466449	[1728022699]	2000000 OPS in 2.181368 seconds, throughput 916855.844589
+466449	[1728022699]	2000000 OPS in 2.205177 seconds, throughput 906956.675133
+466449	[1728022700]	2000000 OPS in 2.206105 seconds, throughput 906575.163014
+466449	[1728022700]	2000000 OPS in 2.193946 seconds, throughput 911599.465073
+466449	[1728022701]	2000000 OPS in 2.183667 seconds, throughput 915890.563900
+466449	[1728022701]	2000000 OPS in 2.203767 seconds, throughput 907536.958308
+466449	[1728022702]	2000000 OPS in 2.192490 seconds, throughput 912204.844720
+466449	[1728022703]	2000000 OPS in 2.194668 seconds, throughput 911299.567862
+466449	[1728022703]	2000000 OPS in 2.200330 seconds, throughput 908954.565906
+466449	[1728022703]	2000000 OPS in 2.231922 seconds, throughput 896088.662597
+466449	[1728022704]	2000000 OPS in 2.198713 seconds, throughput 909623.038568
+466449	[1728022705]	2000000 OPS in 2.198688 seconds, throughput 909633.381362
+466449	[1728022706]	2000000 OPS in 2.191760 seconds, throughput 912508.668832
+466449	[1728022706]	2000000 OPS in 2.206501 seconds, throughput 906412.460271
+466449	[1728022706]	2000000 OPS in 2.192472 seconds, throughput 912212.333841
+466449	[1728022707]	2000000 OPS in 2.209257 seconds, throughput 905281.730464
+466449	[1728022708]	2000000 OPS in 2.190016 seconds, throughput 913235.337093
+466449	[1728022708]	2000000 OPS in 2.212586 seconds, throughput 903919.666851
+466449	[1728022709]	2000000 OPS in 2.197047 seconds, throughput 910312.797132
+466449	[1728022709]	2000000 OPS in 2.184597 seconds, throughput 915500.662136
+466449	[1728022710]	2000000 OPS in 2.167134 seconds, throughput 922877.865420
+466449	[1728022710]	2000000 OPS in 2.187676 seconds, throughput 914212.159387
+466449	[1728022711]	2000000 OPS in 2.191648 seconds, throughput 912555.300851
+466449	[1728022711]	2000000 OPS in 2.193810 seconds, throughput 911655.977500
+466449	[1728022712]	2000000 OPS in 2.182122 seconds, throughput 916539.038606
+466449	[1728022712]	2000000 OPS in 2.217508 seconds, throughput 901913.318915
+466449	[1728022713]	2000000 OPS in 2.192589 seconds, throughput 912163.656755
+466449	[1728022714]	2000000 OPS in 2.194242 seconds, throughput 911476.491654
+466449	[1728022714]	2000000 OPS in 2.193553 seconds, throughput 911762.788499
+466449	[1728022715]	2000000 OPS in 2.213591 seconds, throughput 903509.275200
+466449	[1728022715]	2000000 OPS in 2.190669 seconds, throughput 912963.117659
+466449	[1728022716]	2000000 OPS in 2.193058 seconds, throughput 911968.584506
+466449	[1728022717]	2000000 OPS in 2.191706 seconds, throughput 912531.151532
+466449	[1728022717]	2000000 OPS in 2.213559 seconds, throughput 903522.336653
+466449	[1728022717]	2000000 OPS in 2.200727 seconds, throughput 908790.595108
+466449	[1728022718]	2000000 OPS in 2.213021 seconds, throughput 903741.988892
+466449	[1728022719]	2000000 OPS in 2.189458 seconds, throughput 913468.082055
+466449	[1728022719]	2000000 OPS in 2.203977 seconds, throughput 907450.486099
+466449	[1728022720]	2000000 OPS in 2.204659 seconds, throughput 907169.770926
+466449	[1728022720]	2000000 OPS in 2.202746 seconds, throughput 907957.612907
+466449	[1728022721]	2000000 OPS in 2.180072 seconds, throughput 917400.893182
+466449	[1728022721]	2000000 OPS in 2.203904 seconds, throughput 907480.543617
+466449	[1728022722]	2000000 OPS in 2.200311 seconds, throughput 908962.414859
+466449	[1728022722]	2000000 OPS in 2.199005 seconds, throughput 909502.252155
+466449	[1728022723]	2000000 OPS in 2.189025 seconds, throughput 913648.770571
+466449	[1728022723]	2000000 OPS in 2.230571 seconds, throughput 896631.400659
+466449	[1728022724]	2000000 OPS in 2.198801 seconds, throughput 909586.633806
+466449	[1728022725]	2000000 OPS in 2.198470 seconds, throughput 909723.580490
+466449	[1728022725]	2000000 OPS in 2.189945 seconds, throughput 913264.945010
+466449	[1728022726]	2000000 OPS in 2.193554 seconds, throughput 911762.372843
+466449	[1728022726]	2000000 OPS in 2.176933 seconds, throughput 918723.727372
+466449	[1728022727]	2000000 OPS in 2.177817 seconds, throughput 918350.807253
+466449	[1728022727]	2000000 OPS in 2.182490 seconds, throughput 916384.496607
+466449	[1728022728]	2000000 OPS in 2.204829 seconds, throughput 907099.824975
+466449	[1728022728]	2000000 OPS in 2.192032 seconds, throughput 912395.439483
+466449	[1728022729]	2000000 OPS in 2.208413 seconds, throughput 905627.706412
+466449	[1728022730]	2000000 OPS in 2.189267 seconds, throughput 913547.776493
+466449	[1728022730]	2000000 OPS in 2.206207 seconds, throughput 906533.249147
+466449	[1728022731]	2000000 OPS in 2.211005 seconds, throughput 904566.023143
+466449	[1728022731]	2000000 OPS in 2.202866 seconds, throughput 907908.152380
+466449	[1728022732]	2000000 OPS in 2.182181 seconds, throughput 916514.257983
+466449	[1728022732]	2000000 OPS in 2.214995 seconds, throughput 902936.575478
+466449	[1728022733]	2000000 OPS in 2.197265 seconds, throughput 910222.481130
+466449	[1728022733]	2000000 OPS in 2.193128 seconds, throughput 911939.476401
+466449	[1728022734]	2000000 OPS in 2.192690 seconds, throughput 912121.640542
+466449	[1728022734]	2000000 OPS in 2.209365 seconds, throughput 905237.477737
+466449	[1728022735]	2000000 OPS in 2.204208 seconds, throughput 907355.385699
+466449	[1728022735]	2000000 OPS in 2.193410 seconds, throughput 911822.231138
+466449	[1728022736]	2000000 OPS in 2.186635 seconds, throughput 914647.391997
+466449	[1728022737]	2000000 OPS in 2.213160 seconds, throughput 903685.228361
+466449	[1728022737]	2000000 OPS in 2.196729 seconds, throughput 910444.574638
+466449	[1728022738]	2000000 OPS in 2.204172 seconds, throughput 907370.205229
+466449	[1728022738]	2000000 OPS in 2.190631 seconds, throughput 912978.954466
+466449	[1728022739]	2000000 OPS in 2.203372 seconds, throughput 907699.653077
+466449	[1728022739]	2000000 OPS in 2.211214 seconds, throughput 904480.525178
+466449	[1728022740]	2000000 OPS in 2.207945 seconds, throughput 905819.664892
+466449	[1728022741]	2000000 OPS in 2.188660 seconds, throughput 913801.138596
+466449	[1728022741]	2000000 OPS in 2.203355 seconds, throughput 907706.656440
+466449	[1728022742]	2000000 OPS in 2.183734 seconds, throughput 915862.463102
+466449	[1728022742]	2000000 OPS in 2.180342 seconds, throughput 917287.287958
+466449	[1728022743]	2000000 OPS in 2.166607 seconds, throughput 923102.343895
+466449	[1728022743]	2000000 OPS in 2.202128 seconds, throughput 908212.419986
+466449	[1728022744]	2000000 OPS in 2.199255 seconds, throughput 909398.864616
+466449	[1728022744]	2000000 OPS in 2.194131 seconds, throughput 911522.602798
+466449	[1728022745]	2000000 OPS in 2.193446 seconds, throughput 911807.265827
+466449	[1728022745]	2000000 OPS in 2.207045 seconds, throughput 906189.044628
+466449	[1728022746]	2000000 OPS in 2.191510 seconds, throughput 912612.764715
+466449	[1728022746]	2000000 OPS in 2.192359 seconds, throughput 912259.351685
+466449	[1728022747]	2000000 OPS in 2.190448 seconds, throughput 913055.228885
+466449	[1728022748]	2000000 OPS in 2.212969 seconds, throughput 903763.224880
+466449	[1728022748]	2000000 OPS in 2.199548 seconds, throughput 909277.724332
+466449	[1728022749]	2000000 OPS in 2.216275 seconds, throughput 902415.088380
+466449	[1728022749]	2000000 OPS in 2.182974 seconds, throughput 916181.319613
+466449	[1728022750]	2000000 OPS in 2.206783 seconds, throughput 906296.631794
+466449	[1728022750]	2000000 OPS in 2.203813 seconds, throughput 907518.015367
+466449	[1728022751]	2000000 OPS in 2.192938 seconds, throughput 912018.488439
+466449	[1728022752]	2000000 OPS in 2.188502 seconds, throughput 913867.110928
+466449	[1728022752]	2000000 OPS in 2.210889 seconds, throughput 904613.483535
+466449	[1728022753]	2000000 OPS in 2.193914 seconds, throughput 911612.761485
+466449	[1728022753]	2000000 OPS in 2.199968 seconds, throughput 909104.132424
+466449	[1728022754]	2000000 OPS in 2.180405 seconds, throughput 917260.784120
+466449	[1728022754]	2000000 OPS in 2.212264 seconds, throughput 904051.234392
+466449	[1728022755]	2000000 OPS in 2.199279 seconds, throughput 909388.940648
+466449	[1728022755]	2000000 OPS in 2.193444 seconds, throughput 911808.097221
+466449	[1728022756]	2000000 OPS in 2.201211 seconds, throughput 908590.771171
+466449	[1728022756]	2000000 OPS in 2.211462 seconds, throughput 904379.094011
+466449	[1728022757]	2000000 OPS in 2.198600 seconds, throughput 909669.789866
+466449	[1728022757]	2000000 OPS in 2.201159 seconds, throughput 908612.235645
+466449	[1728022758]	2000000 OPS in 2.169429 seconds, throughput 921901.569491
+466449	[1728022759]	2000000 OPS in 2.187207 seconds, throughput 914408.192732
+466449	[1728022759]	2000000 OPS in 2.176653 seconds, throughput 918841.910033
+466449	[1728022760]	2000000 OPS in 2.198113 seconds, throughput 909871.330546
+466449	[1728022760]	2000000 OPS in 2.188580 seconds, throughput 913834.541118
+466449	[1728022761]	2000000 OPS in 2.212594 seconds, throughput 903916.398580
+466449	[1728022761]	2000000 OPS in 2.214976 seconds, throughput 902944.320841
+466449	[1728022762]	2000000 OPS in 2.201257 seconds, throughput 908571.784212
+466449	[1728022762]	2000000 OPS in 2.181829 seconds, throughput 916662.121550
+466449	[1728022763]	2000000 OPS in 2.217131 seconds, throughput 902066.679867
+466449	[1728022764]	2000000 OPS in 2.194611 seconds, throughput 911323.236783
+466449	[1728022764]	2000000 OPS in 2.193511 seconds, throughput 911780.246372
+466449	[1728022765]	2000000 OPS in 2.182760 seconds, throughput 916271.142957
+466449	[1728022765]	2000000 OPS in 2.208677 seconds, throughput 905519.458028
+466449	[1728022766]	2000000 OPS in 2.191085 seconds, throughput 912789.782231
+466449	[1728022766]	2000000 OPS in 2.192433 seconds, throughput 912228.560690
+466449	[1728022767]	2000000 OPS in 2.195213 seconds, throughput 911073.321814
+466449	[1728022768]	2000000 OPS in 2.205755 seconds, throughput 906719.014578
+466449	[1728022768]	2000000 OPS in 2.199018 seconds, throughput 909496.875423
+466449	[1728022768]	2000000 OPS in 2.213477 seconds, throughput 903555.808350
+466449	[1728022769]	2000000 OPS in 2.183907 seconds, throughput 915789.912299
+466449	[1728022770]	2000000 OPS in 2.205272 seconds, throughput 906917.604722
+466449	[1728022770]	2000000 OPS in 2.200182 seconds, throughput 909015.708700
+466449	[1728022771]	2000000 OPS in 2.196195 seconds, throughput 910665.947241
+466449	[1728022771]	2000000 OPS in 2.188659 seconds, throughput 913801.556113
+466449	[1728022772]	2000000 OPS in 2.194891 seconds, throughput 911206.980210
+466449	[1728022772]	2000000 OPS in 2.199087 seconds, throughput 909468.338451
+466449	[1728022773]	2000000 OPS in 2.201211 seconds, throughput 908590.771171
+466449	[1728022773]	2000000 OPS in 2.178420 seconds, throughput 918096.602124
+466449	[1728022774]	2000000 OPS in 2.205109 seconds, throughput 906984.643390
+466449	[1728022775]	2000000 OPS in 2.178052 seconds, throughput 918251.722181
+466449	[1728022775]	2000000 OPS in 2.177686 seconds, throughput 918406.051194
+466449	[1728022776]	2000000 OPS in 2.165790 seconds, throughput 923450.565383
+466449	[1728022776]	2000000 OPS in 2.203860 seconds, throughput 907498.661439
+466449	[1728022777]	2000000 OPS in 2.191208 seconds, throughput 912738.544219
+466449	[1728022777]	2000000 OPS in 2.192432 seconds, throughput 912228.976771
+466449	[1728022778]	2000000 OPS in 2.194807 seconds, throughput 911241.854067
+466449	[1728022779]	2000000 OPS in 2.205707 seconds, throughput 906738.746352
+466449	[1728022779]	2000000 OPS in 2.201079 seconds, throughput 908645.259893
+466449	[1728022779]	2000000 OPS in 2.213208 seconds, throughput 903665.629259
+466449	[1728022780]	2000000 OPS in 2.183816 seconds, throughput 915828.073427
+466449	[1728022781]	2000000 OPS in 2.203720 seconds, throughput 907556.313869
+466449	[1728022781]	2000000 OPS in 2.205295 seconds, throughput 906908.146076
+466449	[1728022782]	2000000 OPS in 2.196766 seconds, throughput 910429.240074
+466449	[1728022782]	2000000 OPS in 2.180875 seconds, throughput 917063.105405
+466449	[1728022783]	2000000 OPS in 2.222780 seconds, throughput 899774.156687
+466449	[1728022783]	2000000 OPS in 2.193944 seconds, throughput 911600.296088
+466449	[1728022784]	2000000 OPS in 2.193906 seconds, throughput 911616.085648
+466449	[1728022784]	2000000 OPS in 2.189192 seconds, throughput 913579.073923
+466449	[1728022785]	2000000 OPS in 2.216702 seconds, throughput 902241.257508
+466449	[1728022786]	2000000 OPS in 2.200755 seconds, throughput 908779.032650
+466449	[1728022786]	2000000 OPS in 2.201255 seconds, throughput 908572.609716
+466449	[1728022786]	2000000 OPS in 2.205424 seconds, throughput 906855.099065
+466449	[1728022787]	2000000 OPS in 2.210806 seconds, throughput 904647.445321
+466449	[1728022788]	2000000 OPS in 2.199591 seconds, throughput 909259.948781
+466449	[1728022788]	2000000 OPS in 2.214939 seconds, throughput 902959.404300
+466449	[1728022789]	2000000 OPS in 2.195560 seconds, throughput 910929.330103
+466449	[1728022790]	2000000 OPS in 2.211054 seconds, throughput 904545.976715
+466449	[1728022790]	2000000 OPS in 2.200623 seconds, throughput 908833.543956
+466449	[1728022790]	2000000 OPS in 2.190070 seconds, throughput 913212.819682
+466449	[1728022791]	2000000 OPS in 2.167408 seconds, throughput 922761.196784
+466449	[1728022792]	2000000 OPS in 2.190035 seconds, throughput 913227.414174
+466449	[1728022792]	2000000 OPS in 2.190942 seconds, throughput 912849.358860
+466449	[1728022793]	2000000 OPS in 2.191504 seconds, throughput 912615.263308
+466449	[1728022793]	2000000 OPS in 2.180628 seconds, throughput 917166.981255
+466449	[1728022794]	2000000 OPS in 2.218713 seconds, throughput 901423.482893
+466449	[1728022794]	2000000 OPS in 2.192631 seconds, throughput 912146.184196
+466449	[1728022795]	2000000 OPS in 2.194612 seconds, throughput 911322.821528
+466449	[1728022795]	2000000 OPS in 2.181821 seconds, throughput 916665.482640
+466449	[1728022796]	2000000 OPS in 2.214676 seconds, throughput 903066.633675
+466449	[1728022797]	2000000 OPS in 2.199848 seconds, throughput 909153.723348
+466449	[1728022797]	2000000 OPS in 2.200563 seconds, throughput 908858.323983
+466449	[1728022797]	2000000 OPS in 2.201759 seconds, throughput 908364.630280
+466449	[1728022798]	2000000 OPS in 2.203558 seconds, throughput 907623.035110
+466449	[1728022799]	2000000 OPS in 2.192518 seconds, throughput 912193.195221
+466449	[1728022799]	2000000 OPS in 2.220397 seconds, throughput 900739.822653
+466449	[1728022800]	2000000 OPS in 2.192311 seconds, throughput 912279.325333
+466449	[1728022801]	2000000 OPS in 2.211426 seconds, throughput 904393.816479
+466449	[1728022801]	2000000 OPS in 2.208760 seconds, throughput 905485.430739
+466449	[1728022801]	2000000 OPS in 2.194696 seconds, throughput 911287.941473
+466449	[1728022802]	2000000 OPS in 2.181977 seconds, throughput 916599.945829
+466449	[1728022803]	2000000 OPS in 2.223086 seconds, throughput 899650.305926
+466449	[1728022803]	2000000 OPS in 2.195055 seconds, throughput 911138.900848
+466449	[1728022804]	2000000 OPS in 2.194516 seconds, throughput 911362.687718
+466449	[1728022804]	2000000 OPS in 2.182712 seconds, throughput 916291.292667
+466449	[1728022805]	2000000 OPS in 2.207781 seconds, throughput 905886.951650
+466449	[1728022805]	2000000 OPS in 2.193937 seconds, throughput 911603.204650
+466449	[1728022806]	2000000 OPS in 2.192445 seconds, throughput 912223.567752
+466449	[1728022806]	2000000 OPS in 2.189266 seconds, throughput 913548.193778
+466449	[1728022807]	2000000 OPS in 2.189403 seconds, throughput 913491.029290
+466449	[1728022808]	2000000 OPS in 2.176591 seconds, throughput 918868.083163
+466449	[1728022808]	2000000 OPS in 2.189433 seconds, throughput 913478.512473
+466449	[1728022808]	2000000 OPS in 2.181212 seconds, throughput 916921.418001
+466449	[1728022809]	2000000 OPS in 2.204038 seconds, throughput 907425.371069
+466449	[1728022810]	2000000 OPS in 2.192039 seconds, throughput 912392.525863
+466449	[1728022810]	2000000 OPS in 2.205192 seconds, throughput 906950.505897
+466449	[1728022811]	2000000 OPS in 2.182006 seconds, throughput 916587.763737
+466449	[1728022812]	2000000 OPS in 2.210258 seconds, throughput 904871.738955
+466449	[1728022812]	2000000 OPS in 2.212828 seconds, throughput 903820.812101
+466449	[1728022812]	2000000 OPS in 2.196079 seconds, throughput 910714.049904
+466449	[1728022813]	2000000 OPS in 2.180314 seconds, throughput 917299.067932
+466449	[1728022814]	2000000 OPS in 2.210626 seconds, throughput 904721.106148
+466449	[1728022814]	2000000 OPS in 2.191437 seconds, throughput 912643.165193
+466449	[1728022815]	2000000 OPS in 2.194985 seconds, throughput 911167.957868
+466449	[1728022815]	2000000 OPS in 2.179995 seconds, throughput 917433.296865
+466449	[1728022816]	2000000 OPS in 2.204215 seconds, throughput 907352.504179
+466449	[1728022816]	2000000 OPS in 2.196037 seconds, throughput 910731.467639
+466449	[1728022817]	2000000 OPS in 2.203521 seconds, throughput 907638.275288
+466449	[1728022817]	2000000 OPS in 2.187366 seconds, throughput 914341.724247
+466449	[1728022818]	2000000 OPS in 2.211954 seconds, throughput 904177.934984
+466449	[1728022819]	2000000 OPS in 2.200010 seconds, throughput 909086.776878
+466449	[1728022819]	2000000 OPS in 2.215031 seconds, throughput 902921.900416
+466449	[1728022819]	2000000 OPS in 2.201648 seconds, throughput 908410.427098
+466449	[1728022820]	2000000 OPS in 2.202797 seconds, throughput 907936.591524
+466449	[1728022821]	2000000 OPS in 2.204192 seconds, throughput 907361.972097
+466449	[1728022821]	2000000 OPS in 2.201054 seconds, throughput 908655.580463
+466449	[1728022821]	2000000 OPS in 2.182855 seconds, throughput 916231.265934
+466449	[1728022823]	2000000 OPS in 2.206859 seconds, throughput 906265.420673
+466449	[1728022823]	2000000 OPS in 2.188786 seconds, throughput 913748.534576
+466449	[1728022823]	2000000 OPS in 2.183282 seconds, throughput 916052.072064
+466449	[1728022824]	2000000 OPS in 2.165493 seconds, throughput 923577.217751
+466449	[1728022825]	2000000 OPS in 2.203842 seconds, throughput 907506.073484
+466449	[1728022825]	2000000 OPS in 2.191932 seconds, throughput 912437.064653
+466449	[1728022826]	2000000 OPS in 2.197826 seconds, throughput 909990.144807
+466449	[1728022826]	2000000 OPS in 2.180697 seconds, throughput 917137.960936
+466449	[1728022827]	2000000 OPS in 2.212416 seconds, throughput 903989.123203
+466449	[1728022827]	2000000 OPS in 2.201169 seconds, throughput 908608.107783
+466449	[1728022828]	2000000 OPS in 2.203707 seconds, throughput 907561.667681
+466449	[1728022828]	2000000 OPS in 2.205010 seconds, throughput 907025.364964
+466449	[1728022829]	2000000 OPS in 2.204140 seconds, throughput 907383.378551
+466449	[1728022829]	2000000 OPS in 2.191324 seconds, throughput 912690.227461
+466449	[1728022830]	2000000 OPS in 2.218588 seconds, throughput 901474.271023
+466449	[1728022830]	2000000 OPS in 2.186543 seconds, throughput 914685.876290
+466449	[1728022832]	2000000 OPS in 2.204475 seconds, throughput 907245.489289
+466449	[1728022832]	2000000 OPS in 2.209102 seconds, throughput 905345.248884
+466449	[1728022832]	2000000 OPS in 2.197854 seconds, throughput 909978.551806
+466449	[1728022832]	2000000 OPS in 2.179311 seconds, throughput 917721.243090
+466449	[1728022834]	2000000 OPS in 2.219246 seconds, throughput 901206.986517
+466449	[1728022834]	2000000 OPS in 2.196306 seconds, throughput 910619.922725
+466449	[1728022834]	2000000 OPS in 2.197155 seconds, throughput 910268.051184
+466449	[1728022835]	2000000 OPS in 2.179217 seconds, throughput 917760.828775
+466449	[1728022836]	2000000 OPS in 2.212546 seconds, throughput 903936.008562
+466449	[1728022836]	2000000 OPS in 2.192398 seconds, throughput 912243.123739
+466449	[1728022837]	2000000 OPS in 2.195425 seconds, throughput 910985.344523
+466449	[1728022837]	2000000 OPS in 2.179168 seconds, throughput 917781.465220
+466449	[1728022838]	2000000 OPS in 2.203216 seconds, throughput 907763.923283
+466449	[1728022838]	2000000 OPS in 2.190661 seconds, throughput 912966.451678
+466449	[1728022839]	2000000 OPS in 2.196642 seconds, throughput 910480.633622
+466449	[1728022839]	2000000 OPS in 2.180153 seconds, throughput 917366.808660
+466449	[1728022840]	2000000 OPS in 2.189061 seconds, throughput 913633.745245
+466449	[1728022840]	2000000 OPS in 2.177867 seconds, throughput 918329.723532
+466449	[1728022841]	2000000 OPS in 2.204124 seconds, throughput 907389.965356
+466449	[1728022841]	2000000 OPS in 2.188410 seconds, throughput 913905.529585
+466449	[1728022843]	2000000 OPS in 2.225472 seconds, throughput 898685.761942
+466449	[1728022843]	2000000 OPS in 2.214345 seconds, throughput 903201.623957
+466449	[1728022843]	2000000 OPS in 2.204402 seconds, throughput 907275.533229
+466449	[1728022843]	2000000 OPS in 2.180561 seconds, throughput 917195.162162
+466449	[1728022845]	2000000 OPS in 2.206844 seconds, throughput 906271.580592
+466449	[1728022845]	2000000 OPS in 2.200665 seconds, throughput 908816.198740
+466449	[1728022845]	2000000 OPS in 2.196203 seconds, throughput 910662.630003
+466449	[1728022845]	2000000 OPS in 2.178921 seconds, throughput 917885.503880
+466449	[1728022847]	2000000 OPS in 2.204377 seconds, throughput 907285.822706
+466449	[1728022847]	2000000 OPS in 2.190504 seconds, throughput 913031.886726
+466449	[1728022848]	2000000 OPS in 2.196282 seconds, throughput 910629.873577
+466449	[1728022848]	2000000 OPS in 2.180828 seconds, throughput 917082.869442
+466449	[1728022849]	2000000 OPS in 2.212410 seconds, throughput 903991.574799
+466449	[1728022849]	2000000 OPS in 2.192498 seconds, throughput 912201.516261
+466449	[1728022850]	2000000 OPS in 2.198990 seconds, throughput 909508.456155
+466449	[1728022850]	2000000 OPS in 2.209261 seconds, throughput 905280.091397
+466449	[1728022851]	2000000 OPS in 2.206576 seconds, throughput 906381.651935
+466449	[1728022851]	2000000 OPS in 2.199160 seconds, throughput 909438.149111
+466449	[1728022852]	2000000 OPS in 2.181024 seconds, throughput 917000.454832
+466449	[1728022852]	2000000 OPS in 2.206633 seconds, throughput 906358.239000
+466449	[1728022854]	2000000 OPS in 2.217760 seconds, throughput 901810.836159
+466449	[1728022854]	2000000 OPS in 2.199851 seconds, throughput 909152.483509
+466449	[1728022854]	2000000 OPS in 2.179247 seconds, throughput 917748.194675
+466449	[1728022854]	2000000 OPS in 2.198089 seconds, throughput 909881.265044
+466449	[1728022856]	2000000 OPS in 2.190971 seconds, throughput 912837.276258
+466449	[1728022856]	2000000 OPS in 2.180657 seconds, throughput 917154.784086
+466449	[1728022856]	2000000 OPS in 2.165786 seconds, throughput 923452.270908
+466449	[1728022856]	2000000 OPS in 2.182496 seconds, throughput 916381.977332
+466449	[1728022858]	2000000 OPS in 2.204492 seconds, throughput 907238.493041
+466449	[1728022858]	2000000 OPS in 2.200053 seconds, throughput 909069.008792
+466449	[1728022859]	2000000 OPS in 2.180050 seconds, throughput 917410.151143
+466449	[1728022859]	2000000 OPS in 2.202108 seconds, throughput 908220.668559
+466449	[1728022860]	2000000 OPS in 2.192522 seconds, throughput 912191.531031
+466449	[1728022860]	2000000 OPS in 2.212881 seconds, throughput 903799.164980
+466449	[1728022861]	2000000 OPS in 2.192563 seconds, throughput 912174.473436
+466449	[1728022861]	2000000 OPS in 2.207124 seconds, throughput 906156.609234
+466449	[1728022862]	2000000 OPS in 2.203851 seconds, throughput 907502.367447
+466449	[1728022862]	2000000 OPS in 2.216045 seconds, throughput 902508.748694
+466449	[1728022863]	2000000 OPS in 2.188206 seconds, throughput 913990.730306
+466449	[1728022863]	2000000 OPS in 2.196901 seconds, throughput 910373.294017
+466449	[1728022865]	2000000 OPS in 2.196747 seconds, throughput 910437.114515
+466449	[1728022865]	2000000 OPS in 2.206684 seconds, throughput 906337.291610
+466449	[1728022865]	2000000 OPS in 2.180308 seconds, throughput 917301.592252
+466449	[1728022865]	2000000 OPS in 2.203608 seconds, throughput 907602.441088
+466449	[1728022867]	2000000 OPS in 2.200811 seconds, throughput 908755.908617
+466449	[1728022867]	2000000 OPS in 2.210509 seconds, throughput 904768.992119
+466449	[1728022867]	2000000 OPS in 2.187024 seconds, throughput 914484.706158
+466449	[1728022867]	2000000 OPS in 2.203233 seconds, throughput 907756.919037
+466449	[1728022869]	2000000 OPS in 2.192706 seconds, throughput 912114.984863
+466449	[1728022869]	2000000 OPS in 2.202475 seconds, throughput 908069.331093
+466449	[1728022869]	2000000 OPS in 2.190294 seconds, throughput 913119.425977
+466449	[1728022870]	2000000 OPS in 2.217903 seconds, throughput 901752.691619
+466449	[1728022871]	2000000 OPS in 2.198046 seconds, throughput 909899.064897
+466449	[1728022871]	2000000 OPS in 2.211765 seconds, throughput 904255.198902
+466449	[1728022872]	2000000 OPS in 2.177429 seconds, throughput 918514.449840
+466449	[1728022872]	2000000 OPS in 2.185544 seconds, throughput 915103.974114
+466449	[1728022873]	2000000 OPS in 2.195692 seconds, throughput 910874.567107
+466449	[1728022873]	2000000 OPS in 2.211367 seconds, throughput 904417.946004
+466449	[1728022874]	2000000 OPS in 2.186681 seconds, throughput 914628.151065
+466449	[1728022874]	2000000 OPS in 2.204344 seconds, throughput 907299.405175
+466449	[1728022876]	2000000 OPS in 2.193239 seconds, throughput 911893.323071
+466449	[1728022876]	2000000 OPS in 2.206434 seconds, throughput 906439.984155
+466449	[1728022876]	2000000 OPS in 2.179944 seconds, throughput 917454.760306
+466449	[1728022876]	2000000 OPS in 2.203738 seconds, throughput 907548.901004
+466449	[1728022878]	2000000 OPS in 2.194044 seconds, throughput 911558.747227
+466449	[1728022878]	2000000 OPS in 2.204137 seconds, throughput 907384.613570
+466449	[1728022878]	2000000 OPS in 2.179535 seconds, throughput 917626.925009
+466449	[1728022878]	2000000 OPS in 2.195507 seconds, throughput 910951.320128
+466449	[1728022880]	2000000 OPS in 2.200883 seconds, throughput 908726.179447
+466449	[1728022880]	2000000 OPS in 2.203190 seconds, throughput 907774.635869
+466449	[1728022880]	2000000 OPS in 2.188288 seconds, throughput 913956.481048
+466449	[1728022881]	2000000 OPS in 2.210818 seconds, throughput 904642.535025
+466449	[1728022882]	2000000 OPS in 2.200740 seconds, throughput 908785.226787
+466449	[1728022882]	2000000 OPS in 2.222589 seconds, throughput 899851.479513
+466449	[1728022883]	2000000 OPS in 2.185637 seconds, throughput 915065.035960
+466449	[1728022883]	2000000 OPS in 2.198529 seconds, throughput 909699.167034
+466449	[1728022884]	2000000 OPS in 2.200444 seconds, throughput 908907.475037
+466449	[1728022885]	2000000 OPS in 2.208573 seconds, throughput 905562.098242
+466449	[1728022885]	2000000 OPS in 2.190060 seconds, throughput 913216.989489
+466449	[1728022885]	2000000 OPS in 2.201870 seconds, throughput 908318.838079
+466449	[1728022887]	2000000 OPS in 2.194843 seconds, throughput 911226.907802
+466449	[1728022887]	2000000 OPS in 2.208241 seconds, throughput 905698.245798
+466449	[1728022887]	2000000 OPS in 2.181141 seconds, throughput 916951.265416
+466449	[1728022887]	2000000 OPS in 2.208192 seconds, throughput 905718.343332
+466449	[1728022889]	2000000 OPS in 2.178461 seconds, throughput 918079.322972
+466449	[1728022889]	2000000 OPS in 2.190964 seconds, throughput 912840.192719
+466449	[1728022889]	2000000 OPS in 2.164916 seconds, throughput 923823.372362
+466449	[1728022889]	2000000 OPS in 2.203266 seconds, throughput 907743.322867
+466449	[1728022891]	2000000 OPS in 2.200832 seconds, throughput 908747.237408
+466449	[1728022891]	2000000 OPS in 2.219225 seconds, throughput 901215.514425
+466449	[1728022891]	2000000 OPS in 2.201690 seconds, throughput 908393.098029
+466449	[1728022892]	2000000 OPS in 2.205147 seconds, throughput 906969.013857
+466449	[1728022893]	2000000 OPS in 2.213946 seconds, throughput 903364.400035
+466449	[1728022893]	2000000 OPS in 2.222913 seconds, throughput 899720.321938
+466449	[1728022894]	2000000 OPS in 2.189923 seconds, throughput 913274.119684
+466449	[1728022894]	2000000 OPS in 2.206164 seconds, throughput 906550.918245
+466449	[1728022895]	2000000 OPS in 2.195563 seconds, throughput 910928.085416
+466449	[1728022896]	2000000 OPS in 2.206798 seconds, throughput 906290.471534
+466449	[1728022896]	2000000 OPS in 2.179988 seconds, throughput 917436.242768
+466449	[1728022896]	2000000 OPS in 2.198107 seconds, throughput 909873.814150
+466449	[1728022898]	2000000 OPS in 2.194619 seconds, throughput 911319.914755
+466449	[1728022898]	2000000 OPS in 2.206745 seconds, throughput 906312.238161
+466449	[1728022898]	2000000 OPS in 2.187988 seconds, throughput 914081.795695
+466449	[1728022898]	2000000 OPS in 2.197453 seconds, throughput 910144.608326
+466449	[1728022900]	2000000 OPS in 2.191082 seconds, throughput 912791.032011
+466449	[1728022900]	2000000 OPS in 2.204481 seconds, throughput 907243.020012
+466449	[1728022900]	2000000 OPS in 2.180253 seconds, throughput 917324.732497
+466449	[1728022900]	2000000 OPS in 2.213889 seconds, throughput 903387.658550
+466449	[1728022902]	2000000 OPS in 2.201941 seconds, throughput 908289.549992
+466449	[1728022902]	2000000 OPS in 2.218867 seconds, throughput 901360.919785
+466449	[1728022902]	2000000 OPS in 2.193770 seconds, throughput 911672.600136
+466449	[1728022903]	2000000 OPS in 2.196806 seconds, throughput 910412.662748
+466449	[1728022904]	2000000 OPS in 2.189404 seconds, throughput 913490.612057
+466449	[1728022904]	2000000 OPS in 2.192905 seconds, throughput 912032.212978
+466449	[1728022904]	2000000 OPS in 2.166465 seconds, throughput 923162.848234
+466449	[1728022905]	2000000 OPS in 2.178505 seconds, throughput 918060.780214
+466449	[1728022906]	2000000 OPS in 2.199179 seconds, throughput 909430.291941
+466449	[1728022907]	2000000 OPS in 2.187960 seconds, throughput 914093.493483
+466449	[1728022907]	2000000 OPS in 2.212394 seconds, throughput 903998.112452
+466449	[1728022907]	2000000 OPS in 2.201157 seconds, throughput 908613.061222
+466449	[1728022909]	2000000 OPS in 2.200478 seconds, throughput 908893.431336
+466449	[1728022909]	2000000 OPS in 2.188203 seconds, throughput 913991.983376
+466449	[1728022909]	2000000 OPS in 2.212497 seconds, throughput 903956.027963
+466449	[1728022909]	2000000 OPS in 2.218478 seconds, throughput 901518.969311
+466449	[1728022911]	2000000 OPS in 2.200474 seconds, throughput 908895.083514
+466449	[1728022911]	2000000 OPS in 2.191229 seconds, throughput 912729.796840
+466449	[1728022911]	2000000 OPS in 2.221129 seconds, throughput 900442.972921
+466449	[1728022911]	2000000 OPS in 2.198400 seconds, throughput 909752.547307
+466449	[1728022913]	2000000 OPS in 2.211426 seconds, throughput 904393.816479
+466449	[1728022913]	2000000 OPS in 2.195685 seconds, throughput 910877.471040
+466449	[1728022913]	2000000 OPS in 2.218268 seconds, throughput 901604.314718
+466449	[1728022914]	2000000 OPS in 2.202128 seconds, throughput 908212.419986
+466449	[1728022915]	2000000 OPS in 2.195282 seconds, throughput 911044.685831
+466449	[1728022915]	2000000 OPS in 2.179568 seconds, throughput 917613.031573
+466449	[1728022915]	2000000 OPS in 2.203701 seconds, throughput 907564.138692
+466449	[1728022916]	2000000 OPS in 2.193516 seconds, throughput 911778.168019
+466449	[1728022917]	2000000 OPS in 2.192092 seconds, throughput 912370.466203
+466449	[1728022918]	2000000 OPS in 2.179252 seconds, throughput 917746.089025
+466449	[1728022918]	2000000 OPS in 2.213628 seconds, throughput 903494.173366
+466449	[1728022918]	2000000 OPS in 2.193311 seconds, throughput 911863.388275
+466449	[1728022920]	2000000 OPS in 2.192887 seconds, throughput 912039.699264
+466449	[1728022920]	2000000 OPS in 2.186577 seconds, throughput 914671.653457
+466449	[1728022920]	2000000 OPS in 2.204141 seconds, throughput 907382.966879
+466449	[1728022920]	2000000 OPS in 2.193273 seconds, throughput 911879.186950
+466449	[1728022922]	2000000 OPS in 2.175876 seconds, throughput 919170.026233
+466449	[1728022922]	2000000 OPS in 2.179142 seconds, throughput 917792.415547
+466449	[1728022922]	2000000 OPS in 2.210777 seconds, throughput 904659.312088
+466449	[1728022922]	2000000 OPS in 2.202201 seconds, throughput 908182.313967
+466449	[1728022924]	2000000 OPS in 2.221344 seconds, throughput 900355.820620
+466449	[1728022924]	2000000 OPS in 2.189953 seconds, throughput 913261.608811
+466449	[1728022924]	2000000 OPS in 2.207794 seconds, throughput 905881.617578
+466449	[1728022925]	2000000 OPS in 2.198998 seconds, throughput 909505.147344
+466449	[1728022926]	2000000 OPS in 2.192692 seconds, throughput 912120.808577
+466449	[1728022926]	2000000 OPS in 2.179978 seconds, throughput 917440.451234
+466449	[1728022927]	2000000 OPS in 2.205640 seconds, throughput 906766.290056
+466449	[1728022927]	2000000 OPS in 2.192973 seconds, throughput 912003.932561
+466449	[1728022928]	2000000 OPS in 2.189337 seconds, throughput 913518.567493
+466449	[1728022928]	2000000 OPS in 2.179121 seconds, throughput 917801.260233
+466449	[1728022929]	2000000 OPS in 2.209966 seconds, throughput 904991.298509
+466449	[1728022929]	2000000 OPS in 2.193188 seconds, throughput 911914.528075
+466449	[1728022931]	2000000 OPS in 2.190680 seconds, throughput 912958.533423
+466449	[1728022931]	2000000 OPS in 2.179188 seconds, throughput 917773.042069
+466449	[1728022931]	2000000 OPS in 2.211830 seconds, throughput 904228.625166
+466449	[1728022931]	2000000 OPS in 2.207450 seconds, throughput 906022.786473
+466449	[1728022933]	2000000 OPS in 2.199642 seconds, throughput 909238.867052
+466449	[1728022933]	2000000 OPS in 2.200919 seconds, throughput 908711.315591
+466449	[1728022933]	2000000 OPS in 2.210302 seconds, throughput 904853.725871
+466449	[1728022933]	2000000 OPS in 2.199197 seconds, throughput 909422.848431
+466449	[1728022935]	2000000 OPS in 2.200665 seconds, throughput 908816.198740
+466449	[1728022935]	2000000 OPS in 2.181667 seconds, throughput 916730.188429
+466449	[1728022935]	2000000 OPS in 2.203384 seconds, throughput 907694.709592
+466449	[1728022936]	2000000 OPS in 2.191313 seconds, throughput 912694.809003
+466449	[1728022937]	2000000 OPS in 2.175375 seconds, throughput 919381.715796
+466449	[1728022937]	2000000 OPS in 2.165761 seconds, throughput 923462.930582
+466449	[1728022938]	2000000 OPS in 2.190686 seconds, throughput 912956.032950
+466449	[1728022938]	2000000 OPS in 2.175078 seconds, throughput 919507.254452
+466449	[1728022939]	2000000 OPS in 2.189108 seconds, throughput 913614.129591
+466449	[1728022939]	2000000 OPS in 2.179506 seconds, throughput 917639.134740
+466449	[1728022940]	2000000 OPS in 2.211254 seconds, throughput 904464.163773
+466449	[1728022940]	2000000 OPS in 2.200728 seconds, throughput 908790.182158
+466449	[1728022941]	2000000 OPS in 2.189040 seconds, throughput 913642.509959
+466449	[1728022942]	2000000 OPS in 2.178846 seconds, throughput 917917.099235
+466449	[1728022942]	2000000 OPS in 2.216616 seconds, throughput 902276.262555
+466449	[1728022942]	2000000 OPS in 2.194496 seconds, throughput 911370.993613
+466449	[1728022944]	2000000 OPS in 2.202881 seconds, throughput 907901.970193
+466449	[1728022944]	2000000 OPS in 2.200679 seconds, throughput 908810.417149
+466449	[1728022944]	2000000 OPS in 2.208463 seconds, throughput 905607.202837
+466449	[1728022944]	2000000 OPS in 2.200283 seconds, throughput 908973.981983
+466449	[1728022946]	2000000 OPS in 2.197141 seconds, throughput 910273.851337
+466449	[1728022946]	2000000 OPS in 2.182091 seconds, throughput 916552.059470
+466449	[1728022946]	2000000 OPS in 2.203384 seconds, throughput 907694.709592
+466449	[1728022947]	2000000 OPS in 2.190127 seconds, throughput 913189.052507
+466449	[1728022948]	2000000 OPS in 2.190133 seconds, throughput 913186.550771
+466449	[1728022948]	2000000 OPS in 2.181322 seconds, throughput 916875.179364
+466449	[1728022949]	2000000 OPS in 2.203491 seconds, throughput 907650.632564
+466449	[1728022949]	2000000 OPS in 2.190546 seconds, throughput 913014.380890
+466449	[1728022950]	2000000 OPS in 2.194513 seconds, throughput 911363.933593
+466449	[1728022950]	2000000 OPS in 2.178215 seconds, throughput 918183.007646
+466449	[1728022951]	2000000 OPS in 2.213576 seconds, throughput 903515.397709
+466449	[1728022951]	2000000 OPS in 2.206047 seconds, throughput 906598.998117
+466449	[1728022952]	2000000 OPS in 2.190382 seconds, throughput 913082.740819
+466449	[1728022952]	2000000 OPS in 2.188935 seconds, throughput 913686.336049
+466449	[1728022953]	2000000 OPS in 2.202030 seconds, throughput 908252.839425
+466449	[1728022953]	2000000 OPS in 2.180073 seconds, throughput 917400.472370
+466449	[1728022955]	2000000 OPS in 2.186821 seconds, throughput 914569.596689
+466449	[1728022955]	2000000 OPS in 2.178158 seconds, throughput 918207.035486
+466449	[1728022955]	2000000 OPS in 2.203187 seconds, throughput 907775.871953
+466449	[1728022955]	2000000 OPS in 2.198878 seconds, throughput 909554.782030
+466449	[1728022957]	2000000 OPS in 2.180946 seconds, throughput 917033.250709
+466449	[1728022957]	2000000 OPS in 2.189917 seconds, throughput 913276.621899
+466449	[1728022957]	2000000 OPS in 2.205812 seconds, throughput 906695.584211
+466449	[1728022958]	2000000 OPS in 2.190659 seconds, throughput 912967.285187
+466449	[1728022959]	2000000 OPS in 2.179726 seconds, throughput 917546.517315
+466449	[1728022959]	2000000 OPS in 2.197680 seconds, throughput 910050.598813
+466449	[1728022960]	2000000 OPS in 2.204284 seconds, throughput 907324.101613
+466449	[1728022960]	2000000 OPS in 2.191564 seconds, throughput 912590.277993
+466449	[1728022961]	2000000 OPS in 2.180514 seconds, throughput 917214.931892
+466449	[1728022961]	2000000 OPS in 2.188686 seconds, throughput 913790.283302
+466449	[1728022962]	2000000 OPS in 2.224793 seconds, throughput 898960.038080
+466449	[1728022962]	2000000 OPS in 2.212683 seconds, throughput 903880.040657
+466449	[1728022963]	2000000 OPS in 2.186978 seconds, throughput 914503.941055
+466449	[1728022963]	2000000 OPS in 2.202678 seconds, throughput 907985.642931
+466449	[1728022964]	2000000 OPS in 2.205737 seconds, throughput 906726.413892
+466449	[1728022964]	2000000 OPS in 2.192270 seconds, throughput 912296.386850
+466449	[1728022966]	2000000 OPS in 2.200640 seconds, throughput 908826.523193
+466449	[1728022966]	2000000 OPS in 2.197997 seconds, throughput 909919.349298
+466449	[1728022966]	2000000 OPS in 2.203032 seconds, throughput 907839.740866
+466449	[1728022966]	2000000 OPS in 2.199327 seconds, throughput 909369.093364
+466449	[1728022968]	2000000 OPS in 2.188529 seconds, throughput 913855.836500
+466449	[1728022968]	2000000 OPS in 2.197870 seconds, throughput 909971.927366
+466449	[1728022968]	2000000 OPS in 2.211674 seconds, throughput 904292.404758
+466449	[1728022969]	2000000 OPS in 2.198219 seconds, throughput 909827.455772
+466449	[1728022970]	2000000 OPS in 2.164609 seconds, throughput 923954.395459
+466449	[1728022970]	2000000 OPS in 2.176114 seconds, throughput 919069.497278
+466449	[1728022971]	2000000 OPS in 2.195087 seconds, throughput 911125.618256
+466449	[1728022971]	2000000 OPS in 2.187845 seconds, throughput 914141.541106
+466449	[1728022972]	2000000 OPS in 2.179974 seconds, throughput 917442.134631
+466449	[1728022972]	2000000 OPS in 2.189816 seconds, throughput 913318.744589
+466449	[1728022973]	2000000 OPS in 2.222913 seconds, throughput 899720.321938
+466449	[1728022973]	2000000 OPS in 2.205150 seconds, throughput 906967.779970
+466449	[1728022974]	2000000 OPS in 2.203197 seconds, throughput 907771.751686
+466449	[1728022974]	2000000 OPS in 2.215663 seconds, throughput 902664.349226
+466449	[1728022975]	2000000 OPS in 2.213893 seconds, throughput 903386.026335
+466449	[1728022975]	2000000 OPS in 2.199535 seconds, throughput 909283.098473
+466449	[1728022977]	2000000 OPS in 2.187535 seconds, throughput 914271.085948
+466449	[1728022977]	2000000 OPS in 2.193744 seconds, throughput 911683.405174
+466449	[1728022977]	2000000 OPS in 2.202844 seconds, throughput 907917.219740
+466449	[1728022977]	2000000 OPS in 2.189864 seconds, throughput 913298.725400
+466449	[1728022979]	2000000 OPS in 2.187947 seconds, throughput 914098.924700
+466449	[1728022979]	2000000 OPS in 2.198065 seconds, throughput 909891.199760
+466449	[1728022980]	2000000 OPS in 2.211197 seconds, throughput 904487.478954
+466449	[1728022980]	2000000 OPS in 2.199384 seconds, throughput 909345.525838
+466449	[1728022981]	2000000 OPS in 2.178681 seconds, throughput 917986.616673
+466449	[1728022981]	2000000 OPS in 2.195353 seconds, throughput 911015.221698
+466449	[1728022982]	2000000 OPS in 2.224944 seconds, throughput 898899.028470
+466449	[1728022982]	2000000 OPS in 2.204567 seconds, throughput 907207.628528
+466449	[1728022983]	2000000 OPS in 2.178840 seconds, throughput 917919.626957
+466449	[1728022983]	2000000 OPS in 2.188382 seconds, throughput 913917.222861
+466449	[1728022984]	2000000 OPS in 2.206998 seconds, throughput 906208.342735
+466449	[1728022984]	2000000 OPS in 2.192884 seconds, throughput 912040.946990
+466449	[1728022985]	2000000 OPS in 2.179960 seconds, throughput 917448.026569
+466449	[1728022985]	2000000 OPS in 2.190414 seconds, throughput 913069.401492
+466449	[1728022986]	2000000 OPS in 2.176328 seconds, throughput 918979.124470
+466449	[1728022986]	2000000 OPS in 2.188730 seconds, throughput 913771.913393
+466449	[1728022987]	2000000 OPS in 2.187797 seconds, throughput 914161.597260
+466449	[1728022988]	2000000 OPS in 2.188791 seconds, throughput 913746.447240
+466449	[1728022988]	2000000 OPS in 2.190792 seconds, throughput 912911.860186
+466449	[1728022988]	2000000 OPS in 2.203430 seconds, throughput 907675.760065
+466449	[1728022990]	2000000 OPS in 2.187728 seconds, throughput 914190.429523
+466449	[1728022990]	2000000 OPS in 2.195959 seconds, throughput 910763.816629
+466449	[1728022991]	2000000 OPS in 2.208416 seconds, throughput 905626.476171
+466449	[1728022991]	2000000 OPS in 2.223222 seconds, throughput 899595.272087
+466449	[1728022992]	2000000 OPS in 2.177929 seconds, throughput 918303.581063
+466449	[1728022992]	2000000 OPS in 2.189581 seconds, throughput 913416.767866
+466449	[1728022993]	2000000 OPS in 2.204108 seconds, throughput 907396.552256
+466449	[1728022993]	2000000 OPS in 2.208070 seconds, throughput 905768.385966
+466449	[1728022994]	2000000 OPS in 2.180276 seconds, throughput 917315.055525
+466449	[1728022994]	2000000 OPS in 2.210055 seconds, throughput 904954.854065
+466449	[1728022995]	2000000 OPS in 2.198904 seconds, throughput 909544.027388
+466449	[1728022995]	2000000 OPS in 2.195770 seconds, throughput 910842.210250
+466449	[1728022996]	2000000 OPS in 2.208562 seconds, throughput 905566.608499
+466449	[1728022996]	2000000 OPS in 2.205918 seconds, throughput 906652.015170
+466449	[1728022997]	2000000 OPS in 2.200686 seconds, throughput 908807.526380
+466449	[1728022997]	2000000 OPS in 2.201245 seconds, throughput 908576.737256
+466449	[1728022998]	2000000 OPS in 2.183464 seconds, throughput 915975.715652
+466449	[1728022999]	2000000 OPS in 2.187778 seconds, throughput 914169.536397
+466449	[1728022999]	2000000 OPS in 2.197416 seconds, throughput 910159.933303
+466449	[1728022999]	2000000 OPS in 2.205662 seconds, throughput 906757.245670
+466449	[1728023001]	2000000 OPS in 2.180336 seconds, throughput 917289.812212
+466449	[1728023001]	2000000 OPS in 2.189657 seconds, throughput 913385.064419
+466449	[1728023002]	2000000 OPS in 2.191860 seconds, throughput 912467.037128
+466449	[1728023002]	2000000 OPS in 2.205223 seconds, throughput 906937.756408
+466449	[1728023003]	2000000 OPS in 2.165069 seconds, throughput 923758.088079
+466449	[1728023003]	2000000 OPS in 2.174461 seconds, throughput 919768.163237
+466449	[1728023004]	2000000 OPS in 2.199261 seconds, throughput 909396.383603
+466449	[1728023004]	2000000 OPS in 2.204768 seconds, throughput 907124.921987
+466449	[1728023005]	2000000 OPS in 2.192207 seconds, throughput 912322.604572
+466449	[1728023005]	2000000 OPS in 2.208421 seconds, throughput 905624.425778
+466449	[1728023006]	2000000 OPS in 2.192075 seconds, throughput 912377.541827
+466449	[1728023006]	2000000 OPS in 2.205681 seconds, throughput 906749.434755
+466449	[1728023007]	2000000 OPS in 2.198433 seconds, throughput 909738.891292
+466449	[1728023007]	2000000 OPS in 2.197163 seconds, throughput 910264.736845
+466449	[1728023008]	2000000 OPS in 2.200029 seconds, throughput 909078.925778
+466449	[1728023008]	2000000 OPS in 2.211562 seconds, throughput 904338.200783
+466449	[1728023009]	2000000 OPS in 2.189337 seconds, throughput 913518.567493
+466449	[1728023010]	2000000 OPS in 2.196831 seconds, throughput 910402.302225
+466449	[1728023010]	2000000 OPS in 2.199847 seconds, throughput 909154.136629
+466449	[1728023010]	2000000 OPS in 2.217598 seconds, throughput 901876.715257
+466449	[1728023011]	2000000 OPS in 2.178479 seconds, throughput 918071.737207
+466449	[1728023012]	2000000 OPS in 2.187546 seconds, throughput 914266.488568
+466449	[1728023013]	2000000 OPS in 2.212991 seconds, throughput 903754.240302
+466449	[1728023013]	2000000 OPS in 2.209972 seconds, throughput 904988.841488
+466449	[1728023014]	2000000 OPS in 2.180232 seconds, throughput 917333.568171
+466449	[1728023014]	2000000 OPS in 2.186375 seconds, throughput 914756.160311
+466449	[1728023015]	2000000 OPS in 2.200063 seconds, throughput 909064.876779
+466449	[1728023015]	2000000 OPS in 2.212716 seconds, throughput 903866.560372
+466449	[1728023016]	2000000 OPS in 2.195945 seconds, throughput 910769.623101
+466449	[1728023016]	2000000 OPS in 2.210117 seconds, throughput 904929.467535
+466449	[1728023017]	2000000 OPS in 2.192356 seconds, throughput 912260.600012
+466449	[1728023017]	2000000 OPS in 2.203239 seconds, throughput 907754.446976
+466449	[1728023018]	2000000 OPS in 2.174831 seconds, throughput 919611.684770
+466449	[1728023018]	2000000 OPS in 2.176840 seconds, throughput 918762.977527
+466449	[1728023019]	2000000 OPS in 2.175874 seconds, throughput 919170.871107
+466449	[1728023019]	2000000 OPS in 2.172950 seconds, throughput 920407.740629
+466449	[1728023020]	2000000 OPS in 2.189366 seconds, throughput 913506.467169
+466449	[1728023020]	2000000 OPS in 2.197149 seconds, throughput 910270.536955
+466449	[1728023021]	2000000 OPS in 2.217572 seconds, throughput 901887.289342
+466449	[1728023021]	2000000 OPS in 2.225787 seconds, throughput 898558.577258
+466449	[1728023022]	2000000 OPS in 2.188507 seconds, throughput 913865.023050
+466449	[1728023023]	2000000 OPS in 2.194994 seconds, throughput 911164.221861
+466449	[1728023024]	2000000 OPS in 2.203872 seconds, throughput 907493.720143
+466449	[1728023024]	2000000 OPS in 2.214812 seconds, throughput 903011.181084
+466449	[1728023025]	2000000 OPS in 2.189322 seconds, throughput 913524.826407
+466449	[1728023025]	2000000 OPS in 2.205415 seconds, throughput 906858.799818
+466449	[1728023026]	2000000 OPS in 2.190568 seconds, throughput 913005.211434
+466449	[1728023026]	2000000 OPS in 2.203109 seconds, throughput 907808.011315
+466449	[1728023027]	2000000 OPS in 2.191665 seconds, throughput 912548.222470
+466449	[1728023027]	2000000 OPS in 2.202381 seconds, throughput 908108.088473
+466449	[1728023028]	2000000 OPS in 2.192367 seconds, throughput 912256.022828
+466449	[1728023028]	2000000 OPS in 2.204089 seconds, throughput 907404.374324
+466449	[1728023029]	2000000 OPS in 2.182751 seconds, throughput 916274.920960
+466449	[1728023029]	2000000 OPS in 2.188947 seconds, throughput 913681.327140
+466449	[1728023030]	2000000 OPS in 2.189674 seconds, throughput 913377.973159
+466449	[1728023030]	2000000 OPS in 2.216213 seconds, throughput 902440.334029
+466449	[1728023031]	2000000 OPS in 2.181690 seconds, throughput 916720.523997
+466449	[1728023031]	2000000 OPS in 2.188926 seconds, throughput 913690.092767
+466449	[1728023032]	2000000 OPS in 2.203790 seconds, throughput 907527.486739
+466449	[1728023032]	2000000 OPS in 2.215239 seconds, throughput 902837.120509
+466449	[1728023033]	2000000 OPS in 2.187103 seconds, throughput 914451.674201
+466449	[1728023034]	2000000 OPS in 2.191458 seconds, throughput 912634.419642
+466449	[1728023034]	2000000 OPS in 2.178303 seconds, throughput 918145.914503
+466449	[1728023035]	2000000 OPS in 2.179830 seconds, throughput 917502.741039
+466449	[1728023035]	2000000 OPS in 2.167062 seconds, throughput 922908.527767
+466449	[1728023036]	2000000 OPS in 2.187758 seconds, throughput 914177.893533
+466449	[1728023037]	2000000 OPS in 2.198953 seconds, throughput 909523.759717
+466449	[1728023037]	2000000 OPS in 2.204609 seconds, throughput 907190.345317
+466449	[1728023038]	2000000 OPS in 2.192890 seconds, throughput 912038.451541
+466449	[1728023038]	2000000 OPS in 2.199662 seconds, throughput 909230.599974
+466449	[1728023039]	2000000 OPS in 2.192083 seconds, throughput 912374.212108
+466449	[1728023039]	2000000 OPS in 2.203264 seconds, throughput 907744.146866
+466449	[1728023040]	2000000 OPS in 2.181366 seconds, throughput 916856.685215
+466449	[1728023040]	2000000 OPS in 2.190085 seconds, throughput 913206.565042
+466449	[1728023041]	2000000 OPS in 2.190405 seconds, throughput 913073.153138
+466449	[1728023041]	2000000 OPS in 2.223839 seconds, throughput 899345.681050
+466449	[1728023042]	2000000 OPS in 2.188044 seconds, throughput 914058.401019
+466449	[1728023042]	2000000 OPS in 2.187907 seconds, throughput 914115.636542
+466449	[1728023043]	2000000 OPS in 2.207535 seconds, throughput 905987.900532
+466449	[1728023044]	2000000 OPS in 2.208727 seconds, throughput 905498.959355
+466449	[1728023044]	2000000 OPS in 2.181222 seconds, throughput 916917.214295
+466449	[1728023045]	2000000 OPS in 2.191130 seconds, throughput 912771.035949
+466449	[1728023045]	2000000 OPS in 2.199220 seconds, throughput 909413.337456
+466449	[1728023046]	2000000 OPS in 2.203715 seconds, throughput 907558.373020
+466449	[1728023046]	2000000 OPS in 2.179191 seconds, throughput 917771.778610
+466449	[1728023047]	2000000 OPS in 2.211931 seconds, throughput 904187.336766
+466449	[1728023048]	2000000 OPS in 2.192898 seconds, throughput 912035.124297
+466449	[1728023048]	2000000 OPS in 2.205315 seconds, throughput 906899.921326
+466449	[1728023049]	2000000 OPS in 2.194482 seconds, throughput 911376.807830
+466449	[1728023049]	2000000 OPS in 2.190682 seconds, throughput 912957.699931
+466449	[1728023050]	2000000 OPS in 2.190582 seconds, throughput 912999.376421
+466449	[1728023050]	2000000 OPS in 2.204102 seconds, throughput 907399.022368
+466449	[1728023051]	2000000 OPS in 2.167491 seconds, throughput 922725.861376
+466449	[1728023051]	2000000 OPS in 2.176293 seconds, throughput 918993.903854
+466449	[1728023052]	2000000 OPS in 2.192718 seconds, throughput 912109.993168
+466449	[1728023052]	2000000 OPS in 2.213483 seconds, throughput 903553.359118
+466449	[1728023053]	2000000 OPS in 2.188490 seconds, throughput 913872.121874
+466449	[1728023053]	2000000 OPS in 2.198226 seconds, throughput 909824.558530
+466449	[1728023054]	2000000 OPS in 2.195775 seconds, throughput 910840.136171
+466449	[1728023055]	2000000 OPS in 2.204407 seconds, throughput 907273.475361
+466449	[1728023055]	2000000 OPS in 2.189301 seconds, throughput 913533.589031
+466449	[1728023056]	2000000 OPS in 2.200813 seconds, throughput 908755.082781
+466449	[1728023056]	2000000 OPS in 2.199791 seconds, throughput 909177.280933
+466449	[1728023057]	2000000 OPS in 2.205019 seconds, throughput 907021.662852
+466449	[1728023057]	2000000 OPS in 2.178855 seconds, throughput 917913.307678
+466449	[1728023058]	2000000 OPS in 2.206086 seconds, throughput 906582.970927
+466449	[1728023059]	2000000 OPS in 2.199336 seconds, throughput 909365.372094
+466449	[1728023059]	2000000 OPS in 2.212343 seconds, throughput 904018.951853
+466449	[1728023060]	2000000 OPS in 2.202643 seconds, throughput 908000.070824
+466449	[1728023060]	2000000 OPS in 2.192480 seconds, throughput 912209.005327
+466449	[1728023061]	2000000 OPS in 2.191036 seconds, throughput 912810.195725
+466449	[1728023061]	2000000 OPS in 2.223266 seconds, throughput 899577.468463
+466449	[1728023062]	2000000 OPS in 2.180442 seconds, throughput 917245.219089
+466449	[1728023062]	2000000 OPS in 2.190939 seconds, throughput 912850.608803
+466449	[1728023063]	2000000 OPS in 2.204810 seconds, throughput 907107.641928
+466449	[1728023063]	2000000 OPS in 2.209003 seconds, throughput 905385.823378
+466449	[1728023064]	2000000 OPS in 2.179778 seconds, throughput 917524.628655
+466449	[1728023064]	2000000 OPS in 2.191551 seconds, throughput 912595.691362
+466449	[1728023065]	2000000 OPS in 2.193104 seconds, throughput 911949.456113
+466449	[1728023066]	2000000 OPS in 2.203275 seconds, throughput 907739.614891
+466449	[1728023066]	2000000 OPS in 2.188541 seconds, throughput 913850.825733
+466449	[1728023067]	2000000 OPS in 2.191250 seconds, throughput 912721.049629
+466449	[1728023067]	2000000 OPS in 2.177438 seconds, throughput 918510.653346
+466449	[1728023068]	2000000 OPS in 2.189498 seconds, throughput 913451.393881
+466449	[1728023068]	2000000 OPS in 2.174254 seconds, throughput 919855.729827
+466449	[1728023069]	2000000 OPS in 2.189683 seconds, throughput 913374.219008
+466449	[1728023070]	2000000 OPS in 2.198236 seconds, throughput 909820.419646
+466449	[1728023070]	2000000 OPS in 2.216863 seconds, throughput 902175.732104
+466449	[1728023070]	2000000 OPS in 2.192931 seconds, throughput 912021.399670
+466449	[1728023071]	2000000 OPS in 2.198746 seconds, throughput 909609.386441
+466449	[1728023072]	2000000 OPS in 2.198617 seconds, throughput 909662.756178
+466449	[1728023072]	2000000 OPS in 2.219400 seconds, throughput 901144.453456
+466449	[1728023073]	2000000 OPS in 2.187341 seconds, throughput 914352.174627
+466449	[1728023073]	2000000 OPS in 2.198613 seconds, throughput 909664.411154
+466449	[1728023074]	2000000 OPS in 2.214132 seconds, throughput 903288.512157
+466449	[1728023074]	2000000 OPS in 2.206380 seconds, throughput 906462.168801
+466449	[1728023075]	2000000 OPS in 2.179748 seconds, throughput 917537.256600
+466449	[1728023075]	2000000 OPS in 2.192197 seconds, throughput 912326.766253
+466449	[1728023076]	2000000 OPS in 2.192888 seconds, throughput 912039.283356
+466449	[1728023077]	2000000 OPS in 2.203522 seconds, throughput 907637.863384
+466449	[1728023077]	2000000 OPS in 2.186758 seconds, throughput 914595.945230
+466449	[1728023078]	2000000 OPS in 2.205300 seconds, throughput 906906.089874
+466449	[1728023078]	2000000 OPS in 2.192310 seconds, throughput 912279.741460
+466449	[1728023079]	2000000 OPS in 2.204915 seconds, throughput 907064.444661
+466449	[1728023079]	2000000 OPS in 2.191392 seconds, throughput 912661.906222
+466449	[1728023080]	2000000 OPS in 2.192353 seconds, throughput 912261.848343
+466449	[1728023081]	2000000 OPS in 2.196970 seconds, throughput 910344.702021
+466449	[1728023081]	2000000 OPS in 2.216287 seconds, throughput 902410.202289
+466449	[1728023081]	2000000 OPS in 2.182646 seconds, throughput 916318.999966
+466449	[1728023082]	2000000 OPS in 2.197196 seconds, throughput 910251.065449
+466449	[1728023083]	2000000 OPS in 2.190644 seconds, throughput 912973.536549
+466449	[1728023083]	2000000 OPS in 2.190836 seconds, throughput 912893.525577
+466449	[1728023084]	2000000 OPS in 2.165037 seconds, throughput 923771.741545
+466449	[1728023084]	2000000 OPS in 2.173469 seconds, throughput 920187.957592
+466449	[1728023085]	2000000 OPS in 2.190775 seconds, throughput 912918.944209
+466449	[1728023085]	2000000 OPS in 2.213419 seconds, throughput 903579.484951
+466449	[1728023086]	2000000 OPS in 2.179986 seconds, throughput 917437.084458
+466449	[1728023086]	2000000 OPS in 2.196625 seconds, throughput 910487.679964
+466449	[1728023087]	2000000 OPS in 2.191487 seconds, throughput 912622.342729
+466449	[1728023088]	2000000 OPS in 2.204686 seconds, throughput 907158.661143
+466449	[1728023088]	2000000 OPS in 2.185076 seconds, throughput 915299.971260
+466449	[1728023089]	2000000 OPS in 2.205987 seconds, throughput 906623.656440
+466449	[1728023089]	2000000 OPS in 2.199148 seconds, throughput 909443.111605
+466449	[1728023090]	2000000 OPS in 2.214565 seconds, throughput 903111.897822
+466449	[1728023090]	2000000 OPS in 2.200833 seconds, throughput 908746.824498
+466449	[1728023091]	2000000 OPS in 2.189596 seconds, throughput 913410.510432
+466449	[1728023092]	2000000 OPS in 2.191535 seconds, throughput 912602.354058
+466449	[1728023092]	2000000 OPS in 2.216584 seconds, throughput 902289.288382
+466449	[1728023092]	2000000 OPS in 2.182939 seconds, throughput 916196.009142
+466449	[1728023093]	2000000 OPS in 2.199294 seconds, throughput 909382.738279
+466449	[1728023094]	2000000 OPS in 2.204354 seconds, throughput 907295.289232
+466449	[1728023094]	2000000 OPS in 2.206213 seconds, throughput 906530.783746
+466449	[1728023094]	2000000 OPS in 2.181450 seconds, throughput 916821.380275
+466449	[1728023095]	2000000 OPS in 2.190524 seconds, throughput 913023.550529
+466449	[1728023096]	2000000 OPS in 2.198864 seconds, throughput 909560.573096
+466449	[1728023097]	2000000 OPS in 2.211402 seconds, throughput 904403.631723
+466449	[1728023097]	2000000 OPS in 2.187397 seconds, throughput 914328.766109
+466449	[1728023097]	2000000 OPS in 2.218746 seconds, throughput 901410.075782
+466449	[1728023098]	2000000 OPS in 2.198933 seconds, throughput 909532.032126
+466449	[1728023099]	2000000 OPS in 2.211789 seconds, throughput 904245.386879
+466449	[1728023099]	2000000 OPS in 2.187088 seconds, throughput 914457.945908
+466449	[1728023099]	2000000 OPS in 2.179893 seconds, throughput 917476.224750
+466449	[1728023100]	2000000 OPS in 2.175797 seconds, throughput 919203.399950
+466449	[1728023101]	2000000 OPS in 2.202223 seconds, throughput 908173.241311
+466449	[1728023101]	2000000 OPS in 2.179033 seconds, throughput 917838.325532
+466449	[1728023102]	2000000 OPS in 2.188879 seconds, throughput 913709.711683
+466449	[1728023103]	2000000 OPS in 2.211701 seconds, throughput 904281.365338
+466449	[1728023103]	2000000 OPS in 2.214015 seconds, throughput 903336.246593
+466449	[1728023103]	2000000 OPS in 2.186826 seconds, throughput 914567.505599
+466449	[1728023104]	2000000 OPS in 2.196909 seconds, throughput 910369.978911
+466449	[1728023105]	2000000 OPS in 2.199103 seconds, throughput 909461.721438
+466449	[1728023105]	2000000 OPS in 2.206350 seconds, throughput 906474.494074
+466449	[1728023105]	2000000 OPS in 2.180038 seconds, throughput 917415.201019
+466449	[1728023106]	2000000 OPS in 2.190606 seconds, throughput 912989.373717
+466449	[1728023107]	2000000 OPS in 2.192667 seconds, throughput 912131.208250
+466449	[1728023108]	2000000 OPS in 2.209970 seconds, throughput 904989.660493
+466449	[1728023108]	2000000 OPS in 2.179687 seconds, throughput 917562.934495
+466449	[1728023108]	2000000 OPS in 2.204339 seconds, throughput 907301.463160
+466449	[1728023109]	2000000 OPS in 2.191601 seconds, throughput 912574.871065
+466449	[1728023110]	2000000 OPS in 2.192388 seconds, throughput 912247.284696
+466449	[1728023110]	2000000 OPS in 2.209224 seconds, throughput 905295.252994
+466449	[1728023110]	2000000 OPS in 2.192486 seconds, throughput 912206.508958
+466449	[1728023111]	2000000 OPS in 2.189427 seconds, throughput 913481.015809
+466449	[1728023112]	2000000 OPS in 2.188753 seconds, throughput 913762.311234
+466449	[1728023112]	2000000 OPS in 2.214683 seconds, throughput 903063.779331
+466449	[1728023113]	2000000 OPS in 2.192661 seconds, throughput 912133.704207
+466449	[1728023114]	2000000 OPS in 2.209704 seconds, throughput 905098.601442
+466449	[1728023114]	2000000 OPS in 2.179440 seconds, throughput 917666.923613
+466449	[1728023114]	2000000 OPS in 2.195616 seconds, throughput 910906.096512
+466449	[1728023115]	2000000 OPS in 2.198023 seconds, throughput 909908.586034
+466449	[1728023116]	2000000 OPS in 2.178877 seconds, throughput 917904.039558
+466449	[1728023116]	2000000 OPS in 2.164174 seconds, throughput 924140.110730
+466449	[1728023116]	2000000 OPS in 2.189925 seconds, throughput 913273.285615
+466449	[1728023117]	2000000 OPS in 2.185463 seconds, throughput 915137.890690
+466449	[1728023118]	2000000 OPS in 2.200458 seconds, throughput 908901.692284
+466449	[1728023118]	2000000 OPS in 2.186697 seconds, throughput 914621.458757
+466449	[1728023119]	2000000 OPS in 2.213595 seconds, throughput 903507.642545
+466449	[1728023119]	2000000 OPS in 2.209203 seconds, throughput 905303.858450
+466449	[1728023120]	2000000 OPS in 2.197383 seconds, throughput 910173.601962
+466449	[1728023121]	2000000 OPS in 2.201595 seconds, throughput 908432.295677
+466449	[1728023121]	2000000 OPS in 2.233307 seconds, throughput 895532.947329
+466449	[1728023121]	2000000 OPS in 2.200852 seconds, throughput 908738.979268
+466449	[1728023122]	2000000 OPS in 2.199577 seconds, throughput 909265.736094
+466449	[1728023123]	2000000 OPS in 2.185598 seconds, throughput 915081.364460
+466449	[1728023123]	2000000 OPS in 2.207028 seconds, throughput 906196.024699
+466449	[1728023124]	2000000 OPS in 2.197725 seconds, throughput 910031.964873
+466449	[1728023125]	2000000 OPS in 2.204751 seconds, throughput 907131.916484
+466449	[1728023125]	2000000 OPS in 2.182476 seconds, throughput 916390.374969
+466449	[1728023125]	2000000 OPS in 2.204769 seconds, throughput 907124.510550
+466449	[1728023126]	2000000 OPS in 2.189815 seconds, throughput 913319.161664
+466449	[1728023127]	2000000 OPS in 2.193573 seconds, throughput 911754.475461
+466449	[1728023127]	2000000 OPS in 2.180004 seconds, throughput 917429.509304
+466449	[1728023127]	2000000 OPS in 2.203486 seconds, throughput 907652.692143
+466449	[1728023128]	2000000 OPS in 2.201327 seconds, throughput 908542.892537
+466449	[1728023129]	2000000 OPS in 2.192257 seconds, throughput 912301.796733
+466449	[1728023129]	2000000 OPS in 2.179711 seconds, throughput 917552.831545
+466449	[1728023130]	2000000 OPS in 2.212629 seconds, throughput 903902.100171
+466449	[1728023130]	2000000 OPS in 2.201118 seconds, throughput 908629.160272
+466449	[1728023131]	2000000 OPS in 2.199445 seconds, throughput 909320.305804
+466449	[1728023132]	2000000 OPS in 2.188686 seconds, throughput 913790.283302
+466449	[1728023132]	2000000 OPS in 2.213276 seconds, throughput 903637.865318
+466449	[1728023132]	2000000 OPS in 2.177153 seconds, throughput 918630.890893
+466449	[1728023133]	2000000 OPS in 2.192735 seconds, throughput 912102.921694
+466449	[1728023134]	2000000 OPS in 2.178465 seconds, throughput 918077.637235
+466449	[1728023134]	2000000 OPS in 2.195317 seconds, throughput 911030.161020
+466449	[1728023135]	2000000 OPS in 2.190573 seconds, throughput 913003.127492
+466449	[1728023135]	2000000 OPS in 2.207048 seconds, throughput 906187.812861
+466449	[1728023136]	2000000 OPS in 2.188155 seconds, throughput 914012.032968
+466449	[1728023136]	2000000 OPS in 2.206293 seconds, throughput 906497.913015
+466449	[1728023137]	2000000 OPS in 2.199214 seconds, throughput 909415.818561
+466449	[1728023138]	2000000 OPS in 2.201342 seconds, throughput 908536.701703
+466449	[1728023138]	2000000 OPS in 2.187067 seconds, throughput 914466.726442
+466449	[1728023138]	2000000 OPS in 2.211399 seconds, throughput 904404.858644
+466449	[1728023139]	2000000 OPS in 2.213137 seconds, throughput 903694.619899
+466449	[1728023140]	2000000 OPS in 2.191465 seconds, throughput 912631.504496
+466449	[1728023140]	2000000 OPS in 2.179367 seconds, throughput 917697.661752
+466449	[1728023141]	2000000 OPS in 2.222586 seconds, throughput 899852.694114
+466449	[1728023141]	2000000 OPS in 2.192188 seconds, throughput 912330.511799
+466449	[1728023142]	2000000 OPS in 2.190829 seconds, throughput 912896.442397
+466449	[1728023143]	2000000 OPS in 2.192219 seconds, throughput 912317.610604
+466449	[1728023143]	2000000 OPS in 2.207453 seconds, throughput 906021.555159
+466449	[1728023143]	2000000 OPS in 2.190925 seconds, throughput 912856.441914
+466449	[1728023144]	2000000 OPS in 2.211632 seconds, throughput 904309.577724
+466449	[1728023145]	2000000 OPS in 2.189272 seconds, throughput 913545.690074
+466449	[1728023145]	2000000 OPS in 2.211948 seconds, throughput 904180.387604
+466449	[1728023146]	2000000 OPS in 2.196963 seconds, throughput 910347.602577
+466449	[1728023146]	2000000 OPS in 2.193878 seconds, throughput 911627.720411
+466449	[1728023147]	2000000 OPS in 2.178147 seconds, throughput 918211.672582
+466449	[1728023147]	2000000 OPS in 2.204178 seconds, throughput 907367.735274
+466449	[1728023148]	2000000 OPS in 2.198990 seconds, throughput 909508.456155
+466449	[1728023149]	2000000 OPS in 2.177229 seconds, throughput 918598.824469
+466449	[1728023149]	2000000 OPS in 2.164792 seconds, throughput 923876.289269
+466449	[1728023150]	2000000 OPS in 2.195495 seconds, throughput 910956.299149
+466449	[1728023150]	2000000 OPS in 2.197534 seconds, throughput 910111.060853
+466449	[1728023151]	2000000 OPS in 2.191007 seconds, throughput 912822.277610
+466449	[1728023151]	2000000 OPS in 2.186854 seconds, throughput 914555.795677
+466449	[1728023152]	2000000 OPS in 2.221781 seconds, throughput 900178.730487
+466449	[1728023152]	2000000 OPS in 2.193869 seconds, throughput 911631.460219
+466449	[1728023153]	2000000 OPS in 2.190255 seconds, throughput 913135.685114
+466449	[1728023153]	2000000 OPS in 2.192891 seconds, throughput 912038.035634
+466449	[1728023154]	2000000 OPS in 2.205607 seconds, throughput 906779.856974
+466449	[1728023154]	2000000 OPS in 2.191110 seconds, throughput 912779.367535
+466449	[1728023155]	2000000 OPS in 2.214419 seconds, throughput 903171.441358
+466449	[1728023156]	2000000 OPS in 2.181103 seconds, throughput 916967.240887
+466449	[1728023156]	2000000 OPS in 2.205292 seconds, throughput 906909.379801
+466449	[1728023157]	2000000 OPS in 2.191942 seconds, throughput 912432.901965
+466449	[1728023157]	2000000 OPS in 2.191554 seconds, throughput 912594.442117
+466449	[1728023158]	2000000 OPS in 2.178833 seconds, throughput 917922.575984
+466449	[1728023158]	2000000 OPS in 2.205544 seconds, throughput 906805.758579
+466449	[1728023159]	2000000 OPS in 2.218136 seconds, throughput 901657.968673
+466449	[1728023160]	2000000 OPS in 2.199892 seconds, throughput 909135.539381
+466449	[1728023160]	2000000 OPS in 2.188890 seconds, throughput 913705.119947
+466449	[1728023161]	2000000 OPS in 2.222902 seconds, throughput 899724.774192
+466449	[1728023161]	2000000 OPS in 2.193251 seconds, throughput 911888.333802
+466449	[1728023162]	2000000 OPS in 2.190082 seconds, throughput 913207.815963
+466449	[1728023162]	2000000 OPS in 2.178572 seconds, throughput 918032.546090
+466449	[1728023163]	2000000 OPS in 2.215645 seconds, throughput 902671.682512
+466449	[1728023163]	2000000 OPS in 2.193299 seconds, throughput 911868.377271
+466449	[1728023164]	2000000 OPS in 2.192288 seconds, throughput 912288.896349
+466449	[1728023164]	2000000 OPS in 2.179465 seconds, throughput 917656.397327
+466449	[1728023165]	2000000 OPS in 2.189714 seconds, throughput 913361.288278
+466449	[1728023165]	2000000 OPS in 2.174548 seconds, throughput 919731.364863
+466449	[1728023166]	2000000 OPS in 2.198215 seconds, throughput 909829.111347
+466449	[1728023167]	2000000 OPS in 2.178640 seconds, throughput 918003.892337
+466449	[1728023167]	2000000 OPS in 2.204737 seconds, throughput 907137.676739
+466449	[1728023168]	2000000 OPS in 2.189144 seconds, throughput 913599.105404
+466449	[1728023168]	2000000 OPS in 2.192762 seconds, throughput 912091.690753
+466449	[1728023169]	2000000 OPS in 2.180392 seconds, throughput 917266.253041
+466449	[1728023169]	2000000 OPS in 2.204125 seconds, throughput 907389.553678
+466449	[1728023170]	2000000 OPS in 2.213638 seconds, throughput 903490.091876
+466449	[1728023171]	2000000 OPS in 2.190799 seconds, throughput 912908.943267
+466449	[1728023171]	2000000 OPS in 2.181470 seconds, throughput 916812.974737
+466449	[1728023172]	2000000 OPS in 2.225719 seconds, throughput 898586.029953
+466449	[1728023172]	2000000 OPS in 2.200381 seconds, throughput 908933.498335
+466449	[1728023173]	2000000 OPS in 2.197214 seconds, throughput 910243.608497
+466449	[1728023173]	2000000 OPS in 2.194112 seconds, throughput 911530.496164
+466449	[1728023174]	2000000 OPS in 2.213036 seconds, throughput 903735.863312
+466449	[1728023174]	2000000 OPS in 2.190992 seconds, throughput 912828.526987
+466449	[1728023175]	2000000 OPS in 2.203045 seconds, throughput 907834.383773
+466449	[1728023175]	2000000 OPS in 2.187956 seconds, throughput 914095.164619
+466449	[1728023176]	2000000 OPS in 2.205093 seconds, throughput 906991.224406
+466449	[1728023176]	2000000 OPS in 2.190455 seconds, throughput 913052.311050
+466449	[1728023177]	2000000 OPS in 2.201820 seconds, throughput 908339.464625
+466449	[1728023177]	2000000 OPS in 2.179589 seconds, throughput 917604.190515
+466449	[1728023178]	2000000 OPS in 2.203958 seconds, throughput 907458.309097
+466449	[1728023179]	2000000 OPS in 2.208084 seconds, throughput 905762.643088
+466449	[1728023179]	2000000 OPS in 2.200729 seconds, throughput 908789.769208
+466449	[1728023180]	2000000 OPS in 2.187510 seconds, throughput 914281.534713
+466449	[1728023180]	2000000 OPS in 2.211593 seconds, throughput 904325.524633
+466449	[1728023181]	2000000 OPS in 2.183764 seconds, throughput 915849.881214
+466449	[1728023182]	2000000 OPS in 2.175642 seconds, throughput 919268.887069
+466449	[1728023182]	2000000 OPS in 2.165585 seconds, throughput 923537.981654
+466449	[1728023183]	2000000 OPS in 2.204128 seconds, throughput 907388.318646
+466449	[1728023183]	2000000 OPS in 2.190914 seconds, throughput 912861.025125
+466449	[1728023184]	2000000 OPS in 2.190207 seconds, throughput 913155.697156
+466449	[1728023184]	2000000 OPS in 2.204878 seconds, throughput 907079.666086
+466449	[1728023185]	2000000 OPS in 2.211197 seconds, throughput 904487.478954
+466449	[1728023185]	2000000 OPS in 2.190976 seconds, throughput 912835.193083
+466449	[1728023186]	2000000 OPS in 2.205502 seconds, throughput 906823.027138
+466449	[1728023186]	2000000 OPS in 2.185423 seconds, throughput 915154.640543
+466449	[1728023187]	2000000 OPS in 2.203953 seconds, throughput 907460.367803
+466449	[1728023187]	2000000 OPS in 2.192162 seconds, throughput 912341.332438
+466449	[1728023188]	2000000 OPS in 2.199793 seconds, throughput 909176.454330
+466449	[1728023188]	2000000 OPS in 2.180433 seconds, throughput 917249.005129
+466449	[1728023189]	2000000 OPS in 2.204334 seconds, throughput 907303.521154
+466449	[1728023190]	2000000 OPS in 2.211053 seconds, throughput 904546.385817
+466449	[1728023190]	2000000 OPS in 2.198327 seconds, throughput 909782.757524
+466449	[1728023191]	2000000 OPS in 2.186922 seconds, throughput 914527.358543
+466449	[1728023191]	2000000 OPS in 2.224861 seconds, throughput 898932.562529
+466449	[1728023192]	2000000 OPS in 2.193256 seconds, throughput 911886.254956
+466449	[1728023193]	2000000 OPS in 2.198095 seconds, throughput 909878.781399
+466449	[1728023193]	2000000 OPS in 2.185666 seconds, throughput 915052.894633
+466449	[1728023194]	2000000 OPS in 2.206435 seconds, throughput 906439.573339
+466449	[1728023194]	2000000 OPS in 2.189663 seconds, throughput 913382.561609
+466449	[1728023195]	2000000 OPS in 2.205023 seconds, throughput 907020.017478
+466449	[1728023195]	2000000 OPS in 2.199316 seconds, throughput 909373.641623
+466449	[1728023196]	2000000 OPS in 2.213146 seconds, throughput 903690.944926
+466449	[1728023196]	2000000 OPS in 2.197847 seconds, throughput 909981.450028
+466449	[1728023197]	2000000 OPS in 2.186695 seconds, throughput 914622.295290
+466449	[1728023197]	2000000 OPS in 2.167040 seconds, throughput 922917.897224
+466449	[1728023198]	2000000 OPS in 2.190733 seconds, throughput 912936.446386
+466449	[1728023198]	2000000 OPS in 2.176694 seconds, throughput 918824.602815
+466449	[1728023199]	2000000 OPS in 2.199377 seconds, throughput 909348.420030
+466449	[1728023199]	2000000 OPS in 2.179460 seconds, throughput 917658.502565
+466449	[1728023200]	2000000 OPS in 2.214989 seconds, throughput 902939.021368
+466449	[1728023200]	2000000 OPS in 2.209948 seconds, throughput 904998.669652
+466449	[1728023201]	2000000 OPS in 2.191370 seconds, throughput 912671.068783
+466449	[1728023201]	2000000 OPS in 2.181061 seconds, throughput 916984.898634
+466449	[1728023203]	2000000 OPS in 2.207190 seconds, throughput 906129.513091
+466449	[1728023203]	2000000 OPS in 2.192550 seconds, throughput 912179.881873
+466449	[1728023204]	2000000 OPS in 2.192453 seconds, throughput 912220.239157
+466449	[1728023204]	2000000 OPS in 2.179338 seconds, throughput 917709.873365
+466449	[1728023205]	2000000 OPS in 2.204054 seconds, throughput 907418.783750
+466449	[1728023205]	2000000 OPS in 2.189997 seconds, throughput 913243.260151
+466449	[1728023206]	2000000 OPS in 2.203076 seconds, throughput 907821.609422
+466449	[1728023206]	2000000 OPS in 2.200184 seconds, throughput 909014.882392
+466449	[1728023207]	2000000 OPS in 2.205161 seconds, throughput 906963.255744
+466449	[1728023207]	2000000 OPS in 2.190728 seconds, throughput 912938.530023
+466449	[1728023208]	2000000 OPS in 2.201476 seconds, throughput 908481.400660
+466449	[1728023208]	2000000 OPS in 2.188837 seconds, throughput 913727.244194
+466449	[1728023209]	2000000 OPS in 2.211792 seconds, throughput 904244.160391
+466449	[1728023209]	2000000 OPS in 2.210875 seconds, throughput 904619.211851
+466449	[1728023210]	2000000 OPS in 2.199859 seconds, throughput 909149.177288
+466449	[1728023210]	2000000 OPS in 2.187400 seconds, throughput 914327.512115
+466449	[1728023211]	2000000 OPS in 2.231655 seconds, throughput 896195.872570
+466449	[1728023211]	2000000 OPS in 2.204860 seconds, throughput 907087.071288
+466449	[1728023212]	2000000 OPS in 2.200313 seconds, throughput 908961.588647
+466449	[1728023212]	2000000 OPS in 2.186861 seconds, throughput 914552.868244
+466449	[1728023214]	2000000 OPS in 2.185415 seconds, throughput 915157.990588
+466449	[1728023214]	2000000 OPS in 2.177249 seconds, throughput 918590.386309
+466449	[1728023215]	2000000 OPS in 2.175920 seconds, throughput 919151.439391
+466449	[1728023215]	2000000 OPS in 2.176133 seconds, throughput 919061.472805
+466449	[1728023216]	2000000 OPS in 2.207710 seconds, throughput 905916.084993
+466449	[1728023216]	2000000 OPS in 2.200267 seconds, throughput 908980.591901
+466449	[1728023217]	2000000 OPS in 2.215028 seconds, throughput 902923.123319
+466449	[1728023217]	2000000 OPS in 2.190665 seconds, throughput 912964.784666
+466449	[1728023218]	2000000 OPS in 2.204576 seconds, throughput 907203.924927
+466449	[1728023218]	2000000 OPS in 2.189995 seconds, throughput 913244.094165
+466449	[1728023219]	2000000 OPS in 2.191452 seconds, throughput 912636.918354
+466449	[1728023219]	2000000 OPS in 2.179242 seconds, throughput 917750.300334
+466449	[1728023220]	2000000 OPS in 2.222318 seconds, throughput 899961.211672
+466449	[1728023220]	2000000 OPS in 2.202499 seconds, throughput 908059.436122
+466449	[1728023221]	2000000 OPS in 2.180441 seconds, throughput 917245.639758
+466449	[1728023221]	2000000 OPS in 2.197584 seconds, throughput 910090.353770
+466449	[1728023222]	2000000 OPS in 2.208209 seconds, throughput 905711.370618
+466449	[1728023222]	2000000 OPS in 2.193460 seconds, throughput 911801.446117
+466449	[1728023223]	2000000 OPS in 2.178347 seconds, throughput 918127.369056
+466449	[1728023223]	2000000 OPS in 2.192937 seconds, throughput 912018.904328
+466449	[1728023225]	2000000 OPS in 2.212973 seconds, throughput 903761.591307
+466449	[1728023225]	2000000 OPS in 2.197662 seconds, throughput 910058.052603
+466449	[1728023226]	2000000 OPS in 2.203239 seconds, throughput 907754.446976
+466449	[1728023226]	2000000 OPS in 2.213149 seconds, throughput 903689.719942
+466449	[1728023227]	2000000 OPS in 2.197119 seconds, throughput 910282.966011
+466449	[1728023227]	2000000 OPS in 2.212134 seconds, throughput 904104.362575
+466449	[1728023228]	2000000 OPS in 2.185069 seconds, throughput 915302.903478
+466449	[1728023228]	2000000 OPS in 2.195597 seconds, throughput 910913.979205
+466449	[1728023229]	2000000 OPS in 2.191765 seconds, throughput 912506.587157
+466449	[1728023229]	2000000 OPS in 2.204455 seconds, throughput 907253.720307
+466449	[1728023230]	2000000 OPS in 2.164636 seconds, throughput 923942.870764
+466449	[1728023230]	2000000 OPS in 2.175560 seconds, throughput 919303.535641
+466449	[1728023231]	2000000 OPS in 2.192001 seconds, throughput 912408.342879
+466449	[1728023231]	2000000 OPS in 2.212722 seconds, throughput 903864.109454
+466449	[1728023232]	2000000 OPS in 2.179115 seconds, throughput 917803.787317
+466449	[1728023232]	2000000 OPS in 2.191663 seconds, throughput 912549.055215
+466449	[1728023233]	2000000 OPS in 2.199972 seconds, throughput 909102.479486
+466449	[1728023233]	2000000 OPS in 2.212822 seconds, throughput 903823.262784
+466449	[1728023234]	2000000 OPS in 2.186680 seconds, throughput 914628.569338
+466449	[1728023234]	2000000 OPS in 2.196566 seconds, throughput 910512.135761
+466449	[1728023236]	2000000 OPS in 2.198092 seconds, throughput 909880.023220
+466449	[1728023236]	2000000 OPS in 2.212265 seconds, throughput 904050.825737
+466449	[1728023236]	2000000 OPS in 2.204545 seconds, throughput 907216.681900
+466449	[1728023237]	2000000 OPS in 2.212592 seconds, throughput 903917.215646
+466449	[1728023238]	2000000 OPS in 2.191469 seconds, throughput 912629.838706
+466449	[1728023238]	2000000 OPS in 2.202877 seconds, throughput 907903.618768
+466449	[1728023239]	2000000 OPS in 2.184001 seconds, throughput 915750.496451
+466449	[1728023239]	2000000 OPS in 2.194373 seconds, throughput 911422.078197
+466449	[1728023240]	2000000 OPS in 2.197433 seconds, throughput 910152.892034
+466449	[1728023240]	2000000 OPS in 2.222803 seconds, throughput 899764.846457
+466449	[1728023241]	2000000 OPS in 2.179444 seconds, throughput 917665.239391
+466449	[1728023241]	2000000 OPS in 2.191598 seconds, throughput 912576.120256
+466449	[1728023242]	2000000 OPS in 2.203216 seconds, throughput 907763.923283
+466449	[1728023242]	2000000 OPS in 2.215623 seconds, throughput 902680.645579
+466449	[1728023243]	2000000 OPS in 2.187732 seconds, throughput 914188.758038
+466449	[1728023243]	2000000 OPS in 2.198853 seconds, throughput 909565.123271
+466449	[1728023244]	2000000 OPS in 2.192675 seconds, throughput 912127.880329
+466449	[1728023245]	2000000 OPS in 2.204547 seconds, throughput 907215.858859
+466449	[1728023245]	2000000 OPS in 2.178473 seconds, throughput 918074.265782
+466449	[1728023245]	2000000 OPS in 2.192064 seconds, throughput 912382.120230
+466449	[1728023247]	2000000 OPS in 2.175443 seconds, throughput 919352.977761
+466449	[1728023247]	2000000 OPS in 2.189692 seconds, throughput 913370.464887
+466449	[1728023247]	2000000 OPS in 2.185677 seconds, throughput 915048.289386
+466449	[1728023247]	2000000 OPS in 2.198743 seconds, throughput 909610.627527
+466449	[1728023249]	2000000 OPS in 2.198650 seconds, throughput 909649.102859
+466449	[1728023249]	2000000 OPS in 2.217680 seconds, throughput 901843.367844
+466449	[1728023250]	2000000 OPS in 2.188311 seconds, throughput 913946.875010
+466449	[1728023250]	2000000 OPS in 2.191390 seconds, throughput 912662.739175
+466449	[1728023251]	2000000 OPS in 2.202313 seconds, throughput 908136.127789
+466449	[1728023251]	2000000 OPS in 2.212628 seconds, throughput 903902.508691
+466449	[1728023252]	2000000 OPS in 2.181247 seconds, throughput 916906.705201
+466449	[1728023252]	2000000 OPS in 2.192070 seconds, throughput 912379.622914
+466449	[1728023253]	2000000 OPS in 2.192467 seconds, throughput 912214.414174
+466449	[1728023253]	2000000 OPS in 2.213190 seconds, throughput 903672.978822
+466449	[1728023254]	2000000 OPS in 2.180248 seconds, throughput 917326.836213
+466449	[1728023254]	2000000 OPS in 2.191251 seconds, throughput 912720.633100
+466449	[1728023255]	2000000 OPS in 2.190079 seconds, throughput 913209.066888
+466449	[1728023256]	2000000 OPS in 2.203453 seconds, throughput 907666.285598
+466449	[1728023256]	2000000 OPS in 2.179574 seconds, throughput 917610.505539
+466449	[1728023256]	2000000 OPS in 2.209281 seconds, throughput 905271.896151
+466449	[1728023258]	2000000 OPS in 2.196999 seconds, throughput 910332.685632
+466449	[1728023258]	2000000 OPS in 2.205516 seconds, throughput 906817.270879
+466449	[1728023258]	2000000 OPS in 2.192785 seconds, throughput 912082.123874
+466449	[1728023258]	2000000 OPS in 2.196721 seconds, throughput 910447.890287
+466449	[1728023260]	2000000 OPS in 2.202111 seconds, throughput 908219.431264
+466449	[1728023260]	2000000 OPS in 2.226074 seconds, throughput 898442.729217
+466449	[1728023260]	2000000 OPS in 2.189630 seconds, throughput 913396.327233
+466449	[1728023261]	2000000 OPS in 2.199918 seconds, throughput 909124.794651
+466449	[1728023262]	2000000 OPS in 2.187263 seconds, throughput 914384.781345
+466449	[1728023262]	2000000 OPS in 2.192392 seconds, throughput 912245.620309
+466449	[1728023263]	2000000 OPS in 2.164725 seconds, throughput 923904.883992
+466449	[1728023263]	2000000 OPS in 2.177343 seconds, throughput 918550.729031
+466449	[1728023264]	2000000 OPS in 2.190876 seconds, throughput 912876.858389
+466449	[1728023264]	2000000 OPS in 2.212447 seconds, throughput 903976.456837
+466449	[1728023265]	2000000 OPS in 2.178320 seconds, throughput 918138.749128
+466449	[1728023265]	2000000 OPS in 2.192362 seconds, throughput 912258.103361
+466449	[1728023266]	2000000 OPS in 2.197916 seconds, throughput 909952.882640
+466449	[1728023267]	2000000 OPS in 2.211743 seconds, throughput 904264.193444
+466449	[1728023267]	2000000 OPS in 2.193431 seconds, throughput 911813.501314
+466449	[1728023267]	2000000 OPS in 2.213208 seconds, throughput 903665.629259
+466449	[1728023269]	2000000 OPS in 2.190015 seconds, throughput 913235.754093
+466449	[1728023269]	2000000 OPS in 2.211308 seconds, throughput 904442.076816
+466449	[1728023269]	2000000 OPS in 2.187037 seconds, throughput 914479.270355
+466449	[1728023269]	2000000 OPS in 2.193236 seconds, throughput 911894.570397
+466449	[1728023271]	2000000 OPS in 2.209900 seconds, throughput 905018.326621
+466449	[1728023271]	2000000 OPS in 2.213132 seconds, throughput 903696.661564
+466449	[1728023271]	2000000 OPS in 2.185720 seconds, throughput 915030.287503
+466449	[1728023272]	2000000 OPS in 2.192161 seconds, throughput 912341.748622
+466449	[1728023273]	2000000 OPS in 2.195562 seconds, throughput 910928.500311
+466449	[1728023273]	2000000 OPS in 2.204531 seconds, throughput 907222.443232
+466449	[1728023274]	2000000 OPS in 2.178703 seconds, throughput 917977.347073
+466449	[1728023274]	2000000 OPS in 2.192205 seconds, throughput 912323.436905
+466449	[1728023275]	2000000 OPS in 2.191046 seconds, throughput 912806.029632
+466449	[1728023275]	2000000 OPS in 2.211656 seconds, throughput 904299.764520
+466449	[1728023276]	2000000 OPS in 2.178949 seconds, throughput 917873.708839
+466449	[1728023276]	2000000 OPS in 2.190076 seconds, throughput 913210.317815
+466449	[1728023277]	2000000 OPS in 2.198715 seconds, throughput 909622.211155
+466449	[1728023278]	2000000 OPS in 2.211348 seconds, throughput 904425.716803
+466449	[1728023278]	2000000 OPS in 2.187225 seconds, throughput 914400.667512
+466449	[1728023278]	2000000 OPS in 2.199453 seconds, throughput 909316.998363
+466449	[1728023279]	2000000 OPS in 2.175874 seconds, throughput 919170.871107
+466449	[1728023280]	2000000 OPS in 2.203109 seconds, throughput 907808.011315
+466449	[1728023280]	2000000 OPS in 2.180345 seconds, throughput 917286.025835
+466449	[1728023280]	2000000 OPS in 2.190729 seconds, throughput 912938.113295
+466449	[1728023282]	2000000 OPS in 2.220702 seconds, throughput 900616.111482
+466449	[1728023282]	2000000 OPS in 2.216042 seconds, throughput 902509.970479
+466449	[1728023282]	2000000 OPS in 2.189415 seconds, throughput 913486.022522
+466449	[1728023283]	2000000 OPS in 2.200127 seconds, throughput 909038.432781
+466449	[1728023284]	2000000 OPS in 2.193516 seconds, throughput 911778.168019
+466449	[1728023284]	2000000 OPS in 2.204299 seconds, throughput 907317.927377
+466449	[1728023284]	2000000 OPS in 2.179605 seconds, throughput 917597.454585
+466449	[1728023285]	2000000 OPS in 2.190532 seconds, throughput 913020.216094
+466449	[1728023286]	2000000 OPS in 2.190249 seconds, throughput 913138.186571
+466449	[1728023286]	2000000 OPS in 2.210970 seconds, throughput 904580.342565
+466449	[1728023287]	2000000 OPS in 2.177881 seconds, throughput 918323.820264
+466449	[1728023287]	2000000 OPS in 2.202993 seconds, throughput 907855.812524
+466449	[1728023288]	2000000 OPS in 2.191367 seconds, throughput 912672.318238
+466449	[1728023289]	2000000 OPS in 2.219320 seconds, throughput 901176.937080
+466449	[1728023289]	2000000 OPS in 2.199704 seconds, throughput 909213.239600
+466449	[1728023289]	2000000 OPS in 2.203548 seconds, throughput 907627.154026
+466449	[1728023290]	2000000 OPS in 2.209433 seconds, throughput 905209.617128
+466449	[1728023291]	2000000 OPS in 2.195521 seconds, throughput 910945.511339
+466449	[1728023291]	2000000 OPS in 2.189192 seconds, throughput 913579.073923
+466449	[1728023291]	2000000 OPS in 2.192715 seconds, throughput 912111.241087
+466449	[1728023293]	2000000 OPS in 2.205842 seconds, throughput 906683.252926
+466449	[1728023293]	2000000 OPS in 2.198523 seconds, throughput 909701.649698
+466449	[1728023293]	2000000 OPS in 2.188955 seconds, throughput 913677.987898
+466449	[1728023294]	2000000 OPS in 2.199838 seconds, throughput 909157.856169
+466449	[1728023295]	2000000 OPS in 2.176765 seconds, throughput 918794.633321
+466449	[1728023295]	2000000 OPS in 2.190562 seconds, throughput 913007.712176
+466449	[1728023295]	2000000 OPS in 2.165864 seconds, throughput 923419.014306
+466449	[1728023296]	2000000 OPS in 2.175624 seconds, throughput 919276.492629
+466449	[1728023297]	2000000 OPS in 2.191833 seconds, throughput 912478.277314
+466449	[1728023297]	2000000 OPS in 2.202273 seconds, throughput 908152.622313
+466449	[1728023298]	2000000 OPS in 2.179949 seconds, throughput 917452.656003
+466449	[1728023298]	2000000 OPS in 2.206019 seconds, throughput 906610.505168
+466449	[1728023299]	2000000 OPS in 2.190330 seconds, throughput 913104.418056
+466449	[1728023300]	2000000 OPS in 2.224339 seconds, throughput 899143.520839
+466449	[1728023300]	2000000 OPS in 2.192459 seconds, throughput 912217.742726
+466449	[1728023300]	2000000 OPS in 2.194094 seconds, throughput 911537.974216
+466449	[1728023301]	2000000 OPS in 2.211226 seconds, throughput 904475.616694
+466449	[1728023302]	2000000 OPS in 2.214315 seconds, throughput 903213.860720
+466449	[1728023302]	2000000 OPS in 2.189966 seconds, throughput 913256.187539
+466449	[1728023302]	2000000 OPS in 2.200355 seconds, throughput 908944.238543
+466449	[1728023304]	2000000 OPS in 2.201724 seconds, throughput 908379.070220
+466449	[1728023304]	2000000 OPS in 2.186325 seconds, throughput 914777.080260
+466449	[1728023304]	2000000 OPS in 2.213748 seconds, throughput 903445.197918
+466449	[1728023305]	2000000 OPS in 2.198739 seconds, throughput 909612.282313
+466449	[1728023306]	2000000 OPS in 2.198295 seconds, throughput 909796.000992
+466449	[1728023306]	2000000 OPS in 2.187219 seconds, throughput 914403.175905
+466449	[1728023306]	2000000 OPS in 2.210430 seconds, throughput 904801.328248
+466449	[1728023307]	2000000 OPS in 2.198040 seconds, throughput 909901.548652
+466449	[1728023308]	2000000 OPS in 2.191116 seconds, throughput 912776.868043
+466449	[1728023309]	2000000 OPS in 2.178678 seconds, throughput 917987.880724
+466449	[1728023309]	2000000 OPS in 2.213005 seconds, throughput 903748.522936
+466449	[1728023309]	2000000 OPS in 2.212635 seconds, throughput 903899.649061
+466449	[1728023310]	2000000 OPS in 2.198246 seconds, throughput 909816.280798
+466449	[1728023311]	2000000 OPS in 2.187466 seconds, throughput 914299.925119
+466449	[1728023311]	2000000 OPS in 2.213022 seconds, throughput 903741.580518
+466449	[1728023311]	2000000 OPS in 2.176485 seconds, throughput 918912.834226
+466449	[1728023312]	2000000 OPS in 2.189120 seconds, throughput 913609.121473
+466449	[1728023313]	2000000 OPS in 2.178354 seconds, throughput 918124.418712
+466449	[1728023313]	2000000 OPS in 2.204028 seconds, throughput 907429.488192
+466449	[1728023313]	2000000 OPS in 2.191520 seconds, throughput 912608.600423
+466449	[1728023315]	2000000 OPS in 2.198200 seconds, throughput 909835.319807
+466449	[1728023315]	2000000 OPS in 2.185842 seconds, throughput 914979.216247
+466449	[1728023315]	2000000 OPS in 2.210448 seconds, throughput 904793.960319
+466449	[1728023316]	2000000 OPS in 2.199081 seconds, throughput 909470.819856
+466449	[1728023317]	2000000 OPS in 2.189876 seconds, throughput 913293.720740
+466449	[1728023317]	2000000 OPS in 2.186762 seconds, throughput 914594.272262
+466449	[1728023317]	2000000 OPS in 2.204654 seconds, throughput 907171.828323
+466449	[1728023318]	2000000 OPS in 2.203636 seconds, throughput 907590.908843
+466449	[1728023319]	2000000 OPS in 2.189615 seconds, throughput 913402.584473
+466449	[1728023319]	2000000 OPS in 2.193760 seconds, throughput 911676.755889
+466449	[1728023320]	2000000 OPS in 2.224086 seconds, throughput 899245.802545
+466449	[1728023320]	2000000 OPS in 2.202572 seconds, throughput 908029.340244
+466449	[1728023321]	2000000 OPS in 2.211807 seconds, throughput 904238.028002
+466449	[1728023322]	2000000 OPS in 2.196574 seconds, throughput 910508.819644
+466449	[1728023322]	2000000 OPS in 2.215652 seconds, throughput 902668.830665
+466449	[1728023322]	2000000 OPS in 2.199690 seconds, throughput 909219.026317
+466449	[1728023323]	2000000 OPS in 2.207097 seconds, throughput 906167.694487
+466449	[1728023324]	2000000 OPS in 2.180205 seconds, throughput 917344.928573
+466449	[1728023324]	2000000 OPS in 2.203841 seconds, throughput 907506.485268
+466449	[1728023324]	2000000 OPS in 2.189454 seconds, throughput 913469.750906
+466449	[1728023326]	2000000 OPS in 2.189759 seconds, throughput 913342.518515
+466449	[1728023326]	2000000 OPS in 2.186402 seconds, throughput 914744.863936
+466449	[1728023326]	2000000 OPS in 2.203781 seconds, throughput 907531.192982
+466449	[1728023327]	2000000 OPS in 2.190205 seconds, throughput 913156.531010
+466449	[1728023328]	2000000 OPS in 2.176500 seconds, throughput 918906.501263
+466449	[1728023328]	2000000 OPS in 2.165358 seconds, throughput 923634.798495
+466449	[1728023328]	2000000 OPS in 2.195600 seconds, throughput 910912.734560
+466449	[1728023329]	2000000 OPS in 2.191434 seconds, throughput 912644.414571
+466449	[1728023330]	2000000 OPS in 2.191878 seconds, throughput 912459.543825
+466449	[1728023330]	2000000 OPS in 2.192696 seconds, throughput 912119.144651
+466449	[1728023331]	2000000 OPS in 2.212288 seconds, throughput 904041.426794
+466449	[1728023331]	2000000 OPS in 2.192761 seconds, throughput 912092.106709
+466449	[1728023332]	2000000 OPS in 2.202312 seconds, throughput 908136.540145
+466449	[1728023333]	2000000 OPS in 2.180619 seconds, throughput 917170.766649
+466449	[1728023333]	2000000 OPS in 2.212218 seconds, throughput 904070.032881
+466449	[1728023333]	2000000 OPS in 2.192531 seconds, throughput 912187.786627
+466449	[1728023334]	2000000 OPS in 2.192453 seconds, throughput 912220.239157
+466449	[1728023335]	2000000 OPS in 2.178442 seconds, throughput 918087.330303
+466449	[1728023335]	2000000 OPS in 2.204112 seconds, throughput 907394.905522
+466449	[1728023335]	2000000 OPS in 2.200993 seconds, throughput 908680.763637
+466449	[1728023337]	2000000 OPS in 2.197506 seconds, throughput 910122.657231
+466449	[1728023337]	2000000 OPS in 2.187268 seconds, throughput 914382.691101
+466449	[1728023337]	2000000 OPS in 2.210834 seconds, throughput 904635.988048
+466449	[1728023338]	2000000 OPS in 2.207842 seconds, throughput 905861.923091
+466449	[1728023339]	2000000 OPS in 2.190291 seconds, throughput 913120.676659
+466449	[1728023339]	2000000 OPS in 2.187655 seconds, throughput 914220.935202
+466449	[1728023340]	2000000 OPS in 2.215749 seconds, throughput 902629.314060
+466449	[1728023340]	2000000 OPS in 2.197090 seconds, throughput 910294.981089
+466449	[1728023341]	2000000 OPS in 2.190127 seconds, throughput 913189.052507
+466449	[1728023341]	2000000 OPS in 2.193191 seconds, throughput 911913.280695
+466449	[1728023342]	2000000 OPS in 2.215361 seconds, throughput 902787.401241
+466449	[1728023342]	2000000 OPS in 2.192464 seconds, throughput 912215.662378
+466449	[1728023343]	2000000 OPS in 2.189989 seconds, throughput 913246.596216
+466449	[1728023343]	2000000 OPS in 2.166997 seconds, throughput 922936.210802
+466449	[1728023344]	2000000 OPS in 2.189678 seconds, throughput 913376.304644
+466449	[1728023344]	2000000 OPS in 2.176939 seconds, throughput 918721.195220
+466449	[1728023345]	2000000 OPS in 2.191236 seconds, throughput 912726.881084
+466449	[1728023346]	2000000 OPS in 2.179334 seconds, throughput 917711.557751
+466449	[1728023346]	2000000 OPS in 2.202483 seconds, throughput 908066.032746
+466449	[1728023346]	2000000 OPS in 2.199131 seconds, throughput 909450.141897
+466449	[1728023348]	2000000 OPS in 2.190570 seconds, throughput 913004.377856
+466449	[1728023348]	2000000 OPS in 2.179948 seconds, throughput 917453.076862
+466449	[1728023348]	2000000 OPS in 2.221138 seconds, throughput 900439.324346
+466449	[1728023349]	2000000 OPS in 2.212665 seconds, throughput 903887.393708
+466449	[1728023350]	2000000 OPS in 2.197898 seconds, throughput 909960.334829
+466449	[1728023350]	2000000 OPS in 2.186784 seconds, throughput 914585.071045
+466449	[1728023351]	2000000 OPS in 2.210630 seconds, throughput 904719.469111
+466449	[1728023351]	2000000 OPS in 2.196848 seconds, throughput 910395.257205
+466449	[1728023352]	2000000 OPS in 2.192083 seconds, throughput 912374.212108
+466449	[1728023352]	2000000 OPS in 2.199358 seconds, throughput 909356.275786
+466449	[1728023353]	2000000 OPS in 2.213332 seconds, throughput 903615.002178
+466449	[1728023353]	2000000 OPS in 2.192653 seconds, throughput 912137.032171
+466449	[1728023354]	2000000 OPS in 2.209378 seconds, throughput 905232.151311
+466449	[1728023354]	2000000 OPS in 2.186454 seconds, throughput 914723.108741
+466449	[1728023355]	2000000 OPS in 2.189222 seconds, throughput 913566.554694
+466449	[1728023355]	2000000 OPS in 2.199167 seconds, throughput 909435.254349
+466449	[1728023356]	2000000 OPS in 2.190524 seconds, throughput 913023.550529
+466449	[1728023357]	2000000 OPS in 2.181001 seconds, throughput 917010.125167
+466449	[1728023357]	2000000 OPS in 2.205857 seconds, throughput 906677.087409
+466449	[1728023357]	2000000 OPS in 2.191565 seconds, throughput 912589.861583
+466449	[1728023359]	2000000 OPS in 2.199323 seconds, throughput 909370.747271
+466449	[1728023359]	2000000 OPS in 2.179632 seconds, throughput 917586.087927
+466449	[1728023359]	2000000 OPS in 2.205083 seconds, throughput 906995.337590
+466449	[1728023359]	2000000 OPS in 2.192782 seconds, throughput 912083.371717
+466449	[1728023361]	2000000 OPS in 2.175851 seconds, throughput 919180.587274
+466449	[1728023361]	2000000 OPS in 2.171670 seconds, throughput 920950.236454
+466449	[1728023362]	2000000 OPS in 2.204687 seconds, throughput 907158.249674
+466449	[1728023362]	2000000 OPS in 2.192299 seconds, throughput 912284.318882
+466449	[1728023363]	2000000 OPS in 2.203780 seconds, throughput 907531.604788
+466449	[1728023363]	2000000 OPS in 2.196129 seconds, throughput 910693.315374
+466449	[1728023364]	2000000 OPS in 2.204517 seconds, throughput 907228.204636
+466449	[1728023364]	2000000 OPS in 2.191099 seconds, throughput 912783.949972
+466449	[1728023365]	2000000 OPS in 2.201023 seconds, throughput 908668.378295
+466449	[1728023365]	2000000 OPS in 2.186569 seconds, throughput 914674.999966
+466449	[1728023366]	2000000 OPS in 2.211860 seconds, throughput 904216.360891
+466449	[1728023366]	2000000 OPS in 2.198528 seconds, throughput 909699.580810
+466449	[1728023367]	2000000 OPS in 2.190630 seconds, throughput 912979.371231
+466449	[1728023367]	2000000 OPS in 2.178792 seconds, throughput 917939.849238
+466449	[1728023368]	2000000 OPS in 2.215012 seconds, throughput 902929.645528
+466449	[1728023368]	2000000 OPS in 2.214610 seconds, throughput 903093.546945
+466449	[1728023370]	2000000 OPS in 2.199128 seconds, throughput 909451.382548
+466449	[1728023370]	2000000 OPS in 2.188348 seconds, throughput 913931.422242
+466449	[1728023370]	2000000 OPS in 2.215508 seconds, throughput 902727.500871
+466449	[1728023370]	2000000 OPS in 2.197895 seconds, throughput 909961.576872
+466449	[1728023372]	2000000 OPS in 2.190621 seconds, throughput 912983.122138
+466449	[1728023372]	2000000 OPS in 2.197385 seconds, throughput 910172.773547
+466449	[1728023373]	2000000 OPS in 2.203901 seconds, throughput 907481.778900
+466449	[1728023373]	2000000 OPS in 2.190316 seconds, throughput 913110.254411
+466449	[1728023374]	2000000 OPS in 2.204052 seconds, throughput 907419.607160
+466449	[1728023374]	2000000 OPS in 2.185443 seconds, throughput 915146.265540
+466449	[1728023375]	2000000 OPS in 2.203198 seconds, throughput 907771.339662
+466449	[1728023375]	2000000 OPS in 2.191649 seconds, throughput 912554.884473
+466449	[1728023376]	2000000 OPS in 2.177848 seconds, throughput 918337.735232
+466449	[1728023376]	2000000 OPS in 2.166170 seconds, throughput 923288.569226
+466449	[1728023377]	2000000 OPS in 2.190404 seconds, throughput 913073.569990
+466449	[1728023377]	2000000 OPS in 2.177578 seconds, throughput 918451.600815
+466449	[1728023378]	2000000 OPS in 2.190229 seconds, throughput 913146.524861
+466449	[1728023378]	2000000 OPS in 2.178857 seconds, throughput 917912.465114
+466449	[1728023379]	2000000 OPS in 2.235031 seconds, throughput 894842.174449
+466449	[1728023379]	2000000 OPS in 2.212723 seconds, throughput 903863.700969
+466449	[1728023380]	2000000 OPS in 2.199249 seconds, throughput 909401.345641
+466449	[1728023381]	2000000 OPS in 2.187042 seconds, throughput 914477.179679
+466449	[1728023381]	2000000 OPS in 2.192081 seconds, throughput 912375.044535
+466449	[1728023381]	2000000 OPS in 2.206510 seconds, throughput 906408.763160
+466449	[1728023383]	2000000 OPS in 2.215233 seconds, throughput 902839.565861
+466449	[1728023383]	2000000 OPS in 2.197816 seconds, throughput 909994.285236
+466449	[1728023384]	2000000 OPS in 2.198822 seconds, throughput 909577.946737
+466449	[1728023384]	2000000 OPS in 2.211347 seconds, throughput 904426.125796
+466449	[1728023385]	2000000 OPS in 2.197296 seconds, throughput 910209.639484
+466449	[1728023385]	2000000 OPS in 2.186931 seconds, throughput 914523.594937
+466449	[1728023386]	2000000 OPS in 2.191201 seconds, throughput 912741.460049
+466449	[1728023386]	2000000 OPS in 2.204410 seconds, throughput 907272.240645
+466449	[1728023387]	2000000 OPS in 2.192095 seconds, throughput 912369.217575
+466449	[1728023387]	2000000 OPS in 2.182118 seconds, throughput 916540.718696
+466449	[1728023388]	2000000 OPS in 2.193091 seconds, throughput 911954.861882
+466449	[1728023388]	2000000 OPS in 2.216489 seconds, throughput 902327.961023
+466449	[1728023389]	2000000 OPS in 2.192713 seconds, throughput 912112.073035
+466449	[1728023389]	2000000 OPS in 2.181584 seconds, throughput 916765.066117
+466449	[1728023390]	2000000 OPS in 2.212387 seconds, throughput 904000.972705
+466449	[1728023390]	2000000 OPS in 2.215521 seconds, throughput 902722.203942
+466449	[1728023391]	2000000 OPS in 2.191076 seconds, throughput 912793.531580
+466449	[1728023392]	2000000 OPS in 2.181596 seconds, throughput 916760.023396
+466449	[1728023392]	2000000 OPS in 2.178447 seconds, throughput 918085.223097
+466449	[1728023392]	2000000 OPS in 2.189789 seconds, throughput 913330.005768
+466449	[1728023394]	2000000 OPS in 2.196843 seconds, throughput 910397.329258
+466449	[1728023394]	2000000 OPS in 2.188860 seconds, throughput 913717.642974
+466449	[1728023395]	2000000 OPS in 2.199558 seconds, throughput 909273.590421
+466449	[1728023395]	2000000 OPS in 2.205345 seconds, throughput 906887.584482
+466449	[1728023396]	2000000 OPS in 2.199904 seconds, throughput 909130.580244
+466449	[1728023396]	2000000 OPS in 2.190207 seconds, throughput 913155.697156
+466449	[1728023397]	2000000 OPS in 2.198823 seconds, throughput 909577.533071
+466449	[1728023397]	2000000 OPS in 2.212117 seconds, throughput 904111.310568
+466449	[1728023398]	2000000 OPS in 2.191057 seconds, throughput 912801.446973
+466449	[1728023398]	2000000 OPS in 2.182853 seconds, throughput 916232.105414
+466449	[1728023399]	2000000 OPS in 2.209317 seconds, throughput 905257.145081
+466449	[1728023399]	2000000 OPS in 2.223505 seconds, throughput 899480.774723
+466449	[1728023400]	2000000 OPS in 2.191938 seconds, throughput 912434.567036
+466449	[1728023400]	2000000 OPS in 2.182934 seconds, throughput 916198.107684
+466449	[1728023401]	2000000 OPS in 2.194688 seconds, throughput 911291.263268
+466449	[1728023401]	2000000 OPS in 2.209483 seconds, throughput 905189.132480
+466449	[1728023402]	2000000 OPS in 2.190789 seconds, throughput 912913.110300
+466449	[1728023402]	2000000 OPS in 2.182716 seconds, throughput 916289.613491
+466449	[1728023403]	2000000 OPS in 2.200347 seconds, throughput 908947.543274
+466449	[1728023404]	2000000 OPS in 2.210011 seconds, throughput 904972.871176
+466449	[1728023405]	2000000 OPS in 2.221591 seconds, throughput 900255.717637
+466449	[1728023405]	2000000 OPS in 2.210298 seconds, throughput 904855.363394
+466449	[1728023406]	2000000 OPS in 2.198875 seconds, throughput 909556.022966
+466449	[1728023406]	2000000 OPS in 2.210321 seconds, throughput 904845.947715
+466449	[1728023407]	2000000 OPS in 2.191168 seconds, throughput 912755.206356
+466449	[1728023407]	2000000 OPS in 2.184718 seconds, throughput 915449.957386
+466449	[1728023408]	2000000 OPS in 2.191666 seconds, throughput 912547.806098
+466449	[1728023408]	2000000 OPS in 2.206355 seconds, throughput 906472.439839
+466449	[1728023409]	2000000 OPS in 2.166586 seconds, throughput 923111.291220
+466449	[1728023409]	2000000 OPS in 2.175613 seconds, throughput 919281.140534
+466449	[1728023410]	2000000 OPS in 2.188132 seconds, throughput 914021.640376
+466449	[1728023410]	2000000 OPS in 2.212200 seconds, throughput 904077.389025
+466449	[1728023411]	2000000 OPS in 2.181848 seconds, throughput 916654.139060
+466449	[1728023411]	2000000 OPS in 2.189633 seconds, throughput 913395.075796
+466449	[1728023412]	2000000 OPS in 2.202369 seconds, throughput 908113.036462
+466449	[1728023412]	2000000 OPS in 2.214000 seconds, throughput 903342.366757
+466449	[1728023413]	2000000 OPS in 2.195261 seconds, throughput 911053.400940
+466449	[1728023413]	2000000 OPS in 2.215913 seconds, throughput 902562.510351
+466449	[1728023414]	2000000 OPS in 2.192202 seconds, throughput 912324.685408
+466449	[1728023415]	2000000 OPS in 2.203734 seconds, throughput 907550.548297
+466449	[1728023416]	2000000 OPS in 2.196936 seconds, throughput 910358.790607
+466449	[1728023416]	2000000 OPS in 2.197501 seconds, throughput 910124.728043
+466449	[1728023417]	2000000 OPS in 2.192027 seconds, throughput 912397.520651
+466449	[1728023417]	2000000 OPS in 2.203924 seconds, throughput 907472.308483
+466449	[1728023418]	2000000 OPS in 2.181647 seconds, throughput 916738.592449
+466449	[1728023418]	2000000 OPS in 2.191518 seconds, throughput 912609.433279
+466449	[1728023419]	2000000 OPS in 2.194220 seconds, throughput 911485.630429
+466449	[1728023419]	2000000 OPS in 2.217153 seconds, throughput 902057.728988
+466449	[1728023420]	2000000 OPS in 2.181230 seconds, throughput 916913.851359
+466449	[1728023420]	2000000 OPS in 2.191190 seconds, throughput 912746.042105
+466449	[1728023421]	2000000 OPS in 2.204019 seconds, throughput 907433.193634
+466449	[1728023421]	2000000 OPS in 2.213514 seconds, throughput 903540.704961
+466449	[1728023422]	2000000 OPS in 2.180100 seconds, throughput 917389.110591
+466449	[1728023422]	2000000 OPS in 2.189938 seconds, throughput 913267.864204
+466449	[1728023423]	2000000 OPS in 2.199975 seconds, throughput 909101.239787
+466449	[1728023423]	2000000 OPS in 2.195192 seconds, throughput 911082.037471
+466449	[1728023424]	2000000 OPS in 2.182486 seconds, throughput 916386.176131
+466449	[1728023424]	2000000 OPS in 2.191614 seconds, throughput 912569.457943
+466449	[1728023425]	2000000 OPS in 2.175316 seconds, throughput 919406.651723
+466449	[1728023426]	2000000 OPS in 2.184227 seconds, throughput 915655.744572
+466449	[1728023426]	2000000 OPS in 2.181861 seconds, throughput 916648.677436
+466449	[1728023427]	2000000 OPS in 2.199162 seconds, throughput 909437.322034
+466449	[1728023428]	2000000 OPS in 2.192999 seconds, throughput 911993.119924
+466449	[1728023428]	2000000 OPS in 2.213196 seconds, throughput 903670.528955
+466449	[1728023429]	2000000 OPS in 2.189879 seconds, throughput 913292.469584
+466449	[1728023429]	2000000 OPS in 2.192032 seconds, throughput 912395.439483
+466449	[1728023430]	2000000 OPS in 2.200700 seconds, throughput 908801.744899
+466449	[1728023430]	2000000 OPS in 2.210816 seconds, throughput 904643.353404
+466449	[1728023431]	2000000 OPS in 2.183189 seconds, throughput 916091.094266
+466449	[1728023431]	2000000 OPS in 2.189545 seconds, throughput 913431.786056
+466449	[1728023432]	2000000 OPS in 2.204322 seconds, throughput 907308.460379
+466449	[1728023432]	2000000 OPS in 2.212536 seconds, throughput 903940.094082
+466449	[1728023433]	2000000 OPS in 2.191243 seconds, throughput 912723.965348
+466449	[1728023433]	2000000 OPS in 2.201091 seconds, throughput 908640.306103
+466449	[1728023434]	2000000 OPS in 2.199482 seconds, throughput 909305.009089
+466449	[1728023434]	2000000 OPS in 2.203811 seconds, throughput 907518.838957
+466449	[1728023435]	2000000 OPS in 2.194862 seconds, throughput 911219.019692
+466449	[1728023435]	2000000 OPS in 2.205866 seconds, throughput 906673.388139
+466449	[1728023436]	2000000 OPS in 2.191546 seconds, throughput 912597.773444
+466449	[1728023437]	2000000 OPS in 2.203840 seconds, throughput 907506.897052
+466449	[1728023437]	2000000 OPS in 2.190752 seconds, throughput 912928.528651
+466449	[1728023438]	2000000 OPS in 2.199312 seconds, throughput 909375.295547
+466449	[1728023439]	2000000 OPS in 2.199471 seconds, throughput 909309.556707
+466449	[1728023439]	2000000 OPS in 2.225066 seconds, throughput 898849.741985
+466449	[1728023440]	2000000 OPS in 2.188598 seconds, throughput 913827.025338
+466449	[1728023440]	2000000 OPS in 2.191870 seconds, throughput 912462.874167
+466449	[1728023441]	2000000 OPS in 2.190038 seconds, throughput 913226.163199
+466449	[1728023441]	2000000 OPS in 2.191987 seconds, throughput 912414.170340
+466449	[1728023442]	2000000 OPS in 2.167499 seconds, throughput 922722.455697
+466449	[1728023442]	2000000 OPS in 2.176075 seconds, throughput 919085.969004
+466449	[1728023443]	2000000 OPS in 2.190233 seconds, throughput 913144.857191
+466449	[1728023443]	2000000 OPS in 2.204898 seconds, throughput 907071.438225
+466449	[1728023444]	2000000 OPS in 2.182479 seconds, throughput 916389.115313
+466449	[1728023444]	2000000 OPS in 2.197824 seconds, throughput 909990.972890
+466449	[1728023445]	2000000 OPS in 2.190919 seconds, throughput 912858.941841
+466449	[1728023445]	2000000 OPS in 2.210423 seconds, throughput 904804.193586
+466449	[1728023446]	2000000 OPS in 2.203749 seconds, throughput 907544.370979
+466449	[1728023446]	2000000 OPS in 2.206828 seconds, throughput 906278.151265
+466449	[1728023447]	2000000 OPS in 2.199846 seconds, throughput 909154.549909
+466449	[1728023448]	2000000 OPS in 2.219171 seconds, throughput 901237.444073
+466449	[1728023448]	2000000 OPS in 2.183237 seconds, throughput 916070.953360
+466449	[1728023449]	2000000 OPS in 2.198774 seconds, throughput 909597.803139
+466449	[1728023450]	2000000 OPS in 2.205974 seconds, throughput 906628.999254
+466449	[1728023450]	2000000 OPS in 2.221887 seconds, throughput 900135.785483
+466449	[1728023451]	2000000 OPS in 2.190389 seconds, throughput 913079.822808
+466449	[1728023451]	2000000 OPS in 2.191667 seconds, throughput 912547.389727
+466449	[1728023452]	2000000 OPS in 2.199157 seconds, throughput 909439.389730
+466449	[1728023452]	2000000 OPS in 2.204292 seconds, throughput 907320.808677
+466449	[1728023453]	2000000 OPS in 2.182123 seconds, throughput 916538.618584
+466449	[1728023453]	2000000 OPS in 2.190425 seconds, throughput 913064.816189
+466449	[1728023454]	2000000 OPS in 2.195012 seconds, throughput 911156.749940
+466449	[1728023454]	2000000 OPS in 2.211723 seconds, throughput 904272.370455
+466449	[1728023455]	2000000 OPS in 2.193391 seconds, throughput 911830.129694
+466449	[1728023455]	2000000 OPS in 2.212545 seconds, throughput 903936.417112
+466449	[1728023456]	2000000 OPS in 2.198653 seconds, throughput 909647.861668
+466449	[1728023457]	2000000 OPS in 2.212313 seconds, throughput 904031.210774
+466449	[1728023457]	2000000 OPS in 2.179247 seconds, throughput 917748.194675
+466449	[1728023457]	2000000 OPS in 2.178712 seconds, throughput 917973.555018
+466449	[1728023458]	2000000 OPS in 2.176722 seconds, throughput 918812.783626
+466449	[1728023459]	2000000 OPS in 2.193819 seconds, throughput 911652.237491
+466449	[1728023459]	2000000 OPS in 2.183436 seconds, throughput 915987.461964
+466449	[1728023460]	2000000 OPS in 2.189378 seconds, throughput 913501.460232
+466449	[1728023460]	2000000 OPS in 2.203485 seconds, throughput 907653.104060
+466449	[1728023461]	2000000 OPS in 2.206206 seconds, throughput 906533.660048
+466449	[1728023461]	2000000 OPS in 2.182530 seconds, throughput 916367.701704
+466449	[1728023462]	2000000 OPS in 2.197861 seconds, throughput 909975.653601
+466449	[1728023463]	2000000 OPS in 2.192842 seconds, throughput 912058.415517
+466449	[1728023463]	2000000 OPS in 2.204433 seconds, throughput 907262.774600
+466449	[1728023464]	2000000 OPS in 2.190267 seconds, throughput 913130.682241
+466449	[1728023464]	2000000 OPS in 2.190863 seconds, throughput 912882.275158
+466449	[1728023465]	2000000 OPS in 2.191942 seconds, throughput 912432.901965
+466449	[1728023465]	2000000 OPS in 2.204392 seconds, throughput 907279.648992
+466449	[1728023466]	2000000 OPS in 2.190772 seconds, throughput 912920.194342
+466449	[1728023466]	2000000 OPS in 2.204715 seconds, throughput 907146.728716
+466449	[1728023467]	2000000 OPS in 2.198291 seconds, throughput 909797.656452
+466449	[1728023468]	2000000 OPS in 2.216207 seconds, throughput 902442.777232
+466449	[1728023468]	2000000 OPS in 2.186433 seconds, throughput 914731.894369
+466449	[1728023468]	2000000 OPS in 2.192042 seconds, throughput 912391.277174
+466449	[1728023469]	2000000 OPS in 2.191405 seconds, throughput 912656.492068
+466449	[1728023470]	2000000 OPS in 2.211936 seconds, throughput 904185.292884
+466449	[1728023470]	2000000 OPS in 2.182408 seconds, throughput 916418.928083
+466449	[1728023470]	2000000 OPS in 2.199217 seconds, throughput 909414.578007
+466449	[1728023471]	2000000 OPS in 2.204347 seconds, throughput 907298.170388
+466449	[1728023472]	2000000 OPS in 2.205085 seconds, throughput 906994.514951
+466449	[1728023472]	2000000 OPS in 2.181900 seconds, throughput 916632.292956
+466449	[1728023473]	2000000 OPS in 2.190086 seconds, throughput 913206.148069
+466449	[1728023474]	2000000 OPS in 2.177587 seconds, throughput 918447.804841
+466449	[1728023474]	2000000 OPS in 2.191145 seconds, throughput 912764.787360
+466449	[1728023475]	2000000 OPS in 2.166099 seconds, throughput 923318.832611
+466449	[1728023475]	2000000 OPS in 2.189191 seconds, throughput 913579.491237
+466449	[1728023476]	2000000 OPS in 2.191318 seconds, throughput 912692.726478
+466449	[1728023476]	2000000 OPS in 2.205895 seconds, throughput 906661.468474
+466449	[1728023477]	2000000 OPS in 2.207573 seconds, throughput 905972.305333
+466449	[1728023477]	2000000 OPS in 2.202969 seconds, throughput 907865.703058
+466449	[1728023478]	2000000 OPS in 2.197946 seconds, throughput 909940.462596
+466449	[1728023479]	2000000 OPS in 2.233717 seconds, throughput 895368.571757
+466449	[1728023479]	2000000 OPS in 2.193013 seconds, throughput 911987.297841
+466449	[1728023479]	2000000 OPS in 2.198448 seconds, throughput 909732.684148
+466449	[1728023480]	2000000 OPS in 2.204937 seconds, throughput 907055.394326
+466449	[1728023481]	2000000 OPS in 2.205243 seconds, throughput 906929.531122
+466449	[1728023481]	2000000 OPS in 2.184056 seconds, throughput 915727.435560
+466449	[1728023481]	2000000 OPS in 2.198585 seconds, throughput 909675.996152
+466449	[1728023482]	2000000 OPS in 2.198464 seconds, throughput 909726.063288
+466449	[1728023483]	2000000 OPS in 2.203134 seconds, throughput 907797.709989
+466449	[1728023483]	2000000 OPS in 2.188671 seconds, throughput 913796.545940
+466449	[1728023484]	2000000 OPS in 2.189142 seconds, throughput 913599.940068
+466449	[1728023485]	2000000 OPS in 2.190986 seconds, throughput 912831.026761
+466449	[1728023485]	2000000 OPS in 2.204678 seconds, throughput 907161.952902
+466449	[1728023486]	2000000 OPS in 2.181879 seconds, throughput 916641.115296
+466449	[1728023486]	2000000 OPS in 2.204791 seconds, throughput 907115.459016
+466449	[1728023487]	2000000 OPS in 2.192151 seconds, throughput 912345.910478
+466449	[1728023487]	2000000 OPS in 2.206418 seconds, throughput 906446.557271
+466449	[1728023488]	2000000 OPS in 2.195665 seconds, throughput 910885.768093
+466449	[1728023488]	2000000 OPS in 2.192680 seconds, throughput 912125.800390
+466449	[1728023489]	2000000 OPS in 2.197801 seconds, throughput 910000.495950
+466449	[1728023490]	2000000 OPS in 2.202786 seconds, throughput 907941.125466
+466449	[1728023490]	2000000 OPS in 2.169513 seconds, throughput 921865.874968
+466449	[1728023490]	2000000 OPS in 2.175577 seconds, throughput 919296.352186
+466449	[1728023491]	2000000 OPS in 2.189292 seconds, throughput 913537.344493
+466449	[1728023492]	2000000 OPS in 2.210918 seconds, throughput 904601.617970
+466449	[1728023492]	2000000 OPS in 2.182005 seconds, throughput 916588.183803
+466449	[1728023492]	2000000 OPS in 2.189069 seconds, throughput 913630.406351
+466449	[1728023493]	2000000 OPS in 2.194306 seconds, throughput 911449.907169
+466449	[1728023494]	2000000 OPS in 2.195072 seconds, throughput 911131.844422
+466449	[1728023494]	2000000 OPS in 2.183200 seconds, throughput 916086.478564
+466449	[1728023495]	2000000 OPS in 2.208511 seconds, throughput 905587.520280
+466449	[1728023496]	2000000 OPS in 2.199097 seconds, throughput 909464.202807
+466449	[1728023496]	2000000 OPS in 2.210418 seconds, throughput 904806.240268
+466449	[1728023496]	2000000 OPS in 2.191913 seconds, throughput 912444.973865
+466449	[1728023497]	2000000 OPS in 2.200744 seconds, throughput 908783.575009
+466449	[1728023498]	2000000 OPS in 2.191399 seconds, throughput 912658.990900
+466449	[1728023498]	2000000 OPS in 2.216674 seconds, throughput 902252.654202
+466449	[1728023499]	2000000 OPS in 2.196460 seconds, throughput 910556.076596
+466449	[1728023499]	2000000 OPS in 2.193658 seconds, throughput 911719.146740
+466449	[1728023500]	2000000 OPS in 2.191961 seconds, throughput 912424.992963
+466449	[1728023501]	2000000 OPS in 2.216441 seconds, throughput 902347.502144
+466449	[1728023501]	2000000 OPS in 2.192467 seconds, throughput 912214.414174
+466449	[1728023501]	2000000 OPS in 2.199426 seconds, throughput 909328.161075
+466449	[1728023502]	2000000 OPS in 2.212203 seconds, throughput 904076.162992
+466449	[1728023503]	2000000 OPS in 2.211679 seconds, throughput 904290.360400
+466449	[1728023503]	2000000 OPS in 2.181616 seconds, throughput 916751.618983
+466449	[1728023503]	2000000 OPS in 2.191440 seconds, throughput 912641.915818
+466449	[1728023504]	2000000 OPS in 2.199810 seconds, throughput 909169.428269
+466449	[1728023505]	2000000 OPS in 2.211286 seconds, throughput 904451.075076
+466449	[1728023505]	2000000 OPS in 2.189471 seconds, throughput 913462.658332
+466449	[1728023506]	2000000 OPS in 2.198657 seconds, throughput 909646.206753
+466449	[1728023507]	2000000 OPS in 2.177006 seconds, throughput 918692.920460
+466449	[1728023507]	2000000 OPS in 2.198962 seconds, throughput 909520.037181
+466449	[1728023507]	2000000 OPS in 2.186456 seconds, throughput 914722.272024
+466449	[1728023508]	2000000 OPS in 2.190261 seconds, throughput 913133.183671
+466449	[1728023509]	2000000 OPS in 2.191505 seconds, throughput 912614.846875
+466449	[1728023510]	2000000 OPS in 2.209906 seconds, throughput 905015.869453
+466449	[1728023510]	2000000 OPS in 2.185607 seconds, throughput 915077.596292
+466449	[1728023510]	2000000 OPS in 2.190103 seconds, throughput 913199.059588
+466449	[1728023511]	2000000 OPS in 2.215141 seconds, throughput 902877.062905
+466449	[1728023512]	2000000 OPS in 2.212767 seconds, throughput 903845.727996
+466449	[1728023512]	2000000 OPS in 2.191103 seconds, throughput 912782.283626
+466449	[1728023512]	2000000 OPS in 2.199616 seconds, throughput 909249.614478
+466449	[1728023513]	2000000 OPS in 2.198301 seconds, throughput 909793.517812
+466449	[1728023514]	2000000 OPS in 2.203472 seconds, throughput 907658.459014
+466449	[1728023514]	2000000 OPS in 2.183476 seconds, throughput 915970.681610
+466449	[1728023514]	2000000 OPS in 2.190474 seconds, throughput 913044.391305
+466449	[1728023515]	2000000 OPS in 2.200293 seconds, throughput 908969.850834
+466449	[1728023516]	2000000 OPS in 2.184080 seconds, throughput 915717.372990
+466449	[1728023516]	2000000 OPS in 2.211014 seconds, throughput 904562.341080
+466449	[1728023517]	2000000 OPS in 2.219881 seconds, throughput 900949.195024
+466449	[1728023518]	2000000 OPS in 2.199110 seconds, throughput 909458.826525
+466449	[1728023518]	2000000 OPS in 2.203055 seconds, throughput 907830.262976
+466449	[1728023518]	2000000 OPS in 2.224604 seconds, throughput 899036.412773
+466449	[1728023519]	2000000 OPS in 2.192798 seconds, throughput 912076.716597
+466449	[1728023520]	2000000 OPS in 2.192465 seconds, throughput 912215.246310
+466449	[1728023521]	2000000 OPS in 2.193603 seconds, throughput 911742.006188
+466449	[1728023521]	2000000 OPS in 2.214220 seconds, throughput 903252.612658
+466449	[1728023521]	2000000 OPS in 2.199237 seconds, throughput 909406.307733
+466449	[1728023522]	2000000 OPS in 2.201669 seconds, throughput 908401.762481
+466449	[1728023523]	2000000 OPS in 2.170025 seconds, throughput 921648.368106
+466449	[1728023523]	2000000 OPS in 2.190357 seconds, throughput 913093.162439
+466449	[1728023523]	2000000 OPS in 2.174920 seconds, throughput 919574.053299
+466449	[1728023524]	2000000 OPS in 2.191445 seconds, throughput 912639.833534
+466449	[1728023525]	2000000 OPS in 2.180597 seconds, throughput 917180.019967
+466449	[1728023525]	2000000 OPS in 2.211933 seconds, throughput 904186.519212
+466449	[1728023525]	2000000 OPS in 2.200117 seconds, throughput 909042.564555
+466449	[1728023526]	2000000 OPS in 2.191231 seconds, throughput 912728.963765
+466449	[1728023527]	2000000 OPS in 2.181824 seconds, throughput 916664.222229
+466449	[1728023527]	2000000 OPS in 2.210507 seconds, throughput 904769.810727
+466449	[1728023528]	2000000 OPS in 2.203003 seconds, throughput 907851.691532
+466449	[1728023529]	2000000 OPS in 2.192354 seconds, throughput 912261.432232
+466449	[1728023529]	2000000 OPS in 2.203125 seconds, throughput 907801.418440
+466449	[1728023529]	2000000 OPS in 2.210973 seconds, throughput 904579.115168
+466449	[1728023530]	2000000 OPS in 2.191875 seconds, throughput 912460.792700
+466449	[1728023531]	2000000 OPS in 2.191161 seconds, throughput 912758.122292
+466449	[1728023531]	2000000 OPS in 2.182932 seconds, throughput 916198.947104
+466449	[1728023532]	2000000 OPS in 2.205596 seconds, throughput 906784.379370
+466449	[1728023532]	2000000 OPS in 2.191072 seconds, throughput 912795.197967
+466449	[1728023533]	2000000 OPS in 2.212155 seconds, throughput 904095.779907
+466449	[1728023534]	2000000 OPS in 2.182307 seconds, throughput 916461.341140
+466449	[1728023534]	2000000 OPS in 2.205815 seconds, throughput 906694.351068
+466449	[1728023534]	2000000 OPS in 2.190763 seconds, throughput 912923.944763
+466449	[1728023535]	2000000 OPS in 2.193608 seconds, throughput 911739.928009
+466449	[1728023536]	2000000 OPS in 2.181298 seconds, throughput 916885.267396
+466449	[1728023536]	2000000 OPS in 2.210791 seconds, throughput 904653.583265
+466449	[1728023536]	2000000 OPS in 2.210469 seconds, throughput 904785.364554
+466449	[1728023537]	2000000 OPS in 2.198170 seconds, throughput 909847.736981
+466449	[1728023538]	2000000 OPS in 2.191592 seconds, throughput 912578.618648
+466449	[1728023538]	2000000 OPS in 2.212367 seconds, throughput 904009.144957
+466449	[1728023539]	2000000 OPS in 2.181858 seconds, throughput 916649.937805
+466449	[1728023540]	2000000 OPS in 2.177160 seconds, throughput 918627.937313
+466449	[1728023540]	2000000 OPS in 2.187780 seconds, throughput 914168.700692
+466449	[1728023540]	2000000 OPS in 2.211676 seconds, throughput 904291.587014
+466449	[1728023541]	2000000 OPS in 2.198309 seconds, throughput 909790.206927
+466449	[1728023542]	2000000 OPS in 2.211129 seconds, throughput 904515.295128
+466449	[1728023542]	2000000 OPS in 2.183054 seconds, throughput 916147.745315
+466449	[1728023543]	2000000 OPS in 2.204174 seconds, throughput 907369.381909
+466449	[1728023543]	2000000 OPS in 2.190660 seconds, throughput 912966.868432
+466449	[1728023544]	2000000 OPS in 2.202122 seconds, throughput 908214.894543
+466449	[1728023545]	2000000 OPS in 2.189041 seconds, throughput 913642.092588
+466449	[1728023545]	2000000 OPS in 2.211357 seconds, throughput 904422.035881
+466449	[1728023545]	2000000 OPS in 2.197850 seconds, throughput 909980.207930
+466449	[1728023546]	2000000 OPS in 2.193648 seconds, throughput 911723.302918
+466449	[1728023547]	2000000 OPS in 2.181487 seconds, throughput 916805.830152
+466449	[1728023547]	2000000 OPS in 2.219934 seconds, throughput 900927.685237
+466449	[1728023547]	2000000 OPS in 2.213317 seconds, throughput 903621.126120
+466449	[1728023548]	2000000 OPS in 2.198260 seconds, throughput 909810.486476
+466449	[1728023549]	2000000 OPS in 2.201252 seconds, throughput 908573.847974
+466449	[1728023549]	2000000 OPS in 2.211320 seconds, throughput 904437.168750
+466449	[1728023550]	2000000 OPS in 2.198175 seconds, throughput 909845.667429
+466449	[1728023551]	2000000 OPS in 2.192293 seconds, throughput 912286.815677
+466449	[1728023551]	2000000 OPS in 2.193568 seconds, throughput 911756.553706
+466449	[1728023552]	2000000 OPS in 2.204893 seconds, throughput 907073.495176
+466449	[1728023552]	2000000 OPS in 2.191666 seconds, throughput 912547.806098
+466449	[1728023553]	2000000 OPS in 2.203482 seconds, throughput 907654.339813
+466449	[1728023553]	2000000 OPS in 2.183556 seconds, throughput 915937.122748
+466449	[1728023554]	2000000 OPS in 2.205607 seconds, throughput 906779.856974
+466449	[1728023554]	2000000 OPS in 2.190055 seconds, throughput 913219.074407
+466449	[1728023555]	2000000 OPS in 2.178438 seconds, throughput 918089.016075
+466449	[1728023555]	2000000 OPS in 2.165746 seconds, throughput 923469.326505
+466449	[1728023556]	2000000 OPS in 2.190431 seconds, throughput 913062.315133
+466449	[1728023556]	2000000 OPS in 2.185886 seconds, throughput 914960.798505
+466449	[1728023557]	2000000 OPS in 2.200776 seconds, throughput 908770.361000
+466449	[1728023558]	2000000 OPS in 2.189307 seconds, throughput 913531.085407
+466449	[1728023558]	2000000 OPS in 2.233212 seconds, throughput 895571.042964
+466449	[1728023558]	2000000 OPS in 2.209692 seconds, throughput 905103.516689
+466449	[1728023559]	2000000 OPS in 2.197870 seconds, throughput 909971.927366
+466449	[1728023560]	2000000 OPS in 2.201652 seconds, throughput 908408.776682
+466449	[1728023560]	2000000 OPS in 2.205798 seconds, throughput 906701.338926
+466449	[1728023561]	2000000 OPS in 2.198683 seconds, throughput 909635.449949
+466449	[1728023561]	2000000 OPS in 2.197798 seconds, throughput 910001.738103
+466449	[1728023562]	2000000 OPS in 2.181542 seconds, throughput 916782.716079
+466449	[1728023563]	2000000 OPS in 2.205147 seconds, throughput 906969.013857
+466449	[1728023563]	2000000 OPS in 2.190282 seconds, throughput 913124.428727
+466449	[1728023564]	2000000 OPS in 2.205694 seconds, throughput 906744.090522
+466449	[1728023564]	2000000 OPS in 2.189732 seconds, throughput 913353.780280
+466449	[1728023565]	2000000 OPS in 2.212069 seconds, throughput 904130.929008
+466449	[1728023565]	2000000 OPS in 2.200349 seconds, throughput 908946.717089
+466449	[1728023566]	2000000 OPS in 2.192673 seconds, throughput 912128.712307
+466449	[1728023566]	2000000 OPS in 2.180760 seconds, throughput 917111.465728
+466449	[1728023567]	2000000 OPS in 2.210449 seconds, throughput 904793.550993
+466449	[1728023567]	2000000 OPS in 2.201987 seconds, throughput 908270.575621
+466449	[1728023568]	2000000 OPS in 2.197480 seconds, throughput 910133.425560
+466449	[1728023569]	2000000 OPS in 2.178609 seconds, throughput 918016.954855
+466449	[1728023569]	2000000 OPS in 2.219407 seconds, throughput 901141.611250
+466449	[1728023569]	2000000 OPS in 2.202783 seconds, throughput 907942.362003
+466449	[1728023570]	2000000 OPS in 2.199770 seconds, throughput 909185.960350
+466449	[1728023571]	2000000 OPS in 2.187688 seconds, throughput 914207.144712
+466449	[1728023571]	2000000 OPS in 2.187884 seconds, throughput 914125.246128
+466449	[1728023571]	2000000 OPS in 2.175449 seconds, throughput 919350.442139
+466449	[1728023572]	2000000 OPS in 2.188599 seconds, throughput 913826.607798
+466449	[1728023573]	2000000 OPS in 2.180638 seconds, throughput 917162.775298
+466449	[1728023574]	2000000 OPS in 2.202442 seconds, throughput 908082.937031
+466449	[1728023574]	2000000 OPS in 2.199582 seconds, throughput 909263.669188
+466449	[1728023575]	2000000 OPS in 2.195259 seconds, throughput 911054.230959
+466449	[1728023575]	2000000 OPS in 2.187722 seconds, throughput 914192.936763
+466449	[1728023576]	2000000 OPS in 2.204108 seconds, throughput 907396.552256
+466449	[1728023576]	2000000 OPS in 2.191532 seconds, throughput 912603.603324
+466449	[1728023577]	2000000 OPS in 2.192396 seconds, throughput 912243.955928
+466449	[1728023577]	2000000 OPS in 2.181404 seconds, throughput 916840.713595
+466449	[1728023578]	2000000 OPS in 2.215888 seconds, throughput 902572.693205
+466449	[1728023578]	2000000 OPS in 2.204582 seconds, throughput 907201.455877
+466449	[1728023579]	2000000 OPS in 2.198102 seconds, throughput 909875.883831
+466449	[1728023580]	2000000 OPS in 2.180048 seconds, throughput 917410.992785
+466449	[1728023580]	2000000 OPS in 2.214021 seconds, throughput 903333.798550
+466449	[1728023580]	2000000 OPS in 2.192136 seconds, throughput 912352.153334
+466449	[1728023581]	2000000 OPS in 2.196760 seconds, throughput 910431.726725
+466449	[1728023582]	2000000 OPS in 2.174898 seconds, throughput 919583.355173
+466449	[1728023582]	2000000 OPS in 2.194698 seconds, throughput 911287.111028
+466449	[1728023583]	2000000 OPS in 2.135482 seconds, throughput 936556.711787
+466449	[1728023584]	2000000 OPS in 2.104004 seconds, throughput 950568.535041
+466449	[1728023585]	2000000 OPS in 2.212672 seconds, throughput 903884.534174
+466449	[1728023586]	2000000 OPS in 2.107739 seconds, throughput 948884.088590
+466449	[1728023587]	2000000 OPS in 2.118821 seconds, throughput 943921.171255
+466449	[1728023589]	2000000 OPS in 1.932671 seconds, throughput 1034837.279599
+466449	[1728023590]	2000000 OPS in 1.859388 seconds, throughput 1075622.731781
+-----------------------------------------------------------------------------------------------------------------
+Benchmark                                                       Time             CPU   Iterations UserCounters...
+-----------------------------------------------------------------------------------------------------------------
+ViperFixture/bench/50/iterations:1/real_time/threads:4  274825753 us   1099239204 us            4 CompactionCPUUsage=1.97219 CompactionThroughput=790.183k Lat_Get_Avg=640.929 Lat_Get_P50=602.97 Lat_Get_P95=1.25507k Lat_Get_P99=2.1408k Lat_Put_Avg=1.53643k Lat_Put_P50=1.52613k Lat_Put_P95=2.57694k Lat_Put_P99=3.73932k items_per_second=3.63867M/s
+6551.61user 81.55system 18:59.01elapsed 582%CPU (0avgtext+0avgdata 8723456maxresident)k
+304328inputs+12944912outputs (55640major+39600957minor)pagefaults 0swaps

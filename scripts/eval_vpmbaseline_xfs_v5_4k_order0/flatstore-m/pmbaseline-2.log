@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-03T23:47:45-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 4.22, 5.53, 5.35
+[1728017265]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728017265]	Setup starts!
+[1728017265]	Setup starts!
+[1728017265]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f8c56400000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728017265]	Initializing log segments...
+Log: pool_start 0x7f8c56400000 total segments: 2028  cleaners: 2
+[1728017269]Initialized 2026 free log segments...
+[1728017269]	DB init finished in 4.331493 seconds
+[1728017269]	DB init finished in 4.331577 seconds
+[1728017269]	DB init finished in 4.331539 seconds
+[1728017269]	DB init finished in 4.331091 seconds
+[1728017275]	DB load finished in 5.304381 seconds
+[1728017275]	DB load finished in 5.316558 seconds
+[1728017275]	DB load finished in 5.333104 seconds
+[1728017275]	DB load finished in 5.335452 seconds
+[1728017275]	DB warmup finished in 0.000010 seconds
+[1728017275]	DB warmup finished in 0.018911 seconds
+[1728017275]	DB warmup finished in 0.002368 seconds
+[1728017275]	DB warmup finished in 0.031122 seconds
+[1728017275]	ETC init!
+[1728017275]	ETC init!
+[1728017275]	ETC starts!
+[1728017275]	ETC starts!
+[1728017275]	ETC init!
+[1728017275]	ETC starts!
+[1728017275]	ETC init!
+[1728017275]	ETC starts!
+414840	[1728017277]	2000000 OPS in 2.171526 seconds, throughput 921011.307256
+414840	[1728017277]	2000000 OPS in 2.180306 seconds, throughput 917302.433695
+414840	[1728017277]	2000000 OPS in 2.181880 seconds, throughput 916640.695180
+414840	[1728017277]	2000000 OPS in 2.183627 seconds, throughput 915907.341318
+414840	[1728017279]	2000000 OPS in 2.099360 seconds, throughput 952671.290298
+414840	[1728017279]	2000000 OPS in 2.105617 seconds, throughput 949840.355582
+414840	[1728017279]	2000000 OPS in 2.114838 seconds, throughput 945698.914054
+414840	[1728017279]	2000000 OPS in 2.123775 seconds, throughput 941719.344092
+414840	[1728017281]	2000000 OPS in 2.095592 seconds, throughput 954384.250369
+414840	[1728017281]	2000000 OPS in 2.117775 seconds, throughput 944387.387706
+414840	[1728017281]	2000000 OPS in 2.120817 seconds, throughput 943032.802925
+414840	[1728017281]	2000000 OPS in 2.132516 seconds, throughput 937859.317351
+414840	[1728017283]	2000000 OPS in 2.100154 seconds, throughput 952311.116232
+414840	[1728017283]	2000000 OPS in 2.110417 seconds, throughput 947680.008264
+414840	[1728017283]	2000000 OPS in 2.101874 seconds, throughput 951531.823506
+414840	[1728017283]	2000000 OPS in 2.111555 seconds, throughput 947169.266252
+414840	[1728017285]	2000000 OPS in 2.119773 seconds, throughput 943497.251828
+414840	[1728017285]	2000000 OPS in 2.115732 seconds, throughput 945299.310121
+414840	[1728017285]	2000000 OPS in 2.123821 seconds, throughput 941698.947322
+414840	[1728017285]	2000000 OPS in 2.118331 seconds, throughput 944139.513608
+414840	[1728017287]	2000000 OPS in 1.816346 seconds, throughput 1101111.792577
+414840	[1728017287]	2000000 OPS in 1.820499 seconds, throughput 1098599.889371
+414840	[1728017287]	2000000 OPS in 1.828168 seconds, throughput 1093991.361844
+414840	[1728017287]	2000000 OPS in 1.827992 seconds, throughput 1094096.691889
+414840	[1728017289]	2000000 OPS in 1.824715 seconds, throughput 1096061.576739
+414840	[1728017289]	2000000 OPS in 1.832006 seconds, throughput 1091699.481334
+414840	[1728017289]	2000000 OPS in 1.838681 seconds, throughput 1087736.263115
+414840	[1728017289]	2000000 OPS in 1.836902 seconds, throughput 1088789.712244
+414840	[1728017291]	2000000 OPS in 2.023475 seconds, throughput 988398.670604
+414840	[1728017291]	2000000 OPS in 2.020537 seconds, throughput 989835.870365
+414840	[1728017291]	2000000 OPS in 2.078574 seconds, throughput 962198.122367
+414840	[1728017291]	2000000 OPS in 2.213417 seconds, throughput 903580.301407
+414840	[1728017293]	2000000 OPS in 2.410541 seconds, throughput 829689.268923
+414840	[1728017294]	2000000 OPS in 2.407053 seconds, throughput 830891.550788
+414840	[1728017294]	2000000 OPS in 2.540465 seconds, throughput 787257.450900
+414840	[1728017294]	2000000 OPS in 2.426096 seconds, throughput 824369.686937
+414840	[1728017296]	2000000 OPS in 2.411493 seconds, throughput 829361.727361
+414840	[1728017296]	2000000 OPS in 2.379693 seconds, throughput 840444.544737
+414840	[1728017296]	2000000 OPS in 2.284464 seconds, throughput 875478.886951
+414840	[1728017296]	2000000 OPS in 2.521493 seconds, throughput 793180.865463
+414840	[1728017298]	2000000 OPS in 2.176875 seconds, throughput 918748.205570
+414840	[1728017298]	2000000 OPS in 2.295835 seconds, throughput 871142.743272
+414840	[1728017298]	2000000 OPS in 2.238863 seconds, throughput 893310.577735
+414840	[1728017299]	2000000 OPS in 2.253375 seconds, throughput 887557.552560
+414840	[1728017300]	2000000 OPS in 2.148318 seconds, throughput 930960.872645
+414840	[1728017300]	2000000 OPS in 2.125356 seconds, throughput 941018.822258
+414840	[1728017300]	2000000 OPS in 2.111104 seconds, throughput 947371.612199
+414840	[1728017301]	2000000 OPS in 2.122154 seconds, throughput 942438.673159
+414840	[1728017302]	2000000 OPS in 2.046380 seconds, throughput 977335.587721
+414840	[1728017302]	2000000 OPS in 2.028051 seconds, throughput 986168.493790
+414840	[1728017302]	2000000 OPS in 2.066045 seconds, throughput 968033.126094
+414840	[1728017303]	2000000 OPS in 2.066649 seconds, throughput 967750.208187
+414840	[1728017304]	2000000 OPS in 1.918679 seconds, throughput 1042383.848471
+414840	[1728017304]	2000000 OPS in 1.911503 seconds, throughput 1046297.076175
+414840	[1728017304]	2000000 OPS in 1.852814 seconds, throughput 1079439.166587
+414840	[1728017305]	2000000 OPS in 1.843053 seconds, throughput 1085155.988460
+414840	[1728017306]	2000000 OPS in 1.824207 seconds, throughput 1096366.804864
+414840	[1728017306]	2000000 OPS in 1.831681 seconds, throughput 1091893.184457
+414840	[1728017306]	2000000 OPS in 1.834280 seconds, throughput 1090346.075844
+414840	[1728017306]	2000000 OPS in 1.835487 seconds, throughput 1089629.073919
+414840	[1728017308]	2000000 OPS in 1.815484 seconds, throughput 1101634.605428
+414840	[1728017308]	2000000 OPS in 1.827677 seconds, throughput 1094285.259376
+414840	[1728017308]	2000000 OPS in 1.833114 seconds, throughput 1091039.618922
+414840	[1728017308]	2000000 OPS in 1.829863 seconds, throughput 1092977.998899
+414840	[1728017310]	2000000 OPS in 1.818830 seconds, throughput 1099607.989752
+414840	[1728017310]	2000000 OPS in 1.827127 seconds, throughput 1094614.660065
+414840	[1728017310]	2000000 OPS in 1.831992 seconds, throughput 1091707.824052
+414840	[1728017310]	2000000 OPS in 1.830147 seconds, throughput 1092808.391894
+414840	[1728017311]	2000000 OPS in 1.818538 seconds, throughput 1099784.552206
+414840	[1728017312]	2000000 OPS in 1.829637 seconds, throughput 1093113.005476
+414840	[1728017312]	2000000 OPS in 1.835443 seconds, throughput 1089655.194958
+414840	[1728017312]	2000000 OPS in 1.831524 seconds, throughput 1091986.782592
+414840	[1728017313]	2000000 OPS in 1.820527 seconds, throughput 1098582.992727
+414840	[1728017313]	2000000 OPS in 1.832049 seconds, throughput 1091673.858068
+414840	[1728017314]	2000000 OPS in 1.835739 seconds, throughput 1089479.495724
+414840	[1728017314]	2000000 OPS in 1.836811 seconds, throughput 1088843.653484
+414840	[1728017315]	2000000 OPS in 1.824706 seconds, throughput 1096066.982845
+414840	[1728017315]	2000000 OPS in 1.832884 seconds, throughput 1091176.528356
+414840	[1728017315]	2000000 OPS in 1.836303 seconds, throughput 1089144.874239
+414840	[1728017316]	2000000 OPS in 1.836962 seconds, throughput 1088754.149514
+414840	[1728017317]	2000000 OPS in 1.823632 seconds, throughput 1096712.494626
+414840	[1728017317]	2000000 OPS in 1.834670 seconds, throughput 1090114.298484
+414840	[1728017317]	2000000 OPS in 1.838059 seconds, throughput 1088104.353560
+414840	[1728017317]	2000000 OPS in 1.834653 seconds, throughput 1090124.399546
+414840	[1728017319]	2000000 OPS in 1.825176 seconds, throughput 1095784.735280
+414840	[1728017319]	2000000 OPS in 1.833455 seconds, throughput 1090836.699019
+414840	[1728017319]	2000000 OPS in 1.839701 seconds, throughput 1087133.180881
+414840	[1728017319]	2000000 OPS in 1.835742 seconds, throughput 1089477.715278
+414840	[1728017321]	2000000 OPS in 1.911898 seconds, throughput 1046080.910174
+414840	[1728017321]	2000000 OPS in 1.902622 seconds, throughput 1051180.949237
+414840	[1728017321]	2000000 OPS in 1.935657 seconds, throughput 1033240.909934
+414840	[1728017321]	2000000 OPS in 1.925471 seconds, throughput 1038706.893015
+414840	[1728017323]	2000000 OPS in 1.963717 seconds, throughput 1018476.694962
+414840	[1728017323]	2000000 OPS in 1.936738 seconds, throughput 1032664.201353
+414840	[1728017323]	2000000 OPS in 2.042292 seconds, throughput 979291.893618
+414840	[1728017323]	2000000 OPS in 1.995988 seconds, throughput 1002010.032124
+414840	[1728017325]	2000000 OPS in 1.970773 seconds, throughput 1014830.221441
+414840	[1728017325]	2000000 OPS in 1.965890 seconds, throughput 1017350.919940
+414840	[1728017325]	2000000 OPS in 1.976949 seconds, throughput 1011659.886016
+414840	[1728017325]	2000000 OPS in 1.999107 seconds, throughput 1000446.699451
+414840	[1728017327]	2000000 OPS in 1.967262 seconds, throughput 1016641.403128
+414840	[1728017327]	2000000 OPS in 1.917717 seconds, throughput 1042906.747972
+414840	[1728017327]	2000000 OPS in 1.915041 seconds, throughput 1044364.063224
+414840	[1728017327]	2000000 OPS in 1.948855 seconds, throughput 1026243.614841
+414840	[1728017328]	2000000 OPS in 1.875311 seconds, throughput 1066489.771563
+414840	[1728017329]	2000000 OPS in 1.877591 seconds, throughput 1065194.709604
+414840	[1728017329]	2000000 OPS in 1.876971 seconds, throughput 1065546.564118
+414840	[1728017329]	2000000 OPS in 1.873880 seconds, throughput 1067304.203044
+414840	[1728017330]	2000000 OPS in 1.900825 seconds, throughput 1052174.713611
+414840	[1728017330]	2000000 OPS in 1.904990 seconds, throughput 1049874.277555
+414840	[1728017331]	2000000 OPS in 1.907616 seconds, throughput 1048429.033936
+414840	[1728017331]	2000000 OPS in 1.887830 seconds, throughput 1059417.426357
+414840	[1728017332]	2000000 OPS in 1.890466 seconds, throughput 1057940.211567
+414840	[1728017332]	2000000 OPS in 1.894343 seconds, throughput 1055775.010122
+414840	[1728017333]	2000000 OPS in 1.961835 seconds, throughput 1019453.725721
+414840	[1728017333]	2000000 OPS in 1.912939 seconds, throughput 1045511.644647
+414840	[1728017334]	2000000 OPS in 1.899757 seconds, throughput 1052766.222206
+414840	[1728017334]	2000000 OPS in 1.892663 seconds, throughput 1056712.156364
+414840	[1728017335]	2000000 OPS in 1.891197 seconds, throughput 1057531.288385
+414840	[1728017335]	2000000 OPS in 1.891792 seconds, throughput 1057198.677233
+414840	[1728017336]	2000000 OPS in 1.841877 seconds, throughput 1085848.837897
+414840	[1728017336]	2000000 OPS in 1.852901 seconds, throughput 1079388.483249
+414840	[1728017336]	2000000 OPS in 1.859385 seconds, throughput 1075624.467230
+414840	[1728017337]	2000000 OPS in 1.847406 seconds, throughput 1082599.060521
+414840	[1728017338]	2000000 OPS in 1.835510 seconds, throughput 1089615.420237
+414840	[1728017338]	2000000 OPS in 1.834405 seconds, throughput 1090271.777497
+414840	[1728017338]	2000000 OPS in 1.866069 seconds, throughput 1071771.729770
+414840	[1728017338]	2000000 OPS in 1.870577 seconds, throughput 1069188.811794
+414840	[1728017340]	2000000 OPS in 1.822998 seconds, throughput 1097093.907947
+414840	[1728017340]	2000000 OPS in 1.835370 seconds, throughput 1089698.534900
+414840	[1728017340]	2000000 OPS in 1.850219 seconds, throughput 1080953.119604
+414840	[1728017340]	2000000 OPS in 1.836258 seconds, throughput 1089171.565216
+414840	[1728017341]	2000000 OPS in 1.824096 seconds, throughput 1096433.521043
+414840	[1728017342]	2000000 OPS in 1.834658 seconds, throughput 1090121.428626
+414840	[1728017342]	2000000 OPS in 1.847371 seconds, throughput 1082619.571272
+414840	[1728017342]	2000000 OPS in 1.837324 seconds, throughput 1088539.636994
+414840	[1728017343]	2000000 OPS in 1.825259 seconds, throughput 1095734.906663
+414840	[1728017343]	2000000 OPS in 1.835641 seconds, throughput 1089537.660142
+414840	[1728017344]	2000000 OPS in 1.853335 seconds, throughput 1079135.720202
+414840	[1728017344]	2000000 OPS in 1.837053 seconds, throughput 1088700.217141
+414840	[1728017345]	2000000 OPS in 1.824111 seconds, throughput 1096424.504868
+414840	[1728017345]	2000000 OPS in 1.834068 seconds, throughput 1090472.108995
+414840	[1728017346]	2000000 OPS in 1.849933 seconds, throughput 1081120.235165
+414840	[1728017346]	2000000 OPS in 1.836983 seconds, throughput 1088741.703108
+414840	[1728017347]	2000000 OPS in 1.823482 seconds, throughput 1096802.710419
+414840	[1728017347]	2000000 OPS in 1.833176 seconds, throughput 1091002.718779
+414840	[1728017348]	2000000 OPS in 1.850331 seconds, throughput 1080887.689824
+414840	[1728017348]	2000000 OPS in 1.836718 seconds, throughput 1088898.785769
+414840	[1728017349]	2000000 OPS in 1.824831 seconds, throughput 1095991.902812
+414840	[1728017349]	2000000 OPS in 1.833890 seconds, throughput 1090577.951786
+414840	[1728017349]	2000000 OPS in 1.853205 seconds, throughput 1079211.420215
+414840	[1728017349]	2000000 OPS in 1.841334 seconds, throughput 1086169.049178
+414840	[1728017351]	2000000 OPS in 1.877774 seconds, throughput 1065090.900183
+414840	[1728017351]	2000000 OPS in 1.867788 seconds, throughput 1070785.335381
+414840	[1728017351]	2000000 OPS in 1.863098 seconds, throughput 1073480.836757
+414840	[1728017351]	2000000 OPS in 1.857751 seconds, throughput 1076570.541477
+414840	[1728017352]	2000000 OPS in 1.853914 seconds, throughput 1078798.692928
+414840	[1728017353]	2000000 OPS in 1.861069 seconds, throughput 1074651.181660
+414840	[1728017353]	2000000 OPS in 1.871355 seconds, throughput 1068744.305597
+414840	[1728017353]	2000000 OPS in 1.882567 seconds, throughput 1062379.187567
+414840	[1728017354]	2000000 OPS in 1.893079 seconds, throughput 1056479.946162
+414840	[1728017355]	2000000 OPS in 1.875850 seconds, throughput 1066183.330224
+414840	[1728017355]	2000000 OPS in 1.951071 seconds, throughput 1025078.021251
+414840	[1728017355]	2000000 OPS in 1.922524 seconds, throughput 1040299.106799
+414840	[1728017356]	2000000 OPS in 1.852962 seconds, throughput 1079352.949494
+414840	[1728017356]	2000000 OPS in 1.897012 seconds, throughput 1054289.588047
+414840	[1728017357]	2000000 OPS in 1.884707 seconds, throughput 1061172.903799
+414840	[1728017357]	2000000 OPS in 1.886598 seconds, throughput 1060109.254860
+414840	[1728017358]	2000000 OPS in 1.868713 seconds, throughput 1070255.304052
+414840	[1728017358]	2000000 OPS in 1.858282 seconds, throughput 1076262.913810
+414840	[1728017359]	2000000 OPS in 1.838381 seconds, throughput 1087913.767603
+414840	[1728017359]	2000000 OPS in 1.854513 seconds, throughput 1078450.245428
+414840	[1728017360]	2000000 OPS in 1.844986 seconds, throughput 1084019.065727
+414840	[1728017360]	2000000 OPS in 1.862446 seconds, throughput 1073856.637991
+414840	[1728017361]	2000000 OPS in 1.865711 seconds, throughput 1071977.385565
+414840	[1728017361]	2000000 OPS in 1.870899 seconds, throughput 1069004.793952
+414840	[1728017362]	2000000 OPS in 1.856174 seconds, throughput 1077485.192660
+414840	[1728017362]	2000000 OPS in 1.867134 seconds, throughput 1071160.398772
+414840	[1728017363]	2000000 OPS in 1.917926 seconds, throughput 1042793.100464
+414840	[1728017363]	2000000 OPS in 1.920243 seconds, throughput 1041534.847413
+414840	[1728017364]	2000000 OPS in 1.917636 seconds, throughput 1042950.799839
+414840	[1728017364]	2000000 OPS in 1.922414 seconds, throughput 1040358.632428
+414840	[1728017364]	2000000 OPS in 1.911018 seconds, throughput 1046562.617411
+414840	[1728017364]	2000000 OPS in 1.907827 seconds, throughput 1048313.080798
+414840	[1728017366]	2000000 OPS in 1.900262 seconds, throughput 1052486.446606
+414840	[1728017366]	2000000 OPS in 1.863059 seconds, throughput 1073503.308269
+414840	[1728017366]	2000000 OPS in 1.867954 seconds, throughput 1070690.177595
+414840	[1728017366]	2000000 OPS in 1.886187 seconds, throughput 1060340.252584
+414840	[1728017367]	2000000 OPS in 1.863554 seconds, throughput 1073218.162715
+414840	[1728017368]	2000000 OPS in 1.871955 seconds, throughput 1068401.751110
+414840	[1728017368]	2000000 OPS in 1.881761 seconds, throughput 1062834.228151
+414840	[1728017368]	2000000 OPS in 1.903956 seconds, throughput 1050444.443044
+414840	[1728017369]	2000000 OPS in 1.855055 seconds, throughput 1078135.149632
+414840	[1728017370]	2000000 OPS in 1.847080 seconds, throughput 1082790.133616
+414840	[1728017370]	2000000 OPS in 1.838137 seconds, throughput 1088058.180647
+414840	[1728017370]	2000000 OPS in 1.850395 seconds, throughput 1080850.304935
+414840	[1728017371]	2000000 OPS in 1.825138 seconds, throughput 1095807.549895
+414840	[1728017371]	2000000 OPS in 1.847008 seconds, throughput 1082832.342903
+414840	[1728017372]	2000000 OPS in 1.870463 seconds, throughput 1069253.976155
+414840	[1728017372]	2000000 OPS in 1.884416 seconds, throughput 1061336.774895
+414840	[1728017373]	2000000 OPS in 1.868945 seconds, throughput 1070122.448761
+414840	[1728017373]	2000000 OPS in 1.877295 seconds, throughput 1065362.662767
+414840	[1728017374]	2000000 OPS in 1.852757 seconds, throughput 1079472.375492
+414840	[1728017374]	2000000 OPS in 1.864527 seconds, throughput 1072658.105782
+414840	[1728017375]	2000000 OPS in 1.844050 seconds, throughput 1084569.290421
+414840	[1728017375]	2000000 OPS in 1.840499 seconds, throughput 1086661.823777
+414840	[1728017376]	2000000 OPS in 1.835931 seconds, throughput 1089365.558945
+414840	[1728017376]	2000000 OPS in 1.866379 seconds, throughput 1071593.711674
+414840	[1728017377]	2000000 OPS in 1.823846 seconds, throughput 1096583.812449
+414840	[1728017377]	2000000 OPS in 1.844776 seconds, throughput 1084142.464993
+414840	[1728017377]	2000000 OPS in 1.847388 seconds, throughput 1082609.608810
+414840	[1728017378]	2000000 OPS in 1.851619 seconds, throughput 1080135.816278
+414840	[1728017379]	2000000 OPS in 1.824542 seconds, throughput 1096165.503452
+414840	[1728017379]	2000000 OPS in 1.832728 seconds, throughput 1091269.408226
+414840	[1728017379]	2000000 OPS in 1.835552 seconds, throughput 1089590.488311
+414840	[1728017379]	2000000 OPS in 1.850448 seconds, throughput 1080819.347531
+414840	[1728017380]	2000000 OPS in 1.849650 seconds, throughput 1081285.648636
+414840	[1728017381]	2000000 OPS in 1.851274 seconds, throughput 1080337.108391
+414840	[1728017381]	2000000 OPS in 1.848820 seconds, throughput 1081771.075605
+414840	[1728017381]	2000000 OPS in 1.856086 seconds, throughput 1077536.277953
+414840	[1728017382]	2000000 OPS in 1.837787 seconds, throughput 1088265.397459
+414840	[1728017382]	2000000 OPS in 1.843010 seconds, throughput 1085181.306667
+414840	[1728017383]	2000000 OPS in 1.852852 seconds, throughput 1079417.028451
+414840	[1728017383]	2000000 OPS in 1.851994 seconds, throughput 1079917.105563
+414840	[1728017384]	2000000 OPS in 1.829901 seconds, throughput 1092955.301953
+414840	[1728017384]	2000000 OPS in 1.835399 seconds, throughput 1089681.317250
+414840	[1728017385]	2000000 OPS in 1.861004 seconds, throughput 1074688.716413
+414840	[1728017385]	2000000 OPS in 1.942660 seconds, throughput 1029516.230323
+414840	[1728017386]	2000000 OPS in 1.882076 seconds, throughput 1062656.343315
+414840	[1728017386]	2000000 OPS in 1.903482 seconds, throughput 1050706.021911
+414840	[1728017387]	2000000 OPS in 1.888700 seconds, throughput 1058929.422354
+414840	[1728017387]	2000000 OPS in 1.882726 seconds, throughput 1062289.467506
+414840	[1728017388]	2000000 OPS in 1.854957 seconds, throughput 1078192.109035
+414840	[1728017388]	2000000 OPS in 1.837966 seconds, throughput 1088159.411001
+414840	[1728017389]	2000000 OPS in 1.882144 seconds, throughput 1062617.950593
+414840	[1728017389]	2000000 OPS in 1.903618 seconds, throughput 1050630.956421
+414840	[1728017390]	2000000 OPS in 1.865951 seconds, throughput 1071839.507040
+414840	[1728017390]	2000000 OPS in 1.922149 seconds, throughput 1040502.063055
+414840	[1728017391]	2000000 OPS in 1.927739 seconds, throughput 1037484.846237
+414840	[1728017391]	2000000 OPS in 1.883792 seconds, throughput 1061688.339265
+414840	[1728017392]	2000000 OPS in 1.897927 seconds, throughput 1053781.309819
+414840	[1728017392]	2000000 OPS in 1.863290 seconds, throughput 1073370.221490
+414840	[1728017392]	2000000 OPS in 1.836954 seconds, throughput 1088758.891077
+414840	[1728017393]	2000000 OPS in 1.851662 seconds, throughput 1080110.732952
+414840	[1728017393]	2000000 OPS in 1.841825 seconds, throughput 1085879.494523
+414840	[1728017394]	2000000 OPS in 1.860219 seconds, throughput 1075142.227877
+414840	[1728017394]	2000000 OPS in 1.866859 seconds, throughput 1071318.187394
+414840	[1728017394]	2000000 OPS in 1.881043 seconds, throughput 1063239.915302
+414840	[1728017395]	2000000 OPS in 1.865696 seconds, throughput 1071986.004151
+414840	[1728017396]	2000000 OPS in 1.891993 seconds, throughput 1057086.363427
+414840	[1728017396]	2000000 OPS in 1.916077 seconds, throughput 1043799.388020
+414840	[1728017396]	2000000 OPS in 1.916219 seconds, throughput 1043722.038034
+414840	[1728017397]	2000000 OPS in 1.868980 seconds, throughput 1070102.408801
+414840	[1728017397]	2000000 OPS in 1.865470 seconds, throughput 1072115.874284
+414840	[1728017398]	2000000 OPS in 1.861154 seconds, throughput 1074602.101707
+414840	[1728017398]	2000000 OPS in 1.902146 seconds, throughput 1051444.000618
+414840	[1728017399]	2000000 OPS in 1.848585 seconds, throughput 1081908.594952
+414840	[1728017399]	2000000 OPS in 1.856755 seconds, throughput 1077148.035147
+414840	[1728017400]	2000000 OPS in 1.837812 seconds, throughput 1088250.593641
+414840	[1728017400]	2000000 OPS in 1.850149 seconds, throughput 1080994.017239
+414840	[1728017401]	2000000 OPS in 1.824157 seconds, throughput 1096396.856192
+414840	[1728017401]	2000000 OPS in 1.870299 seconds, throughput 1069347.735309
+414840	[1728017402]	2000000 OPS in 1.903047 seconds, throughput 1050946.193131
+414840	[1728017402]	2000000 OPS in 1.930313 seconds, throughput 1036101.399100
+414840	[1728017403]	2000000 OPS in 1.941991 seconds, throughput 1029870.890236
+414840	[1728017403]	2000000 OPS in 1.910013 seconds, throughput 1047113.291899
+414840	[1728017404]	2000000 OPS in 1.902083 seconds, throughput 1051478.826108
+414840	[1728017404]	2000000 OPS in 1.876680 seconds, throughput 1065711.788904
+414840	[1728017405]	2000000 OPS in 1.847962 seconds, throughput 1082273.336789
+414840	[1728017405]	2000000 OPS in 1.860642 seconds, throughput 1074897.804091
+414840	[1728017406]	2000000 OPS in 1.843619 seconds, throughput 1084822.840294
+414840	[1728017406]	2000000 OPS in 1.850582 seconds, throughput 1080741.085777
+414840	[1728017406]	2000000 OPS in 1.828135 seconds, throughput 1094011.109683
+414840	[1728017407]	2000000 OPS in 1.833390 seconds, throughput 1090875.372943
+414840	[1728017407]	2000000 OPS in 1.847762 seconds, throughput 1082390.481025
+414840	[1728017408]	2000000 OPS in 1.857504 seconds, throughput 1076713.697521
+414840	[1728017408]	2000000 OPS in 1.834574 seconds, throughput 1090171.342230
+414840	[1728017409]	2000000 OPS in 1.835854 seconds, throughput 1089411.249478
+414840	[1728017409]	2000000 OPS in 1.837341 seconds, throughput 1088529.565279
+414840	[1728017410]	2000000 OPS in 1.850643 seconds, throughput 1080705.462912
+414840	[1728017410]	2000000 OPS in 1.822875 seconds, throughput 1097167.935267
+414840	[1728017410]	2000000 OPS in 1.833686 seconds, throughput 1090699.280029
+414840	[1728017411]	2000000 OPS in 1.839235 seconds, throughput 1087408.623694
+414840	[1728017411]	2000000 OPS in 1.851974 seconds, throughput 1079928.767898
+414840	[1728017412]	2000000 OPS in 1.823525 seconds, throughput 1096776.847041
+414840	[1728017412]	2000000 OPS in 1.834362 seconds, throughput 1090297.334986
+414840	[1728017413]	2000000 OPS in 1.845152 seconds, throughput 1083921.541423
+414840	[1728017413]	2000000 OPS in 1.862203 seconds, throughput 1073996.766196
+414840	[1728017414]	2000000 OPS in 1.830533 seconds, throughput 1092577.954071
+414840	[1728017414]	2000000 OPS in 1.843990 seconds, throughput 1084604.580285
+414840	[1728017415]	2000000 OPS in 1.857496 seconds, throughput 1076718.334790
+414840	[1728017415]	2000000 OPS in 1.861520 seconds, throughput 1074390.820405
+414840	[1728017416]	2000000 OPS in 1.854151 seconds, throughput 1078660.799471
+414840	[1728017416]	2000000 OPS in 1.850896 seconds, throughput 1080557.740683
+414840	[1728017417]	2000000 OPS in 1.840364 seconds, throughput 1086741.535914
+414840	[1728017417]	2000000 OPS in 1.879303 seconds, throughput 1064224.342748
+414840	[1728017417]	2000000 OPS in 1.852272 seconds, throughput 1079755.025180
+414840	[1728017418]	2000000 OPS in 1.856278 seconds, throughput 1077424.825376
+414840	[1728017418]	2000000 OPS in 1.865338 seconds, throughput 1072191.742194
+414840	[1728017419]	2000000 OPS in 1.851835 seconds, throughput 1080009.828089
+414840	[1728017419]	2000000 OPS in 1.839545 seconds, throughput 1087225.373666
+414840	[1728017420]	2000000 OPS in 1.847636 seconds, throughput 1082464.294915
+414840	[1728017420]	2000000 OPS in 1.862582 seconds, throughput 1073778.228287
+414840	[1728017421]	2000000 OPS in 1.917830 seconds, throughput 1042845.299114
+414840	[1728017421]	2000000 OPS in 1.894606 seconds, throughput 1055628.452565
+414840	[1728017422]	2000000 OPS in 1.898240 seconds, throughput 1053607.552259
+414840	[1728017422]	2000000 OPS in 1.872847 seconds, throughput 1067892.892479
+414840	[1728017423]	2000000 OPS in 1.872155 seconds, throughput 1068287.615075
+414840	[1728017423]	2000000 OPS in 1.879540 seconds, throughput 1064090.149717
+414840	[1728017423]	2000000 OPS in 1.887933 seconds, throughput 1059359.627699
+414840	[1728017424]	2000000 OPS in 1.891832 seconds, throughput 1057176.324325
+414840	[1728017425]	2000000 OPS in 1.915217 seconds, throughput 1044268.090770
+414840	[1728017425]	2000000 OPS in 1.846968 seconds, throughput 1082855.793928
+414840	[1728017425]	2000000 OPS in 1.849960 seconds, throughput 1081104.456313
+414840	[1728017426]	2000000 OPS in 1.835437 seconds, throughput 1089658.757015
+414840	[1728017426]	2000000 OPS in 1.850263 seconds, throughput 1080927.414103
+414840	[1728017427]	2000000 OPS in 1.823564 seconds, throughput 1096753.390613
+414840	[1728017427]	2000000 OPS in 1.859304 seconds, throughput 1075671.326475
+414840	[1728017428]	2000000 OPS in 1.870788 seconds, throughput 1069068.221519
+414840	[1728017428]	2000000 OPS in 1.885651 seconds, throughput 1060641.656383
+414840	[1728017429]	2000000 OPS in 1.868344 seconds, throughput 1070466.680654
+414840	[1728017429]	2000000 OPS in 1.837954 seconds, throughput 1088166.515593
+414840	[1728017430]	2000000 OPS in 1.847015 seconds, throughput 1082828.239078
+414840	[1728017430]	2000000 OPS in 1.862479 seconds, throughput 1073837.611055
+414840	[1728017430]	2000000 OPS in 1.842445 seconds, throughput 1085514.085902
+414840	[1728017431]	2000000 OPS in 1.852396 seconds, throughput 1079682.746022
+414840	[1728017432]	2000000 OPS in 1.906074 seconds, throughput 1049277.205397
+414840	[1728017432]	2000000 OPS in 1.912144 seconds, throughput 1045946.330402
+414840	[1728017432]	2000000 OPS in 1.858230 seconds, throughput 1076293.031541
+414840	[1728017433]	2000000 OPS in 1.897179 seconds, throughput 1054196.783751
+414840	[1728017433]	2000000 OPS in 1.869702 seconds, throughput 1069689.180415
+414840	[1728017434]	2000000 OPS in 1.908131 seconds, throughput 1048146.065443
+414840	[1728017434]	2000000 OPS in 1.890410 seconds, throughput 1057971.551145
+414840	[1728017435]	2000000 OPS in 1.869078 seconds, throughput 1070046.300903
+414840	[1728017435]	2000000 OPS in 1.871761 seconds, throughput 1068512.486370
+414840	[1728017436]	2000000 OPS in 1.850404 seconds, throughput 1080845.047892
+414840	[1728017436]	2000000 OPS in 1.835932 seconds, throughput 1089364.965587
+414840	[1728017436]	2000000 OPS in 1.834343 seconds, throughput 1090308.628212
+414840	[1728017437]	2000000 OPS in 1.835949 seconds, throughput 1089354.878594
+414840	[1728017438]	2000000 OPS in 1.862106 seconds, throughput 1074052.712359
+414840	[1728017438]	2000000 OPS in 1.851917 seconds, throughput 1079962.006937
+414840	[1728017438]	2000000 OPS in 1.876444 seconds, throughput 1065845.823270
+414840	[1728017439]	2000000 OPS in 1.877320 seconds, throughput 1065348.475486
+414840	[1728017440]	2000000 OPS in 1.856895 seconds, throughput 1077066.823918
+414840	[1728017440]	2000000 OPS in 1.852629 seconds, throughput 1079546.957324
+414840	[1728017440]	2000000 OPS in 1.859322 seconds, throughput 1075660.912956
+414840	[1728017441]	2000000 OPS in 1.850262 seconds, throughput 1080927.998305
+414840	[1728017441]	2000000 OPS in 1.868092 seconds, throughput 1070611.083394
+414840	[1728017442]	2000000 OPS in 1.864296 seconds, throughput 1072791.016019
+414840	[1728017442]	2000000 OPS in 1.853454 seconds, throughput 1079066.434883
+414840	[1728017443]	2000000 OPS in 1.891134 seconds, throughput 1057566.518290
+414840	[1728017443]	2000000 OPS in 1.942000 seconds, throughput 1029866.117405
+414840	[1728017443]	2000000 OPS in 1.899269 seconds, throughput 1053036.720970
+414840	[1728017444]	2000000 OPS in 1.913085 seconds, throughput 1045431.854831
+414840	[1728017445]	2000000 OPS in 1.892407 seconds, throughput 1056855.105693
+414840	[1728017445]	2000000 OPS in 1.870892 seconds, throughput 1069008.793666
+414840	[1728017445]	2000000 OPS in 1.880433 seconds, throughput 1063584.823283
+414840	[1728017446]	2000000 OPS in 1.876833 seconds, throughput 1065624.911753
+414840	[1728017447]	2000000 OPS in 1.849751 seconds, throughput 1081226.608338
+414840	[1728017447]	2000000 OPS in 1.851675 seconds, throughput 1080103.149851
+414840	[1728017447]	2000000 OPS in 1.824028 seconds, throughput 1096474.396226
+414840	[1728017448]	2000000 OPS in 1.833368 seconds, throughput 1090888.463200
+414840	[1728017448]	2000000 OPS in 1.839737 seconds, throughput 1087111.907843
+414840	[1728017449]	2000000 OPS in 1.849362 seconds, throughput 1081454.036581
+414840	[1728017449]	2000000 OPS in 1.824481 seconds, throughput 1096202.152831
+414840	[1728017449]	2000000 OPS in 1.836256 seconds, throughput 1089172.751512
+414840	[1728017450]	2000000 OPS in 1.837318 seconds, throughput 1088543.191761
+414840	[1728017451]	2000000 OPS in 1.850551 seconds, throughput 1080759.190101
+414840	[1728017451]	2000000 OPS in 1.824870 seconds, throughput 1095968.479947
+414840	[1728017451]	2000000 OPS in 1.831844 seconds, throughput 1091796.026299
+414840	[1728017452]	2000000 OPS in 1.840525 seconds, throughput 1086646.473153
+414840	[1728017453]	2000000 OPS in 1.846918 seconds, throughput 1082885.109139
+414840	[1728017453]	2000000 OPS in 1.830008 seconds, throughput 1092891.397196
+414840	[1728017453]	2000000 OPS in 1.841286 seconds, throughput 1086197.364233
+414840	[1728017454]	2000000 OPS in 1.896732 seconds, throughput 1054445.224734
+414840	[1728017455]	2000000 OPS in 1.935846 seconds, throughput 1033140.032833
+414840	[1728017455]	2000000 OPS in 1.917109 seconds, throughput 1043237.499798
+414840	[1728017455]	2000000 OPS in 1.865373 seconds, throughput 1072171.624656
+414840	[1728017456]	2000000 OPS in 1.910047 seconds, throughput 1047094.652645
+414840	[1728017456]	2000000 OPS in 1.902770 seconds, throughput 1051099.186975
+414840	[1728017456]	2000000 OPS in 1.892934 seconds, throughput 1056560.873226
+414840	[1728017457]	2000000 OPS in 1.936236 seconds, throughput 1032931.935983
+414840	[1728017458]	2000000 OPS in 1.888829 seconds, throughput 1058857.101410
+414840	[1728017458]	2000000 OPS in 1.863131 seconds, throughput 1073461.823135
+414840	[1728017458]	2000000 OPS in 1.888338 seconds, throughput 1059132.422268
+414840	[1728017459]	2000000 OPS in 1.840455 seconds, throughput 1086687.802744
+414840	[1728017460]	2000000 OPS in 1.841391 seconds, throughput 1086135.426968
+414840	[1728017460]	2000000 OPS in 1.827707 seconds, throughput 1094267.297767
+414840	[1728017460]	2000000 OPS in 1.852735 seconds, throughput 1079485.193511
+414840	[1728017461]	2000000 OPS in 1.834364 seconds, throughput 1090296.146239
+414840	[1728017461]	2000000 OPS in 1.865672 seconds, throughput 1071999.794176
+414840	[1728017462]	2000000 OPS in 1.874815 seconds, throughput 1066771.921496
+414840	[1728017462]	2000000 OPS in 1.869353 seconds, throughput 1069888.886690
+414840	[1728017463]	2000000 OPS in 1.860572 seconds, throughput 1074938.244798
+414840	[1728017463]	2000000 OPS in 1.867146 seconds, throughput 1071153.514508
+414840	[1728017464]	2000000 OPS in 1.859551 seconds, throughput 1075528.447459
+414840	[1728017464]	2000000 OPS in 1.888671 seconds, throughput 1058945.681911
+414840	[1728017464]	2000000 OPS in 1.881831 seconds, throughput 1062794.693041
+414840	[1728017465]	2000000 OPS in 1.869956 seconds, throughput 1069543.882316
+414840	[1728017466]	2000000 OPS in 1.878195 seconds, throughput 1064852.158588
+414840	[1728017466]	2000000 OPS in 1.948665 seconds, throughput 1026343.676312
+414840	[1728017466]	2000000 OPS in 1.887528 seconds, throughput 1059586.930631
+414840	[1728017467]	2000000 OPS in 1.860269 seconds, throughput 1075113.330384
+414840	[1728017468]	2000000 OPS in 1.883626 seconds, throughput 1061781.903626
+414840	[1728017468]	2000000 OPS in 1.882036 seconds, throughput 1062678.928565
+414840	[1728017468]	2000000 OPS in 1.883971 seconds, throughput 1061587.466049
+414840	[1728017469]	2000000 OPS in 1.868739 seconds, throughput 1070240.413455
+414840	[1728017470]	2000000 OPS in 1.855640 seconds, throughput 1077795.262012
+414840	[1728017470]	2000000 OPS in 1.881921 seconds, throughput 1062743.866507
+414840	[1728017470]	2000000 OPS in 1.897020 seconds, throughput 1054285.141959
+414840	[1728017471]	2000000 OPS in 1.924908 seconds, throughput 1039010.695576
+414840	[1728017471]	2000000 OPS in 1.877064 seconds, throughput 1065493.771123
+414840	[1728017472]	2000000 OPS in 1.876188 seconds, throughput 1065991.254608
+414840	[1728017472]	2000000 OPS in 1.879378 seconds, throughput 1064181.872939
+414840	[1728017473]	2000000 OPS in 1.884197 seconds, throughput 1061460.133946
+414840	[1728017473]	2000000 OPS in 1.876578 seconds, throughput 1065769.714875
+414840	[1728017473]	2000000 OPS in 1.873475 seconds, throughput 1067534.928408
+414840	[1728017474]	2000000 OPS in 1.852605 seconds, throughput 1079560.942565
+414840	[1728017475]	2000000 OPS in 1.871621 seconds, throughput 1068592.412673
+414840	[1728017475]	2000000 OPS in 1.864546 seconds, throughput 1072647.175237
+414840	[1728017475]	2000000 OPS in 1.953906 seconds, throughput 1023590.694742
+414840	[1728017476]	2000000 OPS in 1.868682 seconds, throughput 1070273.058765
+414840	[1728017476]	2000000 OPS in 1.858481 seconds, throughput 1076147.671136
+414840	[1728017477]	2000000 OPS in 1.826256 seconds, throughput 1095136.716868
+414840	[1728017477]	2000000 OPS in 1.860812 seconds, throughput 1074799.603614
+414840	[1728017478]	2000000 OPS in 1.860454 seconds, throughput 1075006.423163
+414840	[1728017478]	2000000 OPS in 1.856416 seconds, throughput 1077344.733077
+414840	[1728017479]	2000000 OPS in 1.836991 seconds, throughput 1088736.961694
+414840	[1728017479]	2000000 OPS in 1.852071 seconds, throughput 1079872.207923
+414840	[1728017479]	2000000 OPS in 1.833608 seconds, throughput 1090745.677375
+414840	[1728017480]	2000000 OPS in 1.844175 seconds, throughput 1084495.777245
+414840	[1728017481]	2000000 OPS in 1.851333 seconds, throughput 1080302.679205
+414840	[1728017481]	2000000 OPS in 1.869807 seconds, throughput 1069629.111454
+414840	[1728017481]	2000000 OPS in 1.842107 seconds, throughput 1085713.262042
+414840	[1728017482]	2000000 OPS in 1.841484 seconds, throughput 1086080.574146
+414840	[1728017482]	2000000 OPS in 1.823119 seconds, throughput 1097021.094070
+414840	[1728017483]	2000000 OPS in 1.849738 seconds, throughput 1081234.207223
+414840	[1728017483]	2000000 OPS in 1.844931 seconds, throughput 1084051.381867
+414840	[1728017484]	2000000 OPS in 1.840246 seconds, throughput 1086811.219804
+414840	[1728017484]	2000000 OPS in 1.856223 seconds, throughput 1077456.749539
+414840	[1728017485]	2000000 OPS in 1.871204 seconds, throughput 1068830.549742
+414840	[1728017485]	2000000 OPS in 1.867224 seconds, throughput 1071108.768953
+414840	[1728017486]	2000000 OPS in 1.885431 seconds, throughput 1060765.416502
+414840	[1728017486]	2000000 OPS in 1.882787 seconds, throughput 1062255.050624
+414840	[1728017487]	2000000 OPS in 1.871080 seconds, throughput 1068901.383158
+414840	[1728017487]	2000000 OPS in 1.867746 seconds, throughput 1070809.414128
+414840	[1728017488]	2000000 OPS in 1.844759 seconds, throughput 1084152.455687
+414840	[1728017488]	2000000 OPS in 1.826546 seconds, throughput 1094962.842436
+414840	[1728017488]	2000000 OPS in 1.848659 seconds, throughput 1081865.287216
+414840	[1728017489]	2000000 OPS in 1.837423 seconds, throughput 1088480.986686
+414840	[1728017489]	2000000 OPS in 1.848367 seconds, throughput 1082036.197357
+414840	[1728017490]	2000000 OPS in 1.869683 seconds, throughput 1069700.050757
+414840	[1728017490]	2000000 OPS in 1.874173 seconds, throughput 1067137.345378
+414840	[1728017490]	2000000 OPS in 1.876685 seconds, throughput 1065708.949557
+414840	[1728017491]	2000000 OPS in 1.875124 seconds, throughput 1066596.129109
+414840	[1728017492]	2000000 OPS in 1.869871 seconds, throughput 1069592.501301
+414840	[1728017492]	2000000 OPS in 1.904759 seconds, throughput 1050001.601252
+414840	[1728017492]	2000000 OPS in 1.878940 seconds, throughput 1064429.944543
+414840	[1728017493]	2000000 OPS in 1.870345 seconds, throughput 1069321.435350
+414840	[1728017494]	2000000 OPS in 1.887661 seconds, throughput 1059512.274715
+414840	[1728017494]	2000000 OPS in 1.867596 seconds, throughput 1070895.418495
+414840	[1728017494]	2000000 OPS in 1.868669 seconds, throughput 1070280.504466
+414840	[1728017495]	2000000 OPS in 1.916066 seconds, throughput 1043805.380399
+414840	[1728017496]	2000000 OPS in 1.876049 seconds, throughput 1066070.235905
+414840	[1728017496]	2000000 OPS in 1.865119 seconds, throughput 1072317.637641
+414840	[1728017496]	2000000 OPS in 1.869582 seconds, throughput 1069757.838918
+414840	[1728017497]	2000000 OPS in 1.867685 seconds, throughput 1070844.387571
+414840	[1728017497]	2000000 OPS in 1.857800 seconds, throughput 1076542.146625
+414840	[1728017498]	2000000 OPS in 1.872969 seconds, throughput 1067823.332901
+414840	[1728017498]	2000000 OPS in 1.850424 seconds, throughput 1080833.365758
+414840	[1728017499]	2000000 OPS in 1.912029 seconds, throughput 1046009.239400
+414840	[1728017499]	2000000 OPS in 1.888488 seconds, throughput 1059048.296839
+414840	[1728017500]	2000000 OPS in 1.908345 seconds, throughput 1048028.527337
+414840	[1728017500]	2000000 OPS in 1.913074 seconds, throughput 1045437.865969
+414840	[1728017501]	2000000 OPS in 1.858322 seconds, throughput 1076239.747471
+414840	[1728017501]	2000000 OPS in 1.845441 seconds, throughput 1083751.796996
+414840	[1728017502]	2000000 OPS in 1.874845 seconds, throughput 1066754.851734
+414840	[1728017502]	2000000 OPS in 1.874212 seconds, throughput 1067115.139589
+414840	[1728017503]	2000000 OPS in 1.890683 seconds, throughput 1057818.788237
+414840	[1728017503]	2000000 OPS in 1.873599 seconds, throughput 1067464.275974
+414840	[1728017503]	2000000 OPS in 1.857205 seconds, throughput 1076887.042626
+414840	[1728017504]	2000000 OPS in 1.852787 seconds, throughput 1079454.896866
+414840	[1728017504]	2000000 OPS in 1.862234 seconds, throughput 1073978.887723
+414840	[1728017505]	2000000 OPS in 1.872397 seconds, throughput 1068149.543072
+414840	[1728017505]	2000000 OPS in 1.900229 seconds, throughput 1052504.724431
+414840	[1728017505]	2000000 OPS in 1.893358 seconds, throughput 1056324.266198
+414840	[1728017506]	2000000 OPS in 1.935395 seconds, throughput 1033380.782734
+414840	[1728017507]	2000000 OPS in 1.909752 seconds, throughput 1047256.397689
+414840	[1728017507]	2000000 OPS in 1.908378 seconds, throughput 1048010.404647
+414840	[1728017507]	2000000 OPS in 1.848251 seconds, throughput 1082104.108154
+414840	[1728017508]	2000000 OPS in 1.850335 seconds, throughput 1080885.353193
+414840	[1728017509]	2000000 OPS in 1.856469 seconds, throughput 1077313.976156
+414840	[1728017509]	2000000 OPS in 1.913535 seconds, throughput 1045186.003914
+414840	[1728017509]	2000000 OPS in 1.873879 seconds, throughput 1067304.772613
+414840	[1728017510]	2000000 OPS in 1.877602 seconds, throughput 1065188.469122
+414840	[1728017510]	2000000 OPS in 1.844530 seconds, throughput 1084287.054155
+414840	[1728017511]	2000000 OPS in 1.852920 seconds, throughput 1079377.415107
+414840	[1728017511]	2000000 OPS in 1.837377 seconds, throughput 1088508.237558
+414840	[1728017512]	2000000 OPS in 1.845204 seconds, throughput 1083890.995250
+414840	[1728017512]	2000000 OPS in 1.825770 seconds, throughput 1095428.230281
+414840	[1728017513]	2000000 OPS in 1.850419 seconds, throughput 1080836.286268
+414840	[1728017513]	2000000 OPS in 1.835183 seconds, throughput 1089809.572124
+414840	[1728017514]	2000000 OPS in 1.835512 seconds, throughput 1089614.232977
+414840	[1728017514]	2000000 OPS in 1.828691 seconds, throughput 1093678.483680
+414840	[1728017515]	2000000 OPS in 1.850799 seconds, throughput 1080614.372495
+414840	[1728017515]	2000000 OPS in 1.836137 seconds, throughput 1089243.340775
+414840	[1728017516]	2000000 OPS in 1.839056 seconds, throughput 1087514.463942
+414840	[1728017516]	2000000 OPS in 1.823900 seconds, throughput 1096551.346017
+414840	[1728017517]	2000000 OPS in 1.853591 seconds, throughput 1078986.680449
+414840	[1728017517]	2000000 OPS in 1.837722 seconds, throughput 1088303.889272
+414840	[1728017517]	2000000 OPS in 1.836071 seconds, throughput 1089282.495067
+414840	[1728017518]	2000000 OPS in 1.842895 seconds, throughput 1085249.023954
+414840	[1728017518]	2000000 OPS in 1.842196 seconds, throughput 1085660.809165
+414840	[1728017518]	2000000 OPS in 1.867287 seconds, throughput 1071072.631042
+414840	[1728017519]	2000000 OPS in 1.889146 seconds, throughput 1058679.424460
+414840	[1728017520]	2000000 OPS in 1.870083 seconds, throughput 1069471.248068
+414840	[1728017520]	2000000 OPS in 1.860109 seconds, throughput 1075205.807832
+414840	[1728017520]	2000000 OPS in 1.875000 seconds, throughput 1066666.666667
+414840	[1728017521]	2000000 OPS in 1.889343 seconds, throughput 1058569.036962
+414840	[1728017522]	2000000 OPS in 1.882010 seconds, throughput 1062693.609492
+414840	[1728017522]	2000000 OPS in 1.877581 seconds, throughput 1065200.382833
+414840	[1728017522]	2000000 OPS in 1.919952 seconds, throughput 1041692.708984
+414840	[1728017523]	2000000 OPS in 1.864187 seconds, throughput 1072853.742677
+414840	[1728017523]	2000000 OPS in 1.851258 seconds, throughput 1080346.445498
+414840	[1728017524]	2000000 OPS in 1.836679 seconds, throughput 1088921.907421
+414840	[1728017524]	2000000 OPS in 1.848817 seconds, throughput 1081772.830951
+414840	[1728017525]	2000000 OPS in 1.868093 seconds, throughput 1070610.510290
+414840	[1728017525]	2000000 OPS in 1.855343 seconds, throughput 1077967.793556
+414840	[1728017526]	2000000 OPS in 1.878533 seconds, throughput 1064660.562258
+414840	[1728017526]	2000000 OPS in 1.883780 seconds, throughput 1061695.102400
+414840	[1728017527]	2000000 OPS in 1.848828 seconds, throughput 1081766.394711
+414840	[1728017527]	2000000 OPS in 1.852863 seconds, throughput 1079410.620213
+414840	[1728017528]	2000000 OPS in 1.884443 seconds, throughput 1061321.568230
+414840	[1728017528]	2000000 OPS in 1.882510 seconds, throughput 1062411.355053
+414840	[1728017529]	2000000 OPS in 1.891412 seconds, throughput 1057411.077015
+414840	[1728017529]	2000000 OPS in 1.864810 seconds, throughput 1072495.321239
+414840	[1728017530]	2000000 OPS in 1.862876 seconds, throughput 1073608.764083
+414840	[1728017530]	2000000 OPS in 1.879024 seconds, throughput 1064382.360204
+414840	[1728017531]	2000000 OPS in 1.846140 seconds, throughput 1083341.458394
+414840	[1728017531]	2000000 OPS in 1.861506 seconds, throughput 1074398.900675
+414840	[1728017531]	2000000 OPS in 1.867643 seconds, throughput 1070868.468974
+414840	[1728017532]	2000000 OPS in 1.892608 seconds, throughput 1056742.864872
+414840	[1728017532]	2000000 OPS in 1.841250 seconds, throughput 1086218.601494
+414840	[1728017533]	2000000 OPS in 1.835103 seconds, throughput 1089857.081592
+414840	[1728017533]	2000000 OPS in 1.866124 seconds, throughput 1071740.141598
+414840	[1728017533]	2000000 OPS in 1.856781 seconds, throughput 1077132.952136
+414840	[1728017534]	2000000 OPS in 1.836552 seconds, throughput 1088997.207811
+414840	[1728017535]	2000000 OPS in 1.846420 seconds, throughput 1083177.175291
+414840	[1728017535]	2000000 OPS in 1.848288 seconds, throughput 1082082.446026
+414840	[1728017535]	2000000 OPS in 1.853225 seconds, throughput 1079199.773368
+414840	[1728017536]	2000000 OPS in 1.874025 seconds, throughput 1067221.621910
+414840	[1728017536]	2000000 OPS in 1.890927 seconds, throughput 1057682.290221
+414840	[1728017537]	2000000 OPS in 1.870012 seconds, throughput 1069511.853400
+414840	[1728017537]	2000000 OPS in 1.890079 seconds, throughput 1058156.828365
+414840	[1728017538]	2000000 OPS in 1.921871 seconds, throughput 1040652.572415
+414840	[1728017538]	2000000 OPS in 1.894958 seconds, throughput 1055432.363145
+414840	[1728017539]	2000000 OPS in 1.923057 seconds, throughput 1040010.774512
+414840	[1728017539]	2000000 OPS in 1.894523 seconds, throughput 1055674.700175
+414840	[1728017540]	2000000 OPS in 1.861690 seconds, throughput 1074292.712535
+414840	[1728017540]	2000000 OPS in 1.874763 seconds, throughput 1066801.510378
+414840	[1728017541]	2000000 OPS in 1.856478 seconds, throughput 1077308.753457
+414840	[1728017541]	2000000 OPS in 1.918641 seconds, throughput 1042404.493597
+414840	[1728017542]	2000000 OPS in 1.858931 seconds, throughput 1075887.163106
+414840	[1728017542]	2000000 OPS in 1.878195 seconds, throughput 1064852.158588
+414840	[1728017543]	2000000 OPS in 1.847594 seconds, throughput 1082488.901783
+414840	[1728017543]	2000000 OPS in 1.862364 seconds, throughput 1073903.919964
+414840	[1728017544]	2000000 OPS in 1.847607 seconds, throughput 1082481.285252
+414840	[1728017544]	2000000 OPS in 1.854648 seconds, throughput 1078371.744935
+414840	[1728017545]	2000000 OPS in 1.894596 seconds, throughput 1055634.024351
+414840	[1728017545]	2000000 OPS in 1.901512 seconds, throughput 1051794.571899
+414840	[1728017545]	2000000 OPS in 1.896875 seconds, throughput 1054365.733114
+414840	[1728017546]	2000000 OPS in 1.875382 seconds, throughput 1066449.395377
+414840	[1728017546]	2000000 OPS in 1.876711 seconds, throughput 1065694.185200
+414840	[1728017547]	2000000 OPS in 1.884761 seconds, throughput 1061142.500296
+414840	[1728017547]	2000000 OPS in 1.853830 seconds, throughput 1078847.575020
+414840	[1728017548]	2000000 OPS in 1.849631 seconds, throughput 1081296.755948
+414840	[1728017548]	2000000 OPS in 1.834341 seconds, throughput 1090309.816986
+414840	[1728017549]	2000000 OPS in 1.852726 seconds, throughput 1079490.437334
+414840	[1728017549]	2000000 OPS in 1.885937 seconds, throughput 1060480.811395
+414840	[1728017550]	2000000 OPS in 1.869679 seconds, throughput 1069702.339279
+414840	[1728017550]	2000000 OPS in 1.872324 seconds, throughput 1068191.189132
+414840	[1728017550]	2000000 OPS in 1.865115 seconds, throughput 1072319.937377
+414840	[1728017551]	2000000 OPS in 1.839273 seconds, throughput 1087386.157465
+414840	[1728017551]	2000000 OPS in 1.827241 seconds, throughput 1094546.367994
+414840	[1728017552]	2000000 OPS in 1.833536 seconds, throughput 1090788.509198
+414840	[1728017552]	2000000 OPS in 1.850308 seconds, throughput 1080901.125650
+414840	[1728017553]	2000000 OPS in 1.835561 seconds, throughput 1089585.145904
+414840	[1728017553]	2000000 OPS in 1.822455 seconds, throughput 1097420.786796
+414840	[1728017554]	2000000 OPS in 1.836671 seconds, throughput 1088926.650445
+414840	[1728017554]	2000000 OPS in 1.856050 seconds, throughput 1077557.177878
+414840	[1728017555]	2000000 OPS in 1.856910 seconds, throughput 1077058.123442
+414840	[1728017555]	2000000 OPS in 1.852332 seconds, throughput 1079720.050185
+414840	[1728017556]	2000000 OPS in 1.875826 seconds, throughput 1066196.971361
+414840	[1728017556]	2000000 OPS in 1.895172 seconds, throughput 1055313.185294
+414840	[1728017557]	2000000 OPS in 1.877538 seconds, throughput 1065224.778407
+414840	[1728017557]	2000000 OPS in 1.870504 seconds, throughput 1069230.538935
+414840	[1728017558]	2000000 OPS in 1.865769 seconds, throughput 1071944.061671
+414840	[1728017558]	2000000 OPS in 1.853054 seconds, throughput 1079299.362026
+414840	[1728017559]	2000000 OPS in 1.864095 seconds, throughput 1072906.691987
+414840	[1728017559]	2000000 OPS in 1.859436 seconds, throughput 1075594.965355
+414840	[1728017559]	2000000 OPS in 1.891385 seconds, throughput 1057426.171826
+414840	[1728017560]	2000000 OPS in 1.868268 seconds, throughput 1070510.226584
+414840	[1728017560]	2000000 OPS in 1.873707 seconds, throughput 1067402.747601
+414840	[1728017561]	2000000 OPS in 1.881789 seconds, throughput 1062818.413754
+414840	[1728017561]	2000000 OPS in 1.883181 seconds, throughput 1062032.805131
+414840	[1728017562]	2000000 OPS in 1.891027 seconds, throughput 1057626.358587
+414840	[1728017562]	2000000 OPS in 1.873975 seconds, throughput 1067250.096720
+414840	[1728017562]	2000000 OPS in 1.865765 seconds, throughput 1071946.359804
+414840	[1728017563]	2000000 OPS in 1.843768 seconds, throughput 1084735.172755
+414840	[1728017563]	2000000 OPS in 1.866725 seconds, throughput 1071395.090332
+414840	[1728017564]	2000000 OPS in 1.871052 seconds, throughput 1068917.379100
+414840	[1728017564]	2000000 OPS in 1.870459 seconds, throughput 1069256.262768
+414840	[1728017565]	2000000 OPS in 1.888181 seconds, throughput 1059220.487866
+414840	[1728017565]	2000000 OPS in 1.874086 seconds, throughput 1067186.884700
+414840	[1728017566]	2000000 OPS in 1.865843 seconds, throughput 1071901.547987
+414840	[1728017566]	2000000 OPS in 1.877180 seconds, throughput 1065427.929128
+414840	[1728017567]	2000000 OPS in 1.886643 seconds, throughput 1060083.969251
+414840	[1728017567]	2000000 OPS in 1.892396 seconds, throughput 1056861.248914
+414840	[1728017568]	2000000 OPS in 1.901272 seconds, throughput 1051927.341275
+414840	[1728017568]	2000000 OPS in 1.888069 seconds, throughput 1059283.320684
+414840	[1728017569]	2000000 OPS in 1.896010 seconds, throughput 1054846.757137
+414840	[1728017569]	2000000 OPS in 1.897407 seconds, throughput 1054070.107257
+414840	[1728017570]	2000000 OPS in 1.847402 seconds, throughput 1082601.404567
+414840	[1728017570]	2000000 OPS in 1.875837 seconds, throughput 1066190.719130
+414840	[1728017571]	2000000 OPS in 1.868292 seconds, throughput 1070496.474855
+414840	[1728017571]	2000000 OPS in 1.895043 seconds, throughput 1055385.022926
+414840	[1728017572]	2000000 OPS in 1.857774 seconds, throughput 1076557.213095
+414840	[1728017572]	2000000 OPS in 1.835992 seconds, throughput 1089329.365270
+414840	[1728017573]	2000000 OPS in 1.836455 seconds, throughput 1089054.727723
+414840	[1728017573]	2000000 OPS in 1.863684 seconds, throughput 1073143.301118
+414840	[1728017573]	2000000 OPS in 1.864130 seconds, throughput 1072886.547612
+414840	[1728017574]	2000000 OPS in 1.839804 seconds, throughput 1087072.318573
+414840	[1728017574]	2000000 OPS in 1.867723 seconds, throughput 1070822.600568
+414840	[1728017575]	2000000 OPS in 1.868202 seconds, throughput 1070548.045661
+414840	[1728017575]	2000000 OPS in 1.853270 seconds, throughput 1079173.568881
+414840	[1728017576]	2000000 OPS in 1.830731 seconds, throughput 1092459.787921
+414840	[1728017576]	2000000 OPS in 1.868846 seconds, throughput 1070179.137286
+414840	[1728017577]	2000000 OPS in 1.861015 seconds, throughput 1074682.364194
+414840	[1728017577]	2000000 OPS in 1.838871 seconds, throughput 1087623.873562
+414840	[1728017577]	2000000 OPS in 1.851036 seconds, throughput 1080476.014513
+414840	[1728017578]	2000000 OPS in 1.848817 seconds, throughput 1081772.830951
+414840	[1728017578]	2000000 OPS in 1.863358 seconds, throughput 1073331.050716
+414840	[1728017579]	2000000 OPS in 1.837449 seconds, throughput 1088465.584623
+414840	[1728017579]	2000000 OPS in 1.837504 seconds, throughput 1088433.004772
+414840	[1728017580]	2000000 OPS in 1.833451 seconds, throughput 1090839.078874
+414840	[1728017580]	2000000 OPS in 1.852667 seconds, throughput 1079524.814767
+414840	[1728017581]	2000000 OPS in 1.838024 seconds, throughput 1088125.073448
+414840	[1728017581]	2000000 OPS in 1.823562 seconds, throughput 1096754.593482
+414840	[1728017582]	2000000 OPS in 1.834691 seconds, throughput 1090101.820961
+414840	[1728017582]	2000000 OPS in 1.874380 seconds, throughput 1067019.494446
+414840	[1728017583]	2000000 OPS in 1.867005 seconds, throughput 1071234.410192
+414840	[1728017583]	2000000 OPS in 1.846049 seconds, throughput 1083394.861133
+414840	[1728017584]	2000000 OPS in 1.851845 seconds, throughput 1080003.996015
+414840	[1728017584]	2000000 OPS in 1.858866 seconds, throughput 1075924.784250
+414840	[1728017585]	2000000 OPS in 1.838242 seconds, throughput 1087996.030990
+414840	[1728017585]	2000000 OPS in 1.830145 seconds, throughput 1092809.586126
+414840	[1728017586]	2000000 OPS in 1.848155 seconds, throughput 1082160.316640
+414840	[1728017586]	2000000 OPS in 1.905830 seconds, throughput 1049411.542478
+414840	[1728017586]	2000000 OPS in 1.918436 seconds, throughput 1042515.882729
+414840	[1728017587]	2000000 OPS in 1.877780 seconds, throughput 1065087.496938
+414840	[1728017587]	2000000 OPS in 1.901186 seconds, throughput 1051974.925126
+414840	[1728017588]	2000000 OPS in 1.886189 seconds, throughput 1060339.128263
+414840	[1728017588]	2000000 OPS in 1.870210 seconds, throughput 1069398.623684
+414840	[1728017588]	2000000 OPS in 1.871882 seconds, throughput 1068443.416839
+414840	[1728017589]	2000000 OPS in 1.891142 seconds, throughput 1057562.044521
+414840	[1728017590]	2000000 OPS in 1.897603 seconds, throughput 1053961.234252
+414840	[1728017590]	2000000 OPS in 1.874929 seconds, throughput 1066707.059307
+414840	[1728017590]	2000000 OPS in 1.862742 seconds, throughput 1073685.996236
+414840	[1728017591]	2000000 OPS in 1.867002 seconds, throughput 1071236.131509
+414840	[1728017592]	2000000 OPS in 1.864102 seconds, throughput 1072902.663052
+414840	[1728017592]	2000000 OPS in 1.861007 seconds, throughput 1074686.983982
+414840	[1728017592]	2000000 OPS in 1.830927 seconds, throughput 1092342.840539
+414840	[1728017593]	2000000 OPS in 1.840015 seconds, throughput 1086947.660753
+414840	[1728017593]	2000000 OPS in 1.850667 seconds, throughput 1080691.448002
+414840	[1728017594]	2000000 OPS in 1.854475 seconds, throughput 1078472.343925
+414840	[1728017594]	2000000 OPS in 1.840138 seconds, throughput 1086875.006114
+414840	[1728017595]	2000000 OPS in 1.880083 seconds, throughput 1063782.822354
+414840	[1728017595]	2000000 OPS in 1.919269 seconds, throughput 1042063.410601
+414840	[1728017596]	2000000 OPS in 1.902389 seconds, throughput 1051309.695336
+414840	[1728017596]	2000000 OPS in 1.927171 seconds, throughput 1037790.626779
+414840	[1728017597]	2000000 OPS in 1.886081 seconds, throughput 1060399.844970
+414840	[1728017597]	2000000 OPS in 1.891259 seconds, throughput 1057496.619976
+414840	[1728017598]	2000000 OPS in 1.870291 seconds, throughput 1069352.309347
+414840	[1728017598]	2000000 OPS in 1.835911 seconds, throughput 1089377.426248
+414840	[1728017599]	2000000 OPS in 1.869661 seconds, throughput 1069712.637746
+414840	[1728017599]	2000000 OPS in 1.885641 seconds, throughput 1060647.281216
+414840	[1728017600]	2000000 OPS in 1.868410 seconds, throughput 1070428.867326
+414840	[1728017600]	2000000 OPS in 1.856532 seconds, throughput 1077277.418326
+414840	[1728017601]	2000000 OPS in 1.857692 seconds, throughput 1076604.733185
+414840	[1728017601]	2000000 OPS in 1.884060 seconds, throughput 1061537.318344
+414840	[1728017601]	2000000 OPS in 1.887198 seconds, throughput 1059772.212561
+414840	[1728017602]	2000000 OPS in 1.901666 seconds, throughput 1051709.395867
+414840	[1728017602]	2000000 OPS in 1.895370 seconds, throughput 1055202.941906
+414840	[1728017603]	2000000 OPS in 1.934524 seconds, throughput 1033846.052052
+414840	[1728017603]	2000000 OPS in 1.910606 seconds, throughput 1046788.296488
+414840	[1728017603]	2000000 OPS in 1.909320 seconds, throughput 1047493.348417
+414840	[1728017604]	2000000 OPS in 1.950746 seconds, throughput 1025248.802253
+414840	[1728017605]	2000000 OPS in 1.904397 seconds, throughput 1050201.192293
+414840	[1728017605]	2000000 OPS in 1.887022 seconds, throughput 1059871.056087
+414840	[1728017605]	2000000 OPS in 1.891075 seconds, throughput 1057599.513504
+414840	[1728017606]	2000000 OPS in 1.865875 seconds, throughput 1071883.164735
+414840	[1728017607]	2000000 OPS in 1.886647 seconds, throughput 1060081.721700
+414840	[1728017607]	2000000 OPS in 1.865132 seconds, throughput 1072310.163570
+414840	[1728017607]	2000000 OPS in 1.851876 seconds, throughput 1079985.916984
+414840	[1728017608]	2000000 OPS in 1.850689 seconds, throughput 1080678.601321
+414840	[1728017609]	2000000 OPS in 1.860752 seconds, throughput 1074834.260557
+414840	[1728017609]	2000000 OPS in 1.836395 seconds, throughput 1089090.310091
+414840	[1728017609]	2000000 OPS in 1.828521 seconds, throughput 1093780.164406
+414840	[1728017610]	2000000 OPS in 1.834417 seconds, throughput 1090264.645389
+414840	[1728017610]	2000000 OPS in 1.868088 seconds, throughput 1070613.375815
+414840	[1728017611]	2000000 OPS in 1.862453 seconds, throughput 1073852.601918
+414840	[1728017611]	2000000 OPS in 1.837423 seconds, throughput 1088480.986686
+414840	[1728017612]	2000000 OPS in 1.883516 seconds, throughput 1061843.913192
+414840	[1728017612]	2000000 OPS in 1.863828 seconds, throughput 1073060.389693
+414840	[1728017613]	2000000 OPS in 1.857705 seconds, throughput 1076597.199232
+414840	[1728017613]	2000000 OPS in 1.855267 seconds, throughput 1078011.951919
+414840	[1728017614]	2000000 OPS in 1.859594 seconds, throughput 1075503.577663
+414840	[1728017614]	2000000 OPS in 1.860797 seconds, throughput 1074808.267640
+414840	[1728017615]	2000000 OPS in 1.859206 seconds, throughput 1075728.025835
+414840	[1728017615]	2000000 OPS in 1.877712 seconds, throughput 1065126.068321
+414840	[1728017616]	2000000 OPS in 1.884943 seconds, throughput 1061040.042060
+414840	[1728017616]	2000000 OPS in 1.852467 seconds, throughput 1079641.364731
+414840	[1728017616]	2000000 OPS in 1.839205 seconds, throughput 1087426.360846
+414840	[1728017616]	2000000 OPS in 1.828440 seconds, throughput 1093828.618932
+414840	[1728017617]	2000000 OPS in 1.845228 seconds, throughput 1083876.897597
+414840	[1728017618]	2000000 OPS in 1.857576 seconds, throughput 1076671.963893
+414840	[1728017618]	2000000 OPS in 1.838067 seconds, throughput 1088099.617696
+414840	[1728017618]	2000000 OPS in 1.834726 seconds, throughput 1090081.025723
+414840	[1728017619]	2000000 OPS in 1.833769 seconds, throughput 1090649.912830
+414840	[1728017620]	2000000 OPS in 1.863018 seconds, throughput 1073526.933180
+414840	[1728017620]	2000000 OPS in 1.867254 seconds, throughput 1071091.560120
+414840	[1728017620]	2000000 OPS in 1.889519 seconds, throughput 1058470.436127
+414840	[1728017621]	2000000 OPS in 1.902504 seconds, throughput 1051246.147183
+414840	[1728017622]	2000000 OPS in 1.916202 seconds, throughput 1043731.297640
+414840	[1728017622]	2000000 OPS in 1.884754 seconds, throughput 1061146.441392
+414840	[1728017622]	2000000 OPS in 1.884662 seconds, throughput 1061198.241382
+414840	[1728017623]	2000000 OPS in 1.895812 seconds, throughput 1054956.926109
+414840	[1728017624]	2000000 OPS in 1.860281 seconds, throughput 1075106.395217
+414840	[1728017624]	2000000 OPS in 1.849020 seconds, throughput 1081654.065397
+414840	[1728017624]	2000000 OPS in 1.848592 seconds, throughput 1081904.498126
+414840	[1728017625]	2000000 OPS in 1.854924 seconds, throughput 1078211.290597
+414840	[1728017625]	2000000 OPS in 1.879662 seconds, throughput 1064021.084642
+414840	[1728017626]	2000000 OPS in 1.841778 seconds, throughput 1085907.204886
+414840	[1728017626]	2000000 OPS in 1.855399 seconds, throughput 1077935.258130
+414840	[1728017627]	2000000 OPS in 1.882291 seconds, throughput 1062534.964041
+414840	[1728017627]	2000000 OPS in 1.874090 seconds, throughput 1067184.606929
+414840	[1728017628]	2000000 OPS in 1.838845 seconds, throughput 1087639.251813
+414840	[1728017628]	2000000 OPS in 1.852928 seconds, throughput 1079372.754905
+414840	[1728017629]	2000000 OPS in 1.834056 seconds, throughput 1090479.243818
+414840	[1728017629]	2000000 OPS in 1.852966 seconds, throughput 1079350.619493
+414840	[1728017629]	2000000 OPS in 1.825441 seconds, throughput 1095625.659772
+414840	[1728017629]	2000000 OPS in 1.838420 seconds, throughput 1087890.688744
+414840	[1728017630]	2000000 OPS in 1.897452 seconds, throughput 1054045.108914
+414840	[1728017631]	2000000 OPS in 1.911565 seconds, throughput 1046263.140411
+414840	[1728017631]	2000000 OPS in 1.904373 seconds, throughput 1050214.427531
+414840	[1728017631]	2000000 OPS in 1.908483 seconds, throughput 1047952.745715
+414840	[1728017632]	2000000 OPS in 1.918361 seconds, throughput 1042556.640799
+414840	[1728017633]	2000000 OPS in 1.934860 seconds, throughput 1033666.518508
+414840	[1728017633]	2000000 OPS in 1.931791 seconds, throughput 1035308.685049
+414840	[1728017633]	2000000 OPS in 1.923413 seconds, throughput 1039818.281357
+414840	[1728017634]	2000000 OPS in 1.843371 seconds, throughput 1084968.788160
+414840	[1728017635]	2000000 OPS in 1.848582 seconds, throughput 1081910.350745
+414840	[1728017635]	2000000 OPS in 1.824433 seconds, throughput 1096230.993410
+414840	[1728017635]	2000000 OPS in 1.838442 seconds, throughput 1087877.670332
+414840	[1728017636]	2000000 OPS in 1.835360 seconds, throughput 1089704.472147
+414840	[1728017637]	2000000 OPS in 1.850623 seconds, throughput 1080717.142281
+414840	[1728017637]	2000000 OPS in 1.824473 seconds, throughput 1096206.959489
+414840	[1728017637]	2000000 OPS in 1.838321 seconds, throughput 1087949.275453
+414840	[1728017638]	2000000 OPS in 1.862741 seconds, throughput 1073686.572637
+414840	[1728017639]	2000000 OPS in 1.890055 seconds, throughput 1058170.264886
+414840	[1728017639]	2000000 OPS in 1.876892 seconds, throughput 1065591.413891
+414840	[1728017639]	2000000 OPS in 1.900655 seconds, throughput 1052268.823116
+414840	[1728017640]	2000000 OPS in 1.868996 seconds, throughput 1070093.247926
+414840	[1728017640]	2000000 OPS in 1.857323 seconds, throughput 1076818.625516
+414840	[1728017641]	2000000 OPS in 1.855886 seconds, throughput 1077652.398908
+414840	[1728017641]	2000000 OPS in 1.865880 seconds, throughput 1071880.292409
+414840	[1728017642]	2000000 OPS in 1.913151 seconds, throughput 1045395.789459
+414840	[1728017642]	2000000 OPS in 1.873591 seconds, throughput 1067468.833913
+414840	[1728017642]	2000000 OPS in 1.855110 seconds, throughput 1078103.185256
+414840	[1728017643]	2000000 OPS in 1.870560 seconds, throughput 1069198.528783
+414840	[1728017644]	2000000 OPS in 1.835435 seconds, throughput 1089659.944373
+414840	[1728017644]	2000000 OPS in 1.866260 seconds, throughput 1071662.040659
+414840	[1728017644]	2000000 OPS in 1.826516 seconds, throughput 1094980.826886
+414840	[1728017644]	2000000 OPS in 1.837164 seconds, throughput 1088634.438733
+414840	[1728017645]	2000000 OPS in 1.846537 seconds, throughput 1083108.543181
+414840	[1728017646]	2000000 OPS in 1.839496 seconds, throughput 1087254.334883
+414840	[1728017646]	2000000 OPS in 1.879373 seconds, throughput 1064184.704154
+414840	[1728017646]	2000000 OPS in 1.877610 seconds, throughput 1065183.930635
+414840	[1728017647]	2000000 OPS in 1.887601 seconds, throughput 1059545.952773
+414840	[1728017648]	2000000 OPS in 1.843818 seconds, throughput 1084705.757293
+414840	[1728017648]	2000000 OPS in 1.863949 seconds, throughput 1072990.730970
+414840	[1728017648]	2000000 OPS in 1.871417 seconds, throughput 1068708.898124
+414840	[1728017649]	2000000 OPS in 1.866666 seconds, throughput 1071428.954082
+414840	[1728017650]	2000000 OPS in 1.866819 seconds, throughput 1071341.142339
+414840	[1728017650]	2000000 OPS in 1.900935 seconds, throughput 1052113.828195
+414840	[1728017650]	2000000 OPS in 1.877550 seconds, throughput 1065217.970227
+414840	[1728017651]	2000000 OPS in 1.849464 seconds, throughput 1081394.393186
+414840	[1728017652]	2000000 OPS in 1.825040 seconds, throughput 1095866.391969
+414840	[1728017652]	2000000 OPS in 1.852915 seconds, throughput 1079380.327754
+414840	[1728017652]	2000000 OPS in 1.835804 seconds, throughput 1089440.920708
+414840	[1728017653]	2000000 OPS in 1.838025 seconds, throughput 1088124.481441
+414840	[1728017653]	2000000 OPS in 1.828511 seconds, throughput 1093786.146214
+414840	[1728017654]	2000000 OPS in 1.852023 seconds, throughput 1079900.195624
+414840	[1728017654]	2000000 OPS in 1.837318 seconds, throughput 1088543.191761
+414840	[1728017655]	2000000 OPS in 1.833100 seconds, throughput 1091047.951557
+414840	[1728017655]	2000000 OPS in 1.865948 seconds, throughput 1071841.230302
+414840	[1728017655]	2000000 OPS in 1.895071 seconds, throughput 1055369.429430
+414840	[1728017656]	2000000 OPS in 1.893666 seconds, throughput 1056152.457720
+414840	[1728017657]	2000000 OPS in 1.868570 seconds, throughput 1070337.209738
+414840	[1728017657]	2000000 OPS in 1.823990 seconds, throughput 1096497.239568
+414840	[1728017657]	2000000 OPS in 1.851835 seconds, throughput 1080009.828089
+414840	[1728017657]	2000000 OPS in 1.844496 seconds, throughput 1084307.041056
+414840	[1728017658]	2000000 OPS in 1.847108 seconds, throughput 1082773.719782
+414840	[1728017659]	2000000 OPS in 1.836216 seconds, throughput 1089196.477974
+414840	[1728017659]	2000000 OPS in 1.860381 seconds, throughput 1075048.605635
+414840	[1728017659]	2000000 OPS in 1.856536 seconds, throughput 1077275.097278
+414840	[1728017660]	2000000 OPS in 1.859530 seconds, throughput 1075540.593591
+414840	[1728017661]	2000000 OPS in 1.847516 seconds, throughput 1082534.603219
+414840	[1728017661]	2000000 OPS in 1.874007 seconds, throughput 1067231.872666
+414840	[1728017661]	2000000 OPS in 1.862929 seconds, throughput 1073578.220104
+414840	[1728017662]	2000000 OPS in 1.848097 seconds, throughput 1082194.278764
+414840	[1728017663]	2000000 OPS in 1.854440 seconds, throughput 1078492.698604
+414840	[1728017663]	2000000 OPS in 1.864219 seconds, throughput 1072835.326751
+414840	[1728017663]	2000000 OPS in 1.851793 seconds, throughput 1080034.323491
+414840	[1728017664]	2000000 OPS in 1.834750 seconds, throughput 1090066.766589
+414840	[1728017665]	2000000 OPS in 1.844722 seconds, throughput 1084174.200774
+414840	[1728017665]	2000000 OPS in 1.870740 seconds, throughput 1069095.651988
+414840	[1728017665]	2000000 OPS in 1.859098 seconds, throughput 1075790.517767
+414840	[1728017666]	2000000 OPS in 1.877585 seconds, throughput 1065198.113534
+414840	[1728017666]	2000000 OPS in 1.847265 seconds, throughput 1082681.694289
+414840	[1728017667]	2000000 OPS in 1.855539 seconds, throughput 1077853.928158
+414840	[1728017667]	2000000 OPS in 1.844646 seconds, throughput 1084218.869095
+414840	[1728017668]	2000000 OPS in 1.881513 seconds, throughput 1062974.319072
+414840	[1728017668]	2000000 OPS in 1.903728 seconds, throughput 1050570.249531
+414840	[1728017669]	2000000 OPS in 1.914924 seconds, throughput 1044427.872856
+414840	[1728017669]	2000000 OPS in 1.903668 seconds, throughput 1050603.361511
+414840	[1728017670]	2000000 OPS in 1.963875 seconds, throughput 1018394.755267
+414840	[1728017670]	2000000 OPS in 1.939394 seconds, throughput 1031249.967773
+414840	[1728017670]	2000000 OPS in 1.931947 seconds, throughput 1035225.086402
+414840	[1728017671]	2000000 OPS in 1.939915 seconds, throughput 1030973.006549
+414840	[1728017672]	2000000 OPS in 1.867308 seconds, throughput 1071060.585613
+414840	[1728017672]	2000000 OPS in 1.829794 seconds, throughput 1093019.214185
+414840	[1728017672]	2000000 OPS in 1.863824 seconds, throughput 1073062.692615
+414840	[1728017672]	2000000 OPS in 1.840444 seconds, throughput 1086694.297680
+414840	[1728017673]	2000000 OPS in 1.870764 seconds, throughput 1069081.936578
+414840	[1728017674]	2000000 OPS in 1.848006 seconds, throughput 1082247.568460
+414840	[1728017674]	2000000 OPS in 1.869460 seconds, throughput 1069827.650765
+414840	[1728017674]	2000000 OPS in 1.917972 seconds, throughput 1042768.090462
+414840	[1728017675]	2000000 OPS in 1.850891 seconds, throughput 1080560.659704
+414840	[1728017676]	2000000 OPS in 1.835374 seconds, throughput 1089696.160020
+414840	[1728017676]	2000000 OPS in 1.843798 seconds, throughput 1084717.523286
+414840	[1728017676]	2000000 OPS in 1.852445 seconds, throughput 1079654.186764
+414840	[1728017677]	2000000 OPS in 1.870490 seconds, throughput 1069238.541772
+414840	[1728017678]	2000000 OPS in 1.867140 seconds, throughput 1071156.956629
+414840	[1728017678]	2000000 OPS in 1.880951 seconds, throughput 1063291.919885
+414840	[1728017678]	2000000 OPS in 1.891836 seconds, throughput 1057174.089086
+414840	[1728017679]	2000000 OPS in 1.885012 seconds, throughput 1061001.203175
+414840	[1728017679]	2000000 OPS in 1.878663 seconds, throughput 1064586.889719
+414840	[1728017680]	2000000 OPS in 1.956830 seconds, throughput 1022061.190803
+414840	[1728017680]	2000000 OPS in 1.923605 seconds, throughput 1039714.494400
+414840	[1728017681]	2000000 OPS in 1.878881 seconds, throughput 1064463.369420
+414840	[1728017681]	2000000 OPS in 1.837749 seconds, throughput 1088287.900034
+414840	[1728017682]	2000000 OPS in 1.835404 seconds, throughput 1089678.348745
+414840	[1728017682]	2000000 OPS in 1.852858 seconds, throughput 1079413.533039
+414840	[1728017683]	2000000 OPS in 1.833909 seconds, throughput 1090566.652980
+414840	[1728017683]	2000000 OPS in 1.828261 seconds, throughput 1093935.712680
+414840	[1728017684]	2000000 OPS in 1.838013 seconds, throughput 1088131.585576
+414840	[1728017684]	2000000 OPS in 1.850361 seconds, throughput 1080870.165335
+414840	[1728017685]	2000000 OPS in 1.841175 seconds, throughput 1086262.848453
+414840	[1728017685]	2000000 OPS in 1.825912 seconds, throughput 1095343.039533
+414840	[1728017685]	2000000 OPS in 1.836667 seconds, throughput 1088929.021973
+414840	[1728017685]	2000000 OPS in 1.851945 seconds, throughput 1079945.678732
+414840	[1728017686]	2000000 OPS in 1.831170 seconds, throughput 1092197.884413
+414840	[1728017687]	2000000 OPS in 1.825114 seconds, throughput 1095821.959615
+414840	[1728017687]	2000000 OPS in 1.837130 seconds, throughput 1088654.586230
+414840	[1728017687]	2000000 OPS in 1.860949 seconds, throughput 1074720.478638
+414840	[1728017688]	2000000 OPS in 1.853452 seconds, throughput 1079067.599269
+414840	[1728017689]	2000000 OPS in 1.867547 seconds, throughput 1070923.516249
+414840	[1728017689]	2000000 OPS in 1.865327 seconds, throughput 1072198.065004
+414840	[1728017689]	2000000 OPS in 1.898896 seconds, throughput 1053243.568895
+414840	[1728017690]	2000000 OPS in 1.904223 seconds, throughput 1050297.155323
+414840	[1728017691]	2000000 OPS in 1.880302 seconds, throughput 1063658.922875
+414840	[1728017691]	2000000 OPS in 1.884846 seconds, throughput 1061094.646459
+414840	[1728017691]	2000000 OPS in 1.895243 seconds, throughput 1055273.650925
+414840	[1728017692]	2000000 OPS in 1.848700 seconds, throughput 1081841.293882
+414840	[1728017692]	2000000 OPS in 1.831569 seconds, throughput 1091959.953461
+414840	[1728017693]	2000000 OPS in 1.836835 seconds, throughput 1088829.426704
+414840	[1728017693]	2000000 OPS in 1.850158 seconds, throughput 1080988.758798
+414840	[1728017694]	2000000 OPS in 1.840238 seconds, throughput 1086815.944459
+414840	[1728017694]	2000000 OPS in 1.862682 seconds, throughput 1073720.581398
+414840	[1728017695]	2000000 OPS in 1.868928 seconds, throughput 1070132.182727
+414840	[1728017695]	2000000 OPS in 1.862190 seconds, throughput 1074004.263797
+414840	[1728017696]	2000000 OPS in 1.899773 seconds, throughput 1052757.355747
+414840	[1728017696]	2000000 OPS in 1.894115 seconds, throughput 1055902.096758
+414840	[1728017697]	2000000 OPS in 1.905389 seconds, throughput 1049654.427521
+414840	[1728017697]	2000000 OPS in 1.918173 seconds, throughput 1042658.821702
+414840	[1728017698]	2000000 OPS in 1.879430 seconds, throughput 1064152.429194
+414840	[1728017698]	2000000 OPS in 1.861374 seconds, throughput 1074475.092056
+414840	[1728017699]	2000000 OPS in 1.896879 seconds, throughput 1054363.509744
+414840	[1728017699]	2000000 OPS in 1.888408 seconds, throughput 1059093.162071
+414840	[1728017700]	2000000 OPS in 1.923779 seconds, throughput 1039620.455364
+414840	[1728017700]	2000000 OPS in 1.888406 seconds, throughput 1059094.283750
+414840	[1728017700]	2000000 OPS in 1.890255 seconds, throughput 1058058.304303
+414840	[1728017701]	2000000 OPS in 1.875606 seconds, throughput 1066322.031386
+414840	[1728017701]	2000000 OPS in 1.863527 seconds, throughput 1073233.712203
+414840	[1728017702]	2000000 OPS in 1.850166 seconds, throughput 1080984.084671
+414840	[1728017702]	2000000 OPS in 1.835305 seconds, throughput 1089737.128161
+414840	[1728017702]	2000000 OPS in 1.851010 seconds, throughput 1080491.191296
+414840	[1728017703]	2000000 OPS in 1.836106 seconds, throughput 1089261.731077
+414840	[1728017704]	2000000 OPS in 1.832676 seconds, throughput 1091300.371697
+414840	[1728017704]	2000000 OPS in 1.838591 seconds, throughput 1087789.508379
+414840	[1728017704]	2000000 OPS in 1.850024 seconds, throughput 1081067.056427
+414840	[1728017705]	2000000 OPS in 1.834738 seconds, throughput 1090073.896109
+414840	[1728017705]	2000000 OPS in 1.849051 seconds, throughput 1081635.931080
+414840	[1728017706]	2000000 OPS in 1.866518 seconds, throughput 1071513.909858
+414840	[1728017706]	2000000 OPS in 1.901523 seconds, throughput 1051788.487439
+414840	[1728017707]	2000000 OPS in 1.906901 seconds, throughput 1048822.146509
+414840	[1728017707]	2000000 OPS in 1.897476 seconds, throughput 1054031.776950
+414840	[1728017708]	2000000 OPS in 1.905417 seconds, throughput 1049639.002906
+414840	[1728017708]	2000000 OPS in 1.933233 seconds, throughput 1034536.447495
+414840	[1728017709]	2000000 OPS in 1.885338 seconds, throughput 1060817.741965
+414840	[1728017709]	2000000 OPS in 1.866812 seconds, throughput 1071345.159555
+414840	[1728017710]	2000000 OPS in 1.849942 seconds, throughput 1081114.975497
+414840	[1728017710]	2000000 OPS in 1.852565 seconds, throughput 1079584.252105
+414840	[1728017711]	2000000 OPS in 1.836737 seconds, throughput 1088887.521730
+414840	[1728017711]	2000000 OPS in 1.832344 seconds, throughput 1091498.102976
+414840	[1728017712]	2000000 OPS in 1.839928 seconds, throughput 1086999.056485
+414840	[1728017712]	2000000 OPS in 1.848625 seconds, throughput 1081885.184935
+414840	[1728017713]	2000000 OPS in 1.831314 seconds, throughput 1092112.002639
+414840	[1728017713]	2000000 OPS in 1.830041 seconds, throughput 1092871.689760
+414840	[1728017713]	2000000 OPS in 1.835352 seconds, throughput 1089709.221991
+414840	[1728017714]	2000000 OPS in 1.847795 seconds, throughput 1082371.150479
+414840	[1728017714]	2000000 OPS in 1.834659 seconds, throughput 1090120.834444
+414840	[1728017715]	2000000 OPS in 1.832176 seconds, throughput 1091598.187074
+414840	[1728017715]	2000000 OPS in 1.840358 seconds, throughput 1086745.078947
+414840	[1728017715]	2000000 OPS in 1.850409 seconds, throughput 1080842.127335
+414840	[1728017716]	2000000 OPS in 1.841401 seconds, throughput 1086129.528549
+414840	[1728017716]	2000000 OPS in 1.842934 seconds, throughput 1085226.058014
+414840	[1728017717]	2000000 OPS in 1.861546 seconds, throughput 1074375.814511
+414840	[1728017717]	2000000 OPS in 1.885047 seconds, throughput 1060981.503379
+414840	[1728017718]	2000000 OPS in 1.913825 seconds, throughput 1045027.627918
+414840	[1728017718]	2000000 OPS in 1.907715 seconds, throughput 1048374.626189
+414840	[1728017719]	2000000 OPS in 1.882394 seconds, throughput 1062476.824724
+414840	[1728017719]	2000000 OPS in 1.904748 seconds, throughput 1050007.665056
+414840	[1728017720]	2000000 OPS in 1.853972 seconds, throughput 1078764.943591
+414840	[1728017720]	2000000 OPS in 1.869854 seconds, throughput 1069602.225628
+414840	[1728017721]	2000000 OPS in 1.874614 seconds, throughput 1066886.302994
+414840	[1728017721]	2000000 OPS in 1.886342 seconds, throughput 1060253.124831
+414840	[1728017722]	2000000 OPS in 1.870428 seconds, throughput 1069273.984350
+414840	[1728017722]	2000000 OPS in 1.862735 seconds, throughput 1073690.031056
+414840	[1728017723]	2000000 OPS in 1.917897 seconds, throughput 1042808.868255
+414840	[1728017723]	2000000 OPS in 1.894147 seconds, throughput 1055884.258191
+414840	[1728017724]	2000000 OPS in 1.882674 seconds, throughput 1062318.808248
+414840	[1728017724]	2000000 OPS in 1.851045 seconds, throughput 1080470.761111
+414840	[1728017725]	2000000 OPS in 1.840239 seconds, throughput 1086815.353875
+414840	[1728017725]	2000000 OPS in 1.865615 seconds, throughput 1072032.546908
+414840	[1728017726]	2000000 OPS in 1.876917 seconds, throughput 1065577.220516
+414840	[1728017726]	2000000 OPS in 1.865024 seconds, throughput 1072372.259017
+414840	[1728017726]	2000000 OPS in 1.885206 seconds, throughput 1060892.019228
+414840	[1728017727]	2000000 OPS in 1.899231 seconds, throughput 1053057.790232
+414840	[1728017727]	2000000 OPS in 1.879558 seconds, throughput 1064079.959224
+414840	[1728017728]	2000000 OPS in 1.869332 seconds, throughput 1069900.905778
+414840	[1728017728]	2000000 OPS in 1.865811 seconds, throughput 1071919.931869
+414840	[1728017729]	2000000 OPS in 1.867070 seconds, throughput 1071197.116337
+414840	[1728017729]	2000000 OPS in 1.836844 seconds, throughput 1088824.091757
+414840	[1728017730]	2000000 OPS in 1.842379 seconds, throughput 1085552.972543
+414840	[1728017730]	2000000 OPS in 1.881529 seconds, throughput 1062965.279834
+414840	[1728017731]	2000000 OPS in 1.887852 seconds, throughput 1059405.080483
+414840	[1728017731]	2000000 OPS in 1.874965 seconds, throughput 1066686.578149
+414840	[1728017731]	2000000 OPS in 1.890594 seconds, throughput 1057868.585217
+414840	[1728017732]	2000000 OPS in 1.857721 seconds, throughput 1076587.926820
+414840	[1728017732]	2000000 OPS in 1.879411 seconds, throughput 1064163.187296
+414840	[1728017733]	2000000 OPS in 1.843420 seconds, throughput 1084939.948574
+414840	[1728017733]	2000000 OPS in 1.863653 seconds, throughput 1073161.151781
+414840	[1728017734]	2000000 OPS in 1.874443 seconds, throughput 1066983.631938
+414840	[1728017734]	2000000 OPS in 1.873357 seconds, throughput 1067602.170862
+414840	[1728017735]	2000000 OPS in 1.892859 seconds, throughput 1056602.736918
+414840	[1728017735]	2000000 OPS in 1.832124 seconds, throughput 1091629.169205
+414840	[1728017736]	2000000 OPS in 1.841987 seconds, throughput 1085783.993047
+414840	[1728017736]	2000000 OPS in 1.861666 seconds, throughput 1074306.561972
+414840	[1728017737]	2000000 OPS in 1.869713 seconds, throughput 1069682.887160
+414840	[1728017737]	2000000 OPS in 1.885944 seconds, throughput 1060476.875241
+414840	[1728017738]	2000000 OPS in 1.909213 seconds, throughput 1047552.054171
+414840	[1728017738]	2000000 OPS in 1.926053 seconds, throughput 1038393.024491
+414840	[1728017739]	2000000 OPS in 1.900496 seconds, throughput 1052356.858420
+414840	[1728017739]	2000000 OPS in 1.862313 seconds, throughput 1073933.329145
+414840	[1728017740]	2000000 OPS in 1.840603 seconds, throughput 1086600.423883
+414840	[1728017740]	2000000 OPS in 1.850808 seconds, throughput 1080609.117747
+414840	[1728017741]	2000000 OPS in 1.841075 seconds, throughput 1086321.850006
+414840	[1728017741]	2000000 OPS in 1.833124 seconds, throughput 1091033.667117
+414840	[1728017741]	2000000 OPS in 1.837471 seconds, throughput 1088452.552448
+414840	[1728017742]	2000000 OPS in 1.851247 seconds, throughput 1080352.864853
+414840	[1728017742]	2000000 OPS in 1.835609 seconds, throughput 1089556.653950
+414840	[1728017743]	2000000 OPS in 1.830867 seconds, throughput 1092378.638099
+414840	[1728017743]	2000000 OPS in 1.834468 seconds, throughput 1090234.334968
+414840	[1728017744]	2000000 OPS in 1.847923 seconds, throughput 1082296.177925
+414840	[1728017744]	2000000 OPS in 1.855201 seconds, throughput 1078050.302905
+414840	[1728017744]	2000000 OPS in 1.837263 seconds, throughput 1088575.778209
+414840	[1728017745]	2000000 OPS in 1.854014 seconds, throughput 1078740.505735
+414840	[1728017746]	2000000 OPS in 1.865216 seconds, throughput 1072261.872083
+414840	[1728017746]	2000000 OPS in 1.865539 seconds, throughput 1072076.220331
+414840	[1728017746]	2000000 OPS in 1.868694 seconds, throughput 1070266.185903
+414840	[1728017747]	2000000 OPS in 1.919451 seconds, throughput 1041964.603420
+414840	[1728017747]	2000000 OPS in 1.936182 seconds, throughput 1032960.744393
+414840	[1728017748]	2000000 OPS in 1.922196 seconds, throughput 1040476.621531
+414840	[1728017748]	2000000 OPS in 1.894342 seconds, throughput 1055775.567453
+414840	[1728017749]	2000000 OPS in 1.876812 seconds, throughput 1065636.835229
+414840	[1728017749]	2000000 OPS in 1.872561 seconds, throughput 1068055.993904
+414840	[1728017750]	2000000 OPS in 1.878607 seconds, throughput 1064618.624332
+414840	[1728017750]	2000000 OPS in 1.856445 seconds, throughput 1077327.903601
+414840	[1728017751]	2000000 OPS in 1.864789 seconds, throughput 1072507.398960
+414840	[1728017751]	2000000 OPS in 1.876344 seconds, throughput 1065902.627663
+414840	[1728017752]	2000000 OPS in 1.853162 seconds, throughput 1079236.461788
+414840	[1728017752]	2000000 OPS in 1.836223 seconds, throughput 1089192.325769
+414840	[1728017753]	2000000 OPS in 1.888465 seconds, throughput 1059061.195204
+414840	[1728017753]	2000000 OPS in 1.892051 seconds, throughput 1057053.958905
+414840	[1728017754]	2000000 OPS in 1.882907 seconds, throughput 1062187.351792
+414840	[1728017754]	2000000 OPS in 1.877772 seconds, throughput 1065092.034603
+414840	[1728017754]	2000000 OPS in 1.854702 seconds, throughput 1078340.347937
+414840	[1728017755]	2000000 OPS in 1.855648 seconds, throughput 1077790.615462
+414840	[1728017756]	2000000 OPS in 1.893634 seconds, throughput 1056170.305349
+414840	[1728017756]	2000000 OPS in 1.855620 seconds, throughput 1077806.878563
+414840	[1728017756]	2000000 OPS in 1.906522 seconds, throughput 1049030.643234
+414840	[1728017757]	2000000 OPS in 1.911142 seconds, throughput 1046494.713632
+414840	[1728017757]	2000000 OPS in 1.902753 seconds, throughput 1051108.577939
+414840	[1728017757]	2000000 OPS in 1.898594 seconds, throughput 1053411.103164
+414840	[1728017758]	2000000 OPS in 1.878048 seconds, throughput 1064935.507506
+414840	[1728017759]	2000000 OPS in 1.912190 seconds, throughput 1045921.168921
+414840	[1728017759]	2000000 OPS in 1.835693 seconds, throughput 1089506.796616
+414840	[1728017759]	2000000 OPS in 1.832186 seconds, throughput 1091592.229173
+414840	[1728017760]	2000000 OPS in 1.837993 seconds, throughput 1088143.426009
+414840	[1728017761]	2000000 OPS in 1.850526 seconds, throughput 1080773.790803
+414840	[1728017761]	2000000 OPS in 1.836280 seconds, throughput 1089158.516130
+414840	[1728017761]	2000000 OPS in 1.822091 seconds, throughput 1097640.019077
+414840	[1728017762]	2000000 OPS in 1.839303 seconds, throughput 1087368.421625
+414840	[1728017762]	2000000 OPS in 1.849350 seconds, throughput 1081461.053884
+414840	[1728017763]	2000000 OPS in 1.832858 seconds, throughput 1091192.007237
+414840	[1728017763]	2000000 OPS in 1.822836 seconds, throughput 1097191.409430
+414840	[1728017764]	2000000 OPS in 1.835493 seconds, throughput 1089625.512056
+414840	[1728017764]	2000000 OPS in 1.848771 seconds, throughput 1081799.746967
+414840	[1728017765]	2000000 OPS in 1.852228 seconds, throughput 1079780.674949
+414840	[1728017765]	2000000 OPS in 1.839998 seconds, throughput 1086957.703215
+414840	[1728017766]	2000000 OPS in 1.844641 seconds, throughput 1084221.807929
+414840	[1728017766]	2000000 OPS in 1.858009 seconds, throughput 1076421.050705
+414840	[1728017767]	2000000 OPS in 1.889291 seconds, throughput 1058598.172542
+414840	[1728017767]	2000000 OPS in 1.893576 seconds, throughput 1056202.655716
+414840	[1728017768]	2000000 OPS in 1.943915 seconds, throughput 1028851.570156
+414840	[1728017768]	2000000 OPS in 1.924577 seconds, throughput 1039189.390708
+414840	[1728017769]	2000000 OPS in 1.866797 seconds, throughput 1071353.767978
+414840	[1728017769]	2000000 OPS in 1.898379 seconds, throughput 1053530.406731
+414840	[1728017769]	2000000 OPS in 1.900896 seconds, throughput 1052135.414036
+414840	[1728017770]	2000000 OPS in 1.849784 seconds, throughput 1081207.319341
+414840	[1728017770]	2000000 OPS in 1.829623 seconds, throughput 1093121.369812
+414840	[1728017770]	2000000 OPS in 1.842319 seconds, throughput 1085588.326452
+414840	[1728017771]	2000000 OPS in 1.837126 seconds, throughput 1088656.956572
+414840	[1728017772]	2000000 OPS in 1.866908 seconds, throughput 1071290.068927
+414840	[1728017772]	2000000 OPS in 1.863929 seconds, throughput 1073002.244184
+414840	[1728017772]	2000000 OPS in 1.855748 seconds, throughput 1077732.536961
+414840	[1728017773]	2000000 OPS in 1.875692 seconds, throughput 1066273.140793
+414840	[1728017774]	2000000 OPS in 1.865784 seconds, throughput 1071935.443760
+414840	[1728017774]	2000000 OPS in 1.857048 seconds, throughput 1076978.085650
+414840	[1728017774]	2000000 OPS in 1.846505 seconds, throughput 1083127.313492
+414840	[1728017775]	2000000 OPS in 1.839922 seconds, throughput 1087002.601197
+414840	[1728017776]	2000000 OPS in 1.871242 seconds, throughput 1068808.844607
+414840	[1728017776]	2000000 OPS in 1.838927 seconds, throughput 1087590.752651
+414840	[1728017776]	2000000 OPS in 1.850724 seconds, throughput 1080658.164048
+414840	[1728017777]	2000000 OPS in 1.889869 seconds, throughput 1058274.409496
+414840	[1728017777]	2000000 OPS in 1.897677 seconds, throughput 1053920.134986
+414840	[1728017778]	2000000 OPS in 1.867500 seconds, throughput 1070950.468541
+414840	[1728017778]	2000000 OPS in 1.869005 seconds, throughput 1070088.095002
+414840	[1728017779]	2000000 OPS in 1.859175 seconds, throughput 1075745.962591
+414840	[1728017779]	2000000 OPS in 1.865679 seconds, throughput 1071995.772049
+414840	[1728017780]	2000000 OPS in 1.848560 seconds, throughput 1081923.226728
+414840	[1728017780]	2000000 OPS in 1.859953 seconds, throughput 1075295.988662
+414840	[1728017781]	2000000 OPS in 1.845368 seconds, throughput 1083794.668597
+414840	[1728017781]	2000000 OPS in 1.892445 seconds, throughput 1056833.884208
+414840	[1728017782]	2000000 OPS in 1.831256 seconds, throughput 1092146.592284
+414840	[1728017782]	2000000 OPS in 1.861117 seconds, throughput 1074623.465371
+414840	[1728017783]	2000000 OPS in 1.916850 seconds, throughput 1043378.459452
+414840	[1728017783]	2000000 OPS in 1.912531 seconds, throughput 1045734.683516
+414840	[1728017783]	2000000 OPS in 1.902040 seconds, throughput 1051502.597211
+414840	[1728017783]	2000000 OPS in 1.933669 seconds, throughput 1034303.182189
+414840	[1728017784]	2000000 OPS in 1.896501 seconds, throughput 1054573.659597
+414840	[1728017785]	2000000 OPS in 1.892551 seconds, throughput 1056774.691937
+414840	[1728017785]	2000000 OPS in 1.897632 seconds, throughput 1053945.127401
+414840	[1728017785]	2000000 OPS in 1.896706 seconds, throughput 1054459.679044
+414840	[1728017786]	2000000 OPS in 1.909734 seconds, throughput 1047266.268496
+414840	[1728017787]	2000000 OPS in 1.909472 seconds, throughput 1047409.964639
+414840	[1728017787]	2000000 OPS in 1.865653 seconds, throughput 1072010.711531
+414840	[1728017787]	2000000 OPS in 1.881307 seconds, throughput 1063090.712999
+414840	[1728017788]	2000000 OPS in 1.858832 seconds, throughput 1075944.464051
+414840	[1728017789]	2000000 OPS in 1.855621 seconds, throughput 1077806.297730
+414840	[1728017789]	2000000 OPS in 1.848433 seconds, throughput 1081997.562259
+414840	[1728017789]	2000000 OPS in 1.863008 seconds, throughput 1073532.695512
+414840	[1728017790]	2000000 OPS in 1.836321 seconds, throughput 1089134.198215
+414840	[1728017791]	2000000 OPS in 1.851944 seconds, throughput 1079946.261874
+414840	[1728017791]	2000000 OPS in 1.825548 seconds, throughput 1095561.442372
+414840	[1728017791]	2000000 OPS in 1.836578 seconds, throughput 1088981.791135
+414840	[1728017792]	2000000 OPS in 1.841407 seconds, throughput 1086125.989529
+414840	[1728017793]	2000000 OPS in 1.894710 seconds, throughput 1055570.509471
+414840	[1728017793]	2000000 OPS in 1.872581 seconds, throughput 1068044.586589
+414840	[1728017793]	2000000 OPS in 1.871089 seconds, throughput 1068896.241707
+414840	[1728017794]	2000000 OPS in 1.877803 seconds, throughput 1065074.451367
+414840	[1728017794]	2000000 OPS in 1.885755 seconds, throughput 1060583.161651
+414840	[1728017795]	2000000 OPS in 1.868799 seconds, throughput 1070206.052122
+414840	[1728017795]	2000000 OPS in 1.889844 seconds, throughput 1058288.408990
+414840	[1728017796]	2000000 OPS in 1.905474 seconds, throughput 1049607.604197
+414840	[1728017796]	2000000 OPS in 1.904609 seconds, throughput 1050084.295517
+414840	[1728017796]	2000000 OPS in 1.878041 seconds, throughput 1064939.476827
+414840	[1728017797]	2000000 OPS in 1.893994 seconds, throughput 1055969.554286
+414840	[1728017798]	2000000 OPS in 1.857096 seconds, throughput 1076950.249206
+414840	[1728017798]	2000000 OPS in 1.868518 seconds, throughput 1070366.996732
+414840	[1728017798]	2000000 OPS in 1.853894 seconds, throughput 1078810.331119
+414840	[1728017798]	2000000 OPS in 1.848894 seconds, throughput 1081727.778878
+414840	[1728017799]	2000000 OPS in 1.883371 seconds, throughput 1061925.664142
+414840	[1728017800]	2000000 OPS in 1.921720 seconds, throughput 1040734.342152
+414840	[1728017800]	2000000 OPS in 1.900473 seconds, throughput 1052369.594306
+414840	[1728017800]	2000000 OPS in 1.901193 seconds, throughput 1051971.051861
+414840	[1728017801]	2000000 OPS in 1.860785 seconds, throughput 1074815.198962
+414840	[1728017802]	2000000 OPS in 1.901309 seconds, throughput 1051906.870477
+414840	[1728017802]	2000000 OPS in 1.871001 seconds, throughput 1068946.515796
+414840	[1728017802]	2000000 OPS in 1.910918 seconds, throughput 1046617.384943
+414840	[1728017803]	2000000 OPS in 1.882332 seconds, throughput 1062511.820444
+414840	[1728017804]	2000000 OPS in 1.851185 seconds, throughput 1080389.048096
+414840	[1728017804]	2000000 OPS in 1.823397 seconds, throughput 1096853.839290
+414840	[1728017804]	2000000 OPS in 1.834059 seconds, throughput 1090477.460104
+414840	[1728017805]	2000000 OPS in 1.898239 seconds, throughput 1053608.107304
+414840	[1728017806]	2000000 OPS in 1.871829 seconds, throughput 1068473.669336
+414840	[1728017806]	2000000 OPS in 1.913893 seconds, throughput 1044990.498424
+414840	[1728017806]	2000000 OPS in 1.915689 seconds, throughput 1044010.797160
+414840	[1728017807]	2000000 OPS in 1.847456 seconds, throughput 1082569.760795
+414840	[1728017808]	2000000 OPS in 1.872419 seconds, throughput 1068136.992842
+414840	[1728017808]	2000000 OPS in 1.860424 seconds, throughput 1075023.758025
+414840	[1728017808]	2000000 OPS in 1.925389 seconds, throughput 1038751.130291
+414840	[1728017809]	2000000 OPS in 1.867224 seconds, throughput 1071108.768953
+414840	[1728017809]	2000000 OPS in 1.866201 seconds, throughput 1071695.921286
+414840	[1728017810]	2000000 OPS in 1.852200 seconds, throughput 1079796.998164
+414840	[1728017810]	2000000 OPS in 1.836629 seconds, throughput 1088951.552001
+414840	[1728017811]	2000000 OPS in 1.856561 seconds, throughput 1077260.590953
+414840	[1728017811]	2000000 OPS in 1.934846 seconds, throughput 1033673.997827
+414840	[1728017811]	2000000 OPS in 1.914869 seconds, throughput 1044457.871531
+414840	[1728017812]	2000000 OPS in 1.916015 seconds, throughput 1043833.164145
+414840	[1728017813]	2000000 OPS in 1.903321 seconds, throughput 1050794.900072
+414840	[1728017813]	2000000 OPS in 1.921614 seconds, throughput 1040791.751101
+414840	[1728017813]	2000000 OPS in 1.895347 seconds, throughput 1055215.746774
+414840	[1728017814]	2000000 OPS in 1.878883 seconds, throughput 1064462.236339
+414840	[1728017814]	2000000 OPS in 1.885631 seconds, throughput 1060652.906109
+414840	[1728017815]	2000000 OPS in 1.850845 seconds, throughput 1080587.515432
+414840	[1728017815]	2000000 OPS in 1.824269 seconds, throughput 1096329.543505
+414840	[1728017815]	2000000 OPS in 1.832309 seconds, throughput 1091518.952316
+414840	[1728017816]	2000000 OPS in 1.848421 seconds, throughput 1082004.586617
+414840	[1728017817]	2000000 OPS in 1.843896 seconds, throughput 1084659.872357
+414840	[1728017817]	2000000 OPS in 1.870237 seconds, throughput 1069383.185126
+414840	[1728017817]	2000000 OPS in 1.861139 seconds, throughput 1074610.762549
+414840	[1728017818]	2000000 OPS in 1.855935 seconds, throughput 1077623.946959
+414840	[1728017819]	2000000 OPS in 1.864831 seconds, throughput 1072483.243790
+414840	[1728017819]	2000000 OPS in 1.875046 seconds, throughput 1066640.498420
+414840	[1728017819]	2000000 OPS in 1.839622 seconds, throughput 1087179.866299
+414840	[1728017820]	2000000 OPS in 1.837717 seconds, throughput 1088306.850293
+414840	[1728017821]	2000000 OPS in 1.850532 seconds, throughput 1080770.286599
+414840	[1728017821]	2000000 OPS in 1.864169 seconds, throughput 1072864.101914
+414840	[1728017821]	2000000 OPS in 1.874396 seconds, throughput 1067010.386279
+414840	[1728017822]	2000000 OPS in 1.877855 seconds, throughput 1065044.958210
+414840	[1728017823]	2000000 OPS in 1.876590 seconds, throughput 1065762.899728
+414840	[1728017823]	2000000 OPS in 1.881168 seconds, throughput 1063169.265052
+414840	[1728017823]	2000000 OPS in 1.890824 seconds, throughput 1057739.905988
+414840	[1728017824]	2000000 OPS in 1.882459 seconds, throughput 1062440.138138
+414840	[1728017824]	2000000 OPS in 1.885938 seconds, throughput 1060480.249086
+414840	[1728017825]	2000000 OPS in 1.857826 seconds, throughput 1076527.080577
+414840	[1728017825]	2000000 OPS in 1.873274 seconds, throughput 1067649.473595
+414840	[1728017826]	2000000 OPS in 1.853968 seconds, throughput 1078767.271064
+414840	[1728017826]	2000000 OPS in 1.849557 seconds, throughput 1081340.018177
+414840	[1728017826]	2000000 OPS in 1.865232 seconds, throughput 1072252.674198
+414840	[1728017827]	2000000 OPS in 1.841907 seconds, throughput 1085831.152170
+414840	[1728017827]	2000000 OPS in 1.839833 seconds, throughput 1087055.183813
+414840	[1728017828]	2000000 OPS in 1.853513 seconds, throughput 1079032.086638
+414840	[1728017828]	2000000 OPS in 1.866558 seconds, throughput 1071490.947509
+414840	[1728017828]	2000000 OPS in 1.850650 seconds, throughput 1080701.375192
+414840	[1728017829]	2000000 OPS in 1.872774 seconds, throughput 1067934.518527
+414840	[1728017830]	2000000 OPS in 1.841262 seconds, throughput 1086211.522315
+414840	[1728017830]	2000000 OPS in 1.868351 seconds, throughput 1070462.670023
+414840	[1728017830]	2000000 OPS in 1.866611 seconds, throughput 1071460.523912
+414840	[1728017831]	2000000 OPS in 1.900986 seconds, throughput 1052085.601893
+414840	[1728017832]	2000000 OPS in 1.931548 seconds, throughput 1035438.932918
+414840	[1728017832]	2000000 OPS in 1.958155 seconds, throughput 1021369.605573
+414840	[1728017832]	2000000 OPS in 1.894719 seconds, throughput 1055565.495464
+414840	[1728017833]	2000000 OPS in 1.879838 seconds, throughput 1063921.465573
+414840	[1728017834]	2000000 OPS in 1.853233 seconds, throughput 1079195.114700
+414840	[1728017834]	2000000 OPS in 1.866346 seconds, throughput 1071612.659175
+414840	[1728017834]	2000000 OPS in 1.859521 seconds, throughput 1075545.799160
+414840	[1728017835]	2000000 OPS in 1.850245 seconds, throughput 1080937.929842
+414840	[1728017836]	2000000 OPS in 1.853608 seconds, throughput 1078976.784735
+414840	[1728017836]	2000000 OPS in 1.883254 seconds, throughput 1061991.637878
+414840	[1728017836]	2000000 OPS in 1.840562 seconds, throughput 1086624.628782
+414840	[1728017837]	2000000 OPS in 1.856817 seconds, throughput 1077112.068664
+414840	[1728017838]	2000000 OPS in 1.857175 seconds, throughput 1076904.438192
+414840	[1728017838]	2000000 OPS in 1.872777 seconds, throughput 1067932.807804
+414840	[1728017838]	2000000 OPS in 1.863027 seconds, throughput 1073521.747135
+414840	[1728017839]	2000000 OPS in 1.876371 seconds, throughput 1065887.289880
+414840	[1728017839]	2000000 OPS in 1.868824 seconds, throughput 1070191.735551
+414840	[1728017840]	2000000 OPS in 1.919109 seconds, throughput 1042150.289535
+414840	[1728017840]	2000000 OPS in 1.889805 seconds, throughput 1058310.248941
+414840	[1728017841]	2000000 OPS in 1.886164 seconds, throughput 1060353.182438
+414840	[1728017841]	2000000 OPS in 1.904151 seconds, throughput 1050336.869292
+414840	[1728017842]	2000000 OPS in 1.919179 seconds, throughput 1042112.278219
+414840	[1728017842]	2000000 OPS in 1.889472 seconds, throughput 1058496.765234
+414840	[1728017842]	2000000 OPS in 1.917449 seconds, throughput 1043052.514043
+414840	[1728017843]	2000000 OPS in 1.857531 seconds, throughput 1076698.047031
+414840	[1728017843]	2000000 OPS in 1.863978 seconds, throughput 1072974.037247
+414840	[1728017843]	2000000 OPS in 1.873770 seconds, throughput 1067366.859326
+414840	[1728017844]	2000000 OPS in 1.849113 seconds, throughput 1081599.664271
+414840	[1728017845]	2000000 OPS in 1.835671 seconds, throughput 1089519.854048
+414840	[1728017845]	2000000 OPS in 1.849114 seconds, throughput 1081599.079343
+414840	[1728017845]	2000000 OPS in 1.862612 seconds, throughput 1073760.933571
+414840	[1728017846]	2000000 OPS in 1.846462 seconds, throughput 1083152.537122
+414840	[1728017847]	2000000 OPS in 1.868611 seconds, throughput 1070313.725008
+414840	[1728017847]	2000000 OPS in 1.861811 seconds, throughput 1074222.893731
+414840	[1728017847]	2000000 OPS in 1.858956 seconds, throughput 1075872.694136
+414840	[1728017848]	2000000 OPS in 1.845625 seconds, throughput 1083643.752116
+414840	[1728017849]	2000000 OPS in 1.836112 seconds, throughput 1089258.171615
+414840	[1728017849]	2000000 OPS in 1.854772 seconds, throughput 1078299.650847
+414840	[1728017849]	2000000 OPS in 1.847410 seconds, throughput 1082596.716484
+414840	[1728017850]	2000000 OPS in 1.860293 seconds, throughput 1075099.460139
+414840	[1728017851]	2000000 OPS in 1.886471 seconds, throughput 1060180.622973
+414840	[1728017851]	2000000 OPS in 1.883823 seconds, throughput 1061670.868229
+414840	[1728017851]	2000000 OPS in 1.881896 seconds, throughput 1062757.984501
+414840	[1728017852]	2000000 OPS in 1.871245 seconds, throughput 1068807.131081
+414840	[1728017852]	2000000 OPS in 1.889889 seconds, throughput 1058263.210167
+414840	[1728017853]	2000000 OPS in 1.885129 seconds, throughput 1060935.352435
+414840	[1728017853]	2000000 OPS in 1.906167 seconds, throughput 1049226.012201
+414840	[1728017854]	2000000 OPS in 1.917241 seconds, throughput 1043165.674008
+414840	[1728017854]	2000000 OPS in 1.879005 seconds, throughput 1064393.122956
+414840	[1728017855]	2000000 OPS in 1.901837 seconds, throughput 1051614.833448
+414840	[1728017855]	2000000 OPS in 1.885083 seconds, throughput 1060961.241494
+414840	[1728017855]	2000000 OPS in 1.858628 seconds, throughput 1076062.557973
+414840	[1728017856]	2000000 OPS in 1.862882 seconds, throughput 1073605.306187
+414840	[1728017857]	2000000 OPS in 1.883164 seconds, throughput 1062042.392484
+414840	[1728017857]	2000000 OPS in 1.894052 seconds, throughput 1055937.218197
+414840	[1728017857]	2000000 OPS in 1.868364 seconds, throughput 1070455.221788
+414840	[1728017858]	2000000 OPS in 1.841807 seconds, throughput 1085890.106835
+414840	[1728017858]	2000000 OPS in 1.843874 seconds, throughput 1084672.813869
+414840	[1728017858]	2000000 OPS in 1.850695 seconds, throughput 1080675.097734
+414840	[1728017859]	2000000 OPS in 1.864252 seconds, throughput 1072816.335989
+414840	[1728017860]	2000000 OPS in 1.845611 seconds, throughput 1083651.972165
+414840	[1728017860]	2000000 OPS in 1.873294 seconds, throughput 1067638.074963
+414840	[1728017860]	2000000 OPS in 1.886961 seconds, throughput 1059905.318658
+414840	[1728017861]	2000000 OPS in 1.857330 seconds, throughput 1076814.567147
+414840	[1728017862]	2000000 OPS in 1.854818 seconds, throughput 1078272.908717
+414840	[1728017862]	2000000 OPS in 1.872717 seconds, throughput 1067967.023314
+414840	[1728017862]	2000000 OPS in 1.895172 seconds, throughput 1055313.185294
+414840	[1728017863]	2000000 OPS in 1.866766 seconds, throughput 1071371.559156
+414840	[1728017864]	2000000 OPS in 1.916701 seconds, throughput 1043459.569333
+414840	[1728017864]	2000000 OPS in 1.904961 seconds, throughput 1049890.260221
+414840	[1728017864]	2000000 OPS in 1.893822 seconds, throughput 1056065.459161
+414840	[1728017865]	2000000 OPS in 1.883614 seconds, throughput 1061788.667954
+414840	[1728017866]	2000000 OPS in 1.894406 seconds, throughput 1055739.899472
+414840	[1728017866]	2000000 OPS in 1.887865 seconds, throughput 1059397.785329
+414840	[1728017866]	2000000 OPS in 1.897558 seconds, throughput 1053986.228616
+414840	[1728017867]	2000000 OPS in 1.907489 seconds, throughput 1048498.838001
+414840	[1728017867]	2000000 OPS in 1.847942 seconds, throughput 1082285.050072
+414840	[1728017868]	2000000 OPS in 1.860576 seconds, throughput 1074935.933818
+414840	[1728017868]	2000000 OPS in 1.907602 seconds, throughput 1048436.728416
+414840	[1728017869]	2000000 OPS in 1.851889 seconds, throughput 1079978.335635
+414840	[1728017869]	2000000 OPS in 1.831845 seconds, throughput 1091795.430290
+414840	[1728017870]	2000000 OPS in 1.857453 seconds, throughput 1076743.260799
+414840	[1728017870]	2000000 OPS in 1.849246 seconds, throughput 1081521.874321
+414840	[1728017870]	2000000 OPS in 1.838575 seconds, throughput 1087798.974749
+414840	[1728017871]	2000000 OPS in 1.864830 seconds, throughput 1072483.818900
+414840	[1728017872]	2000000 OPS in 1.913397 seconds, throughput 1045261.385902
+414840	[1728017872]	2000000 OPS in 1.917820 seconds, throughput 1042850.736774
+414840	[1728017872]	2000000 OPS in 1.865722 seconds, throughput 1071971.065357
+414840	[1728017873]	2000000 OPS in 1.853479 seconds, throughput 1079051.880275
+414840	[1728017873]	2000000 OPS in 1.854423 seconds, throughput 1078502.585440
+414840	[1728017874]	2000000 OPS in 1.899282 seconds, throughput 1053029.513258
+414840	[1728017874]	2000000 OPS in 1.881643 seconds, throughput 1062900.879710
+414840	[1728017875]	2000000 OPS in 1.897613 seconds, throughput 1053955.680110
+414840	[1728017875]	2000000 OPS in 1.884894 seconds, throughput 1061067.625023
+414840	[1728017875]	2000000 OPS in 1.926420 seconds, throughput 1038195.201462
+414840	[1728017876]	2000000 OPS in 1.893390 seconds, throughput 1056306.413364
+414840	[1728017877]	2000000 OPS in 1.890919 seconds, throughput 1057686.765007
+414840	[1728017877]	2000000 OPS in 1.868816 seconds, throughput 1070196.316812
+414840	[1728017877]	2000000 OPS in 1.886537 seconds, throughput 1060143.532833
+414840	[1728017878]	2000000 OPS in 1.861223 seconds, throughput 1074562.263630
+414840	[1728017879]	2000000 OPS in 1.860057 seconds, throughput 1075235.866428
+414840	[1728017879]	2000000 OPS in 1.852767 seconds, throughput 1079466.549221
+414840	[1728017879]	2000000 OPS in 1.855856 seconds, throughput 1077669.819210
+414840	[1728017880]	2000000 OPS in 1.832373 seconds, throughput 1091480.828412
+414840	[1728017880]	2000000 OPS in 1.824826 seconds, throughput 1095994.905816
+414840	[1728017881]	2000000 OPS in 1.844612 seconds, throughput 1084238.853482
+414840	[1728017881]	2000000 OPS in 1.874358 seconds, throughput 1067032.018430
+414840	[1728017882]	2000000 OPS in 1.882049 seconds, throughput 1062671.588253
+414840	[1728017882]	2000000 OPS in 1.865070 seconds, throughput 1072345.810077
+414840	[1728017883]	2000000 OPS in 1.882191 seconds, throughput 1062591.416068
+414840	[1728017883]	2000000 OPS in 1.939442 seconds, throughput 1031224.444969
+414840	[1728017884]	2000000 OPS in 1.881006 seconds, throughput 1063260.829577
+414840	[1728017884]	2000000 OPS in 1.873374 seconds, throughput 1067592.482868
+414840	[1728017885]	2000000 OPS in 1.896009 seconds, throughput 1054847.313488
+414840	[1728017885]	2000000 OPS in 1.891949 seconds, throughput 1057110.947494
+414840	[1728017885]	2000000 OPS in 1.823665 seconds, throughput 1096692.649143
+414840	[1728017886]	2000000 OPS in 1.824649 seconds, throughput 1096101.222756
+414840	[1728017887]	2000000 OPS in 1.864689 seconds, throughput 1072564.915651
+414840	[1728017887]	2000000 OPS in 1.878525 seconds, throughput 1064665.096286
+414840	[1728017887]	2000000 OPS in 1.901836 seconds, throughput 1051615.386395
+414840	[1728017888]	2000000 OPS in 1.895684 seconds, throughput 1055028.158702
+414840	[1728017888]	2000000 OPS in 1.885651 seconds, throughput 1060641.656383
+414840	[1728017889]	2000000 OPS in 1.894189 seconds, throughput 1055860.845987
+414840	[1728017889]	2000000 OPS in 1.833710 seconds, throughput 1090685.004717
+414840	[1728017890]	2000000 OPS in 1.830149 seconds, throughput 1092807.197665
+414840	[1728017890]	2000000 OPS in 1.854462 seconds, throughput 1078479.904145
+414840	[1728017891]	2000000 OPS in 1.868535 seconds, throughput 1070357.258494
+414840	[1728017891]	2000000 OPS in 1.863509 seconds, throughput 1073244.078778
+414840	[1728017892]	2000000 OPS in 1.930192 seconds, throughput 1036166.350291
+414840	[1728017892]	2000000 OPS in 1.889075 seconds, throughput 1058719.214430
+414840	[1728017892]	2000000 OPS in 1.943353 seconds, throughput 1029149.104666
+414840	[1728017893]	2000000 OPS in 1.874262 seconds, throughput 1067086.671981
+414840	[1728017894]	2000000 OPS in 1.932281 seconds, throughput 1035046.144945
+414840	[1728017894]	2000000 OPS in 1.886645 seconds, throughput 1060082.845474
+414840	[1728017894]	2000000 OPS in 1.888771 seconds, throughput 1058889.616581
+414840	[1728017895]	2000000 OPS in 1.874729 seconds, throughput 1066820.857841
+414840	[1728017895]	2000000 OPS in 1.860721 seconds, throughput 1074852.167520
+414840	[1728017896]	2000000 OPS in 1.866865 seconds, throughput 1071314.744237
+414840	[1728017896]	2000000 OPS in 1.873921 seconds, throughput 1067280.851221
+414840	[1728017897]	2000000 OPS in 1.878395 seconds, throughput 1064738.779650
+414840	[1728017897]	2000000 OPS in 1.878166 seconds, throughput 1064868.600539
+414840	[1728017898]	2000000 OPS in 1.849889 seconds, throughput 1081145.949838
+414840	[1728017898]	2000000 OPS in 1.891332 seconds, throughput 1057455.803635
+414840	[1728017898]	2000000 OPS in 1.896462 seconds, throughput 1054595.346493
+414840	[1728017899]	2000000 OPS in 1.868859 seconds, throughput 1070171.692996
+414840	[1728017900]	2000000 OPS in 1.859810 seconds, throughput 1075378.667713
+414840	[1728017900]	2000000 OPS in 1.867705 seconds, throughput 1070832.920616
+414840	[1728017900]	2000000 OPS in 1.824629 seconds, throughput 1096113.237266
+414840	[1728017901]	2000000 OPS in 1.835046 seconds, throughput 1089890.934614
+414840	[1728017901]	2000000 OPS in 1.835481 seconds, throughput 1089632.635805
+414840	[1728017902]	2000000 OPS in 1.849898 seconds, throughput 1081140.689919
+414840	[1728017902]	2000000 OPS in 1.826032 seconds, throughput 1095271.057681
+414840	[1728017903]	2000000 OPS in 1.852027 seconds, throughput 1079897.863260
+414840	[1728017903]	2000000 OPS in 1.871895 seconds, throughput 1068435.996677
+414840	[1728017904]	2000000 OPS in 2.001681 seconds, throughput 999160.205847
+414840	[1728017904]	2000000 OPS in 1.913744 seconds, throughput 1045071.859141
+414840	[1728017905]	2000000 OPS in 1.915380 seconds, throughput 1044179.222922
+414840	[1728017905]	2000000 OPS in 1.912126 seconds, throughput 1045956.176528
+414840	[1728017906]	2000000 OPS in 1.867308 seconds, throughput 1071060.585613
+414840	[1728017906]	2000000 OPS in 1.842893 seconds, throughput 1085250.201721
+414840	[1728017907]	2000000 OPS in 1.923010 seconds, throughput 1040036.193260
+414840	[1728017907]	2000000 OPS in 1.912972 seconds, throughput 1045493.608898
+414840	[1728017908]	2000000 OPS in 1.889614 seconds, throughput 1058417.221718
+414840	[1728017908]	2000000 OPS in 1.901476 seconds, throughput 1051814.485168
+414840	[1728017909]	2000000 OPS in 1.833386 seconds, throughput 1090877.752966
+414840	[1728017909]	2000000 OPS in 1.838496 seconds, throughput 1087845.717369
+414840	[1728017910]	2000000 OPS in 1.880383 seconds, throughput 1063613.104352
+414840	[1728017910]	2000000 OPS in 1.900252 seconds, throughput 1052491.985274
+414840	[1728017910]	2000000 OPS in 1.854819 seconds, throughput 1078272.327381
+414840	[1728017911]	2000000 OPS in 1.858865 seconds, throughput 1075925.363058
+414840	[1728017911]	2000000 OPS in 1.872544 seconds, throughput 1068065.690312
+414840	[1728017912]	2000000 OPS in 1.870965 seconds, throughput 1068967.083831
+414840	[1728017912]	2000000 OPS in 1.864950 seconds, throughput 1072414.810049
+414840	[1728017913]	2000000 OPS in 1.846404 seconds, throughput 1083186.561554
+414840	[1728017913]	2000000 OPS in 1.849941 seconds, throughput 1081115.559902
+414840	[1728017913]	2000000 OPS in 1.841577 seconds, throughput 1086025.726863
+414840	[1728017914]	2000000 OPS in 1.831562 seconds, throughput 1091964.126795
+414840	[1728017915]	2000000 OPS in 1.839804 seconds, throughput 1087072.318573
+414840	[1728017915]	2000000 OPS in 1.853538 seconds, throughput 1079017.532956
+414840	[1728017915]	2000000 OPS in 1.836207 seconds, throughput 1089201.816571
+414840	[1728017916]	2000000 OPS in 1.838360 seconds, throughput 1087926.195087
+414840	[1728017916]	2000000 OPS in 1.832382 seconds, throughput 1091475.467452
+414840	[1728017917]	2000000 OPS in 1.848233 seconds, throughput 1082114.646800
+414840	[1728017917]	2000000 OPS in 1.839007 seconds, throughput 1087543.440563
+414840	[1728017918]	2000000 OPS in 1.847702 seconds, throughput 1082425.629241
+414840	[1728017918]	2000000 OPS in 1.855626 seconds, throughput 1077803.393572
+414840	[1728017919]	2000000 OPS in 1.902076 seconds, throughput 1051482.695749
+414840	[1728017919]	2000000 OPS in 1.877659 seconds, throughput 1065156.133249
+414840	[1728017920]	2000000 OPS in 1.879275 seconds, throughput 1064240.199013
+414840	[1728017920]	2000000 OPS in 1.912919 seconds, throughput 1045522.575708
+414840	[1728017921]	2000000 OPS in 1.875143 seconds, throughput 1066585.321759
+414840	[1728017921]	2000000 OPS in 1.873623 seconds, throughput 1067450.602389
+414840	[1728017922]	2000000 OPS in 1.863636 seconds, throughput 1073170.941107
+414840	[1728017922]	2000000 OPS in 1.864363 seconds, throughput 1072752.462906
+414840	[1728017923]	2000000 OPS in 1.881188 seconds, throughput 1063157.961884
+414840	[1728017923]	2000000 OPS in 1.867835 seconds, throughput 1070758.391400
+414840	[1728017923]	2000000 OPS in 1.890575 seconds, throughput 1057879.216640
+414840	[1728017924]	2000000 OPS in 1.891499 seconds, throughput 1057362.441112
+414840	[1728017925]	2000000 OPS in 1.929930 seconds, throughput 1036307.016317
+414840	[1728017925]	2000000 OPS in 1.914446 seconds, throughput 1044688.646219
+414840	[1728017925]	2000000 OPS in 1.879597 seconds, throughput 1064057.880492
+414840	[1728017926]	2000000 OPS in 1.874423 seconds, throughput 1066995.016600
+414840	[1728017926]	2000000 OPS in 1.889033 seconds, throughput 1058742.753568
+414840	[1728017926]	2000000 OPS in 1.875777 seconds, throughput 1066224.823100
+414840	[1728017927]	2000000 OPS in 1.895770 seconds, throughput 1054980.298243
+414840	[1728017928]	2000000 OPS in 1.901148 seconds, throughput 1051995.951920
+414840	[1728017928]	2000000 OPS in 1.867042 seconds, throughput 1071213.181064
+414840	[1728017928]	2000000 OPS in 1.857322 seconds, throughput 1076819.205286
+414840	[1728017929]	2000000 OPS in 1.840484 seconds, throughput 1086670.680104
+414840	[1728017929]	2000000 OPS in 1.847155 seconds, throughput 1082746.169109
+414840	[1728017930]	2000000 OPS in 1.849786 seconds, throughput 1081206.150333
+414840	[1728017930]	2000000 OPS in 1.837499 seconds, throughput 1088435.966496
+414840	[1728017931]	2000000 OPS in 1.852531 seconds, throughput 1079604.066005
+414840	[1728017931]	2000000 OPS in 1.867844 seconds, throughput 1070753.232069
+414840	[1728017932]	2000000 OPS in 1.885457 seconds, throughput 1060750.788801
+414840	[1728017932]	2000000 OPS in 1.874428 seconds, throughput 1066992.170411
+414840	[1728017933]	2000000 OPS in 1.909995 seconds, throughput 1047123.160008
+414840	[1728017933]	2000000 OPS in 1.901901 seconds, throughput 1051579.446038
+414840	[1728017934]	2000000 OPS in 1.892051 seconds, throughput 1057053.958905
+414840	[1728017934]	2000000 OPS in 1.935736 seconds, throughput 1033198.741977
+414840	[1728017935]	2000000 OPS in 1.879774 seconds, throughput 1063957.688531
+414840	[1728017935]	2000000 OPS in 1.863906 seconds, throughput 1073015.484686
+414840	[1728017936]	2000000 OPS in 1.866742 seconds, throughput 1071385.333378
+414840	[1728017936]	2000000 OPS in 1.864650 seconds, throughput 1072587.348832
+414840	[1728017937]	2000000 OPS in 1.833202 seconds, throughput 1090987.245268
+414840	[1728017937]	2000000 OPS in 1.834626 seconds, throughput 1090140.442793
+414840	[1728017938]	2000000 OPS in 1.847092 seconds, throughput 1082783.099055
+414840	[1728017938]	2000000 OPS in 1.865257 seconds, throughput 1072238.302818
+414840	[1728017938]	2000000 OPS in 1.863469 seconds, throughput 1073267.116330
+414840	[1728017939]	2000000 OPS in 1.849965 seconds, throughput 1081101.534353
+414840	[1728017940]	2000000 OPS in 1.876270 seconds, throughput 1065944.666812
+414840	[1728017940]	2000000 OPS in 1.881937 seconds, throughput 1062734.831187
+414840	[1728017940]	2000000 OPS in 1.878157 seconds, throughput 1064873.703317
+414840	[1728017941]	2000000 OPS in 1.884094 seconds, throughput 1061518.162045
+414840	[1728017941]	2000000 OPS in 1.846118 seconds, throughput 1083354.368464
+414840	[1728017941]	2000000 OPS in 1.862408 seconds, throughput 1073878.548632
+414840	[1728017942]	2000000 OPS in 1.857408 seconds, throughput 1076769.347392
+414840	[1728017943]	2000000 OPS in 1.845565 seconds, throughput 1083678.981775
+414840	[1728017943]	2000000 OPS in 1.854313 seconds, throughput 1078566.563466
+414840	[1728017943]	2000000 OPS in 1.890207 seconds, throughput 1058085.172682
+414840	[1728017944]	2000000 OPS in 1.882129 seconds, throughput 1062626.419337
+414840	[1728017944]	2000000 OPS in 1.888427 seconds, throughput 1059082.506234
+414840	[1728017945]	2000000 OPS in 1.903175 seconds, throughput 1050875.510660
+414840	[1728017945]	2000000 OPS in 1.888463 seconds, throughput 1059062.316815
+414840	[1728017946]	2000000 OPS in 1.878409 seconds, throughput 1064730.844028
+414840	[1728017946]	2000000 OPS in 1.864950 seconds, throughput 1072414.810049
+414840	[1728017947]	2000000 OPS in 1.854077 seconds, throughput 1078703.851027
+414840	[1728017947]	2000000 OPS in 1.873360 seconds, throughput 1067600.461203
+414840	[1728017948]	2000000 OPS in 1.870734 seconds, throughput 1069099.080896
+414840	[1728017948]	2000000 OPS in 1.838728 seconds, throughput 1087708.459326
+414840	[1728017949]	2000000 OPS in 1.851976 seconds, throughput 1079927.601654
+414840	[1728017949]	2000000 OPS in 1.862816 seconds, throughput 1073643.344270
+414840	[1728017950]	2000000 OPS in 1.849629 seconds, throughput 1081297.925151
+414840	[1728017950]	2000000 OPS in 1.859976 seconds, throughput 1075282.691820
+414840	[1728017951]	2000000 OPS in 1.881425 seconds, throughput 1063024.037631
+414840	[1728017951]	2000000 OPS in 1.896879 seconds, throughput 1054363.509744
+414840	[1728017952]	2000000 OPS in 1.929191 seconds, throughput 1036703.986282
+414840	[1728017952]	2000000 OPS in 1.921413 seconds, throughput 1040900.628860
+414840	[1728017953]	2000000 OPS in 1.913760 seconds, throughput 1045063.121813
+414840	[1728017953]	2000000 OPS in 1.897123 seconds, throughput 1054227.901934
+414840	[1728017953]	2000000 OPS in 1.832921 seconds, throughput 1091154.501476
+414840	[1728017954]	2000000 OPS in 1.841355 seconds, throughput 1086156.661806
+414840	[1728017954]	2000000 OPS in 1.850017 seconds, throughput 1081071.146914
+414840	[1728017955]	2000000 OPS in 1.874538 seconds, throughput 1066929.558110
+414840	[1728017955]	2000000 OPS in 1.839813 seconds, throughput 1087067.000831
+414840	[1728017956]	2000000 OPS in 1.863846 seconds, throughput 1073050.026665
+414840	[1728017956]	2000000 OPS in 1.868128 seconds, throughput 1070590.452046
+414840	[1728017956]	2000000 OPS in 1.881141 seconds, throughput 1063184.524711
+414840	[1728017957]	2000000 OPS in 1.856506 seconds, throughput 1077292.505384
+414840	[1728017958]	2000000 OPS in 1.906579 seconds, throughput 1048999.280911
+414840	[1728017958]	2000000 OPS in 1.874757 seconds, throughput 1066804.924585
+414840	[1728017958]	2000000 OPS in 1.870301 seconds, throughput 1069346.591805
+414840	[1728017959]	2000000 OPS in 1.856365 seconds, throughput 1077374.331018
+414840	[1728017959]	2000000 OPS in 1.864617 seconds, throughput 1072606.331488
+414840	[1728017960]	2000000 OPS in 1.854775 seconds, throughput 1078297.906754
+414840	[1728017960]	2000000 OPS in 1.889932 seconds, throughput 1058239.132413
+414840	[1728017961]	2000000 OPS in 1.898408 seconds, throughput 1053514.313045
+414840	[1728017961]	2000000 OPS in 1.922007 seconds, throughput 1040578.936497
+414840	[1728017962]	2000000 OPS in 1.934953 seconds, throughput 1033616.837205
+414840	[1728017962]	2000000 OPS in 1.924460 seconds, throughput 1039252.569552
+414840	[1728017963]	2000000 OPS in 1.884225 seconds, throughput 1061444.360413
+414840	[1728017963]	2000000 OPS in 1.842313 seconds, throughput 1085591.861969
+414840	[1728017964]	2000000 OPS in 1.868470 seconds, throughput 1070394.493891
+414840	[1728017964]	2000000 OPS in 1.884001 seconds, throughput 1061570.561799
+414840	[1728017965]	2000000 OPS in 1.883398 seconds, throughput 1061910.440597
+414840	[1728017965]	2000000 OPS in 1.867749 seconds, throughput 1070807.694182
+414840	[1728017966]	2000000 OPS in 1.844399 seconds, throughput 1084364.066560
+414840	[1728017966]	2000000 OPS in 1.866137 seconds, throughput 1071732.675575
+414840	[1728017966]	2000000 OPS in 1.880381 seconds, throughput 1063614.235626
+414840	[1728017967]	2000000 OPS in 1.870330 seconds, throughput 1069330.011281
+414840	[1728017968]	2000000 OPS in 1.945661 seconds, throughput 1027928.297890
+414840	[1728017968]	2000000 OPS in 1.924724 seconds, throughput 1039110.023047
+414840	[1728017968]	2000000 OPS in 1.902992 seconds, throughput 1050976.567426
+414840	[1728017969]	2000000 OPS in 1.884813 seconds, throughput 1061113.224495
+414840	[1728017970]	2000000 OPS in 1.848430 seconds, throughput 1081999.318340
+414840	[1728017970]	2000000 OPS in 1.859854 seconds, throughput 1075353.226651
+414840	[1728017970]	2000000 OPS in 1.839350 seconds, throughput 1087340.636638
+414840	[1728017971]	2000000 OPS in 1.841801 seconds, throughput 1085893.644319
+414840	[1728017971]	2000000 OPS in 1.917729 seconds, throughput 1042900.222086
+414840	[1728017972]	2000000 OPS in 1.931371 seconds, throughput 1035533.825454
+414840	[1728017972]	2000000 OPS in 1.890270 seconds, throughput 1058049.908214
+414840	[1728017973]	2000000 OPS in 1.894549 seconds, throughput 1055660.212536
+414840	[1728017973]	2000000 OPS in 1.852282 seconds, throughput 1079749.195857
+414840	[1728017973]	2000000 OPS in 1.856276 seconds, throughput 1077425.986222
+414840	[1728017974]	2000000 OPS in 1.857983 seconds, throughput 1076436.113786
+414840	[1728017974]	2000000 OPS in 1.870598 seconds, throughput 1069176.808700
+414840	[1728017975]	2000000 OPS in 1.898881 seconds, throughput 1053251.888876
+414840	[1728017975]	2000000 OPS in 1.867544 seconds, throughput 1070925.236567
+414840	[1728017976]	2000000 OPS in 1.861348 seconds, throughput 1074490.100723
+414840	[1728017976]	2000000 OPS in 1.863694 seconds, throughput 1073137.542966
+414840	[1728017977]	2000000 OPS in 1.858333 seconds, throughput 1076233.376903
+414840	[1728017977]	2000000 OPS in 1.869012 seconds, throughput 1070084.087208
+414840	[1728017978]	2000000 OPS in 1.841059 seconds, throughput 1086331.290849
+414840	[1728017978]	2000000 OPS in 1.855532 seconds, throughput 1077857.994365
+414840	[1728017979]	2000000 OPS in 1.840359 seconds, throughput 1086744.488439
+414840	[1728017979]	2000000 OPS in 1.867221 seconds, throughput 1071110.489867
+414840	[1728017980]	2000000 OPS in 1.843968 seconds, throughput 1084617.520478
+414840	[1728017980]	2000000 OPS in 1.848768 seconds, throughput 1081801.502406
+414840	[1728017981]	2000000 OPS in 1.845642 seconds, throughput 1083633.770796
+414840	[1728017981]	2000000 OPS in 1.850025 seconds, throughput 1081066.472075
+414840	[1728017981]	2000000 OPS in 1.833367 seconds, throughput 1090889.058219
+414840	[1728017982]	2000000 OPS in 1.855240 seconds, throughput 1078027.640629
+414840	[1728017983]	2000000 OPS in 1.873352 seconds, throughput 1067605.020306
+414840	[1728017983]	2000000 OPS in 1.908794 seconds, throughput 1047782.002668
+414840	[1728017983]	2000000 OPS in 1.881392 seconds, throughput 1063042.683290
+414840	[1728017984]	2000000 OPS in 1.863706 seconds, throughput 1073130.633265
+414840	[1728017984]	2000000 OPS in 1.877468 seconds, throughput 1065264.494521
+414840	[1728017985]	2000000 OPS in 1.885133 seconds, throughput 1060933.101272
+414840	[1728017985]	2000000 OPS in 1.854945 seconds, throughput 1078199.084070
+414840	[1728017986]	2000000 OPS in 1.859092 seconds, throughput 1075793.989754
+414840	[1728017986]	2000000 OPS in 1.880870 seconds, throughput 1063337.710740
+414840	[1728017987]	2000000 OPS in 1.903299 seconds, throughput 1050807.046082
+414840	[1728017987]	2000000 OPS in 1.868659 seconds, throughput 1070286.231998
+414840	[1728017987]	2000000 OPS in 1.874880 seconds, throughput 1066734.937703
+414840	[1728017988]	2000000 OPS in 1.882273 seconds, throughput 1062545.124963
+414840	[1728017989]	2000000 OPS in 1.884896 seconds, throughput 1061066.499160
+414840	[1728017989]	2000000 OPS in 1.850682 seconds, throughput 1080682.688868
+414840	[1728017989]	2000000 OPS in 1.856361 seconds, throughput 1077376.652494
+414840	[1728017990]	2000000 OPS in 1.843609 seconds, throughput 1084828.724529
+414840	[1728017990]	2000000 OPS in 1.881327 seconds, throughput 1063079.411500
+414840	[1728017991]	2000000 OPS in 1.840827 seconds, throughput 1086468.201520
+414840	[1728017991]	2000000 OPS in 1.859837 seconds, throughput 1075363.056010
+414840	[1728017992]	2000000 OPS in 1.862315 seconds, throughput 1073932.175813
+414840	[1728017992]	2000000 OPS in 1.867492 seconds, throughput 1070955.056300
+414840	[1728017993]	2000000 OPS in 1.875056 seconds, throughput 1066634.809840
+414840	[1728017993]	2000000 OPS in 1.868910 seconds, throughput 1070142.489472
+414840	[1728017994]	2000000 OPS in 1.859507 seconds, throughput 1075553.896812
+414840	[1728017994]	2000000 OPS in 1.883017 seconds, throughput 1062125.302108
+414840	[1728017994]	2000000 OPS in 1.851568 seconds, throughput 1080165.567778
+414840	[1728017995]	2000000 OPS in 1.872196 seconds, throughput 1068264.220199
+414840	[1728017996]	2000000 OPS in 1.871338 seconds, throughput 1068754.014507
+414840	[1728017996]	2000000 OPS in 1.894660 seconds, throughput 1055598.365934
+414840	[1728017996]	2000000 OPS in 1.917969 seconds, throughput 1042769.721513
+414840	[1728017997]	2000000 OPS in 1.882260 seconds, throughput 1062552.463528
+414840	[1728017998]	2000000 OPS in 1.918385 seconds, throughput 1042543.597870
+414840	[1728017998]	2000000 OPS in 1.935889 seconds, throughput 1033117.084709
+414840	[1728017998]	2000000 OPS in 1.892646 seconds, throughput 1056721.647894
+414840	[1728017999]	2000000 OPS in 1.889460 seconds, throughput 1058503.487769
+414840	[1728017999]	2000000 OPS in 1.888911 seconds, throughput 1058811.135093
+414840	[1728018000]	2000000 OPS in 1.883116 seconds, throughput 1062069.463591
+414840	[1728018000]	2000000 OPS in 1.901470 seconds, throughput 1051817.804120
+414840	[1728018001]	2000000 OPS in 1.889767 seconds, throughput 1058331.529760
+414840	[1728018001]	2000000 OPS in 1.877749 seconds, throughput 1065105.080604
+414840	[1728018002]	2000000 OPS in 1.878586 seconds, throughput 1064630.525299
+414840	[1728018002]	2000000 OPS in 1.865894 seconds, throughput 1071872.249978
+414840	[1728018002]	2000000 OPS in 1.859348 seconds, throughput 1075645.871564
+414840	[1728018003]	2000000 OPS in 1.847689 seconds, throughput 1082433.244989
+414840	[1728018004]	2000000 OPS in 1.857253 seconds, throughput 1076859.210888
+414840	[1728018004]	2000000 OPS in 1.843179 seconds, throughput 1085081.807030
+414840	[1728018004]	2000000 OPS in 1.846901 seconds, throughput 1082895.076672
+414840	[1728018005]	2000000 OPS in 1.871155 seconds, throughput 1068858.539244
+414840	[1728018006]	2000000 OPS in 1.891146 seconds, throughput 1057559.807651
+414840	[1728018006]	2000000 OPS in 1.899980 seconds, throughput 1052642.659396
+414840	[1728018006]	2000000 OPS in 1.901529 seconds, throughput 1051785.168672
+414840	[1728018007]	2000000 OPS in 1.858024 seconds, throughput 1076412.360658
+414840	[1728018007]	2000000 OPS in 1.863610 seconds, throughput 1073185.913362
+414840	[1728018008]	2000000 OPS in 1.849203 seconds, throughput 1081547.023231
+414840	[1728018008]	2000000 OPS in 1.840438 seconds, throughput 1086697.840405
+414840	[1728018009]	2000000 OPS in 1.837513 seconds, throughput 1088427.673709
+414840	[1728018009]	2000000 OPS in 1.849535 seconds, throughput 1081352.880589
+414840	[1728018009]	2000000 OPS in 1.857056 seconds, throughput 1076973.446143
+414840	[1728018010]	2000000 OPS in 1.847099 seconds, throughput 1082778.995603
+414840	[1728018011]	2000000 OPS in 1.859753 seconds, throughput 1075411.627243
+414840	[1728018011]	2000000 OPS in 1.869865 seconds, throughput 1069595.933396
+414840	[1728018011]	2000000 OPS in 1.856565 seconds, throughput 1077258.269977
+414840	[1728018012]	2000000 OPS in 1.836165 seconds, throughput 1089226.730713
+414840	[1728018012]	2000000 OPS in 1.841337 seconds, throughput 1086167.279537
+414840	[1728018013]	2000000 OPS in 1.878876 seconds, throughput 1064466.202134
+414840	[1728018013]	2000000 OPS in 1.853106 seconds, throughput 1079269.075811
+414840	[1728018014]	2000000 OPS in 1.865725 seconds, throughput 1071969.341677
+414840	[1728018014]	2000000 OPS in 1.882705 seconds, throughput 1062301.316457
+414840	[1728018015]	2000000 OPS in 1.856099 seconds, throughput 1077528.730957
+414840	[1728018015]	2000000 OPS in 1.833391 seconds, throughput 1090874.777939
+414840	[1728018015]	2000000 OPS in 1.911810 seconds, throughput 1046129.060942
+414840	[1728018016]	2000000 OPS in 1.881854 seconds, throughput 1062781.703575
+414840	[1728018017]	2000000 OPS in 1.914081 seconds, throughput 1044887.860023
+414840	[1728018017]	2000000 OPS in 1.913063 seconds, throughput 1045443.877175
+414840	[1728018017]	2000000 OPS in 1.849051 seconds, throughput 1081635.931080
+414840	[1728018018]	2000000 OPS in 1.836330 seconds, throughput 1089128.860281
+414840	[1728018019]	2000000 OPS in 1.848414 seconds, throughput 1082008.684202
+414840	[1728018019]	2000000 OPS in 1.831208 seconds, throughput 1092175.219855
+414840	[1728018019]	2000000 OPS in 1.834756 seconds, throughput 1090063.201864
+414840	[1728018020]	2000000 OPS in 1.835076 seconds, throughput 1089873.116972
+414840	[1728018020]	2000000 OPS in 1.893427 seconds, throughput 1056285.771778
+414840	[1728018021]	2000000 OPS in 1.873298 seconds, throughput 1067635.795266
+414840	[1728018021]	2000000 OPS in 1.850635 seconds, throughput 1080710.134629
+414840	[1728018022]	2000000 OPS in 1.891768 seconds, throughput 1057212.089432
+414840	[1728018022]	2000000 OPS in 1.869943 seconds, throughput 1069551.317874
+414840	[1728018022]	2000000 OPS in 1.875063 seconds, throughput 1066630.827871
+414840	[1728018023]	2000000 OPS in 1.861047 seconds, throughput 1074663.885437
+414840	[1728018024]	2000000 OPS in 1.867931 seconds, throughput 1070703.361098
+414840	[1728018024]	2000000 OPS in 1.883409 seconds, throughput 1061904.238538
+414840	[1728018024]	2000000 OPS in 1.875372 seconds, throughput 1066455.081978
+414840	[1728018025]	2000000 OPS in 1.868410 seconds, throughput 1070428.867326
+414840	[1728018026]	2000000 OPS in 1.854400 seconds, throughput 1078515.962036
+414840	[1728018026]	2000000 OPS in 1.862058 seconds, throughput 1074080.399214
+414840	[1728018026]	2000000 OPS in 1.834224 seconds, throughput 1090379.364789
+414840	[1728018027]	2000000 OPS in 1.842169 seconds, throughput 1085676.721300
+414840	[1728018027]	2000000 OPS in 1.872137 seconds, throughput 1068297.886319
+414840	[1728018028]	2000000 OPS in 1.915392 seconds, throughput 1044172.681101
+414840	[1728018028]	2000000 OPS in 1.881639 seconds, throughput 1062903.139231
+414840	[1728018028]	2000000 OPS in 1.935535 seconds, throughput 1033306.036832
+414840	[1728018029]	2000000 OPS in 1.901024 seconds, throughput 1052064.571515
+414840	[1728018030]	2000000 OPS in 1.879237 seconds, throughput 1064261.718985
+414840	[1728018030]	2000000 OPS in 1.868535 seconds, throughput 1070357.258494
+414840	[1728018030]	2000000 OPS in 1.886230 seconds, throughput 1060316.080224
+414840	[1728018031]	2000000 OPS in 1.854675 seconds, throughput 1078356.046208
+414840	[1728018032]	2000000 OPS in 1.861606 seconds, throughput 1074341.187126
+414840	[1728018032]	2000000 OPS in 1.910045 seconds, throughput 1047095.749053
+414840	[1728018032]	2000000 OPS in 1.854555 seconds, throughput 1078425.821828
+414840	[1728018033]	2000000 OPS in 1.852015 seconds, throughput 1079904.860382
+414840	[1728018034]	2000000 OPS in 1.848588 seconds, throughput 1081906.839166
+414840	[1728018034]	2000000 OPS in 1.870239 seconds, throughput 1069382.041547
+414840	[1728018034]	2000000 OPS in 1.858570 seconds, throughput 1076096.138429
+414840	[1728018035]	2000000 OPS in 1.859210 seconds, throughput 1075725.711458
+414840	[1728018035]	2000000 OPS in 1.876789 seconds, throughput 1065649.894581
+414840	[1728018036]	2000000 OPS in 1.886520 seconds, throughput 1060153.086106
+414840	[1728018036]	2000000 OPS in 1.892013 seconds, throughput 1057075.189230
+414840	[1728018037]	2000000 OPS in 1.925007 seconds, throughput 1038957.260935
+414840	[1728018037]	2000000 OPS in 1.913268 seconds, throughput 1045331.861506
+414840	[1728018037]	2000000 OPS in 1.903451 seconds, throughput 1050723.133929
+414840	[1728018038]	2000000 OPS in 1.909947 seconds, throughput 1047149.475876
+414840	[1728018039]	2000000 OPS in 1.887714 seconds, throughput 1059482.527544
+414840	[1728018039]	2000000 OPS in 1.900916 seconds, throughput 1052124.344264
+414840	[1728018039]	2000000 OPS in 1.946277 seconds, throughput 1027602.956825
+414840	[1728018040]	2000000 OPS in 1.863681 seconds, throughput 1073145.028575
+414840	[1728018041]	2000000 OPS in 1.858243 seconds, throughput 1076285.501950
+414840	[1728018041]	2000000 OPS in 1.846684 seconds, throughput 1083022.325422
+414840	[1728018041]	2000000 OPS in 1.871452 seconds, throughput 1068688.911070
+414840	[1728018042]	2000000 OPS in 1.837842 seconds, throughput 1088232.829590
+414840	[1728018042]	2000000 OPS in 1.837942 seconds, throughput 1088173.620277
+414840	[1728018043]	2000000 OPS in 1.836681 seconds, throughput 1088920.721671
+414840	[1728018043]	2000000 OPS in 1.858822 seconds, throughput 1075950.252364
+414840	[1728018043]	2000000 OPS in 1.843581 seconds, throughput 1084845.200726
+414840	[1728018044]	2000000 OPS in 1.849932 seconds, throughput 1081120.819576
+414840	[1728018045]	2000000 OPS in 1.848057 seconds, throughput 1082217.702160
+414840	[1728018045]	2000000 OPS in 1.856485 seconds, throughput 1077304.691393
+414840	[1728018045]	2000000 OPS in 1.846351 seconds, throughput 1083217.654715
+414840	[1728018046]	2000000 OPS in 1.866080 seconds, throughput 1071765.411987
+414840	[1728018047]	2000000 OPS in 1.866406 seconds, throughput 1071578.209671
+414840	[1728018047]	2000000 OPS in 1.892462 seconds, throughput 1056824.390661
+414840	[1728018047]	2000000 OPS in 1.883594 seconds, throughput 1061799.942026
+414840	[1728018048]	2000000 OPS in 1.909226 seconds, throughput 1047544.921345
+414840	[1728018049]	2000000 OPS in 1.899002 seconds, throughput 1053184.778110
+414840	[1728018049]	2000000 OPS in 1.892884 seconds, throughput 1056588.781986
+414840	[1728018049]	2000000 OPS in 1.880051 seconds, throughput 1063800.928805
+414840	[1728018050]	2000000 OPS in 1.855701 seconds, throughput 1077759.833077
+414840	[1728018050]	2000000 OPS in 1.839869 seconds, throughput 1087033.913828
+414840	[1728018051]	2000000 OPS in 1.861408 seconds, throughput 1074455.465970
+414840	[1728018051]	2000000 OPS in 1.856299 seconds, throughput 1077412.636650
+414840	[1728018052]	2000000 OPS in 1.874517 seconds, throughput 1066941.510800
+414840	[1728018052]	2000000 OPS in 1.871796 seconds, throughput 1068492.506662
+414840	[1728018053]	2000000 OPS in 1.888140 seconds, throughput 1059243.488301
+414840	[1728018053]	2000000 OPS in 1.865149 seconds, throughput 1072300.389942
+414840	[1728018054]	2000000 OPS in 1.869183 seconds, throughput 1069986.191828
+414840	[1728018054]	2000000 OPS in 1.848508 seconds, throughput 1081953.662089
+414840	[1728018054]	2000000 OPS in 1.862065 seconds, throughput 1074076.361459
+414840	[1728018055]	2000000 OPS in 1.844551 seconds, throughput 1084274.709672
+414840	[1728018055]	2000000 OPS in 1.850286 seconds, throughput 1080913.977623
+414840	[1728018056]	2000000 OPS in 1.877678 seconds, throughput 1065145.355061
+414840	[1728018056]	2000000 OPS in 1.878363 seconds, throughput 1064756.918657
+414840	[1728018056]	2000000 OPS in 1.865212 seconds, throughput 1072264.171579
+414840	[1728018057]	2000000 OPS in 1.899968 seconds, throughput 1052649.307778
+414840	[1728018058]	2000000 OPS in 1.879021 seconds, throughput 1064384.059571
+414840	[1728018058]	2000000 OPS in 1.920634 seconds, throughput 1041322.813196
+414840	[1728018058]	2000000 OPS in 1.866614 seconds, throughput 1071458.801873
+414840	[1728018059]	2000000 OPS in 1.861848 seconds, throughput 1074201.545991
+414840	[1728018060]	2000000 OPS in 1.853446 seconds, throughput 1079071.092441
+414840	[1728018060]	2000000 OPS in 1.908337 seconds, throughput 1048032.920810
+414840	[1728018060]	2000000 OPS in 1.890399 seconds, throughput 1057977.707352
+414840	[1728018061]	2000000 OPS in 1.922436 seconds, throughput 1040346.726757
+414840	[1728018062]	2000000 OPS in 1.901888 seconds, throughput 1051586.633913
+414840	[1728018062]	2000000 OPS in 1.896976 seconds, throughput 1054309.595904
+414840	[1728018062]	2000000 OPS in 1.885791 seconds, throughput 1060562.914978
+414840	[1728018063]	2000000 OPS in 1.851543 seconds, throughput 1080180.152446
+414840	[1728018064]	2000000 OPS in 1.854940 seconds, throughput 1078201.990361
+414840	[1728018064]	2000000 OPS in 1.864012 seconds, throughput 1072954.465958
+414840	[1728018064]	2000000 OPS in 1.890470 seconds, throughput 1057937.973097
+414840	[1728018065]	2000000 OPS in 1.914325 seconds, throughput 1044754.678542
+414840	[1728018065]	2000000 OPS in 1.874891 seconds, throughput 1066728.679161
+414840	[1728018066]	2000000 OPS in 1.899672 seconds, throughput 1052813.327774
+414840	[1728018066]	2000000 OPS in 1.876014 seconds, throughput 1066090.125127
+414840	[1728018067]	2000000 OPS in 1.854601 seconds, throughput 1078399.073440
+414840	[1728018067]	2000000 OPS in 1.840536 seconds, throughput 1086639.978789
+414840	[1728018068]	2000000 OPS in 1.871359 seconds, throughput 1068742.021173
+414840	[1728018068]	2000000 OPS in 1.880977 seconds, throughput 1063277.222422
+414840	[1728018069]	2000000 OPS in 1.905623 seconds, throughput 1049525.535743
+414840	[1728018069]	2000000 OPS in 1.896590 seconds, throughput 1054524.172330
+414840	[1728018070]	2000000 OPS in 1.931894 seconds, throughput 1035253.486993
+414840	[1728018070]	2000000 OPS in 1.932873 seconds, throughput 1034729.131195
+414840	[1728018071]	2000000 OPS in 1.933119 seconds, throughput 1034597.456235
+414840	[1728018071]	2000000 OPS in 1.904516 seconds, throughput 1050135.572502
+414840	[1728018071]	2000000 OPS in 1.873408 seconds, throughput 1067573.107406
+414840	[1728018072]	2000000 OPS in 1.866977 seconds, throughput 1071250.476037
+414840	[1728018072]	2000000 OPS in 1.837599 seconds, throughput 1088376.735077
+414840	[1728018073]	2000000 OPS in 1.830421 seconds, throughput 1092644.806850
+414840	[1728018073]	2000000 OPS in 1.849186 seconds, throughput 1081556.966146
+414840	[1728018073]	2000000 OPS in 1.833863 seconds, throughput 1090594.008386
+414840	[1728018074]	2000000 OPS in 1.843124 seconds, throughput 1085114.186566
+414840	[1728018075]	2000000 OPS in 1.874824 seconds, throughput 1066766.800510
+414840	[1728018075]	2000000 OPS in 1.886187 seconds, throughput 1060340.252584
+414840	[1728018075]	2000000 OPS in 1.881073 seconds, throughput 1063222.958386
+414840	[1728018076]	2000000 OPS in 1.907934 seconds, throughput 1048254.289719
+414840	[1728018077]	2000000 OPS in 1.849248 seconds, throughput 1081520.704632
+414840	[1728018077]	2000000 OPS in 1.855144 seconds, throughput 1078083.426408
+414840	[1728018077]	2000000 OPS in 1.847679 seconds, throughput 1082439.103329
+414840	[1728018078]	2000000 OPS in 1.904199 seconds, throughput 1050310.392979
+414840	[1728018078]	2000000 OPS in 1.887641 seconds, throughput 1059523.500496
+414840	[1728018079]	2000000 OPS in 1.864492 seconds, throughput 1072678.241580
+414840	[1728018079]	2000000 OPS in 1.880480 seconds, throughput 1063558.240449
+414840	[1728018080]	2000000 OPS in 1.851165 seconds, throughput 1080400.720627
+414840	[1728018080]	2000000 OPS in 1.843521 seconds, throughput 1084880.508549
+414840	[1728018081]	2000000 OPS in 1.847585 seconds, throughput 1082494.174828
+414840	[1728018081]	2000000 OPS in 1.842411 seconds, throughput 1085534.118066
+414840	[1728018082]	2000000 OPS in 1.868554 seconds, throughput 1070346.374790
+414840	[1728018082]	2000000 OPS in 1.869463 seconds, throughput 1069825.933971
+414840	[1728018083]	2000000 OPS in 1.889506 seconds, throughput 1058477.718515
+414840	[1728018083]	2000000 OPS in 1.884569 seconds, throughput 1061250.609556
+414840	[1728018084]	2000000 OPS in 1.879541 seconds, throughput 1064089.583574
+414840	[1728018084]	2000000 OPS in 1.839641 seconds, throughput 1087168.637794
+414840	[1728018084]	2000000 OPS in 1.844907 seconds, throughput 1084065.484060
+414840	[1728018085]	2000000 OPS in 1.834410 seconds, throughput 1090268.805774
+414840	[1728018086]	2000000 OPS in 1.930394 seconds, throughput 1036057.923926
+414840	[1728018086]	2000000 OPS in 1.890025 seconds, throughput 1058187.061018
+414840	[1728018086]	2000000 OPS in 1.885741 seconds, throughput 1060591.035566
+414840	[1728018086]	2000000 OPS in 1.879363 seconds, throughput 1064190.366630
+414840	[1728018088]	2000000 OPS in 1.892997 seconds, throughput 1056525.710289
+414840	[1728018088]	2000000 OPS in 1.857970 seconds, throughput 1076443.645484
+414840	[1728018088]	2000000 OPS in 1.872537 seconds, throughput 1068069.683002
+414840	[1728018088]	2000000 OPS in 1.859907 seconds, throughput 1075322.583333
+414840	[1728018089]	2000000 OPS in 1.865080 seconds, throughput 1072340.060480
+414840	[1728018090]	2000000 OPS in 1.861963 seconds, throughput 1074135.200324
+414840	[1728018090]	2000000 OPS in 1.867519 seconds, throughput 1070939.572770
+414840	[1728018090]	2000000 OPS in 1.886437 seconds, throughput 1060199.731027
+414840	[1728018091]	2000000 OPS in 1.889261 seconds, throughput 1058614.982260
+414840	[1728018092]	2000000 OPS in 1.872093 seconds, throughput 1068322.994638
+414840	[1728018092]	2000000 OPS in 1.864128 seconds, throughput 1072887.698699
+414840	[1728018092]	2000000 OPS in 1.858665 seconds, throughput 1076041.137053
+414840	[1728018093]	2000000 OPS in 1.927031 seconds, throughput 1037866.022913
+414840	[1728018093]	2000000 OPS in 1.940345 seconds, throughput 1030744.532544
+414840	[1728018094]	2000000 OPS in 1.888827 seconds, throughput 1058858.222590
+414840	[1728018094]	2000000 OPS in 1.891978 seconds, throughput 1057094.744231
+414840	[1728018095]	2000000 OPS in 1.893919 seconds, throughput 1056011.371130
+414840	[1728018095]	2000000 OPS in 1.860308 seconds, throughput 1075090.791417
+414840	[1728018096]	2000000 OPS in 1.903587 seconds, throughput 1050648.065993
+414840	[1728018096]	2000000 OPS in 1.936799 seconds, throughput 1032631.677319
+414840	[1728018097]	2000000 OPS in 1.906191 seconds, throughput 1049212.801865
+414840	[1728018097]	2000000 OPS in 1.890792 seconds, throughput 1057757.807310
+414840	[1728018098]	2000000 OPS in 1.841423 seconds, throughput 1086116.552253
+414840	[1728018098]	2000000 OPS in 1.836138 seconds, throughput 1089242.747549
+414840	[1728018099]	2000000 OPS in 1.848931 seconds, throughput 1081706.131813
+414840	[1728018099]	2000000 OPS in 1.831462 seconds, throughput 1092023.749333
+414840	[1728018099]	2000000 OPS in 1.825944 seconds, throughput 1095323.843448
+414840	[1728018100]	2000000 OPS in 1.837508 seconds, throughput 1088430.635404
+414840	[1728018101]	2000000 OPS in 1.885963 seconds, throughput 1060466.191542
+414840	[1728018101]	2000000 OPS in 1.877253 seconds, throughput 1065386.498250
+414840	[1728018101]	2000000 OPS in 1.855461 seconds, throughput 1077899.239057
+414840	[1728018101]	2000000 OPS in 1.900218 seconds, throughput 1052510.817180
+414840	[1728018103]	2000000 OPS in 1.850978 seconds, throughput 1080509.870998
+414840	[1728018103]	2000000 OPS in 1.832587 seconds, throughput 1091353.370945
+414840	[1728018103]	2000000 OPS in 1.826971 seconds, throughput 1094708.126183
+414840	[1728018103]	2000000 OPS in 1.835383 seconds, throughput 1089690.816576
+414840	[1728018104]	2000000 OPS in 1.862640 seconds, throughput 1073744.792338
+414840	[1728018105]	2000000 OPS in 1.839042 seconds, throughput 1087522.742819
+414840	[1728018105]	2000000 OPS in 1.850468 seconds, throughput 1080807.665953
+414840	[1728018105]	2000000 OPS in 1.845087 seconds, throughput 1083959.726560
+414840	[1728018106]	2000000 OPS in 1.876613 seconds, throughput 1065749.837606
+414840	[1728018106]	2000000 OPS in 1.889335 seconds, throughput 1058573.519254
+414840	[1728018107]	2000000 OPS in 1.898138 seconds, throughput 1053664.169834
+414840	[1728018107]	2000000 OPS in 1.893135 seconds, throughput 1056448.694890
+414840	[1728018108]	2000000 OPS in 1.855528 seconds, throughput 1077860.317926
+414840	[1728018108]	2000000 OPS in 1.831135 seconds, throughput 1092218.760496
+414840	[1728018109]	2000000 OPS in 1.828295 seconds, throughput 1093915.369237
+414840	[1728018109]	2000000 OPS in 1.832865 seconds, throughput 1091187.839803
+414840	[1728018110]	2000000 OPS in 1.864289 seconds, throughput 1072795.044116
+414840	[1728018110]	2000000 OPS in 1.852963 seconds, throughput 1079352.366993
+414840	[1728018111]	2000000 OPS in 1.891616 seconds, throughput 1057297.041260
+414840	[1728018111]	2000000 OPS in 1.891162 seconds, throughput 1057550.860265
+414840	[1728018112]	2000000 OPS in 1.919723 seconds, throughput 1041816.970469
+414840	[1728018112]	2000000 OPS in 1.902401 seconds, throughput 1051303.063865
+414840	[1728018112]	2000000 OPS in 1.908324 seconds, throughput 1048040.060283
+414840	[1728018113]	2000000 OPS in 1.892568 seconds, throughput 1056765.199454
+414840	[1728018114]	2000000 OPS in 1.860731 seconds, throughput 1074846.391015
+414840	[1728018114]	2000000 OPS in 1.848319 seconds, throughput 1082064.297343
+414840	[1728018114]	2000000 OPS in 1.840582 seconds, throughput 1086612.821379
+414840	[1728018114]	2000000 OPS in 1.841151 seconds, throughput 1086277.008241
+414840	[1728018116]	2000000 OPS in 1.894102 seconds, throughput 1055909.343847
+414840	[1728018116]	2000000 OPS in 1.887091 seconds, throughput 1059832.302735
+414840	[1728018116]	2000000 OPS in 1.881844 seconds, throughput 1062787.351130
+414840	[1728018116]	2000000 OPS in 1.880573 seconds, throughput 1063505.644290
+414840	[1728018118]	2000000 OPS in 1.876644 seconds, throughput 1065732.232645
+414840	[1728018118]	2000000 OPS in 1.879206 seconds, throughput 1064279.275396
+414840	[1728018118]	2000000 OPS in 1.855554 seconds, throughput 1077845.214960
+414840	[1728018118]	2000000 OPS in 1.847574 seconds, throughput 1082500.619732
+414840	[1728018119]	2000000 OPS in 1.851957 seconds, throughput 1079938.681082
+414840	[1728018120]	2000000 OPS in 1.843480 seconds, throughput 1084904.636882
+414840	[1728018120]	2000000 OPS in 1.845452 seconds, throughput 1083745.337186
+414840	[1728018120]	2000000 OPS in 1.845906 seconds, throughput 1083478.790361
+414840	[1728018121]	2000000 OPS in 1.911681 seconds, throughput 1046199.653603
+414840	[1728018121]	2000000 OPS in 1.902046 seconds, throughput 1051499.280249
+414840	[1728018122]	2000000 OPS in 1.889011 seconds, throughput 1058755.084010
+414840	[1728018122]	2000000 OPS in 1.930156 seconds, throughput 1036185.676184
+414840	[1728018123]	2000000 OPS in 1.939381 seconds, throughput 1031256.880417
+414840	[1728018123]	2000000 OPS in 1.894645 seconds, throughput 1055606.723159
+414840	[1728018124]	2000000 OPS in 1.876271 seconds, throughput 1065944.098694
+414840	[1728018124]	2000000 OPS in 1.896551 seconds, throughput 1054545.857190
+414840	[1728018125]	2000000 OPS in 1.869967 seconds, throughput 1069537.590770
+414840	[1728018125]	2000000 OPS in 1.862762 seconds, throughput 1073674.468343
+414840	[1728018126]	2000000 OPS in 1.841705 seconds, throughput 1085950.247189
+414840	[1728018126]	2000000 OPS in 1.882900 seconds, throughput 1062191.300653
+414840	[1728018127]	2000000 OPS in 1.860916 seconds, throughput 1074739.536873
+414840	[1728018127]	2000000 OPS in 1.879971 seconds, throughput 1063846.197628
+414840	[1728018127]	2000000 OPS in 1.869197 seconds, throughput 1069978.177795
+414840	[1728018128]	2000000 OPS in 1.891084 seconds, throughput 1057594.480203
+414840	[1728018129]	2000000 OPS in 1.898028 seconds, throughput 1053725.234823
+414840	[1728018129]	2000000 OPS in 1.934728 seconds, throughput 1033737.042106
+414840	[1728018129]	2000000 OPS in 1.865910 seconds, throughput 1071863.058776
+414840	[1728018130]	2000000 OPS in 1.869440 seconds, throughput 1069839.096200
+414840	[1728018131]	2000000 OPS in 1.866966 seconds, throughput 1071256.787751
+414840	[1728018131]	2000000 OPS in 1.903235 seconds, throughput 1050842.381524
+414840	[1728018131]	2000000 OPS in 1.876648 seconds, throughput 1065729.961080
+414840	[1728018131]	2000000 OPS in 1.857311 seconds, throughput 1076825.582791
+414840	[1728018133]	2000000 OPS in 1.864725 seconds, throughput 1072544.208932
+414840	[1728018133]	2000000 OPS in 1.864893 seconds, throughput 1072447.588146
+414840	[1728018133]	2000000 OPS in 1.847585 seconds, throughput 1082494.174828
+414840	[1728018133]	2000000 OPS in 1.858090 seconds, throughput 1076374.126119
+414840	[1728018134]	2000000 OPS in 1.833295 seconds, throughput 1090931.901303
+414840	[1728018135]	2000000 OPS in 1.849915 seconds, throughput 1081130.754656
+414840	[1728018135]	2000000 OPS in 1.842308 seconds, throughput 1085594.808251
+414840	[1728018135]	2000000 OPS in 1.841346 seconds, throughput 1086161.970645
+414840	[1728018136]	2000000 OPS in 1.877160 seconds, throughput 1065439.280615
+414840	[1728018136]	2000000 OPS in 1.893739 seconds, throughput 1056111.745072
+414840	[1728018137]	2000000 OPS in 1.863132 seconds, throughput 1073461.246976
+414840	[1728018137]	2000000 OPS in 1.866703 seconds, throughput 1071407.717243
+414840	[1728018138]	2000000 OPS in 1.848552 seconds, throughput 1081927.908980
+414840	[1728018138]	2000000 OPS in 1.860714 seconds, throughput 1074856.211110
+414840	[1728018139]	2000000 OPS in 1.860988 seconds, throughput 1074697.956139
+414840	[1728018139]	2000000 OPS in 1.871081 seconds, throughput 1068900.811884
+414840	[1728018140]	2000000 OPS in 1.861835 seconds, throughput 1074209.046451
+414840	[1728018140]	2000000 OPS in 1.903824 seconds, throughput 1050517.274706
+414840	[1728018140]	2000000 OPS in 1.854029 seconds, throughput 1078731.778198
+414840	[1728018141]	2000000 OPS in 1.848613 seconds, throughput 1081892.207834
+414840	[1728018142]	2000000 OPS in 1.853621 seconds, throughput 1078969.217548
+414840	[1728018142]	2000000 OPS in 1.890102 seconds, throughput 1058143.952020
+414840	[1728018142]	2000000 OPS in 1.871781 seconds, throughput 1068501.069302
+414840	[1728018143]	2000000 OPS in 1.897734 seconds, throughput 1053888.479629
+414840	[1728018144]	2000000 OPS in 1.870292 seconds, throughput 1069351.737590
+414840	[1728018144]	2000000 OPS in 1.872109 seconds, throughput 1068313.864203
+414840	[1728018144]	2000000 OPS in 1.851982 seconds, throughput 1079924.102934
+414840	[1728018144]	2000000 OPS in 1.853094 seconds, throughput 1079276.064787
+414840	[1728018146]	2000000 OPS in 1.856984 seconds, throughput 1077015.203147
+414840	[1728018146]	2000000 OPS in 1.876233 seconds, throughput 1065965.687630
+414840	[1728018146]	2000000 OPS in 1.856513 seconds, throughput 1077288.443442
+414840	[1728018146]	2000000 OPS in 1.843512 seconds, throughput 1084885.804920
+414840	[1728018148]	2000000 OPS in 1.859749 seconds, throughput 1075413.940268
+414840	[1728018148]	2000000 OPS in 1.895539 seconds, throughput 1055108.863495
+414840	[1728018148]	2000000 OPS in 1.885606 seconds, throughput 1060666.968603
+414840	[1728018148]	2000000 OPS in 1.907162 seconds, throughput 1048678.612514
+414840	[1728018149]	2000000 OPS in 1.884639 seconds, throughput 1061211.192170
+414840	[1728018150]	2000000 OPS in 1.876758 seconds, throughput 1065667.496822
+414840	[1728018150]	2000000 OPS in 1.867264 seconds, throughput 1071085.823965
+414840	[1728018150]	2000000 OPS in 1.840411 seconds, throughput 1086713.782954
+414840	[1728018151]	2000000 OPS in 1.914018 seconds, throughput 1044922.252560
+414840	[1728018152]	2000000 OPS in 1.918128 seconds, throughput 1042683.282867
+414840	[1728018152]	2000000 OPS in 1.908877 seconds, throughput 1047736.443993
+414840	[1728018152]	2000000 OPS in 1.899964 seconds, throughput 1052651.523924
+414840	[1728018153]	2000000 OPS in 1.853703 seconds, throughput 1078921.488502
+414840	[1728018153]	2000000 OPS in 1.882927 seconds, throughput 1062176.069492
+414840	[1728018153]	2000000 OPS in 1.861250 seconds, throughput 1074546.675621
+414840	[1728018154]	2000000 OPS in 1.890643 seconds, throughput 1057841.168322
+414840	[1728018155]	2000000 OPS in 1.964220 seconds, throughput 1018215.882131
+414840	[1728018155]	2000000 OPS in 1.928619 seconds, throughput 1037011.457421
+414840	[1728018155]	2000000 OPS in 1.924293 seconds, throughput 1039342.761212
+414840	[1728018156]	2000000 OPS in 1.905472 seconds, throughput 1049608.705874
+414840	[1728018157]	2000000 OPS in 1.859934 seconds, throughput 1075306.973258
+414840	[1728018157]	2000000 OPS in 1.869814 seconds, throughput 1069625.107096
+414840	[1728018157]	2000000 OPS in 1.844963 seconds, throughput 1084032.579515
+414840	[1728018158]	2000000 OPS in 1.851941 seconds, throughput 1079948.011303
+414840	[1728018159]	2000000 OPS in 1.867506 seconds, throughput 1070947.027747
+414840	[1728018159]	2000000 OPS in 1.888413 seconds, throughput 1059090.357883
+414840	[1728018159]	2000000 OPS in 1.888242 seconds, throughput 1059186.269557
+414840	[1728018159]	2000000 OPS in 1.873575 seconds, throughput 1067477.949909
+414840	[1728018161]	2000000 OPS in 1.835346 seconds, throughput 1089712.784401
+414840	[1728018161]	2000000 OPS in 1.828211 seconds, throughput 1093965.630882
+414840	[1728018161]	2000000 OPS in 1.853137 seconds, throughput 1079251.021376
+414840	[1728018161]	2000000 OPS in 1.835617 seconds, throughput 1089551.905436
+414840	[1728018163]	2000000 OPS in 1.847955 seconds, throughput 1082277.436409
+414840	[1728018163]	2000000 OPS in 1.869015 seconds, throughput 1070082.369590
+414840	[1728018163]	2000000 OPS in 1.904746 seconds, throughput 1050008.767573
+414840	[1728018163]	2000000 OPS in 1.884194 seconds, throughput 1061461.823995
+414840	[1728018164]	2000000 OPS in 1.854244 seconds, throughput 1078606.699010
+414840	[1728018165]	2000000 OPS in 1.850577 seconds, throughput 1080744.005788
+414840	[1728018165]	2000000 OPS in 1.886937 seconds, throughput 1059918.799621
+414840	[1728018165]	2000000 OPS in 1.835187 seconds, throughput 1089807.196760
+414840	[1728018166]	2000000 OPS in 1.881646 seconds, throughput 1062899.185075
+414840	[1728018167]	2000000 OPS in 1.906014 seconds, throughput 1049310.235916
+414840	[1728018167]	2000000 OPS in 1.907756 seconds, throughput 1048352.095341
+414840	[1728018167]	2000000 OPS in 1.896801 seconds, throughput 1054406.867141
+414840	[1728018168]	2000000 OPS in 1.864951 seconds, throughput 1072414.235012
+414840	[1728018168]	2000000 OPS in 1.862532 seconds, throughput 1073807.054053
+414840	[1728018169]	2000000 OPS in 1.900516 seconds, throughput 1052345.783987
+414840	[1728018169]	2000000 OPS in 1.878173 seconds, throughput 1064864.631746
+414840	[1728018170]	2000000 OPS in 1.831617 seconds, throughput 1091931.337174
+414840	[1728018170]	2000000 OPS in 1.834269 seconds, throughput 1090352.614584
+414840	[1728018170]	2000000 OPS in 1.852051 seconds, throughput 1079883.869289
+414840	[1728018171]	2000000 OPS in 1.833949 seconds, throughput 1090542.866786
+414840	[1728018172]	2000000 OPS in 1.823426 seconds, throughput 1096836.394787
+414840	[1728018172]	2000000 OPS in 1.826991 seconds, throughput 1094696.142455
+414840	[1728018172]	2000000 OPS in 1.851836 seconds, throughput 1080009.244879
+414840	[1728018172]	2000000 OPS in 1.833679 seconds, throughput 1090703.443733
+414840	[1728018174]	2000000 OPS in 1.854753 seconds, throughput 1078310.696896
+414840	[1728018174]	2000000 OPS in 1.846467 seconds, throughput 1083149.604082
+414840	[1728018174]	2000000 OPS in 1.874481 seconds, throughput 1066962.001749
+414840	[1728018174]	2000000 OPS in 1.853680 seconds, throughput 1078934.875491
+414840	[1728018176]	2000000 OPS in 1.906625 seconds, throughput 1048973.972333
+414840	[1728018176]	2000000 OPS in 1.900437 seconds, throughput 1052389.529356
+414840	[1728018176]	2000000 OPS in 1.915363 seconds, throughput 1044188.490641
+414840	[1728018176]	2000000 OPS in 1.902748 seconds, throughput 1051111.340020
+414840	[1728018177]	2000000 OPS in 1.904412 seconds, throughput 1050192.920439
+414840	[1728018178]	2000000 OPS in 1.886943 seconds, throughput 1059915.429348
+414840	[1728018178]	2000000 OPS in 1.905447 seconds, throughput 1049622.477036
+414840	[1728018178]	2000000 OPS in 1.902053 seconds, throughput 1051495.410485
+414840	[1728018179]	2000000 OPS in 1.864024 seconds, throughput 1072947.558615
+414840	[1728018180]	2000000 OPS in 1.922712 seconds, throughput 1040197.387856
+414840	[1728018180]	2000000 OPS in 1.888463 seconds, throughput 1059062.316815
+414840	[1728018180]	2000000 OPS in 1.873159 seconds, throughput 1067715.020455
+414840	[1728018181]	2000000 OPS in 1.853803 seconds, throughput 1078863.288062
+414840	[1728018182]	2000000 OPS in 1.847022 seconds, throughput 1082824.135284
+414840	[1728018182]	2000000 OPS in 1.907224 seconds, throughput 1048644.522091
+414840	[1728018182]	2000000 OPS in 1.856477 seconds, throughput 1077309.333754
+414840	[1728018183]	2000000 OPS in 1.873951 seconds, throughput 1067263.765168
+414840	[1728018183]	2000000 OPS in 1.883922 seconds, throughput 1061615.077482
+414840	[1728018184]	2000000 OPS in 1.881252 seconds, throughput 1063121.793359
+414840	[1728018184]	2000000 OPS in 1.872394 seconds, throughput 1068151.254490
+414840	[1728018185]	2000000 OPS in 1.907904 seconds, throughput 1048270.772534
+414840	[1728018185]	2000000 OPS in 1.940220 seconds, throughput 1030810.938966
+414840	[1728018186]	2000000 OPS in 1.910627 seconds, throughput 1046776.791074
+414840	[1728018186]	2000000 OPS in 1.958860 seconds, throughput 1021002.011374
+414840	[1728018187]	2000000 OPS in 1.902764 seconds, throughput 1051102.501414
+414840	[1728018187]	2000000 OPS in 1.841439 seconds, throughput 1086107.115142
+414840	[1728018187]	2000000 OPS in 1.853304 seconds, throughput 1079153.770779
+414840	[1728018187]	2000000 OPS in 1.853692 seconds, throughput 1078927.890933
+414840	[1728018189]	2000000 OPS in 1.856103 seconds, throughput 1077526.408825
+414840	[1728018189]	2000000 OPS in 1.854384 seconds, throughput 1078525.267690
+414840	[1728018189]	2000000 OPS in 1.877116 seconds, throughput 1065464.254740
+414840	[1728018189]	2000000 OPS in 1.873210 seconds, throughput 1067685.950854
+414840	[1728018191]	2000000 OPS in 1.857654 seconds, throughput 1076626.756113
+414840	[1728018191]	2000000 OPS in 1.870156 seconds, throughput 1069429.502138
+414840	[1728018191]	2000000 OPS in 1.884156 seconds, throughput 1061483.231749
+414840	[1728018191]	2000000 OPS in 1.863664 seconds, throughput 1073154.817607
+414840	[1728018192]	2000000 OPS in 1.846915 seconds, throughput 1082886.868102
+414840	[1728018193]	2000000 OPS in 1.845096 seconds, throughput 1083954.439227
+414840	[1728018193]	2000000 OPS in 1.852062 seconds, throughput 1079877.455506
+414840	[1728018193]	2000000 OPS in 1.852362 seconds, throughput 1079702.563538
+414840	[1728018194]	2000000 OPS in 1.887285 seconds, throughput 1059723.359217
+414840	[1728018195]	2000000 OPS in 1.882816 seconds, throughput 1062238.689282
+414840	[1728018195]	2000000 OPS in 1.900078 seconds, throughput 1052588.367425
+414840	[1728018195]	2000000 OPS in 1.910351 seconds, throughput 1046928.025269
+414840	[1728018196]	2000000 OPS in 1.826333 seconds, throughput 1095090.544824
+414840	[1728018196]	2000000 OPS in 1.827074 seconds, throughput 1094646.412789
+414840	[1728018197]	2000000 OPS in 1.835639 seconds, throughput 1089538.847235
+414840	[1728018197]	2000000 OPS in 1.850843 seconds, throughput 1080588.683103
+414840	[1728018198]	2000000 OPS in 1.851944 seconds, throughput 1079946.261874
+414840	[1728018198]	2000000 OPS in 1.850055 seconds, throughput 1081048.941788
+414840	[1728018199]	2000000 OPS in 1.873389 seconds, throughput 1067583.934783
+414840	[1728018199]	2000000 OPS in 1.899840 seconds, throughput 1052720.229072
+414840	[1728018200]	2000000 OPS in 1.856672 seconds, throughput 1077196.187587
+414840	[1728018200]	2000000 OPS in 1.857070 seconds, throughput 1076965.327101
+414840	[1728018201]	2000000 OPS in 1.870078 seconds, throughput 1069474.107497
+414840	[1728018201]	2000000 OPS in 1.873242 seconds, throughput 1067667.711913
+414840	[1728018202]	2000000 OPS in 1.876480 seconds, throughput 1065825.375171
+414840	[1728018202]	2000000 OPS in 1.849762 seconds, throughput 1081220.178596
+414840	[1728018202]	2000000 OPS in 1.854796 seconds, throughput 1078285.698265
+414840	[1728018202]	2000000 OPS in 1.863607 seconds, throughput 1073187.640956
+414840	[1728018204]	2000000 OPS in 1.833847 seconds, throughput 1090603.523631
+414840	[1728018204]	2000000 OPS in 1.852872 seconds, throughput 1079405.377166
+414840	[1728018204]	2000000 OPS in 1.844091 seconds, throughput 1084545.177000
+414840	[1728018204]	2000000 OPS in 1.874882 seconds, throughput 1066733.799780
+414840	[1728018205]	2000000 OPS in 1.884096 seconds, throughput 1061517.035225
+414840	[1728018206]	2000000 OPS in 1.908160 seconds, throughput 1048130.135838
+414840	[1728018206]	2000000 OPS in 1.874431 seconds, throughput 1066990.462706
+414840	[1728018206]	2000000 OPS in 1.870597 seconds, throughput 1069177.380270
+414840	[1728018207]	2000000 OPS in 1.904202 seconds, throughput 1050308.738254
+414840	[1728018208]	2000000 OPS in 1.908963 seconds, throughput 1047689.242798
+414840	[1728018208]	2000000 OPS in 1.894554 seconds, throughput 1055657.426497
+414840	[1728018208]	2000000 OPS in 1.994820 seconds, throughput 1002596.725519
+414840	[1728018210]	2000000 OPS in 1.830812 seconds, throughput 1092411.454590
+414840	[1728018210]	2000000 OPS in 1.850555 seconds, throughput 1080756.854025
+414840	[1728018210]	2000000 OPS in 1.852029 seconds, throughput 1079896.697082
+414840	[1728018211]	2000000 OPS in 1.800578 seconds, throughput 1110754.435520
+414840	[1728018212]	2000000 OPS in 1.820130 seconds, throughput 1098822.611572
+414840	[1728018213]	2000000 OPS in 1.782705 seconds, throughput 1121890.610056
+414840	[1728018215]	2000000 OPS in 1.674059 seconds, throughput 1194701.023082
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     234482 ms       920509 ms            4 CompactionCPUUsage=1.9681 CompactionThroughput=599.389M Lat_Get_Avg=849.519 Lat_Get_P50=878.228 Lat_Get_P95=1.36896k Lat_Get_P99=1.81039k Lat_Put_Avg=1042.86 Lat_Put_P50=1012.36 Lat_Put_P95=1.56959k Lat_Put_P99=1.85804k items_per_second=4.26472M/s
+5576.50user 27.18system 16:17.10elapsed 573%CPU (0avgtext+0avgdata 9117660maxresident)k
+316024inputs+16649760outputs (5787major+3550467minor)pagefaults 0swaps

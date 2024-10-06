@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-04T00:04:03-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 4.29, 5.65, 5.70
+[1728018243]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728018243]	Setup starts!
+[1728018243]	Setup starts!
+[1728018243]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7f43ba800000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728018243]	Initializing log segments...
+Log: pool_start 0x7f43ba800000 total segments: 2028  cleaners: 2
+[1728018247]Initialized 2026 free log segments...
+[1728018247]	DB init finished in 4.318826 seconds
+[1728018247]	DB init finished in 4.318902 seconds
+[1728018247]	DB init finished in 4.318870 seconds
+[1728018247]	DB init finished in 4.318645 seconds
+[1728018252]	DB load finished in 5.312270 seconds
+[1728018252]	DB load finished in 5.319417 seconds
+[1728018253]	DB load finished in 5.340362 seconds
+[1728018253]	DB load finished in 5.343902 seconds
+[1728018253]	DB warmup finished in 0.000011 seconds
+[1728018253]	DB warmup finished in 0.031654 seconds
+[1728018253]	DB warmup finished in 0.024501 seconds
+[1728018253]	DB warmup finished in 0.003559 seconds
+[1728018253]	ETC init!
+[1728018253]	ETC init!
+[1728018253]	ETC starts!
+[1728018253]	ETC starts!
+[1728018253]	ETC init!
+[1728018253]	ETC init!
+[1728018253]	ETC starts!
+[1728018253]	ETC starts!
+425168	[1728018255]	2000000 OPS in 2.168485 seconds, throughput 922302.898106
+425168	[1728018255]	2000000 OPS in 2.171494 seconds, throughput 921024.879645
+425168	[1728018255]	2000000 OPS in 2.186795 seconds, throughput 914580.470506
+425168	[1728018255]	2000000 OPS in 2.199740 seconds, throughput 909198.359806
+425168	[1728018257]	2000000 OPS in 2.092578 seconds, throughput 955758.877327
+425168	[1728018257]	2000000 OPS in 2.103774 seconds, throughput 950672.458163
+425168	[1728018257]	2000000 OPS in 2.119185 seconds, throughput 943759.039442
+425168	[1728018257]	2000000 OPS in 2.119081 seconds, throughput 943805.357134
+425168	[1728018259]	2000000 OPS in 2.099766 seconds, throughput 952487.086656
+425168	[1728018259]	2000000 OPS in 2.112890 seconds, throughput 946570.810596
+425168	[1728018259]	2000000 OPS in 2.122450 seconds, throughput 942307.239275
+425168	[1728018259]	2000000 OPS in 2.139945 seconds, throughput 934603.459435
+425168	[1728018261]	2000000 OPS in 2.103801 seconds, throughput 950660.257315
+425168	[1728018261]	2000000 OPS in 2.114851 seconds, throughput 945693.100838
+425168	[1728018261]	2000000 OPS in 2.122751 seconds, throughput 942173.622813
+425168	[1728018261]	2000000 OPS in 2.129115 seconds, throughput 939357.432548
+425168	[1728018263]	2000000 OPS in 2.131203 seconds, throughput 938437.117440
+425168	[1728018263]	2000000 OPS in 2.111386 seconds, throughput 947245.079772
+425168	[1728018263]	2000000 OPS in 2.130099 seconds, throughput 938923.496044
+425168	[1728018263]	2000000 OPS in 2.134086 seconds, throughput 937169.354937
+425168	[1728018265]	2000000 OPS in 1.821322 seconds, throughput 1098103.465505
+425168	[1728018265]	2000000 OPS in 1.820282 seconds, throughput 1098730.855988
+425168	[1728018265]	2000000 OPS in 1.831950 seconds, throughput 1091732.852971
+425168	[1728018265]	2000000 OPS in 1.843458 seconds, throughput 1084917.584236
+425168	[1728018267]	2000000 OPS in 1.825808 seconds, throughput 1095405.431458
+425168	[1728018267]	2000000 OPS in 1.829939 seconds, throughput 1092932.605950
+425168	[1728018267]	2000000 OPS in 1.846133 seconds, throughput 1083345.566110
+425168	[1728018267]	2000000 OPS in 1.858049 seconds, throughput 1076397.877559
+425168	[1728018269]	2000000 OPS in 2.007550 seconds, throughput 996239.197031
+425168	[1728018269]	2000000 OPS in 2.023950 seconds, throughput 988166.703723
+425168	[1728018269]	2000000 OPS in 2.123269 seconds, throughput 941943.766899
+425168	[1728018269]	2000000 OPS in 2.171178 seconds, throughput 921158.928471
+425168	[1728018271]	2000000 OPS in 2.403007 seconds, throughput 832290.542641
+425168	[1728018271]	2000000 OPS in 2.466206 seconds, throughput 810962.263493
+425168	[1728018271]	2000000 OPS in 2.487293 seconds, throughput 804087.013472
+425168	[1728018272]	2000000 OPS in 2.559489 seconds, throughput 781405.975958
+425168	[1728018274]	2000000 OPS in 2.412800 seconds, throughput 828912.466844
+425168	[1728018274]	2000000 OPS in 2.411681 seconds, throughput 829297.075359
+425168	[1728018274]	2000000 OPS in 2.229519 seconds, throughput 897054.476773
+425168	[1728018274]	2000000 OPS in 2.501417 seconds, throughput 799546.816864
+425168	[1728018276]	2000000 OPS in 2.236469 seconds, throughput 894266.810763
+425168	[1728018276]	2000000 OPS in 2.152117 seconds, throughput 929317.504578
+425168	[1728018276]	2000000 OPS in 2.288970 seconds, throughput 873755.444589
+425168	[1728018276]	2000000 OPS in 2.327313 seconds, throughput 859360.129042
+425168	[1728018278]	2000000 OPS in 2.070820 seconds, throughput 965800.987049
+425168	[1728018278]	2000000 OPS in 2.100378 seconds, throughput 952209.554661
+425168	[1728018278]	2000000 OPS in 2.180759 seconds, throughput 917111.886274
+425168	[1728018279]	2000000 OPS in 2.253381 seconds, throughput 887555.189291
+425168	[1728018280]	2000000 OPS in 2.032913 seconds, throughput 983809.931856
+425168	[1728018280]	2000000 OPS in 2.040245 seconds, throughput 980274.427826
+425168	[1728018280]	2000000 OPS in 2.008937 seconds, throughput 995551.378664
+425168	[1728018281]	2000000 OPS in 2.084292 seconds, throughput 959558.449584
+425168	[1728018282]	2000000 OPS in 1.941099 seconds, throughput 1030344.150401
+425168	[1728018282]	2000000 OPS in 1.930159 seconds, throughput 1036184.065665
+425168	[1728018282]	2000000 OPS in 1.915431 seconds, throughput 1044151.420751
+425168	[1728018283]	2000000 OPS in 1.857076 seconds, throughput 1076961.847550
+425168	[1728018284]	2000000 OPS in 1.832058 seconds, throughput 1091668.495211
+425168	[1728018284]	2000000 OPS in 1.828395 seconds, throughput 1093855.539968
+425168	[1728018284]	2000000 OPS in 1.836064 seconds, throughput 1089286.647960
+425168	[1728018285]	2000000 OPS in 1.849401 seconds, throughput 1081431.230977
+425168	[1728018286]	2000000 OPS in 1.823726 seconds, throughput 1096655.966960
+425168	[1728018286]	2000000 OPS in 1.820930 seconds, throughput 1098339.859303
+425168	[1728018286]	2000000 OPS in 1.825125 seconds, throughput 1095815.355113
+425168	[1728018286]	2000000 OPS in 1.847443 seconds, throughput 1082577.378571
+425168	[1728018287]	2000000 OPS in 1.825510 seconds, throughput 1095584.247690
+425168	[1728018287]	2000000 OPS in 1.821148 seconds, throughput 1098208.382844
+425168	[1728018287]	2000000 OPS in 1.828044 seconds, throughput 1094065.569538
+425168	[1728018288]	2000000 OPS in 1.848219 seconds, throughput 1082122.843667
+425168	[1728018289]	2000000 OPS in 1.826670 seconds, throughput 1094888.512977
+425168	[1728018289]	2000000 OPS in 1.821198 seconds, throughput 1098178.232131
+425168	[1728018289]	2000000 OPS in 1.828282 seconds, throughput 1093923.147523
+425168	[1728018290]	2000000 OPS in 1.853106 seconds, throughput 1079269.075811
+425168	[1728018291]	2000000 OPS in 1.827837 seconds, throughput 1094189.470943
+425168	[1728018291]	2000000 OPS in 1.825100 seconds, throughput 1095830.365459
+425168	[1728018291]	2000000 OPS in 1.839409 seconds, throughput 1087305.759622
+425168	[1728018292]	2000000 OPS in 1.853218 seconds, throughput 1079203.849736
+425168	[1728018293]	2000000 OPS in 1.834046 seconds, throughput 1090485.189575
+425168	[1728018293]	2000000 OPS in 1.828206 seconds, throughput 1093968.622792
+425168	[1728018293]	2000000 OPS in 1.833404 seconds, throughput 1090867.042943
+425168	[1728018294]	2000000 OPS in 1.853117 seconds, throughput 1079262.669330
+425168	[1728018295]	2000000 OPS in 1.831364 seconds, throughput 1092082.185737
+425168	[1728018295]	2000000 OPS in 1.828499 seconds, throughput 1093793.324470
+425168	[1728018295]	2000000 OPS in 1.830845 seconds, throughput 1092391.764458
+425168	[1728018296]	2000000 OPS in 1.856135 seconds, throughput 1077507.832135
+425168	[1728018297]	2000000 OPS in 1.841604 seconds, throughput 1086009.804497
+425168	[1728018297]	2000000 OPS in 1.826477 seconds, throughput 1095004.207554
+425168	[1728018297]	2000000 OPS in 1.831271 seconds, throughput 1092137.646476
+425168	[1728018297]	2000000 OPS in 1.854474 seconds, throughput 1078472.925476
+425168	[1728018298]	2000000 OPS in 1.914820 seconds, throughput 1044484.599075
+425168	[1728018299]	2000000 OPS in 1.954756 seconds, throughput 1023145.599758
+425168	[1728018299]	2000000 OPS in 1.941221 seconds, throughput 1030279.396318
+425168	[1728018300]	2000000 OPS in 2.047604 seconds, throughput 976751.364033
+425168	[1728018300]	2000000 OPS in 1.955045 seconds, throughput 1022994.355629
+425168	[1728018300]	2000000 OPS in 1.970884 seconds, throughput 1014773.066299
+425168	[1728018301]	2000000 OPS in 1.993534 seconds, throughput 1003243.486191
+425168	[1728018301]	2000000 OPS in 1.962698 seconds, throughput 1019005.471040
+425168	[1728018302]	2000000 OPS in 1.991667 seconds, throughput 1004183.932354
+425168	[1728018302]	2000000 OPS in 2.001143 seconds, throughput 999428.826426
+425168	[1728018303]	2000000 OPS in 2.009674 seconds, throughput 995186.283945
+425168	[1728018304]	2000000 OPS in 2.029020 seconds, throughput 985697.528856
+425168	[1728018304]	2000000 OPS in 1.927153 seconds, throughput 1037800.319954
+425168	[1728018304]	2000000 OPS in 1.912275 seconds, throughput 1045874.678067
+425168	[1728018304]	2000000 OPS in 1.888844 seconds, throughput 1058848.692640
+425168	[1728018305]	2000000 OPS in 1.877698 seconds, throughput 1065134.009835
+425168	[1728018306]	2000000 OPS in 1.847565 seconds, throughput 1082505.892891
+425168	[1728018306]	2000000 OPS in 1.839061 seconds, throughput 1087511.507231
+425168	[1728018306]	2000000 OPS in 1.868306 seconds, throughput 1070488.453176
+425168	[1728018307]	2000000 OPS in 1.899577 seconds, throughput 1052865.980163
+425168	[1728018308]	2000000 OPS in 1.894344 seconds, throughput 1055774.452792
+425168	[1728018308]	2000000 OPS in 1.889396 seconds, throughput 1058539.342732
+425168	[1728018308]	2000000 OPS in 1.902475 seconds, throughput 1051262.171645
+425168	[1728018309]	2000000 OPS in 1.975221 seconds, throughput 1012544.925353
+425168	[1728018310]	2000000 OPS in 1.984716 seconds, throughput 1007700.849895
+425168	[1728018310]	2000000 OPS in 2.032495 seconds, throughput 984012.260793
+425168	[1728018310]	2000000 OPS in 1.986495 seconds, throughput 1006798.406238
+425168	[1728018311]	2000000 OPS in 2.030880 seconds, throughput 984794.768770
+425168	[1728018312]	2000000 OPS in 1.883006 seconds, throughput 1062131.506750
+425168	[1728018312]	2000000 OPS in 1.877834 seconds, throughput 1065056.868712
+425168	[1728018312]	2000000 OPS in 1.883073 seconds, throughput 1062093.715963
+425168	[1728018313]	2000000 OPS in 1.901783 seconds, throughput 1051644.693427
+425168	[1728018314]	2000000 OPS in 1.913814 seconds, throughput 1045033.634408
+425168	[1728018314]	2000000 OPS in 1.880489 seconds, throughput 1063553.150271
+425168	[1728018314]	2000000 OPS in 1.902309 seconds, throughput 1051353.907278
+425168	[1728018315]	2000000 OPS in 1.867639 seconds, throughput 1070870.762497
+425168	[1728018316]	2000000 OPS in 1.828707 seconds, throughput 1093668.914703
+425168	[1728018316]	2000000 OPS in 1.832624 seconds, throughput 1091331.336925
+425168	[1728018316]	2000000 OPS in 1.832055 seconds, throughput 1091670.282824
+425168	[1728018317]	2000000 OPS in 1.839564 seconds, throughput 1087214.144221
+425168	[1728018318]	2000000 OPS in 1.828605 seconds, throughput 1093729.919802
+425168	[1728018318]	2000000 OPS in 1.830009 seconds, throughput 1092890.799991
+425168	[1728018318]	2000000 OPS in 1.831079 seconds, throughput 1092252.163888
+425168	[1728018319]	2000000 OPS in 1.840737 seconds, throughput 1086521.322709
+425168	[1728018319]	2000000 OPS in 1.829025 seconds, throughput 1093478.766009
+425168	[1728018319]	2000000 OPS in 1.829587 seconds, throughput 1093142.878693
+425168	[1728018319]	2000000 OPS in 1.834261 seconds, throughput 1090357.370080
+425168	[1728018321]	2000000 OPS in 1.841050 seconds, throughput 1086336.601396
+425168	[1728018321]	2000000 OPS in 1.828115 seconds, throughput 1094023.078417
+425168	[1728018321]	2000000 OPS in 1.830296 seconds, throughput 1092719.428989
+425168	[1728018321]	2000000 OPS in 1.833484 seconds, throughput 1090819.445384
+425168	[1728018322]	2000000 OPS in 1.843467 seconds, throughput 1084912.287554
+425168	[1728018323]	2000000 OPS in 1.830327 seconds, throughput 1092700.921748
+425168	[1728018323]	2000000 OPS in 1.833258 seconds, throughput 1090953.919197
+425168	[1728018323]	2000000 OPS in 1.833153 seconds, throughput 1091016.407250
+425168	[1728018324]	2000000 OPS in 1.839880 seconds, throughput 1087027.414831
+425168	[1728018325]	2000000 OPS in 1.831090 seconds, throughput 1092245.602346
+425168	[1728018325]	2000000 OPS in 1.831273 seconds, throughput 1092136.453713
+425168	[1728018325]	2000000 OPS in 1.830622 seconds, throughput 1092524.835821
+425168	[1728018326]	2000000 OPS in 1.840675 seconds, throughput 1086557.920328
+425168	[1728018327]	2000000 OPS in 1.828522 seconds, throughput 1093779.566229
+425168	[1728018327]	2000000 OPS in 1.830222 seconds, throughput 1092763.610098
+425168	[1728018327]	2000000 OPS in 1.830985 seconds, throughput 1092308.238462
+425168	[1728018328]	2000000 OPS in 1.917711 seconds, throughput 1042910.010945
+425168	[1728018329]	2000000 OPS in 1.916270 seconds, throughput 1043694.260203
+425168	[1728018329]	2000000 OPS in 1.918440 seconds, throughput 1042513.709055
+425168	[1728018329]	2000000 OPS in 1.924123 seconds, throughput 1039434.589161
+425168	[1728018330]	2000000 OPS in 1.885650 seconds, throughput 1060642.218864
+425168	[1728018330]	2000000 OPS in 1.874517 seconds, throughput 1066941.510800
+425168	[1728018331]	2000000 OPS in 1.884348 seconds, throughput 1061375.075092
+425168	[1728018331]	2000000 OPS in 1.878970 seconds, throughput 1064412.949648
+425168	[1728018332]	2000000 OPS in 1.895894 seconds, throughput 1054911.297784
+425168	[1728018332]	2000000 OPS in 1.885190 seconds, throughput 1060901.023239
+425168	[1728018332]	2000000 OPS in 1.897031 seconds, throughput 1054279.028651
+425168	[1728018333]	2000000 OPS in 1.891799 seconds, throughput 1057194.765406
+425168	[1728018334]	2000000 OPS in 1.877456 seconds, throughput 1065271.303296
+425168	[1728018334]	2000000 OPS in 1.951876 seconds, throughput 1024655.254740
+425168	[1728018334]	2000000 OPS in 1.914283 seconds, throughput 1044777.600804
+425168	[1728018334]	2000000 OPS in 1.909960 seconds, throughput 1047142.348531
+425168	[1728018336]	2000000 OPS in 1.893544 seconds, throughput 1056220.505042
+425168	[1728018336]	2000000 OPS in 1.887263 seconds, throughput 1059735.712511
+425168	[1728018336]	2000000 OPS in 1.924689 seconds, throughput 1039128.919010
+425168	[1728018336]	2000000 OPS in 1.904199 seconds, throughput 1050310.392979
+425168	[1728018337]	2000000 OPS in 1.900680 seconds, throughput 1052254.982427
+425168	[1728018338]	2000000 OPS in 1.839295 seconds, throughput 1087373.151126
+425168	[1728018338]	2000000 OPS in 1.852253 seconds, throughput 1079766.101067
+425168	[1728018338]	2000000 OPS in 1.852922 seconds, throughput 1079376.250053
+425168	[1728018339]	2000000 OPS in 1.880857 seconds, throughput 1063345.060257
+425168	[1728018340]	2000000 OPS in 1.861796 seconds, throughput 1074231.548462
+425168	[1728018340]	2000000 OPS in 1.880558 seconds, throughput 1063514.127190
+425168	[1728018340]	2000000 OPS in 1.861536 seconds, throughput 1074381.585959
+425168	[1728018341]	2000000 OPS in 1.891580 seconds, throughput 1057317.163430
+425168	[1728018342]	2000000 OPS in 1.892131 seconds, throughput 1057009.266272
+425168	[1728018342]	2000000 OPS in 1.900919 seconds, throughput 1052122.683818
+425168	[1728018342]	2000000 OPS in 1.902326 seconds, throughput 1051344.511929
+425168	[1728018343]	2000000 OPS in 1.925040 seconds, throughput 1038939.450609
+425168	[1728018344]	2000000 OPS in 1.865867 seconds, throughput 1071887.760489
+425168	[1728018344]	2000000 OPS in 1.864292 seconds, throughput 1072793.317785
+425168	[1728018344]	2000000 OPS in 1.866040 seconds, throughput 1071788.386101
+425168	[1728018345]	2000000 OPS in 1.881270 seconds, throughput 1063111.621405
+425168	[1728018346]	2000000 OPS in 1.874930 seconds, throughput 1066706.490376
+425168	[1728018346]	2000000 OPS in 1.851701 seconds, throughput 1080087.983967
+425168	[1728018346]	2000000 OPS in 1.858077 seconds, throughput 1076381.656950
+425168	[1728018347]	2000000 OPS in 1.915112 seconds, throughput 1044325.344941
+425168	[1728018347]	2000000 OPS in 1.858877 seconds, throughput 1075918.417410
+425168	[1728018347]	2000000 OPS in 1.882963 seconds, throughput 1062155.761956
+425168	[1728018348]	2000000 OPS in 1.889747 seconds, throughput 1058342.730535
+425168	[1728018349]	2000000 OPS in 1.848839 seconds, throughput 1081759.958547
+425168	[1728018349]	2000000 OPS in 1.826268 seconds, throughput 1095129.520968
+425168	[1728018349]	2000000 OPS in 1.833325 seconds, throughput 1090914.049609
+425168	[1728018349]	2000000 OPS in 1.830712 seconds, throughput 1092471.125988
+425168	[1728018351]	2000000 OPS in 1.909892 seconds, throughput 1047179.631100
+425168	[1728018351]	2000000 OPS in 1.931193 seconds, throughput 1035629.271647
+425168	[1728018351]	2000000 OPS in 1.915092 seconds, throughput 1044336.251209
+425168	[1728018351]	2000000 OPS in 1.886341 seconds, throughput 1060253.686900
+425168	[1728018353]	2000000 OPS in 1.843552 seconds, throughput 1084862.265887
+425168	[1728018353]	2000000 OPS in 1.828474 seconds, throughput 1093808.279472
+425168	[1728018353]	2000000 OPS in 1.829140 seconds, throughput 1093410.017823
+425168	[1728018353]	2000000 OPS in 1.825158 seconds, throughput 1095795.542085
+425168	[1728018354]	2000000 OPS in 1.859538 seconds, throughput 1075535.966460
+425168	[1728018355]	2000000 OPS in 1.881009 seconds, throughput 1063259.133795
+425168	[1728018355]	2000000 OPS in 1.864088 seconds, throughput 1072910.720953
+425168	[1728018355]	2000000 OPS in 1.860195 seconds, throughput 1075156.099226
+425168	[1728018356]	2000000 OPS in 1.867480 seconds, throughput 1070961.938013
+425168	[1728018357]	2000000 OPS in 1.845471 seconds, throughput 1083734.179513
+425168	[1728018357]	2000000 OPS in 1.858036 seconds, throughput 1076405.408722
+425168	[1728018357]	2000000 OPS in 1.852022 seconds, throughput 1079900.778716
+425168	[1728018358]	2000000 OPS in 1.909357 seconds, throughput 1047473.049828
+425168	[1728018359]	2000000 OPS in 1.896054 seconds, throughput 1054822.278268
+425168	[1728018359]	2000000 OPS in 1.917880 seconds, throughput 1042818.111665
+425168	[1728018359]	2000000 OPS in 1.876851 seconds, throughput 1065614.691843
+425168	[1728018360]	2000000 OPS in 1.856950 seconds, throughput 1077034.922857
+425168	[1728018361]	2000000 OPS in 1.894044 seconds, throughput 1055941.678229
+425168	[1728018361]	2000000 OPS in 1.891008 seconds, throughput 1057636.985142
+425168	[1728018361]	2000000 OPS in 1.878833 seconds, throughput 1064490.564090
+425168	[1728018362]	2000000 OPS in 1.920185 seconds, throughput 1041566.307413
+425168	[1728018362]	2000000 OPS in 1.868894 seconds, throughput 1070151.651190
+425168	[1728018362]	2000000 OPS in 1.903474 seconds, throughput 1050710.437863
+425168	[1728018362]	2000000 OPS in 1.906045 seconds, throughput 1049293.169888
+425168	[1728018364]	2000000 OPS in 1.954976 seconds, throughput 1023030.461755
+425168	[1728018364]	2000000 OPS in 1.899655 seconds, throughput 1052822.749394
+425168	[1728018364]	2000000 OPS in 1.863642 seconds, throughput 1073167.486030
+425168	[1728018364]	2000000 OPS in 1.871475 seconds, throughput 1068675.777128
+425168	[1728018366]	2000000 OPS in 1.917654 seconds, throughput 1042941.010214
+425168	[1728018366]	2000000 OPS in 1.904778 seconds, throughput 1049991.127575
+425168	[1728018366]	2000000 OPS in 1.898134 seconds, throughput 1053666.390255
+425168	[1728018366]	2000000 OPS in 1.909438 seconds, throughput 1047428.615121
+425168	[1728018368]	2000000 OPS in 1.882623 seconds, throughput 1062347.586320
+425168	[1728018368]	2000000 OPS in 1.849303 seconds, throughput 1081488.539196
+425168	[1728018368]	2000000 OPS in 1.845970 seconds, throughput 1083441.226022
+425168	[1728018368]	2000000 OPS in 1.879200 seconds, throughput 1064282.673478
+425168	[1728018370]	2000000 OPS in 1.841105 seconds, throughput 1086304.148867
+425168	[1728018370]	2000000 OPS in 1.834729 seconds, throughput 1090079.243311
+425168	[1728018370]	2000000 OPS in 1.827456 seconds, throughput 1094417.594733
+425168	[1728018370]	2000000 OPS in 1.834453 seconds, throughput 1090243.249623
+425168	[1728018372]	2000000 OPS in 1.917055 seconds, throughput 1043266.885927
+425168	[1728018372]	2000000 OPS in 1.863953 seconds, throughput 1072988.428356
+425168	[1728018372]	2000000 OPS in 1.864638 seconds, throughput 1072594.251538
+425168	[1728018372]	2000000 OPS in 1.860838 seconds, throughput 1074784.586299
+425168	[1728018373]	2000000 OPS in 1.871810 seconds, throughput 1068484.514988
+425168	[1728018374]	2000000 OPS in 1.848594 seconds, throughput 1081903.327610
+425168	[1728018374]	2000000 OPS in 1.837071 seconds, throughput 1088689.549832
+425168	[1728018374]	2000000 OPS in 1.849355 seconds, throughput 1081458.129997
+425168	[1728018375]	2000000 OPS in 1.882228 seconds, throughput 1062570.528119
+425168	[1728018375]	2000000 OPS in 1.857847 seconds, throughput 1076514.912154
+425168	[1728018376]	2000000 OPS in 1.881109 seconds, throughput 1063202.610800
+425168	[1728018376]	2000000 OPS in 1.860124 seconds, throughput 1075197.137395
+425168	[1728018377]	2000000 OPS in 1.888128 seconds, throughput 1059250.220324
+425168	[1728018377]	2000000 OPS in 1.897747 seconds, throughput 1053881.260252
+425168	[1728018377]	2000000 OPS in 1.883771 seconds, throughput 1061700.174809
+425168	[1728018377]	2000000 OPS in 1.871309 seconds, throughput 1068770.577174
+425168	[1728018379]	2000000 OPS in 1.912768 seconds, throughput 1045605.112591
+425168	[1728018379]	2000000 OPS in 1.866411 seconds, throughput 1071575.338979
+425168	[1728018379]	2000000 OPS in 1.878986 seconds, throughput 1064403.885926
+425168	[1728018379]	2000000 OPS in 1.887325 seconds, throughput 1059700.899421
+425168	[1728018381]	2000000 OPS in 1.899972 seconds, throughput 1052647.091641
+425168	[1728018381]	2000000 OPS in 1.871161 seconds, throughput 1068855.111880
+425168	[1728018381]	2000000 OPS in 1.871285 seconds, throughput 1068784.284596
+425168	[1728018381]	2000000 OPS in 1.856427 seconds, throughput 1077338.349421
+425168	[1728018383]	2000000 OPS in 1.883837 seconds, throughput 1061662.978273
+425168	[1728018383]	2000000 OPS in 1.861714 seconds, throughput 1074278.863456
+425168	[1728018383]	2000000 OPS in 1.880948 seconds, throughput 1063293.615772
+425168	[1728018383]	2000000 OPS in 1.880391 seconds, throughput 1063608.579280
+425168	[1728018385]	2000000 OPS in 1.967147 seconds, throughput 1016700.836287
+425168	[1728018385]	2000000 OPS in 1.908829 seconds, throughput 1047762.790695
+425168	[1728018385]	2000000 OPS in 1.898516 seconds, throughput 1053454.382265
+425168	[1728018385]	2000000 OPS in 1.907874 seconds, throughput 1048287.255867
+425168	[1728018387]	2000000 OPS in 1.902296 seconds, throughput 1051361.092070
+425168	[1728018387]	2000000 OPS in 1.849856 seconds, throughput 1081165.236645
+425168	[1728018387]	2000000 OPS in 1.868485 seconds, throughput 1070385.900877
+425168	[1728018387]	2000000 OPS in 1.859617 seconds, throughput 1075490.275686
+425168	[1728018389]	2000000 OPS in 1.867857 seconds, throughput 1070745.779789
+425168	[1728018389]	2000000 OPS in 1.923465 seconds, throughput 1039790.170344
+425168	[1728018389]	2000000 OPS in 1.876260 seconds, throughput 1065950.348033
+425168	[1728018389]	2000000 OPS in 1.864794 seconds, throughput 1072504.523288
+425168	[1728018391]	2000000 OPS in 1.907344 seconds, throughput 1048578.546922
+425168	[1728018391]	2000000 OPS in 1.910111 seconds, throughput 1047059.568789
+425168	[1728018391]	2000000 OPS in 1.908683 seconds, throughput 1047842.936727
+425168	[1728018391]	2000000 OPS in 1.961519 seconds, throughput 1019617.959347
+425168	[1728018392]	2000000 OPS in 1.851031 seconds, throughput 1080478.933092
+425168	[1728018392]	2000000 OPS in 1.861257 seconds, throughput 1074542.634359
+425168	[1728018392]	2000000 OPS in 1.879106 seconds, throughput 1064335.912929
+425168	[1728018393]	2000000 OPS in 1.907017 seconds, throughput 1048758.348772
+425168	[1728018394]	2000000 OPS in 1.839010 seconds, throughput 1087541.666440
+425168	[1728018394]	2000000 OPS in 1.843021 seconds, throughput 1085174.829804
+425168	[1728018394]	2000000 OPS in 1.853650 seconds, throughput 1078952.337281
+425168	[1728018394]	2000000 OPS in 1.895631 seconds, throughput 1055057.656263
+425168	[1728018396]	2000000 OPS in 1.832284 seconds, throughput 1091533.845190
+425168	[1728018396]	2000000 OPS in 1.823037 seconds, throughput 1097070.437956
+425168	[1728018396]	2000000 OPS in 1.829747 seconds, throughput 1093047.290144
+425168	[1728018396]	2000000 OPS in 1.853972 seconds, throughput 1078764.943591
+425168	[1728018398]	2000000 OPS in 1.878689 seconds, throughput 1064572.156435
+425168	[1728018398]	2000000 OPS in 1.872066 seconds, throughput 1068338.402599
+425168	[1728018398]	2000000 OPS in 1.915607 seconds, throughput 1044055.487373
+425168	[1728018398]	2000000 OPS in 1.897326 seconds, throughput 1054115.107261
+425168	[1728018400]	2000000 OPS in 1.868217 seconds, throughput 1070539.450182
+425168	[1728018400]	2000000 OPS in 1.861223 seconds, throughput 1074562.263630
+425168	[1728018400]	2000000 OPS in 1.893779 seconds, throughput 1056089.438102
+425168	[1728018400]	2000000 OPS in 1.901662 seconds, throughput 1051711.608057
+425168	[1728018402]	2000000 OPS in 1.852946 seconds, throughput 1079362.269597
+425168	[1728018402]	2000000 OPS in 1.861704 seconds, throughput 1074284.633862
+425168	[1728018402]	2000000 OPS in 1.846783 seconds, throughput 1082964.268135
+425168	[1728018402]	2000000 OPS in 1.946205 seconds, throughput 1027640.973073
+425168	[1728018404]	2000000 OPS in 1.902779 seconds, throughput 1051094.215356
+425168	[1728018404]	2000000 OPS in 1.863937 seconds, throughput 1072997.638869
+425168	[1728018404]	2000000 OPS in 1.895763 seconds, throughput 1054984.193699
+425168	[1728018404]	2000000 OPS in 1.889190 seconds, throughput 1058654.767387
+425168	[1728018405]	2000000 OPS in 1.836787 seconds, throughput 1088857.880636
+425168	[1728018405]	2000000 OPS in 1.832641 seconds, throughput 1091321.213484
+425168	[1728018405]	2000000 OPS in 1.837607 seconds, throughput 1088371.996842
+425168	[1728018406]	2000000 OPS in 1.855903 seconds, throughput 1077642.527654
+425168	[1728018407]	2000000 OPS in 1.846267 seconds, throughput 1083266.938097
+425168	[1728018407]	2000000 OPS in 1.851209 seconds, throughput 1080375.041392
+425168	[1728018407]	2000000 OPS in 1.850656 seconds, throughput 1080697.871457
+425168	[1728018408]	2000000 OPS in 1.891545 seconds, throughput 1057336.727384
+425168	[1728018409]	2000000 OPS in 1.902296 seconds, throughput 1051361.092070
+425168	[1728018409]	2000000 OPS in 1.916021 seconds, throughput 1043829.895393
+425168	[1728018409]	2000000 OPS in 1.897463 seconds, throughput 1054038.998389
+425168	[1728018410]	2000000 OPS in 1.911683 seconds, throughput 1046198.559071
+425168	[1728018411]	2000000 OPS in 1.943435 seconds, throughput 1029105.681435
+425168	[1728018411]	2000000 OPS in 1.918640 seconds, throughput 1042405.036901
+425168	[1728018411]	2000000 OPS in 1.983470 seconds, throughput 1008333.879514
+425168	[1728018412]	2000000 OPS in 1.973318 seconds, throughput 1013521.388849
+425168	[1728018413]	2000000 OPS in 1.853030 seconds, throughput 1079313.340853
+425168	[1728018413]	2000000 OPS in 1.834317 seconds, throughput 1090324.082479
+425168	[1728018413]	2000000 OPS in 1.852451 seconds, throughput 1079650.689816
+425168	[1728018413]	2000000 OPS in 1.866858 seconds, throughput 1071318.761256
+425168	[1728018415]	2000000 OPS in 1.857215 seconds, throughput 1076881.244229
+425168	[1728018415]	2000000 OPS in 1.868667 seconds, throughput 1070281.649968
+425168	[1728018415]	2000000 OPS in 1.857126 seconds, throughput 1076932.852160
+425168	[1728018415]	2000000 OPS in 1.898256 seconds, throughput 1053598.671623
+425168	[1728018417]	2000000 OPS in 1.883255 seconds, throughput 1061991.073965
+425168	[1728018417]	2000000 OPS in 1.868642 seconds, throughput 1070295.968944
+425168	[1728018417]	2000000 OPS in 1.864899 seconds, throughput 1072444.137725
+425168	[1728018417]	2000000 OPS in 1.877349 seconds, throughput 1065332.018714
+425168	[1728018419]	2000000 OPS in 1.866944 seconds, throughput 1071269.411402
+425168	[1728018419]	2000000 OPS in 1.859340 seconds, throughput 1075650.499640
+425168	[1728018419]	2000000 OPS in 1.864871 seconds, throughput 1072460.239877
+425168	[1728018419]	2000000 OPS in 1.874853 seconds, throughput 1066750.299890
+425168	[1728018420]	2000000 OPS in 1.841849 seconds, throughput 1085865.345096
+425168	[1728018420]	2000000 OPS in 1.863260 seconds, throughput 1073387.503623
+425168	[1728018420]	2000000 OPS in 1.846034 seconds, throughput 1083403.664288
+425168	[1728018421]	2000000 OPS in 1.869779 seconds, throughput 1069645.129184
+425168	[1728018422]	2000000 OPS in 1.832485 seconds, throughput 1091414.117987
+425168	[1728018422]	2000000 OPS in 1.831054 seconds, throughput 1092267.076777
+425168	[1728018422]	2000000 OPS in 1.838518 seconds, throughput 1087832.700033
+425168	[1728018423]	2000000 OPS in 1.853469 seconds, throughput 1079057.702071
+425168	[1728018424]	2000000 OPS in 1.839739 seconds, throughput 1087110.726032
+425168	[1728018424]	2000000 OPS in 1.848038 seconds, throughput 1082228.828628
+425168	[1728018424]	2000000 OPS in 1.829013 seconds, throughput 1093485.940231
+425168	[1728018425]	2000000 OPS in 1.872901 seconds, throughput 1067862.102695
+425168	[1728018426]	2000000 OPS in 1.897958 seconds, throughput 1053764.098046
+425168	[1728018426]	2000000 OPS in 1.884402 seconds, throughput 1061344.660004
+425168	[1728018426]	2000000 OPS in 1.976708 seconds, throughput 1011783.227467
+425168	[1728018427]	2000000 OPS in 1.985334 seconds, throughput 1007387.170118
+425168	[1728018428]	2000000 OPS in 1.869120 seconds, throughput 1070022.256463
+425168	[1728018428]	2000000 OPS in 1.922620 seconds, throughput 1040247.162726
+425168	[1728018428]	2000000 OPS in 1.903496 seconds, throughput 1050698.294086
+425168	[1728018429]	2000000 OPS in 1.929590 seconds, throughput 1036489.616965
+425168	[1728018430]	2000000 OPS in 1.883610 seconds, throughput 1061790.922749
+425168	[1728018430]	2000000 OPS in 1.864578 seconds, throughput 1072628.766402
+425168	[1728018430]	2000000 OPS in 1.863949 seconds, throughput 1072990.730970
+425168	[1728018430]	2000000 OPS in 1.857119 seconds, throughput 1076936.911420
+425168	[1728018432]	2000000 OPS in 1.877626 seconds, throughput 1065174.853778
+425168	[1728018432]	2000000 OPS in 1.897675 seconds, throughput 1053921.245735
+425168	[1728018432]	2000000 OPS in 1.894034 seconds, throughput 1055947.253323
+425168	[1728018432]	2000000 OPS in 1.951397 seconds, throughput 1024906.771918
+425168	[1728018433]	2000000 OPS in 1.882465 seconds, throughput 1062436.751812
+425168	[1728018434]	2000000 OPS in 1.912307 seconds, throughput 1045857.176698
+425168	[1728018434]	2000000 OPS in 1.870031 seconds, throughput 1069500.986882
+425168	[1728018434]	2000000 OPS in 1.906703 seconds, throughput 1048931.060579
+425168	[1728018435]	2000000 OPS in 1.827108 seconds, throughput 1094626.042905
+425168	[1728018435]	2000000 OPS in 1.843213 seconds, throughput 1085061.791556
+425168	[1728018435]	2000000 OPS in 1.833995 seconds, throughput 1090515.513946
+425168	[1728018436]	2000000 OPS in 1.860811 seconds, throughput 1074800.181211
+425168	[1728018437]	2000000 OPS in 1.831213 seconds, throughput 1092172.237746
+425168	[1728018437]	2000000 OPS in 1.844259 seconds, throughput 1084446.381989
+425168	[1728018437]	2000000 OPS in 1.825080 seconds, throughput 1095842.374033
+425168	[1728018438]	2000000 OPS in 1.866233 seconds, throughput 1071677.545087
+425168	[1728018439]	2000000 OPS in 1.895985 seconds, throughput 1054860.666092
+425168	[1728018439]	2000000 OPS in 1.855409 seconds, throughput 1077929.448440
+425168	[1728018439]	2000000 OPS in 1.889591 seconds, throughput 1058430.104716
+425168	[1728018440]	2000000 OPS in 1.894352 seconds, throughput 1055769.994172
+425168	[1728018441]	2000000 OPS in 1.866549 seconds, throughput 1071496.113951
+425168	[1728018441]	2000000 OPS in 1.842149 seconds, throughput 1085688.508367
+425168	[1728018441]	2000000 OPS in 1.873281 seconds, throughput 1067645.484046
+425168	[1728018442]	2000000 OPS in 1.889477 seconds, throughput 1058493.964203
+425168	[1728018443]	2000000 OPS in 1.904227 seconds, throughput 1050294.949079
+425168	[1728018443]	2000000 OPS in 1.893631 seconds, throughput 1056171.978596
+425168	[1728018443]	2000000 OPS in 1.928073 seconds, throughput 1037305.122783
+425168	[1728018444]	2000000 OPS in 1.937298 seconds, throughput 1032365.696966
+425168	[1728018445]	2000000 OPS in 1.865374 seconds, throughput 1072171.049881
+425168	[1728018445]	2000000 OPS in 1.859064 seconds, throughput 1075810.192656
+425168	[1728018445]	2000000 OPS in 1.916144 seconds, throughput 1043762.890472
+425168	[1728018446]	2000000 OPS in 1.971999 seconds, throughput 1014199.297261
+425168	[1728018446]	2000000 OPS in 1.846835 seconds, throughput 1082933.775892
+425168	[1728018447]	2000000 OPS in 1.870689 seconds, throughput 1069124.798403
+425168	[1728018447]	2000000 OPS in 1.889172 seconds, throughput 1058664.854232
+425168	[1728018448]	2000000 OPS in 1.884630 seconds, throughput 1061216.259956
+425168	[1728018448]	2000000 OPS in 1.849478 seconds, throughput 1081386.207351
+425168	[1728018448]	2000000 OPS in 1.849614 seconds, throughput 1081306.694262
+425168	[1728018449]	2000000 OPS in 1.856975 seconds, throughput 1077020.423000
+425168	[1728018449]	2000000 OPS in 1.886323 seconds, throughput 1060263.804237
+425168	[1728018450]	2000000 OPS in 1.849626 seconds, throughput 1081299.678962
+425168	[1728018450]	2000000 OPS in 1.868729 seconds, throughput 1070246.140559
+425168	[1728018450]	2000000 OPS in 1.857582 seconds, throughput 1076668.486236
+425168	[1728018451]	2000000 OPS in 1.955291 seconds, throughput 1022865.650177
+425168	[1728018452]	2000000 OPS in 1.894326 seconds, throughput 1055784.484825
+425168	[1728018452]	2000000 OPS in 1.886471 seconds, throughput 1060180.622973
+425168	[1728018452]	2000000 OPS in 1.873957 seconds, throughput 1067260.348023
+425168	[1728018453]	2000000 OPS in 1.894137 seconds, throughput 1055889.832678
+425168	[1728018454]	2000000 OPS in 1.865066 seconds, throughput 1072348.109933
+425168	[1728018454]	2000000 OPS in 1.886736 seconds, throughput 1060031.716149
+425168	[1728018454]	2000000 OPS in 1.875028 seconds, throughput 1066650.738016
+425168	[1728018455]	2000000 OPS in 1.905451 seconds, throughput 1049620.273626
+425168	[1728018456]	2000000 OPS in 1.870263 seconds, throughput 1069368.318787
+425168	[1728018456]	2000000 OPS in 1.882036 seconds, throughput 1062678.928565
+425168	[1728018456]	2000000 OPS in 1.872110 seconds, throughput 1068313.293556
+425168	[1728018457]	2000000 OPS in 1.867615 seconds, throughput 1070884.523845
+425168	[1728018458]	2000000 OPS in 1.837202 seconds, throughput 1088611.921825
+425168	[1728018458]	2000000 OPS in 1.849157 seconds, throughput 1081573.928012
+425168	[1728018458]	2000000 OPS in 1.856850 seconds, throughput 1077092.926192
+425168	[1728018459]	2000000 OPS in 1.904987 seconds, throughput 1049875.930912
+425168	[1728018460]	2000000 OPS in 1.912002 seconds, throughput 1046024.010435
+425168	[1728018460]	2000000 OPS in 1.913079 seconds, throughput 1045435.133625
+425168	[1728018460]	2000000 OPS in 1.931804 seconds, throughput 1035301.717980
+425168	[1728018461]	2000000 OPS in 1.859285 seconds, throughput 1075682.318741
+425168	[1728018461]	2000000 OPS in 1.855068 seconds, throughput 1078127.594245
+425168	[1728018462]	2000000 OPS in 1.847925 seconds, throughput 1082295.006561
+425168	[1728018462]	2000000 OPS in 1.860120 seconds, throughput 1075199.449498
+425168	[1728018463]	2000000 OPS in 1.857437 seconds, throughput 1076752.535887
+425168	[1728018463]	2000000 OPS in 1.857387 seconds, throughput 1076781.521568
+425168	[1728018463]	2000000 OPS in 1.824458 seconds, throughput 1096215.972086
+425168	[1728018464]	2000000 OPS in 1.840208 seconds, throughput 1086833.662282
+425168	[1728018465]	2000000 OPS in 1.853928 seconds, throughput 1078790.546343
+425168	[1728018465]	2000000 OPS in 1.828862 seconds, throughput 1093576.223903
+425168	[1728018465]	2000000 OPS in 1.835194 seconds, throughput 1089803.039897
+425168	[1728018465]	2000000 OPS in 1.852769 seconds, throughput 1079465.383974
+425168	[1728018466]	2000000 OPS in 1.881538 seconds, throughput 1062960.195330
+425168	[1728018467]	2000000 OPS in 1.872102 seconds, throughput 1068317.858749
+425168	[1728018467]	2000000 OPS in 1.926007 seconds, throughput 1038417.825065
+425168	[1728018467]	2000000 OPS in 1.921854 seconds, throughput 1040661.777638
+425168	[1728018468]	2000000 OPS in 1.908679 seconds, throughput 1047845.132681
+425168	[1728018469]	2000000 OPS in 1.908276 seconds, throughput 1048066.422258
+425168	[1728018469]	2000000 OPS in 1.896793 seconds, throughput 1054411.314255
+425168	[1728018469]	2000000 OPS in 1.882434 seconds, throughput 1062454.248064
+425168	[1728018470]	2000000 OPS in 1.842537 seconds, throughput 1085459.884930
+425168	[1728018471]	2000000 OPS in 1.910923 seconds, throughput 1046614.646430
+425168	[1728018471]	2000000 OPS in 1.888793 seconds, throughput 1058877.283006
+425168	[1728018471]	2000000 OPS in 1.892806 seconds, throughput 1056632.322594
+425168	[1728018472]	2000000 OPS in 1.915364 seconds, throughput 1044187.945477
+425168	[1728018473]	2000000 OPS in 1.888476 seconds, throughput 1059055.026381
+425168	[1728018473]	2000000 OPS in 1.887999 seconds, throughput 1059322.594980
+425168	[1728018473]	2000000 OPS in 1.890847 seconds, throughput 1057727.039787
+425168	[1728018474]	2000000 OPS in 1.846894 seconds, throughput 1082899.181003
+425168	[1728018475]	2000000 OPS in 1.829000 seconds, throughput 1093493.712411
+425168	[1728018475]	2000000 OPS in 1.828730 seconds, throughput 1093655.159592
+425168	[1728018475]	2000000 OPS in 1.863046 seconds, throughput 1073510.798982
+425168	[1728018476]	2000000 OPS in 1.856018 seconds, throughput 1077575.756270
+425168	[1728018476]	2000000 OPS in 1.862626 seconds, throughput 1073752.862894
+425168	[1728018477]	2000000 OPS in 1.874199 seconds, throughput 1067122.541416
+425168	[1728018477]	2000000 OPS in 1.887653 seconds, throughput 1059516.764999
+425168	[1728018478]	2000000 OPS in 1.887235 seconds, throughput 1059751.435301
+425168	[1728018478]	2000000 OPS in 1.911837 seconds, throughput 1046114.286940
+425168	[1728018478]	2000000 OPS in 1.887204 seconds, throughput 1059768.843220
+425168	[1728018479]	2000000 OPS in 1.932605 seconds, throughput 1034872.620116
+425168	[1728018480]	2000000 OPS in 1.931492 seconds, throughput 1035468.953534
+425168	[1728018480]	2000000 OPS in 1.917839 seconds, throughput 1042840.405269
+425168	[1728018480]	2000000 OPS in 1.892074 seconds, throughput 1057041.109386
+425168	[1728018481]	2000000 OPS in 1.837587 seconds, throughput 1088383.842507
+425168	[1728018482]	2000000 OPS in 1.895261 seconds, throughput 1055263.628598
+425168	[1728018482]	2000000 OPS in 1.877971 seconds, throughput 1064979.171670
+425168	[1728018482]	2000000 OPS in 1.882105 seconds, throughput 1062639.969608
+425168	[1728018482]	2000000 OPS in 1.898895 seconds, throughput 1053244.123556
+425168	[1728018483]	2000000 OPS in 1.926458 seconds, throughput 1038174.722729
+425168	[1728018484]	2000000 OPS in 1.872005 seconds, throughput 1068373.214815
+425168	[1728018484]	2000000 OPS in 1.866401 seconds, throughput 1071581.080379
+425168	[1728018484]	2000000 OPS in 1.897665 seconds, throughput 1053926.799514
+425168	[1728018485]	2000000 OPS in 1.855538 seconds, throughput 1077854.509043
+425168	[1728018486]	2000000 OPS in 1.832277 seconds, throughput 1091538.015267
+425168	[1728018486]	2000000 OPS in 1.823999 seconds, throughput 1096491.829217
+425168	[1728018486]	2000000 OPS in 1.844614 seconds, throughput 1084237.677910
+425168	[1728018487]	2000000 OPS in 1.873507 seconds, throughput 1067516.694627
+425168	[1728018488]	2000000 OPS in 1.884158 seconds, throughput 1061482.105004
+425168	[1728018488]	2000000 OPS in 1.867587 seconds, throughput 1070900.579197
+425168	[1728018488]	2000000 OPS in 1.869667 seconds, throughput 1069709.204901
+425168	[1728018489]	2000000 OPS in 1.868772 seconds, throughput 1070221.514449
+425168	[1728018490]	2000000 OPS in 1.846222 seconds, throughput 1083293.341754
+425168	[1728018490]	2000000 OPS in 1.851583 seconds, throughput 1080156.817167
+425168	[1728018490]	2000000 OPS in 1.847908 seconds, throughput 1082304.963234
+425168	[1728018491]	2000000 OPS in 1.885281 seconds, throughput 1060849.814961
+425168	[1728018491]	2000000 OPS in 1.837707 seconds, throughput 1088312.772384
+425168	[1728018491]	2000000 OPS in 1.839667 seconds, throughput 1087153.272848
+425168	[1728018492]	2000000 OPS in 1.858705 seconds, throughput 1076017.980260
+425168	[1728018493]	2000000 OPS in 1.891775 seconds, throughput 1057208.177505
+425168	[1728018493]	2000000 OPS in 1.868576 seconds, throughput 1070333.772884
+425168	[1728018493]	2000000 OPS in 1.856864 seconds, throughput 1077084.805349
+425168	[1728018494]	2000000 OPS in 1.864177 seconds, throughput 1072859.497784
+425168	[1728018495]	2000000 OPS in 1.897961 seconds, throughput 1053762.432421
+425168	[1728018495]	2000000 OPS in 1.907348 seconds, throughput 1048576.347892
+425168	[1728018495]	2000000 OPS in 1.888581 seconds, throughput 1058996.145784
+425168	[1728018496]	2000000 OPS in 1.907137 seconds, throughput 1048692.359280
+425168	[1728018497]	2000000 OPS in 1.892679 seconds, throughput 1056703.223315
+425168	[1728018497]	2000000 OPS in 1.877177 seconds, throughput 1065429.631835
+425168	[1728018497]	2000000 OPS in 1.883730 seconds, throughput 1061723.283061
+425168	[1728018497]	2000000 OPS in 1.859602 seconds, throughput 1075498.950851
+425168	[1728018499]	2000000 OPS in 1.896965 seconds, throughput 1054315.709568
+425168	[1728018499]	2000000 OPS in 1.871878 seconds, throughput 1068445.699987
+425168	[1728018499]	2000000 OPS in 1.858517 seconds, throughput 1076126.825851
+425168	[1728018499]	2000000 OPS in 1.867109 seconds, throughput 1071174.741271
+425168	[1728018500]	2000000 OPS in 1.894975 seconds, throughput 1055422.894761
+425168	[1728018501]	2000000 OPS in 1.851537 seconds, throughput 1080183.652825
+425168	[1728018501]	2000000 OPS in 1.847478 seconds, throughput 1082556.869419
+425168	[1728018501]	2000000 OPS in 1.840073 seconds, throughput 1086913.399631
+425168	[1728018502]	2000000 OPS in 1.855396 seconds, throughput 1077937.001050
+425168	[1728018503]	2000000 OPS in 1.838738 seconds, throughput 1087702.543810
+425168	[1728018503]	2000000 OPS in 1.842757 seconds, throughput 1085330.295856
+425168	[1728018503]	2000000 OPS in 1.937809 seconds, throughput 1032093.462256
+425168	[1728018504]	2000000 OPS in 1.975692 seconds, throughput 1012303.537191
+425168	[1728018505]	2000000 OPS in 1.958240 seconds, throughput 1021325.271673
+425168	[1728018505]	2000000 OPS in 1.925077 seconds, throughput 1038919.482182
+425168	[1728018505]	2000000 OPS in 1.918212 seconds, throughput 1042637.622953
+425168	[1728018506]	2000000 OPS in 1.877565 seconds, throughput 1065209.460125
+425168	[1728018506]	2000000 OPS in 1.856651 seconds, throughput 1077208.371417
+425168	[1728018506]	2000000 OPS in 1.854106 seconds, throughput 1078686.979062
+425168	[1728018507]	2000000 OPS in 1.882175 seconds, throughput 1062600.448949
+425168	[1728018508]	2000000 OPS in 1.913461 seconds, throughput 1045226.424787
+425168	[1728018508]	2000000 OPS in 1.879678 seconds, throughput 1064012.027592
+425168	[1728018508]	2000000 OPS in 1.873700 seconds, throughput 1067406.735336
+425168	[1728018509]	2000000 OPS in 1.853645 seconds, throughput 1078955.247634
+425168	[1728018510]	2000000 OPS in 1.910736 seconds, throughput 1046717.076561
+425168	[1728018510]	2000000 OPS in 1.876430 seconds, throughput 1065853.775521
+425168	[1728018510]	2000000 OPS in 1.882850 seconds, throughput 1062219.507661
+425168	[1728018511]	2000000 OPS in 1.860893 seconds, throughput 1074752.820286
+425168	[1728018512]	2000000 OPS in 1.914293 seconds, throughput 1044772.143031
+425168	[1728018512]	2000000 OPS in 1.889801 seconds, throughput 1058312.488987
+425168	[1728018512]	2000000 OPS in 1.876805 seconds, throughput 1065640.809780
+425168	[1728018513]	2000000 OPS in 1.924543 seconds, throughput 1039207.749580
+425168	[1728018514]	2000000 OPS in 1.971005 seconds, throughput 1014710.769379
+425168	[1728018514]	2000000 OPS in 1.951345 seconds, throughput 1024934.083927
+425168	[1728018514]	2000000 OPS in 1.924425 seconds, throughput 1039271.470699
+425168	[1728018514]	2000000 OPS in 1.912470 seconds, throughput 1045768.038191
+425168	[1728018516]	2000000 OPS in 1.881535 seconds, throughput 1062961.890159
+425168	[1728018516]	2000000 OPS in 1.857795 seconds, throughput 1076545.043990
+425168	[1728018516]	2000000 OPS in 1.864391 seconds, throughput 1072736.351978
+425168	[1728018516]	2000000 OPS in 1.868559 seconds, throughput 1070343.510695
+425168	[1728018518]	2000000 OPS in 1.887079 seconds, throughput 1059839.042245
+425168	[1728018518]	2000000 OPS in 1.873044 seconds, throughput 1067780.575363
+425168	[1728018518]	2000000 OPS in 1.878390 seconds, throughput 1064741.613829
+425168	[1728018518]	2000000 OPS in 1.857141 seconds, throughput 1076924.153847
+425168	[1728018519]	2000000 OPS in 1.854664 seconds, throughput 1078362.441930
+425168	[1728018520]	2000000 OPS in 1.829142 seconds, throughput 1093408.822278
+425168	[1728018520]	2000000 OPS in 1.831492 seconds, throughput 1092005.861887
+425168	[1728018520]	2000000 OPS in 1.831450 seconds, throughput 1092030.904475
+425168	[1728018521]	2000000 OPS in 1.855631 seconds, throughput 1077800.489429
+425168	[1728018521]	2000000 OPS in 1.828030 seconds, throughput 1094073.948458
+425168	[1728018521]	2000000 OPS in 1.833652 seconds, throughput 1090719.504028
+425168	[1728018522]	2000000 OPS in 1.829723 seconds, throughput 1093061.627361
+425168	[1728018523]	2000000 OPS in 1.869683 seconds, throughput 1069700.050757
+425168	[1728018523]	2000000 OPS in 1.897537 seconds, throughput 1053997.893058
+425168	[1728018523]	2000000 OPS in 1.879666 seconds, throughput 1064018.820365
+425168	[1728018524]	2000000 OPS in 1.876258 seconds, throughput 1065951.484284
+425168	[1728018525]	2000000 OPS in 1.891378 seconds, throughput 1057430.085366
+425168	[1728018525]	2000000 OPS in 1.886710 seconds, throughput 1060046.324024
+425168	[1728018525]	2000000 OPS in 1.892712 seconds, throughput 1056684.799378
+425168	[1728018526]	2000000 OPS in 1.845349 seconds, throughput 1083805.827516
+425168	[1728018527]	2000000 OPS in 1.882002 seconds, throughput 1062698.126782
+425168	[1728018527]	2000000 OPS in 1.849787 seconds, throughput 1081205.565830
+425168	[1728018527]	2000000 OPS in 1.871450 seconds, throughput 1068690.053167
+425168	[1728018527]	2000000 OPS in 1.865198 seconds, throughput 1072272.219893
+425168	[1728018529]	2000000 OPS in 1.853433 seconds, throughput 1079078.661058
+425168	[1728018529]	2000000 OPS in 1.829595 seconds, throughput 1093138.098869
+425168	[1728018529]	2000000 OPS in 1.833998 seconds, throughput 1090513.730113
+425168	[1728018529]	2000000 OPS in 1.833967 seconds, throughput 1090532.163338
+425168	[1728018531]	2000000 OPS in 1.853983 seconds, throughput 1078758.543093
+425168	[1728018531]	2000000 OPS in 1.830326 seconds, throughput 1092701.518746
+425168	[1728018531]	2000000 OPS in 1.853658 seconds, throughput 1078947.680748
+425168	[1728018531]	2000000 OPS in 1.833695 seconds, throughput 1090693.926744
+425168	[1728018533]	2000000 OPS in 1.906392 seconds, throughput 1049102.178356
+425168	[1728018533]	2000000 OPS in 1.890497 seconds, throughput 1057922.863670
+425168	[1728018533]	2000000 OPS in 1.897305 seconds, throughput 1054126.774557
+425168	[1728018533]	2000000 OPS in 1.920980 seconds, throughput 1041135.253881
+425168	[1728018534]	2000000 OPS in 1.870739 seconds, throughput 1069096.223471
+425168	[1728018534]	2000000 OPS in 1.880895 seconds, throughput 1063323.577340
+425168	[1728018535]	2000000 OPS in 1.987200 seconds, throughput 1006441.223833
+425168	[1728018535]	2000000 OPS in 1.887375 seconds, throughput 1059672.826015
+425168	[1728018536]	2000000 OPS in 1.928020 seconds, throughput 1037333.637618
+425168	[1728018536]	2000000 OPS in 1.896046 seconds, throughput 1054826.728887
+425168	[1728018536]	2000000 OPS in 1.923839 seconds, throughput 1039588.032055
+425168	[1728018537]	2000000 OPS in 1.890188 seconds, throughput 1058095.808459
+425168	[1728018538]	2000000 OPS in 1.872733 seconds, throughput 1067957.898964
+425168	[1728018538]	2000000 OPS in 1.891882 seconds, throughput 1057148.384519
+425168	[1728018538]	2000000 OPS in 1.896807 seconds, throughput 1054403.531830
+425168	[1728018539]	2000000 OPS in 1.892902 seconds, throughput 1056578.734662
+425168	[1728018540]	2000000 OPS in 1.847529 seconds, throughput 1082526.986045
+425168	[1728018540]	2000000 OPS in 1.855727 seconds, throughput 1077744.732927
+425168	[1728018540]	2000000 OPS in 1.863754 seconds, throughput 1073102.995352
+425168	[1728018541]	2000000 OPS in 1.870888 seconds, throughput 1069011.079231
+425168	[1728018542]	2000000 OPS in 1.895322 seconds, throughput 1055229.665461
+425168	[1728018542]	2000000 OPS in 1.904624 seconds, throughput 1050076.025504
+425168	[1728018542]	2000000 OPS in 1.912531 seconds, throughput 1045734.683516
+425168	[1728018542]	2000000 OPS in 1.932131 seconds, throughput 1035126.500222
+425168	[1728018544]	2000000 OPS in 1.909138 seconds, throughput 1047593.206987
+425168	[1728018544]	2000000 OPS in 1.926538 seconds, throughput 1038131.612250
+425168	[1728018544]	2000000 OPS in 1.969108 seconds, throughput 1015688.321819
+425168	[1728018544]	2000000 OPS in 1.892558 seconds, throughput 1056770.783247
+425168	[1728018546]	2000000 OPS in 1.829931 seconds, throughput 1092937.383978
+425168	[1728018546]	2000000 OPS in 1.849010 seconds, throughput 1081659.915306
+425168	[1728018546]	2000000 OPS in 1.861073 seconds, throughput 1074648.871914
+425168	[1728018546]	2000000 OPS in 1.837723 seconds, throughput 1088303.297069
+425168	[1728018548]	2000000 OPS in 1.836795 seconds, throughput 1088853.138211
+425168	[1728018548]	2000000 OPS in 1.830717 seconds, throughput 1092468.142263
+425168	[1728018548]	2000000 OPS in 1.866241 seconds, throughput 1071672.951135
+425168	[1728018548]	2000000 OPS in 1.849337 seconds, throughput 1081468.656064
+425168	[1728018550]	2000000 OPS in 1.914205 seconds, throughput 1044820.173388
+425168	[1728018550]	2000000 OPS in 1.910224 seconds, throughput 1046997.629597
+425168	[1728018550]	2000000 OPS in 1.959315 seconds, throughput 1020764.910185
+425168	[1728018550]	2000000 OPS in 1.917580 seconds, throughput 1042981.257627
+425168	[1728018551]	2000000 OPS in 1.850833 seconds, throughput 1080594.521494
+425168	[1728018551]	2000000 OPS in 1.863319 seconds, throughput 1073353.515957
+425168	[1728018552]	2000000 OPS in 1.911606 seconds, throughput 1046240.700228
+425168	[1728018552]	2000000 OPS in 1.887704 seconds, throughput 1059488.140090
+425168	[1728018553]	2000000 OPS in 1.883250 seconds, throughput 1061993.893535
+425168	[1728018553]	2000000 OPS in 1.874194 seconds, throughput 1067125.388300
+425168	[1728018554]	2000000 OPS in 1.925490 seconds, throughput 1038696.643452
+425168	[1728018554]	2000000 OPS in 1.888078 seconds, throughput 1059278.271343
+425168	[1728018555]	2000000 OPS in 1.900390 seconds, throughput 1052415.556807
+425168	[1728018555]	2000000 OPS in 1.878348 seconds, throughput 1064765.421530
+425168	[1728018556]	2000000 OPS in 1.868404 seconds, throughput 1070432.304791
+425168	[1728018556]	2000000 OPS in 1.847346 seconds, throughput 1082634.222284
+425168	[1728018557]	2000000 OPS in 1.826288 seconds, throughput 1095117.528013
+425168	[1728018557]	2000000 OPS in 1.831465 seconds, throughput 1092021.960562
+425168	[1728018557]	2000000 OPS in 1.864296 seconds, throughput 1072791.016019
+425168	[1728018557]	2000000 OPS in 1.830727 seconds, throughput 1092462.174863
+425168	[1728018559]	2000000 OPS in 1.836888 seconds, throughput 1088798.010548
+425168	[1728018559]	2000000 OPS in 1.854000 seconds, throughput 1078748.651564
+425168	[1728018559]	2000000 OPS in 1.854442 seconds, throughput 1078491.535459
+425168	[1728018559]	2000000 OPS in 1.841570 seconds, throughput 1086029.854961
+425168	[1728018561]	2000000 OPS in 1.845432 seconds, throughput 1083757.082353
+425168	[1728018561]	2000000 OPS in 1.838769 seconds, throughput 1087684.206118
+425168	[1728018561]	2000000 OPS in 1.846535 seconds, throughput 1083109.716306
+425168	[1728018561]	2000000 OPS in 1.876513 seconds, throughput 1065806.631769
+425168	[1728018562]	2000000 OPS in 1.824800 seconds, throughput 1096010.521701
+425168	[1728018563]	2000000 OPS in 1.829120 seconds, throughput 1093421.973408
+425168	[1728018563]	2000000 OPS in 1.831301 seconds, throughput 1092119.755300
+425168	[1728018563]	2000000 OPS in 1.854757 seconds, throughput 1078308.371393
+425168	[1728018564]	2000000 OPS in 1.861823 seconds, throughput 1074215.970047
+425168	[1728018564]	2000000 OPS in 1.855308 seconds, throughput 1077988.129195
+425168	[1728018565]	2000000 OPS in 1.858659 seconds, throughput 1076044.610657
+425168	[1728018565]	2000000 OPS in 1.912901 seconds, throughput 1045532.413857
+425168	[1728018566]	2000000 OPS in 1.874758 seconds, throughput 1066804.355549
+425168	[1728018566]	2000000 OPS in 1.905146 seconds, throughput 1049788.310187
+425168	[1728018567]	2000000 OPS in 1.883450 seconds, throughput 1061881.122408
+425168	[1728018567]	2000000 OPS in 1.919541 seconds, throughput 1041915.749651
+425168	[1728018568]	2000000 OPS in 1.849685 seconds, throughput 1081265.188397
+425168	[1728018568]	2000000 OPS in 1.860401 seconds, throughput 1075037.048464
+425168	[1728018569]	2000000 OPS in 1.873962 seconds, throughput 1067257.500419
+425168	[1728018569]	2000000 OPS in 1.883202 seconds, throughput 1062020.962170
+425168	[1728018570]	2000000 OPS in 1.924963 seconds, throughput 1038981.008986
+425168	[1728018570]	2000000 OPS in 1.918547 seconds, throughput 1042455.566635
+425168	[1728018570]	2000000 OPS in 1.913785 seconds, throughput 1045049.470029
+425168	[1728018571]	2000000 OPS in 1.935669 seconds, throughput 1033234.504453
+425168	[1728018572]	2000000 OPS in 1.871340 seconds, throughput 1068752.872273
+425168	[1728018572]	2000000 OPS in 1.861604 seconds, throughput 1074342.341336
+425168	[1728018572]	2000000 OPS in 1.867241 seconds, throughput 1071099.017213
+425168	[1728018573]	2000000 OPS in 1.892930 seconds, throughput 1056563.105873
+425168	[1728018574]	2000000 OPS in 1.870078 seconds, throughput 1069474.107497
+425168	[1728018574]	2000000 OPS in 1.900434 seconds, throughput 1052391.190644
+425168	[1728018574]	2000000 OPS in 1.886730 seconds, throughput 1060035.087161
+425168	[1728018574]	2000000 OPS in 1.931020 seconds, throughput 1035722.053630
+425168	[1728018576]	2000000 OPS in 1.894582 seconds, throughput 1055641.824951
+425168	[1728018576]	2000000 OPS in 1.928458 seconds, throughput 1037098.033766
+425168	[1728018576]	2000000 OPS in 1.892093 seconds, throughput 1057030.494801
+425168	[1728018576]	2000000 OPS in 1.865075 seconds, throughput 1072342.935271
+425168	[1728018578]	2000000 OPS in 1.851826 seconds, throughput 1080015.077010
+425168	[1728018578]	2000000 OPS in 1.889029 seconds, throughput 1058744.995445
+425168	[1728018578]	2000000 OPS in 1.871165 seconds, throughput 1068852.826982
+425168	[1728018578]	2000000 OPS in 1.884349 seconds, throughput 1061374.511834
+425168	[1728018579]	2000000 OPS in 1.886943 seconds, throughput 1059915.429348
+425168	[1728018579]	2000000 OPS in 1.879297 seconds, throughput 1064227.740480
+425168	[1728018580]	2000000 OPS in 1.901437 seconds, throughput 1051836.058728
+425168	[1728018580]	2000000 OPS in 1.977729 seconds, throughput 1011260.895704
+425168	[1728018581]	2000000 OPS in 1.869207 seconds, throughput 1069972.453559
+425168	[1728018581]	2000000 OPS in 1.855547 seconds, throughput 1077849.281101
+425168	[1728018582]	2000000 OPS in 1.874119 seconds, throughput 1067168.093381
+425168	[1728018582]	2000000 OPS in 1.871551 seconds, throughput 1068632.380309
+425168	[1728018583]	2000000 OPS in 1.863212 seconds, throughput 1073415.156193
+425168	[1728018583]	2000000 OPS in 1.899813 seconds, throughput 1052735.190253
+425168	[1728018584]	2000000 OPS in 1.866300 seconds, throughput 1071639.071961
+425168	[1728018584]	2000000 OPS in 1.907174 seconds, throughput 1048672.014195
+425168	[1728018585]	2000000 OPS in 1.848589 seconds, throughput 1081906.253905
+425168	[1728018585]	2000000 OPS in 1.845896 seconds, throughput 1083484.660024
+425168	[1728018585]	2000000 OPS in 1.860401 seconds, throughput 1075037.048464
+425168	[1728018586]	2000000 OPS in 1.902327 seconds, throughput 1051343.959267
+425168	[1728018587]	2000000 OPS in 1.881556 seconds, throughput 1062950.026467
+425168	[1728018587]	2000000 OPS in 1.895585 seconds, throughput 1055083.259258
+425168	[1728018587]	2000000 OPS in 1.879061 seconds, throughput 1064361.401785
+425168	[1728018588]	2000000 OPS in 1.867292 seconds, throughput 1071069.763058
+425168	[1728018589]	2000000 OPS in 1.831592 seconds, throughput 1091946.241303
+425168	[1728018589]	2000000 OPS in 1.865804 seconds, throughput 1071923.953427
+425168	[1728018589]	2000000 OPS in 1.855591 seconds, throughput 1077823.723008
+425168	[1728018590]	2000000 OPS in 1.919814 seconds, throughput 1041767.587902
+425168	[1728018591]	2000000 OPS in 1.872894 seconds, throughput 1067866.093863
+425168	[1728018591]	2000000 OPS in 1.903996 seconds, throughput 1050422.374837
+425168	[1728018591]	2000000 OPS in 1.877721 seconds, throughput 1065120.963125
+425168	[1728018592]	2000000 OPS in 1.880546 seconds, throughput 1063520.913607
+425168	[1728018592]	2000000 OPS in 1.838495 seconds, throughput 1087846.309073
+425168	[1728018593]	2000000 OPS in 1.840225 seconds, throughput 1086823.622111
+425168	[1728018593]	2000000 OPS in 1.850083 seconds, throughput 1081032.580700
+425168	[1728018593]	2000000 OPS in 1.883912 seconds, throughput 1061620.712645
+425168	[1728018594]	2000000 OPS in 1.871926 seconds, throughput 1068418.302860
+425168	[1728018594]	2000000 OPS in 1.846532 seconds, throughput 1083111.475999
+425168	[1728018595]	2000000 OPS in 1.839145 seconds, throughput 1087461.836886
+425168	[1728018595]	2000000 OPS in 1.859500 seconds, throughput 1075557.945684
+425168	[1728018596]	2000000 OPS in 1.866045 seconds, throughput 1071785.514283
+425168	[1728018596]	2000000 OPS in 1.857819 seconds, throughput 1076531.136779
+425168	[1728018597]	2000000 OPS in 1.867472 seconds, throughput 1070966.525870
+425168	[1728018597]	2000000 OPS in 1.907170 seconds, throughput 1048674.213625
+425168	[1728018598]	2000000 OPS in 1.881332 seconds, throughput 1063076.586163
+425168	[1728018598]	2000000 OPS in 1.885912 seconds, throughput 1060494.869326
+425168	[1728018599]	2000000 OPS in 1.909583 seconds, throughput 1047349.080925
+425168	[1728018599]	2000000 OPS in 1.939106 seconds, throughput 1031403.131134
+425168	[1728018600]	2000000 OPS in 1.858521 seconds, throughput 1076124.509758
+425168	[1728018600]	2000000 OPS in 1.858620 seconds, throughput 1076067.189635
+425168	[1728018600]	2000000 OPS in 1.828740 seconds, throughput 1093649.179216
+425168	[1728018601]	2000000 OPS in 1.857541 seconds, throughput 1076692.250669
+425168	[1728018602]	2000000 OPS in 1.834000 seconds, throughput 1090512.540894
+425168	[1728018602]	2000000 OPS in 1.838862 seconds, throughput 1087629.196753
+425168	[1728018602]	2000000 OPS in 1.842930 seconds, throughput 1085228.413450
+425168	[1728018603]	2000000 OPS in 1.922452 seconds, throughput 1040338.068259
+425168	[1728018604]	2000000 OPS in 1.867545 seconds, throughput 1070924.663127
+425168	[1728018604]	2000000 OPS in 1.876661 seconds, throughput 1065722.578558
+425168	[1728018604]	2000000 OPS in 1.883094 seconds, throughput 1062081.871643
+425168	[1728018605]	2000000 OPS in 1.866579 seconds, throughput 1071478.892669
+425168	[1728018605]	2000000 OPS in 1.882655 seconds, throughput 1062329.529308
+425168	[1728018606]	2000000 OPS in 1.872821 seconds, throughput 1067907.717822
+425168	[1728018606]	2000000 OPS in 1.933049 seconds, throughput 1034634.921308
+425168	[1728018607]	2000000 OPS in 1.961718 seconds, throughput 1019514.527572
+425168	[1728018607]	2000000 OPS in 1.901925 seconds, throughput 1051566.176374
+425168	[1728018607]	2000000 OPS in 1.902020 seconds, throughput 1051513.653905
+425168	[1728018608]	2000000 OPS in 1.906822 seconds, throughput 1048865.599411
+425168	[1728018609]	2000000 OPS in 1.912710 seconds, throughput 1045636.818964
+425168	[1728018609]	2000000 OPS in 1.898838 seconds, throughput 1053275.740216
+425168	[1728018609]	2000000 OPS in 1.919614 seconds, throughput 1041876.127180
+425168	[1728018610]	2000000 OPS in 1.928870 seconds, throughput 1036876.513192
+425168	[1728018611]	2000000 OPS in 1.878856 seconds, throughput 1064477.533137
+425168	[1728018611]	2000000 OPS in 1.869008 seconds, throughput 1070086.377372
+425168	[1728018611]	2000000 OPS in 1.867225 seconds, throughput 1071108.195317
+425168	[1728018612]	2000000 OPS in 1.856092 seconds, throughput 1077532.794711
+425168	[1728018612]	2000000 OPS in 1.921351 seconds, throughput 1040934.217642
+425168	[1728018613]	2000000 OPS in 1.883969 seconds, throughput 1061588.593018
+425168	[1728018613]	2000000 OPS in 1.867397 seconds, throughput 1071009.538946
+425168	[1728018614]	2000000 OPS in 1.884462 seconds, throughput 1061310.867505
+425168	[1728018614]	2000000 OPS in 1.873580 seconds, throughput 1067475.101143
+425168	[1728018615]	2000000 OPS in 1.867750 seconds, throughput 1070807.120867
+425168	[1728018615]	2000000 OPS in 1.865258 seconds, throughput 1072237.727971
+425168	[1728018616]	2000000 OPS in 1.894799 seconds, throughput 1055520.928605
+425168	[1728018616]	2000000 OPS in 1.894412 seconds, throughput 1055736.555723
+425168	[1728018617]	2000000 OPS in 1.870321 seconds, throughput 1069335.156906
+425168	[1728018617]	2000000 OPS in 1.873311 seconds, throughput 1067628.386317
+425168	[1728018617]	2000000 OPS in 1.839989 seconds, throughput 1086963.019888
+425168	[1728018618]	2000000 OPS in 1.885227 seconds, throughput 1060880.201695
+425168	[1728018619]	2000000 OPS in 1.888405 seconds, throughput 1059094.844591
+425168	[1728018619]	2000000 OPS in 1.876385 seconds, throughput 1065879.337130
+425168	[1728018619]	2000000 OPS in 1.897599 seconds, throughput 1053963.455925
+425168	[1728018620]	2000000 OPS in 1.864824 seconds, throughput 1072487.269576
+425168	[1728018621]	2000000 OPS in 1.865738 seconds, throughput 1071961.872460
+425168	[1728018621]	2000000 OPS in 1.860051 seconds, throughput 1075239.334835
+425168	[1728018621]	2000000 OPS in 1.889481 seconds, throughput 1058491.723389
+425168	[1728018622]	2000000 OPS in 1.869339 seconds, throughput 1069896.899385
+425168	[1728018622]	2000000 OPS in 1.855875 seconds, throughput 1077658.786287
+425168	[1728018622]	2000000 OPS in 1.828479 seconds, throughput 1093805.288439
+425168	[1728018623]	2000000 OPS in 1.857790 seconds, throughput 1076547.941371
+425168	[1728018624]	2000000 OPS in 1.919020 seconds, throughput 1042198.622213
+425168	[1728018624]	2000000 OPS in 1.928936 seconds, throughput 1036841.035680
+425168	[1728018624]	2000000 OPS in 1.892724 seconds, throughput 1056678.099924
+425168	[1728018625]	2000000 OPS in 1.860064 seconds, throughput 1075231.819980
+425168	[1728018626]	2000000 OPS in 1.854217 seconds, throughput 1078622.405037
+425168	[1728018626]	2000000 OPS in 1.849554 seconds, throughput 1081341.772125
+425168	[1728018626]	2000000 OPS in 1.842285 seconds, throughput 1085608.361356
+425168	[1728018627]	2000000 OPS in 1.857467 seconds, throughput 1076735.145227
+425168	[1728018627]	2000000 OPS in 1.896726 seconds, throughput 1054448.560309
+425168	[1728018628]	2000000 OPS in 1.876330 seconds, throughput 1065910.580761
+425168	[1728018628]	2000000 OPS in 1.897628 seconds, throughput 1053947.349006
+425168	[1728018629]	2000000 OPS in 1.900067 seconds, throughput 1052594.461143
+425168	[1728018629]	2000000 OPS in 1.946707 seconds, throughput 1027375.973888
+425168	[1728018630]	2000000 OPS in 1.876098 seconds, throughput 1066042.392242
+425168	[1728018630]	2000000 OPS in 1.890690 seconds, throughput 1057814.871819
+425168	[1728018630]	2000000 OPS in 1.850312 seconds, throughput 1080898.788961
+425168	[1728018631]	2000000 OPS in 1.853710 seconds, throughput 1078917.414267
+425168	[1728018632]	2000000 OPS in 1.841816 seconds, throughput 1085884.800653
+425168	[1728018632]	2000000 OPS in 1.838245 seconds, throughput 1087994.255390
+425168	[1728018632]	2000000 OPS in 1.879845 seconds, throughput 1063917.503837
+425168	[1728018633]	2000000 OPS in 1.917111 seconds, throughput 1043236.411455
+425168	[1728018634]	2000000 OPS in 1.892634 seconds, throughput 1056728.347900
+425168	[1728018634]	2000000 OPS in 1.895487 seconds, throughput 1055137.808911
+425168	[1728018634]	2000000 OPS in 1.894266 seconds, throughput 1055817.926310
+425168	[1728018635]	2000000 OPS in 1.891935 seconds, throughput 1057118.769937
+425168	[1728018636]	2000000 OPS in 1.871017 seconds, throughput 1068937.374700
+425168	[1728018636]	2000000 OPS in 1.875821 seconds, throughput 1066199.813308
+425168	[1728018636]	2000000 OPS in 1.864973 seconds, throughput 1072401.584366
+425168	[1728018637]	2000000 OPS in 1.910766 seconds, throughput 1046700.642570
+425168	[1728018637]	2000000 OPS in 1.901911 seconds, throughput 1051573.916971
+425168	[1728018637]	2000000 OPS in 1.893377 seconds, throughput 1056313.666005
+425168	[1728018638]	2000000 OPS in 1.921228 seconds, throughput 1041000.859867
+425168	[1728018639]	2000000 OPS in 1.923113 seconds, throughput 1039980.489966
+425168	[1728018639]	2000000 OPS in 1.900382 seconds, throughput 1052419.987139
+425168	[1728018639]	2000000 OPS in 1.865128 seconds, throughput 1072312.463273
+425168	[1728018640]	2000000 OPS in 1.899445 seconds, throughput 1052939.148014
+425168	[1728018641]	2000000 OPS in 1.901313 seconds, throughput 1051904.657466
+425168	[1728018641]	2000000 OPS in 1.848976 seconds, throughput 1081679.805471
+425168	[1728018641]	2000000 OPS in 1.841872 seconds, throughput 1085851.785575
+425168	[1728018642]	2000000 OPS in 1.853517 seconds, throughput 1079029.758022
+425168	[1728018643]	2000000 OPS in 1.915251 seconds, throughput 1044249.552670
+425168	[1728018643]	2000000 OPS in 1.903869 seconds, throughput 1050492.444596
+425168	[1728018643]	2000000 OPS in 1.910555 seconds, throughput 1046816.239260
+425168	[1728018644]	2000000 OPS in 1.880309 seconds, throughput 1063654.963094
+425168	[1728018645]	2000000 OPS in 1.862303 seconds, throughput 1073939.095840
+425168	[1728018645]	2000000 OPS in 1.847108 seconds, throughput 1082773.719782
+425168	[1728018645]	2000000 OPS in 1.844401 seconds, throughput 1084362.890716
+425168	[1728018645]	2000000 OPS in 1.838828 seconds, throughput 1087649.307059
+425168	[1728018646]	2000000 OPS in 1.859212 seconds, throughput 1075724.554274
+425168	[1728018647]	2000000 OPS in 1.829986 seconds, throughput 1092904.535882
+425168	[1728018647]	2000000 OPS in 1.832528 seconds, throughput 1091388.508116
+425168	[1728018647]	2000000 OPS in 1.831203 seconds, throughput 1092178.201980
+425168	[1728018648]	2000000 OPS in 1.894891 seconds, throughput 1055469.681370
+425168	[1728018649]	2000000 OPS in 1.885872 seconds, throughput 1060517.362790
+425168	[1728018649]	2000000 OPS in 1.882823 seconds, throughput 1062234.740069
+425168	[1728018649]	2000000 OPS in 1.913205 seconds, throughput 1045366.283279
+425168	[1728018650]	2000000 OPS in 1.905871 seconds, throughput 1049388.967039
+425168	[1728018650]	2000000 OPS in 1.854760 seconds, throughput 1078306.627273
+425168	[1728018651]	2000000 OPS in 1.849309 seconds, throughput 1081485.030355
+425168	[1728018651]	2000000 OPS in 1.874260 seconds, throughput 1067087.810656
+425168	[1728018652]	2000000 OPS in 1.890768 seconds, throughput 1057771.233700
+425168	[1728018652]	2000000 OPS in 1.865884 seconds, throughput 1071877.994559
+425168	[1728018652]	2000000 OPS in 1.896253 seconds, throughput 1054711.581208
+425168	[1728018653]	2000000 OPS in 1.877159 seconds, throughput 1065439.848196
+425168	[1728018654]	2000000 OPS in 1.944800 seconds, throughput 1028383.381325
+425168	[1728018654]	2000000 OPS in 1.913919 seconds, throughput 1044976.302550
+425168	[1728018654]	2000000 OPS in 1.917604 seconds, throughput 1042968.204071
+425168	[1728018655]	2000000 OPS in 1.912916 seconds, throughput 1045524.215386
+425168	[1728018656]	2000000 OPS in 1.928026 seconds, throughput 1037330.409445
+425168	[1728018656]	2000000 OPS in 1.857639 seconds, throughput 1076635.449622
+425168	[1728018656]	2000000 OPS in 1.876902 seconds, throughput 1065585.736496
+425168	[1728018657]	2000000 OPS in 1.877934 seconds, throughput 1065000.154425
+425168	[1728018658]	2000000 OPS in 1.860430 seconds, throughput 1075020.291008
+425168	[1728018658]	2000000 OPS in 1.840993 seconds, throughput 1086370.236063
+425168	[1728018658]	2000000 OPS in 1.858848 seconds, throughput 1075935.202878
+425168	[1728018659]	2000000 OPS in 1.852441 seconds, throughput 1079656.518075
+425168	[1728018660]	2000000 OPS in 1.902313 seconds, throughput 1051351.696593
+425168	[1728018660]	2000000 OPS in 1.915778 seconds, throughput 1043962.296258
+425168	[1728018660]	2000000 OPS in 1.889984 seconds, throughput 1058210.016593
+425168	[1728018661]	2000000 OPS in 1.881568 seconds, throughput 1062943.247334
+425168	[1728018662]	2000000 OPS in 1.891396 seconds, throughput 1057420.022037
+425168	[1728018662]	2000000 OPS in 1.881274 seconds, throughput 1063109.360997
+425168	[1728018662]	2000000 OPS in 1.915766 seconds, throughput 1043968.835442
+425168	[1728018662]	2000000 OPS in 1.872169 seconds, throughput 1068279.626465
+425168	[1728018664]	2000000 OPS in 1.854872 seconds, throughput 1078241.517474
+425168	[1728018664]	2000000 OPS in 1.837210 seconds, throughput 1088607.181542
+425168	[1728018664]	2000000 OPS in 1.833469 seconds, throughput 1090828.369610
+425168	[1728018664]	2000000 OPS in 1.837397 seconds, throughput 1088496.389185
+425168	[1728018665]	2000000 OPS in 1.853614 seconds, throughput 1078973.292174
+425168	[1728018665]	2000000 OPS in 1.849721 seconds, throughput 1081244.144387
+425168	[1728018666]	2000000 OPS in 1.847666 seconds, throughput 1082446.719266
+425168	[1728018666]	2000000 OPS in 1.847015 seconds, throughput 1082828.239078
+425168	[1728018667]	2000000 OPS in 1.906043 seconds, throughput 1049294.270906
+425168	[1728018667]	2000000 OPS in 1.871558 seconds, throughput 1068628.383411
+425168	[1728018667]	2000000 OPS in 1.863679 seconds, throughput 1073146.180217
+425168	[1728018668]	2000000 OPS in 1.889018 seconds, throughput 1058751.160656
+425168	[1728018669]	2000000 OPS in 1.875539 seconds, throughput 1066360.123676
+425168	[1728018669]	2000000 OPS in 1.909818 seconds, throughput 1047220.206323
+425168	[1728018669]	2000000 OPS in 1.878503 seconds, throughput 1064677.565061
+425168	[1728018670]	2000000 OPS in 1.848967 seconds, throughput 1081685.070637
+425168	[1728018671]	2000000 OPS in 1.876409 seconds, throughput 1065865.704119
+425168	[1728018671]	2000000 OPS in 1.891875 seconds, throughput 1057152.296003
+425168	[1728018671]	2000000 OPS in 1.894978 seconds, throughput 1055421.223888
+425168	[1728018672]	2000000 OPS in 1.879993 seconds, throughput 1063833.748317
+425168	[1728018673]	2000000 OPS in 1.849884 seconds, throughput 1081148.872037
+425168	[1728018673]	2000000 OPS in 1.877053 seconds, throughput 1065500.015183
+425168	[1728018673]	2000000 OPS in 1.854023 seconds, throughput 1078735.269196
+425168	[1728018674]	2000000 OPS in 1.853391 seconds, throughput 1079103.114238
+425168	[1728018675]	2000000 OPS in 1.826786 seconds, throughput 1094818.988103
+425168	[1728018675]	2000000 OPS in 1.853797 seconds, throughput 1078866.779912
+425168	[1728018675]	2000000 OPS in 1.833899 seconds, throughput 1090572.599691
+425168	[1728018675]	2000000 OPS in 1.829841 seconds, throughput 1092991.139667
+425168	[1728018677]	2000000 OPS in 1.841820 seconds, throughput 1085882.442367
+425168	[1728018677]	2000000 OPS in 1.877722 seconds, throughput 1065120.395884
+425168	[1728018677]	2000000 OPS in 1.899685 seconds, throughput 1052806.123120
+425168	[1728018677]	2000000 OPS in 1.919727 seconds, throughput 1041814.799709
+425168	[1728018678]	2000000 OPS in 1.886484 seconds, throughput 1060173.317134
+425168	[1728018679]	2000000 OPS in 1.908874 seconds, throughput 1047738.090623
+425168	[1728018679]	2000000 OPS in 1.870505 seconds, throughput 1069229.967308
+425168	[1728018679]	2000000 OPS in 1.837476 seconds, throughput 1088449.590634
+425168	[1728018680]	2000000 OPS in 1.859831 seconds, throughput 1075366.525238
+425168	[1728018680]	2000000 OPS in 1.863952 seconds, throughput 1072989.004009
+425168	[1728018680]	2000000 OPS in 1.852507 seconds, throughput 1079618.052725
+425168	[1728018681]	2000000 OPS in 1.865164 seconds, throughput 1072291.766300
+425168	[1728018682]	2000000 OPS in 1.889598 seconds, throughput 1058426.183770
+425168	[1728018682]	2000000 OPS in 1.880070 seconds, throughput 1063790.178025
+425168	[1728018682]	2000000 OPS in 1.899210 seconds, throughput 1053069.434133
+425168	[1728018683]	2000000 OPS in 1.852310 seconds, throughput 1079732.874087
+425168	[1728018684]	2000000 OPS in 1.887494 seconds, throughput 1059606.017291
+425168	[1728018684]	2000000 OPS in 1.927834 seconds, throughput 1037433.720953
+425168	[1728018684]	2000000 OPS in 1.933974 seconds, throughput 1034140.065999
+425168	[1728018685]	2000000 OPS in 1.904570 seconds, throughput 1050105.798159
+425168	[1728018686]	2000000 OPS in 1.834860 seconds, throughput 1090001.417002
+425168	[1728018686]	2000000 OPS in 1.840817 seconds, throughput 1086474.103618
+425168	[1728018686]	2000000 OPS in 1.863037 seconds, throughput 1073515.984921
+425168	[1728018687]	2000000 OPS in 1.849484 seconds, throughput 1081382.699174
+425168	[1728018688]	2000000 OPS in 1.902740 seconds, throughput 1051115.759379
+425168	[1728018688]	2000000 OPS in 1.962277 seconds, throughput 1019224.095273
+425168	[1728018688]	2000000 OPS in 1.956683 seconds, throughput 1022137.975339
+425168	[1728018689]	2000000 OPS in 1.947276 seconds, throughput 1027075.771488
+425168	[1728018690]	2000000 OPS in 1.916152 seconds, throughput 1043758.532726
+425168	[1728018690]	2000000 OPS in 1.896211 seconds, throughput 1054734.942472
+425168	[1728018690]	2000000 OPS in 1.902951 seconds, throughput 1050999.211225
+425168	[1728018690]	2000000 OPS in 1.898856 seconds, throughput 1053265.755802
+425168	[1728018692]	2000000 OPS in 1.857106 seconds, throughput 1076944.450128
+425168	[1728018692]	2000000 OPS in 1.868543 seconds, throughput 1070352.675855
+425168	[1728018692]	2000000 OPS in 1.888747 seconds, throughput 1058903.071719
+425168	[1728018692]	2000000 OPS in 1.847246 seconds, throughput 1082692.830300
+425168	[1728018694]	2000000 OPS in 1.877454 seconds, throughput 1065272.438100
+425168	[1728018694]	2000000 OPS in 1.897599 seconds, throughput 1053963.455925
+425168	[1728018694]	2000000 OPS in 1.884892 seconds, throughput 1061068.750889
+425168	[1728018694]	2000000 OPS in 1.901444 seconds, throughput 1051832.186486
+425168	[1728018695]	2000000 OPS in 1.897852 seconds, throughput 1053822.953529
+425168	[1728018696]	2000000 OPS in 1.882963 seconds, throughput 1062155.761956
+425168	[1728018696]	2000000 OPS in 1.887741 seconds, throughput 1059467.373967
+425168	[1728018696]	2000000 OPS in 1.858034 seconds, throughput 1076406.567372
+425168	[1728018697]	2000000 OPS in 1.846233 seconds, throughput 1083286.887408
+425168	[1728018697]	2000000 OPS in 1.848508 seconds, throughput 1081953.662089
+425168	[1728018698]	2000000 OPS in 1.875567 seconds, throughput 1066344.204179
+425168	[1728018698]	2000000 OPS in 1.846130 seconds, throughput 1083347.326570
+425168	[1728018699]	2000000 OPS in 1.851583 seconds, throughput 1080156.817167
+425168	[1728018699]	2000000 OPS in 1.855745 seconds, throughput 1077734.279225
+425168	[1728018699]	2000000 OPS in 1.895850 seconds, throughput 1054935.780784
+425168	[1728018700]	2000000 OPS in 1.867340 seconds, throughput 1071042.231195
+425168	[1728018701]	2000000 OPS in 1.861632 seconds, throughput 1074326.182618
+425168	[1728018701]	2000000 OPS in 1.855120 seconds, throughput 1078097.373755
+425168	[1728018701]	2000000 OPS in 1.875295 seconds, throughput 1066498.870844
+425168	[1728018702]	2000000 OPS in 1.861900 seconds, throughput 1074171.545196
+425168	[1728018703]	2000000 OPS in 1.892491 seconds, throughput 1056808.196182
+425168	[1728018703]	2000000 OPS in 1.855865 seconds, throughput 1077664.593060
+425168	[1728018703]	2000000 OPS in 1.882176 seconds, throughput 1062599.884389
+425168	[1728018703]	2000000 OPS in 1.861613 seconds, throughput 1074337.147409
+425168	[1728018705]	2000000 OPS in 1.829834 seconds, throughput 1092995.320887
+425168	[1728018705]	2000000 OPS in 1.825859 seconds, throughput 1095374.834530
+425168	[1728018705]	2000000 OPS in 1.853295 seconds, throughput 1079159.011382
+425168	[1728018705]	2000000 OPS in 1.831917 seconds, throughput 1091752.519355
+425168	[1728018707]	2000000 OPS in 1.857845 seconds, throughput 1076516.071039
+425168	[1728018707]	2000000 OPS in 1.877345 seconds, throughput 1065334.288583
+425168	[1728018707]	2000000 OPS in 1.909009 seconds, throughput 1047663.997393
+425168	[1728018707]	2000000 OPS in 1.910570 seconds, throughput 1046808.020643
+425168	[1728018708]	2000000 OPS in 1.871265 seconds, throughput 1068795.707716
+425168	[1728018709]	2000000 OPS in 1.846979 seconds, throughput 1082849.344795
+425168	[1728018709]	2000000 OPS in 1.862144 seconds, throughput 1074030.794611
+425168	[1728018709]	2000000 OPS in 1.836068 seconds, throughput 1089284.274874
+425168	[1728018710]	2000000 OPS in 1.835228 seconds, throughput 1089782.849869
+425168	[1728018710]	2000000 OPS in 1.830330 seconds, throughput 1092699.130758
+425168	[1728018711]	2000000 OPS in 1.876477 seconds, throughput 1065827.079149
+425168	[1728018711]	2000000 OPS in 1.872420 seconds, throughput 1068136.422384
+425168	[1728018712]	2000000 OPS in 1.902067 seconds, throughput 1051487.671044
+425168	[1728018712]	2000000 OPS in 1.911439 seconds, throughput 1046332.108950
+425168	[1728018713]	2000000 OPS in 1.913663 seconds, throughput 1045116.094109
+425168	[1728018713]	2000000 OPS in 1.859226 seconds, throughput 1075716.454051
+425168	[1728018714]	2000000 OPS in 1.890999 seconds, throughput 1057642.018848
+425168	[1728018714]	2000000 OPS in 1.922828 seconds, throughput 1040134.635027
+425168	[1728018715]	2000000 OPS in 1.967907 seconds, throughput 1016308.189361
+425168	[1728018715]	2000000 OPS in 1.909238 seconds, throughput 1047538.337284
+425168	[1728018716]	2000000 OPS in 1.886498 seconds, throughput 1060165.449420
+425168	[1728018716]	2000000 OPS in 1.853040 seconds, throughput 1079307.516298
+425168	[1728018717]	2000000 OPS in 1.912532 seconds, throughput 1045734.136736
+425168	[1728018717]	2000000 OPS in 1.874908 seconds, throughput 1066719.007013
+425168	[1728018718]	2000000 OPS in 1.869368 seconds, throughput 1069880.301792
+425168	[1728018718]	2000000 OPS in 1.889623 seconds, throughput 1058412.180631
+425168	[1728018718]	2000000 OPS in 1.924082 seconds, throughput 1039456.738330
+425168	[1728018718]	2000000 OPS in 1.907452 seconds, throughput 1048519.176367
+425168	[1728018720]	2000000 OPS in 1.929690 seconds, throughput 1036435.904213
+425168	[1728018720]	2000000 OPS in 1.907692 seconds, throughput 1048387.265869
+425168	[1728018720]	2000000 OPS in 1.878061 seconds, throughput 1064928.135987
+425168	[1728018720]	2000000 OPS in 1.950124 seconds, throughput 1025575.809538
+425168	[1728018722]	2000000 OPS in 1.934219 seconds, throughput 1034009.075498
+425168	[1728018722]	2000000 OPS in 1.892938 seconds, throughput 1056558.640589
+425168	[1728018722]	2000000 OPS in 1.884822 seconds, throughput 1061108.157693
+425168	[1728018722]	2000000 OPS in 1.910305 seconds, throughput 1046953.235216
+425168	[1728018723]	2000000 OPS in 1.832697 seconds, throughput 1091287.867007
+425168	[1728018724]	2000000 OPS in 1.828504 seconds, throughput 1093790.333519
+425168	[1728018724]	2000000 OPS in 1.832367 seconds, throughput 1091484.402415
+425168	[1728018724]	2000000 OPS in 1.856588 seconds, throughput 1077244.924561
+425168	[1728018725]	2000000 OPS in 1.844020 seconds, throughput 1084586.935066
+425168	[1728018726]	2000000 OPS in 1.849956 seconds, throughput 1081106.793891
+425168	[1728018726]	2000000 OPS in 1.848487 seconds, throughput 1081965.953777
+425168	[1728018726]	2000000 OPS in 1.878306 seconds, throughput 1064789.230296
+425168	[1728018727]	2000000 OPS in 1.857687 seconds, throughput 1076607.630887
+425168	[1728018727]	2000000 OPS in 1.860511 seconds, throughput 1074973.488466
+425168	[1728018728]	2000000 OPS in 1.866925 seconds, throughput 1071280.313885
+425168	[1728018728]	2000000 OPS in 1.874154 seconds, throughput 1067148.163918
+425168	[1728018729]	2000000 OPS in 1.897257 seconds, throughput 1054153.443629
+425168	[1728018729]	2000000 OPS in 1.848763 seconds, throughput 1081804.428150
+425168	[1728018730]	2000000 OPS in 1.855548 seconds, throughput 1077848.700222
+425168	[1728018730]	2000000 OPS in 1.860603 seconds, throughput 1074920.334967
+425168	[1728018731]	2000000 OPS in 1.874731 seconds, throughput 1066819.719736
+425168	[1728018731]	2000000 OPS in 1.887300 seconds, throughput 1059714.936682
+425168	[1728018732]	2000000 OPS in 1.972231 seconds, throughput 1014079.993672
+425168	[1728018732]	2000000 OPS in 1.950984 seconds, throughput 1025123.732435
+425168	[1728018733]	2000000 OPS in 1.881302 seconds, throughput 1063093.538411
+425168	[1728018733]	2000000 OPS in 1.864488 seconds, throughput 1072680.542862
+425168	[1728018733]	2000000 OPS in 1.833993 seconds, throughput 1090516.703172
+425168	[1728018734]	2000000 OPS in 1.857197 seconds, throughput 1076891.681389
+425168	[1728018735]	2000000 OPS in 1.836660 seconds, throughput 1088933.172171
+425168	[1728018735]	2000000 OPS in 1.836044 seconds, throughput 1089298.513543
+425168	[1728018735]	2000000 OPS in 1.865458 seconds, throughput 1072122.770923
+425168	[1728018735]	2000000 OPS in 1.864936 seconds, throughput 1072422.860624
+425168	[1728018737]	2000000 OPS in 1.857956 seconds, throughput 1076451.756662
+425168	[1728018737]	2000000 OPS in 1.848034 seconds, throughput 1082231.171072
+425168	[1728018737]	2000000 OPS in 1.851223 seconds, throughput 1080366.870982
+425168	[1728018737]	2000000 OPS in 1.905482 seconds, throughput 1049603.197511
+425168	[1728018738]	2000000 OPS in 1.928536 seconds, throughput 1037056.088141
+425168	[1728018739]	2000000 OPS in 1.895670 seconds, throughput 1055035.950350
+425168	[1728018739]	2000000 OPS in 1.874628 seconds, throughput 1066878.335328
+425168	[1728018739]	2000000 OPS in 1.935548 seconds, throughput 1033299.096690
+425168	[1728018740]	2000000 OPS in 1.847052 seconds, throughput 1082806.547948
+425168	[1728018740]	2000000 OPS in 1.864619 seconds, throughput 1072605.181005
+425168	[1728018741]	2000000 OPS in 1.853797 seconds, throughput 1078866.779912
+425168	[1728018741]	2000000 OPS in 1.872192 seconds, throughput 1068266.502581
+425168	[1728018742]	2000000 OPS in 1.846230 seconds, throughput 1083288.647677
+425168	[1728018742]	2000000 OPS in 1.830195 seconds, throughput 1092779.731122
+425168	[1728018743]	2000000 OPS in 1.867306 seconds, throughput 1071061.732785
+425168	[1728018743]	2000000 OPS in 1.869142 seconds, throughput 1070009.662187
+425168	[1728018744]	2000000 OPS in 1.875518 seconds, throughput 1066372.063611
+425168	[1728018744]	2000000 OPS in 1.881944 seconds, throughput 1062730.878283
+425168	[1728018745]	2000000 OPS in 1.882794 seconds, throughput 1062251.101289
+425168	[1728018745]	2000000 OPS in 1.881967 seconds, throughput 1062717.890377
+425168	[1728018746]	2000000 OPS in 1.835260 seconds, throughput 1089763.848174
+425168	[1728018746]	2000000 OPS in 1.840307 seconds, throughput 1086775.195660
+425168	[1728018747]	2000000 OPS in 1.850113 seconds, throughput 1081015.051513
+425168	[1728018747]	2000000 OPS in 1.869427 seconds, throughput 1069846.535864
+425168	[1728018748]	2000000 OPS in 1.889340 seconds, throughput 1058570.717817
+425168	[1728018748]	2000000 OPS in 1.916465 seconds, throughput 1043588.064483
+425168	[1728018748]	2000000 OPS in 1.919486 seconds, throughput 1041945.604188
+425168	[1728018749]	2000000 OPS in 1.945592 seconds, throughput 1027964.753145
+425168	[1728018750]	2000000 OPS in 1.885043 seconds, throughput 1060983.754747
+425168	[1728018750]	2000000 OPS in 1.865242 seconds, throughput 1072246.925600
+425168	[1728018750]	2000000 OPS in 1.874793 seconds, throughput 1066784.439669
+425168	[1728018751]	2000000 OPS in 1.958070 seconds, throughput 1021413.943322
+425168	[1728018752]	2000000 OPS in 1.906512 seconds, throughput 1049036.145589
+425168	[1728018752]	2000000 OPS in 1.902342 seconds, throughput 1051335.669401
+425168	[1728018752]	2000000 OPS in 1.873241 seconds, throughput 1067668.281871
+425168	[1728018753]	2000000 OPS in 1.901224 seconds, throughput 1051953.899172
+425168	[1728018753]	2000000 OPS in 1.882329 seconds, throughput 1062513.513844
+425168	[1728018754]	2000000 OPS in 1.861899 seconds, throughput 1074172.122118
+425168	[1728018754]	2000000 OPS in 1.862172 seconds, throughput 1074014.645264
+425168	[1728018754]	2000000 OPS in 1.877339 seconds, throughput 1065337.693405
+425168	[1728018755]	2000000 OPS in 1.839101 seconds, throughput 1087487.854120
+425168	[1728018755]	2000000 OPS in 1.840279 seconds, throughput 1086791.731036
+425168	[1728018756]	2000000 OPS in 1.845644 seconds, throughput 1083632.596535
+425168	[1728018756]	2000000 OPS in 1.901030 seconds, throughput 1052061.251006
+425168	[1728018757]	2000000 OPS in 1.926111 seconds, throughput 1038361.755890
+425168	[1728018757]	2000000 OPS in 1.909403 seconds, throughput 1047447.814841
+425168	[1728018758]	2000000 OPS in 1.895688 seconds, throughput 1055025.932537
+425168	[1728018758]	2000000 OPS in 1.907821 seconds, throughput 1048316.377690
+425168	[1728018759]	2000000 OPS in 1.885507 seconds, throughput 1060722.659741
+425168	[1728018759]	2000000 OPS in 1.897367 seconds, throughput 1054092.329001
+425168	[1728018760]	2000000 OPS in 1.889037 seconds, throughput 1058740.511700
+425168	[1728018760]	2000000 OPS in 1.869316 seconds, throughput 1069910.063360
+425168	[1728018761]	2000000 OPS in 1.860219 seconds, throughput 1075142.227877
+425168	[1728018761]	2000000 OPS in 1.855044 seconds, throughput 1078141.542734
+425168	[1728018762]	2000000 OPS in 1.853833 seconds, throughput 1078845.829155
+425168	[1728018762]	2000000 OPS in 1.880385 seconds, throughput 1063611.973080
+425168	[1728018763]	2000000 OPS in 1.863828 seconds, throughput 1073060.389693
+425168	[1728018763]	2000000 OPS in 1.849916 seconds, throughput 1081130.170235
+425168	[1728018763]	2000000 OPS in 1.870838 seconds, throughput 1069039.649612
+425168	[1728018764]	2000000 OPS in 1.876166 seconds, throughput 1066003.754465
+425168	[1728018765]	2000000 OPS in 1.873819 seconds, throughput 1067338.947892
+425168	[1728018765]	2000000 OPS in 1.895271 seconds, throughput 1055258.060721
+425168	[1728018765]	2000000 OPS in 1.866268 seconds, throughput 1071657.446840
+425168	[1728018766]	2000000 OPS in 1.910138 seconds, throughput 1047044.768493
+425168	[1728018767]	2000000 OPS in 1.866468 seconds, throughput 1071542.614178
+425168	[1728018767]	2000000 OPS in 1.885306 seconds, throughput 1060835.747619
+425168	[1728018767]	2000000 OPS in 1.883244 seconds, throughput 1061997.277039
+425168	[1728018768]	2000000 OPS in 1.898392 seconds, throughput 1053523.192260
+425168	[1728018768]	2000000 OPS in 1.876941 seconds, throughput 1065563.595233
+425168	[1728018769]	2000000 OPS in 1.867418 seconds, throughput 1070997.494937
+425168	[1728018769]	2000000 OPS in 1.872682 seconds, throughput 1067986.983375
+425168	[1728018770]	2000000 OPS in 1.881934 seconds, throughput 1062736.525298
+425168	[1728018770]	2000000 OPS in 1.900796 seconds, throughput 1052190.766395
+425168	[1728018770]	2000000 OPS in 1.903705 seconds, throughput 1050582.942210
+425168	[1728018771]	2000000 OPS in 1.858706 seconds, throughput 1076017.401353
+425168	[1728018772]	2000000 OPS in 1.915588 seconds, throughput 1044065.842968
+425168	[1728018772]	2000000 OPS in 1.911274 seconds, throughput 1046422.438646
+425168	[1728018772]	2000000 OPS in 1.870176 seconds, throughput 1069418.065465
+425168	[1728018773]	2000000 OPS in 1.906535 seconds, throughput 1049023.490259
+425168	[1728018773]	2000000 OPS in 1.869667 seconds, throughput 1069709.204901
+425168	[1728018774]	2000000 OPS in 1.839104 seconds, throughput 1087486.080178
+425168	[1728018774]	2000000 OPS in 1.841219 seconds, throughput 1086236.889800
+425168	[1728018775]	2000000 OPS in 1.853652 seconds, throughput 1078951.173144
+425168	[1728018775]	2000000 OPS in 1.865895 seconds, throughput 1071871.675523
+425168	[1728018776]	2000000 OPS in 1.845957 seconds, throughput 1083448.856068
+425168	[1728018776]	2000000 OPS in 1.841209 seconds, throughput 1086242.789385
+425168	[1728018776]	2000000 OPS in 1.829534 seconds, throughput 1093174.546087
+425168	[1728018777]	2000000 OPS in 1.851772 seconds, throughput 1080046.571608
+425168	[1728018778]	2000000 OPS in 1.837024 seconds, throughput 1088717.403801
+425168	[1728018778]	2000000 OPS in 1.840453 seconds, throughput 1086688.983636
+425168	[1728018778]	2000000 OPS in 1.856335 seconds, throughput 1077391.742331
+425168	[1728018779]	2000000 OPS in 1.896295 seconds, throughput 1054688.220978
+425168	[1728018780]	2000000 OPS in 1.854728 seconds, throughput 1078325.231516
+425168	[1728018780]	2000000 OPS in 1.881936 seconds, throughput 1062735.395890
+425168	[1728018780]	2000000 OPS in 1.866238 seconds, throughput 1071674.673863
+425168	[1728018781]	2000000 OPS in 1.877912 seconds, throughput 1065012.631050
+425168	[1728018781]	2000000 OPS in 1.876308 seconds, throughput 1065923.078727
+425168	[1728018782]	2000000 OPS in 1.864443 seconds, throughput 1072706.432967
+425168	[1728018782]	2000000 OPS in 1.868878 seconds, throughput 1070160.813065
+425168	[1728018783]	2000000 OPS in 1.930556 seconds, throughput 1035970.984525
+425168	[1728018783]	2000000 OPS in 1.881453 seconds, throughput 1063008.217585
+425168	[1728018783]	2000000 OPS in 1.893860 seconds, throughput 1056044.269376
+425168	[1728018784]	2000000 OPS in 1.909540 seconds, throughput 1047372.665668
+425168	[1728018785]	2000000 OPS in 1.896406 seconds, throughput 1054626.488210
+425168	[1728018785]	2000000 OPS in 1.894523 seconds, throughput 1055674.700175
+425168	[1728018785]	2000000 OPS in 1.893552 seconds, throughput 1056216.042654
+425168	[1728018786]	2000000 OPS in 1.902673 seconds, throughput 1051152.772967
+425168	[1728018787]	2000000 OPS in 1.931691 seconds, throughput 1035362.281027
+425168	[1728018787]	2000000 OPS in 1.870964 seconds, throughput 1068967.655177
+425168	[1728018787]	2000000 OPS in 1.882514 seconds, throughput 1062409.097622
+425168	[1728018788]	2000000 OPS in 1.869557 seconds, throughput 1069772.143882
+425168	[1728018788]	2000000 OPS in 1.870654 seconds, throughput 1069144.801765
+425168	[1728018789]	2000000 OPS in 1.842186 seconds, throughput 1085666.702494
+425168	[1728018789]	2000000 OPS in 1.834909 seconds, throughput 1089972.309253
+425168	[1728018790]	2000000 OPS in 1.831947 seconds, throughput 1091734.640795
+425168	[1728018790]	2000000 OPS in 1.862104 seconds, throughput 1074053.865949
+425168	[1728018791]	2000000 OPS in 1.854280 seconds, throughput 1078585.758354
+425168	[1728018791]	2000000 OPS in 1.846215 seconds, throughput 1083297.449105
+425168	[1728018791]	2000000 OPS in 1.857067 seconds, throughput 1076967.066886
+425168	[1728018792]	2000000 OPS in 1.873498 seconds, throughput 1067521.822815
+425168	[1728018793]	2000000 OPS in 1.842131 seconds, throughput 1085699.116947
+425168	[1728018793]	2000000 OPS in 1.863637 seconds, throughput 1073170.365259
+425168	[1728018793]	2000000 OPS in 1.905001 seconds, throughput 1049868.215292
+425168	[1728018794]	2000000 OPS in 1.908278 seconds, throughput 1048065.323816
+425168	[1728018795]	2000000 OPS in 1.870884 seconds, throughput 1069013.364805
+425168	[1728018795]	2000000 OPS in 1.882438 seconds, throughput 1062451.990451
+425168	[1728018795]	2000000 OPS in 1.855459 seconds, throughput 1077900.400925
+425168	[1728018796]	2000000 OPS in 1.883594 seconds, throughput 1061799.942026
+425168	[1728018796]	2000000 OPS in 1.846826 seconds, throughput 1082939.053273
+425168	[1728018796]	2000000 OPS in 1.842516 seconds, throughput 1085472.256415
+425168	[1728018797]	2000000 OPS in 1.873912 seconds, throughput 1067285.977143
+425168	[1728018798]	2000000 OPS in 1.911295 seconds, throughput 1046410.941273
+425168	[1728018798]	2000000 OPS in 1.893574 seconds, throughput 1056203.771281
+425168	[1728018798]	2000000 OPS in 1.870054 seconds, throughput 1069487.832972
+425168	[1728018799]	2000000 OPS in 1.878516 seconds, throughput 1064670.197113
+425168	[1728018800]	2000000 OPS in 1.911001 seconds, throughput 1046571.927487
+425168	[1728018800]	2000000 OPS in 1.854391 seconds, throughput 1078521.196447
+425168	[1728018800]	2000000 OPS in 1.870011 seconds, throughput 1069512.425328
+425168	[1728018801]	2000000 OPS in 1.860920 seconds, throughput 1074737.226748
+425168	[1728018802]	2000000 OPS in 1.899828 seconds, throughput 1052726.878433
+425168	[1728018802]	2000000 OPS in 1.887786 seconds, throughput 1059442.118969
+425168	[1728018802]	2000000 OPS in 1.884975 seconds, throughput 1061022.029470
+425168	[1728018803]	2000000 OPS in 1.897857 seconds, throughput 1053820.177179
+425168	[1728018804]	2000000 OPS in 1.933324 seconds, throughput 1034487.752699
+425168	[1728018804]	2000000 OPS in 1.907762 seconds, throughput 1048348.798225
+425168	[1728018804]	2000000 OPS in 1.922702 seconds, throughput 1040202.797937
+425168	[1728018805]	2000000 OPS in 1.882706 seconds, throughput 1062300.752215
+425168	[1728018806]	2000000 OPS in 1.878155 seconds, throughput 1064874.837274
+425168	[1728018806]	2000000 OPS in 1.857509 seconds, throughput 1076710.799248
+425168	[1728018806]	2000000 OPS in 1.858330 seconds, throughput 1076235.114323
+425168	[1728018806]	2000000 OPS in 1.877001 seconds, throughput 1065529.533548
+425168	[1728018807]	2000000 OPS in 1.898679 seconds, throughput 1053363.944090
+425168	[1728018808]	2000000 OPS in 1.844360 seconds, throughput 1084386.996031
+425168	[1728018808]	2000000 OPS in 1.841531 seconds, throughput 1086052.854934
+425168	[1728018808]	2000000 OPS in 1.856024 seconds, throughput 1077572.272772
+425168	[1728018809]	2000000 OPS in 1.868078 seconds, throughput 1070619.106911
+425168	[1728018809]	2000000 OPS in 1.841435 seconds, throughput 1086109.474404
+425168	[1728018810]	2000000 OPS in 1.839515 seconds, throughput 1087243.104840
+425168	[1728018810]	2000000 OPS in 1.867381 seconds, throughput 1071018.715517
+425168	[1728018811]	2000000 OPS in 1.923230 seconds, throughput 1039917.222589
+425168	[1728018811]	2000000 OPS in 1.889725 seconds, throughput 1058355.051661
+425168	[1728018811]	2000000 OPS in 1.862662 seconds, throughput 1073732.110281
+425168	[1728018812]	2000000 OPS in 1.904217 seconds, throughput 1050300.464705
+425168	[1728018813]	2000000 OPS in 1.930439 seconds, throughput 1036033.772629
+425168	[1728018813]	2000000 OPS in 1.885015 seconds, throughput 1060999.514593
+425168	[1728018813]	2000000 OPS in 1.888846 seconds, throughput 1058847.571480
+425168	[1728018814]	2000000 OPS in 1.871045 seconds, throughput 1068921.378160
+425168	[1728018815]	2000000 OPS in 1.920071 seconds, throughput 1041628.148126
+425168	[1728018815]	2000000 OPS in 1.919787 seconds, throughput 1041782.239384
+425168	[1728018815]	2000000 OPS in 1.914003 seconds, throughput 1044930.441593
+425168	[1728018816]	2000000 OPS in 1.877721 seconds, throughput 1065120.963125
+425168	[1728018817]	2000000 OPS in 1.855178 seconds, throughput 1078063.668284
+425168	[1728018817]	2000000 OPS in 1.833961 seconds, throughput 1090535.731131
+425168	[1728018817]	2000000 OPS in 1.826773 seconds, throughput 1094826.779244
+425168	[1728018818]	2000000 OPS in 1.832829 seconds, throughput 1091209.272660
+425168	[1728018819]	2000000 OPS in 1.867668 seconds, throughput 1070854.134675
+425168	[1728018819]	2000000 OPS in 1.849335 seconds, throughput 1081469.825640
+425168	[1728018819]	2000000 OPS in 1.868498 seconds, throughput 1070378.453710
+425168	[1728018820]	2000000 OPS in 1.845251 seconds, throughput 1083863.387691
+425168	[1728018821]	2000000 OPS in 1.898777 seconds, throughput 1053309.577691
+425168	[1728018821]	2000000 OPS in 1.894020 seconds, throughput 1055955.058553
+425168	[1728018821]	2000000 OPS in 1.867837 seconds, throughput 1070757.244877
+425168	[1728018821]	2000000 OPS in 1.893783 seconds, throughput 1056087.207457
+425168	[1728018823]	2000000 OPS in 1.871703 seconds, throughput 1068545.597245
+425168	[1728018823]	2000000 OPS in 1.848199 seconds, throughput 1082134.553693
+425168	[1728018823]	2000000 OPS in 1.838699 seconds, throughput 1087725.614687
+425168	[1728018823]	2000000 OPS in 1.839093 seconds, throughput 1087492.584660
+425168	[1728018824]	2000000 OPS in 1.862578 seconds, throughput 1073780.534292
+425168	[1728018824]	2000000 OPS in 1.896692 seconds, throughput 1054467.462298
+425168	[1728018825]	2000000 OPS in 1.900235 seconds, throughput 1052501.401142
+425168	[1728018825]	2000000 OPS in 1.876683 seconds, throughput 1065710.085294
+425168	[1728018826]	2000000 OPS in 1.845560 seconds, throughput 1083681.917684
+425168	[1728018826]	2000000 OPS in 1.879628 seconds, throughput 1064040.331385
+425168	[1728018826]	2000000 OPS in 1.835448 seconds, throughput 1089652.226595
+425168	[1728018827]	2000000 OPS in 1.869817 seconds, throughput 1069623.390952
+425168	[1728018828]	2000000 OPS in 1.858168 seconds, throughput 1076328.943346
+425168	[1728018828]	2000000 OPS in 1.859153 seconds, throughput 1075758.692265
+425168	[1728018828]	2000000 OPS in 1.934837 seconds, throughput 1033678.806018
+425168	[1728018829]	2000000 OPS in 1.855264 seconds, throughput 1078013.695086
+425168	[1728018830]	2000000 OPS in 1.910954 seconds, throughput 1046597.667971
+425168	[1728018830]	2000000 OPS in 1.887097 seconds, throughput 1059828.933012
+425168	[1728018830]	2000000 OPS in 1.905046 seconds, throughput 1049843.415855
+425168	[1728018831]	2000000 OPS in 1.893042 seconds, throughput 1056500.595338
+425168	[1728018832]	2000000 OPS in 1.891685 seconds, throughput 1057258.475909
+425168	[1728018832]	2000000 OPS in 1.883112 seconds, throughput 1062071.719579
+425168	[1728018832]	2000000 OPS in 1.893929 seconds, throughput 1056005.795360
+425168	[1728018833]	2000000 OPS in 1.846289 seconds, throughput 1083254.030111
+425168	[1728018834]	2000000 OPS in 1.844322 seconds, throughput 1084409.338499
+425168	[1728018834]	2000000 OPS in 1.844181 seconds, throughput 1084492.248863
+425168	[1728018834]	2000000 OPS in 1.885291 seconds, throughput 1060844.187979
+425168	[1728018834]	2000000 OPS in 1.868143 seconds, throughput 1070581.855886
+425168	[1728018836]	2000000 OPS in 1.871950 seconds, throughput 1068404.604824
+425168	[1728018836]	2000000 OPS in 1.883738 seconds, throughput 1061718.774055
+425168	[1728018836]	2000000 OPS in 1.885690 seconds, throughput 1060619.720102
+425168	[1728018836]	2000000 OPS in 1.875129 seconds, throughput 1066593.285049
+425168	[1728018838]	2000000 OPS in 1.883255 seconds, throughput 1061991.073965
+425168	[1728018838]	2000000 OPS in 1.865251 seconds, throughput 1072241.751914
+425168	[1728018838]	2000000 OPS in 1.899516 seconds, throughput 1052899.791315
+425168	[1728018838]	2000000 OPS in 1.893422 seconds, throughput 1056288.561134
+425168	[1728018839]	2000000 OPS in 1.880875 seconds, throughput 1063334.884030
+425168	[1728018839]	2000000 OPS in 1.890140 seconds, throughput 1058122.678743
+425168	[1728018840]	2000000 OPS in 1.929827 seconds, throughput 1036362.326779
+425168	[1728018840]	2000000 OPS in 1.883567 seconds, throughput 1061815.162402
+425168	[1728018841]	2000000 OPS in 1.839153 seconds, throughput 1087457.106614
+425168	[1728018841]	2000000 OPS in 1.831780 seconds, throughput 1091834.172226
+425168	[1728018842]	2000000 OPS in 1.884269 seconds, throughput 1061419.574381
+425168	[1728018842]	2000000 OPS in 1.843918 seconds, throughput 1084646.931154
+425168	[1728018843]	2000000 OPS in 1.855026 seconds, throughput 1078152.004338
+425168	[1728018843]	2000000 OPS in 1.884527 seconds, throughput 1061274.261393
+425168	[1728018843]	2000000 OPS in 1.903728 seconds, throughput 1050570.249531
+425168	[1728018844]	2000000 OPS in 1.904680 seconds, throughput 1050045.151942
+425168	[1728018845]	2000000 OPS in 1.888273 seconds, throughput 1059168.880771
+425168	[1728018845]	2000000 OPS in 1.903586 seconds, throughput 1050648.617924
+425168	[1728018845]	2000000 OPS in 1.907449 seconds, throughput 1048520.825459
+425168	[1728018846]	2000000 OPS in 1.861473 seconds, throughput 1074417.947507
+425168	[1728018847]	2000000 OPS in 1.839706 seconds, throughput 1087130.226243
+425168	[1728018847]	2000000 OPS in 1.834318 seconds, throughput 1090323.488076
+425168	[1728018847]	2000000 OPS in 1.885975 seconds, throughput 1060459.444054
+425168	[1728018848]	2000000 OPS in 1.860570 seconds, throughput 1074939.400291
+425168	[1728018849]	2000000 OPS in 1.890596 seconds, throughput 1057867.466132
+425168	[1728018849]	2000000 OPS in 1.892167 seconds, throughput 1056989.155820
+425168	[1728018849]	2000000 OPS in 1.910050 seconds, throughput 1047093.008036
+425168	[1728018849]	2000000 OPS in 1.855095 seconds, throughput 1078111.902625
+425168	[1728018851]	2000000 OPS in 1.925646 seconds, throughput 1038612.496793
+425168	[1728018851]	2000000 OPS in 1.912812 seconds, throughput 1045581.060763
+425168	[1728018851]	2000000 OPS in 1.942030 seconds, throughput 1029850.208287
+425168	[1728018851]	2000000 OPS in 1.877388 seconds, throughput 1065309.887993
+425168	[1728018853]	2000000 OPS in 1.869001 seconds, throughput 1070090.385184
+425168	[1728018853]	2000000 OPS in 1.869448 seconds, throughput 1069834.517997
+425168	[1728018853]	2000000 OPS in 1.882166 seconds, throughput 1062605.530012
+425168	[1728018853]	2000000 OPS in 1.846816 seconds, throughput 1082944.917090
+425168	[1728018854]	2000000 OPS in 1.861844 seconds, throughput 1074203.853814
+425168	[1728018854]	2000000 OPS in 1.845212 seconds, throughput 1083886.295992
+425168	[1728018855]	2000000 OPS in 1.893474 seconds, throughput 1056259.552547
+425168	[1728018855]	2000000 OPS in 1.858832 seconds, throughput 1075944.464051
+425168	[1728018856]	2000000 OPS in 1.836185 seconds, throughput 1089214.866694
+425168	[1728018856]	2000000 OPS in 1.850019 seconds, throughput 1081069.978200
+425168	[1728018857]	2000000 OPS in 1.872211 seconds, throughput 1068255.661354
+425168	[1728018857]	2000000 OPS in 1.853444 seconds, throughput 1079072.256836
+425168	[1728018858]	2000000 OPS in 1.903045 seconds, throughput 1050947.297620
+425168	[1728018858]	2000000 OPS in 1.900116 seconds, throughput 1052567.316943
+425168	[1728018859]	2000000 OPS in 1.909560 seconds, throughput 1047361.695888
+425168	[1728018859]	2000000 OPS in 1.916093 seconds, throughput 1043790.671956
+425168	[1728018860]	2000000 OPS in 1.854945 seconds, throughput 1078199.084070
+425168	[1728018860]	2000000 OPS in 1.844617 seconds, throughput 1084235.914556
+425168	[1728018861]	2000000 OPS in 1.871925 seconds, throughput 1068418.873619
+425168	[1728018861]	2000000 OPS in 1.873234 seconds, throughput 1067672.271590
+425168	[1728018862]	2000000 OPS in 1.875549 seconds, throughput 1066354.438087
+425168	[1728018862]	2000000 OPS in 1.879901 seconds, throughput 1063885.811008
+425168	[1728018862]	2000000 OPS in 1.880348 seconds, throughput 1063632.901995
+425168	[1728018863]	2000000 OPS in 1.867297 seconds, throughput 1071066.895090
+425168	[1728018864]	2000000 OPS in 1.881824 seconds, throughput 1062798.646420
+425168	[1728018864]	2000000 OPS in 1.874440 seconds, throughput 1066985.339621
+425168	[1728018864]	2000000 OPS in 1.885984 seconds, throughput 1060454.383494
+425168	[1728018864]	2000000 OPS in 1.867831 seconds, throughput 1070760.684452
+425168	[1728018866]	2000000 OPS in 1.837091 seconds, throughput 1088677.697512
+425168	[1728018866]	2000000 OPS in 1.838547 seconds, throughput 1087815.541294
+425168	[1728018866]	2000000 OPS in 1.876594 seconds, throughput 1065760.628031
+425168	[1728018866]	2000000 OPS in 1.847899 seconds, throughput 1082310.234488
+425168	[1728018867]	2000000 OPS in 1.859926 seconds, throughput 1075311.598418
+425168	[1728018868]	2000000 OPS in 1.850858 seconds, throughput 1080579.925634
+425168	[1728018868]	2000000 OPS in 1.911651 seconds, throughput 1046216.071867
+425168	[1728018868]	2000000 OPS in 1.968380 seconds, throughput 1016063.971388
+425168	[1728018869]	2000000 OPS in 1.866094 seconds, throughput 1071757.371279
+425168	[1728018869]	2000000 OPS in 1.871883 seconds, throughput 1068442.846054
+425168	[1728018870]	2000000 OPS in 1.852608 seconds, throughput 1079559.194390
+425168	[1728018870]	2000000 OPS in 1.866532 seconds, throughput 1071505.872924
+425168	[1728018871]	2000000 OPS in 1.835024 seconds, throughput 1089904.001256
+425168	[1728018871]	2000000 OPS in 1.870308 seconds, throughput 1069342.589563
+425168	[1728018872]	2000000 OPS in 1.835399 seconds, throughput 1089681.317250
+425168	[1728018872]	2000000 OPS in 1.860666 seconds, throughput 1074883.939407
+425168	[1728018873]	2000000 OPS in 1.855492 seconds, throughput 1077881.230423
+425168	[1728018873]	2000000 OPS in 1.878857 seconds, throughput 1064476.966581
+425168	[1728018874]	2000000 OPS in 1.886567 seconds, throughput 1060126.674536
+425168	[1728018874]	2000000 OPS in 1.893144 seconds, throughput 1056443.672536
+425168	[1728018875]	2000000 OPS in 1.866152 seconds, throughput 1071724.061063
+425168	[1728018875]	2000000 OPS in 1.842572 seconds, throughput 1085439.266417
+425168	[1728018876]	2000000 OPS in 1.854418 seconds, throughput 1078505.493368
+425168	[1728018876]	2000000 OPS in 1.879424 seconds, throughput 1064155.826466
+425168	[1728018877]	2000000 OPS in 1.904942 seconds, throughput 1049900.731886
+425168	[1728018877]	2000000 OPS in 1.916281 seconds, throughput 1043688.269100
+425168	[1728018877]	2000000 OPS in 1.863003 seconds, throughput 1073535.576701
+425168	[1728018878]	2000000 OPS in 1.876810 seconds, throughput 1065637.970812
+425168	[1728018879]	2000000 OPS in 1.861148 seconds, throughput 1074605.566027
+425168	[1728018879]	2000000 OPS in 1.851076 seconds, throughput 1080452.666449
+425168	[1728018879]	2000000 OPS in 1.856859 seconds, throughput 1077087.705636
+425168	[1728018879]	2000000 OPS in 1.894649 seconds, throughput 1055604.494553
+425168	[1728018881]	2000000 OPS in 1.897027 seconds, throughput 1054281.251664
+425168	[1728018881]	2000000 OPS in 1.930785 seconds, throughput 1035848.113591
+425168	[1728018881]	2000000 OPS in 1.894320 seconds, throughput 1055787.828878
+425168	[1728018881]	2000000 OPS in 1.919952 seconds, throughput 1041692.708984
+425168	[1728018882]	2000000 OPS in 1.842570 seconds, throughput 1085440.444596
+425168	[1728018882]	2000000 OPS in 1.844336 seconds, throughput 1084401.106957
+425168	[1728018883]	2000000 OPS in 1.896343 seconds, throughput 1054661.524840
+425168	[1728018883]	2000000 OPS in 1.894763 seconds, throughput 1055540.983226
+425168	[1728018884]	2000000 OPS in 1.860144 seconds, throughput 1075185.577031
+425168	[1728018884]	2000000 OPS in 1.876099 seconds, throughput 1066041.824019
+425168	[1728018885]	2000000 OPS in 1.832743 seconds, throughput 1091260.476783
+425168	[1728018885]	2000000 OPS in 1.858026 seconds, throughput 1076411.201996
+425168	[1728018886]	2000000 OPS in 1.887691 seconds, throughput 1059495.436488
+425168	[1728018886]	2000000 OPS in 1.886002 seconds, throughput 1060444.262519
+425168	[1728018887]	2000000 OPS in 1.896204 seconds, throughput 1054738.836117
+425168	[1728018887]	2000000 OPS in 1.951396 seconds, throughput 1024907.297135
+425168	[1728018888]	2000000 OPS in 1.832599 seconds, throughput 1091346.224679
+425168	[1728018888]	2000000 OPS in 1.838687 seconds, throughput 1087732.713616
+425168	[1728018889]	2000000 OPS in 1.830601 seconds, throughput 1092537.368875
+425168	[1728018889]	2000000 OPS in 1.858815 seconds, throughput 1075954.304221
+425168	[1728018890]	2000000 OPS in 1.889135 seconds, throughput 1058685.588907
+425168	[1728018890]	2000000 OPS in 1.868433 seconds, throughput 1070415.690581
+425168	[1728018891]	2000000 OPS in 1.899465 seconds, throughput 1052928.061323
+425168	[1728018891]	2000000 OPS in 1.911661 seconds, throughput 1046210.599055
+425168	[1728018892]	2000000 OPS in 1.870071 seconds, throughput 1069478.110724
+425168	[1728018892]	2000000 OPS in 1.879481 seconds, throughput 1064123.553258
+425168	[1728018892]	2000000 OPS in 1.889251 seconds, throughput 1058620.585618
+425168	[1728018893]	2000000 OPS in 1.907920 seconds, throughput 1048261.981634
+425168	[1728018894]	2000000 OPS in 1.868435 seconds, throughput 1070414.544793
+425168	[1728018894]	2000000 OPS in 1.892728 seconds, throughput 1056675.866791
+425168	[1728018894]	2000000 OPS in 1.875482 seconds, throughput 1066392.532693
+425168	[1728018895]	2000000 OPS in 1.903573 seconds, throughput 1050655.793080
+425168	[1728018895]	2000000 OPS in 1.849630 seconds, throughput 1081297.340549
+425168	[1728018896]	2000000 OPS in 1.847219 seconds, throughput 1082708.655552
+425168	[1728018896]	2000000 OPS in 1.849517 seconds, throughput 1081363.404608
+425168	[1728018897]	2000000 OPS in 1.920187 seconds, throughput 1041565.222554
+425168	[1728018897]	2000000 OPS in 1.861522 seconds, throughput 1074389.666090
+425168	[1728018897]	2000000 OPS in 1.863306 seconds, throughput 1073361.004580
+425168	[1728018898]	2000000 OPS in 1.877790 seconds, throughput 1065081.824911
+425168	[1728018898]	2000000 OPS in 1.872846 seconds, throughput 1067893.462677
+425168	[1728018899]	2000000 OPS in 1.875375 seconds, throughput 1066453.375991
+425168	[1728018899]	2000000 OPS in 1.854201 seconds, throughput 1078631.712527
+425168	[1728018900]	2000000 OPS in 1.858123 seconds, throughput 1076355.009867
+425168	[1728018900]	2000000 OPS in 1.893399 seconds, throughput 1056301.392364
+425168	[1728018901]	2000000 OPS in 1.896223 seconds, throughput 1054728.267720
+425168	[1728018901]	2000000 OPS in 1.919604 seconds, throughput 1041881.554737
+425168	[1728018902]	2000000 OPS in 1.873720 seconds, throughput 1067395.341887
+425168	[1728018902]	2000000 OPS in 1.902835 seconds, throughput 1051063.281893
+425168	[1728018903]	2000000 OPS in 1.876967 seconds, throughput 1065548.834902
+425168	[1728018903]	2000000 OPS in 1.875182 seconds, throughput 1066563.138938
+425168	[1728018904]	2000000 OPS in 1.901869 seconds, throughput 1051597.139445
+425168	[1728018904]	2000000 OPS in 1.926646 seconds, throughput 1038073.418781
+425168	[1728018905]	2000000 OPS in 1.895620 seconds, throughput 1055063.778605
+425168	[1728018905]	2000000 OPS in 1.902113 seconds, throughput 1051462.242254
+425168	[1728018906]	2000000 OPS in 1.899805 seconds, throughput 1052739.623277
+425168	[1728018906]	2000000 OPS in 1.892970 seconds, throughput 1056540.779833
+425168	[1728018907]	2000000 OPS in 1.882937 seconds, throughput 1062170.428432
+425168	[1728018907]	2000000 OPS in 1.880195 seconds, throughput 1063719.454631
+425168	[1728018907]	2000000 OPS in 1.884360 seconds, throughput 1061368.316033
+425168	[1728018908]	2000000 OPS in 1.868082 seconds, throughput 1070616.814465
+425168	[1728018909]	2000000 OPS in 1.828435 seconds, throughput 1093831.610093
+425168	[1728018909]	2000000 OPS in 1.831515 seconds, throughput 1091992.148576
+425168	[1728018909]	2000000 OPS in 1.829818 seconds, throughput 1093004.878081
+425168	[1728018910]	2000000 OPS in 1.862499 seconds, throughput 1073826.079907
+425168	[1728018910]	2000000 OPS in 1.847324 seconds, throughput 1082647.115503
+425168	[1728018911]	2000000 OPS in 1.848870 seconds, throughput 1081741.820680
+425168	[1728018911]	2000000 OPS in 1.864634 seconds, throughput 1072596.552460
+425168	[1728018912]	2000000 OPS in 1.882990 seconds, throughput 1062140.531814
+425168	[1728018912]	2000000 OPS in 1.828966 seconds, throughput 1093514.040174
+425168	[1728018912]	2000000 OPS in 1.823008 seconds, throughput 1097087.889905
+425168	[1728018913]	2000000 OPS in 1.844827 seconds, throughput 1084112.494017
+425168	[1728018914]	2000000 OPS in 1.875176 seconds, throughput 1066566.551620
+425168	[1728018914]	2000000 OPS in 1.864361 seconds, throughput 1072753.613705
+425168	[1728018914]	2000000 OPS in 1.845740 seconds, throughput 1083576.235006
+425168	[1728018915]	2000000 OPS in 1.858123 seconds, throughput 1076355.009867
+425168	[1728018915]	2000000 OPS in 1.903988 seconds, throughput 1050426.788404
+425168	[1728018916]	2000000 OPS in 1.931473 seconds, throughput 1035479.139496
+425168	[1728018916]	2000000 OPS in 1.891466 seconds, throughput 1057380.888686
+425168	[1728018917]	2000000 OPS in 1.874365 seconds, throughput 1067028.033494
+425168	[1728018917]	2000000 OPS in 1.943081 seconds, throughput 1029293.168941
+425168	[1728018918]	2000000 OPS in 1.888276 seconds, throughput 1059167.198016
+425168	[1728018918]	2000000 OPS in 1.884289 seconds, throughput 1061408.308386
+425168	[1728018919]	2000000 OPS in 1.915551 seconds, throughput 1044086.009717
+425168	[1728018919]	2000000 OPS in 1.957770 seconds, throughput 1021570.460269
+425168	[1728018920]	2000000 OPS in 1.881768 seconds, throughput 1062830.274508
+425168	[1728018920]	2000000 OPS in 1.879957 seconds, throughput 1063854.120068
+425168	[1728018921]	2000000 OPS in 1.853772 seconds, throughput 1078881.329527
+425168	[1728018921]	2000000 OPS in 1.860301 seconds, throughput 1075094.836803
+425168	[1728018922]	2000000 OPS in 1.836819 seconds, throughput 1088838.911183
+425168	[1728018922]	2000000 OPS in 1.854234 seconds, throughput 1078612.516004
+425168	[1728018922]	2000000 OPS in 1.871436 seconds, throughput 1068698.047916
+425168	[1728018923]	2000000 OPS in 1.923944 seconds, throughput 1039531.296129
+425168	[1728018924]	2000000 OPS in 1.884588 seconds, throughput 1061239.910262
+425168	[1728018924]	2000000 OPS in 1.907360 seconds, throughput 1048569.750860
+425168	[1728018924]	2000000 OPS in 1.898168 seconds, throughput 1053647.516974
+425168	[1728018925]	2000000 OPS in 1.870896 seconds, throughput 1069006.508112
+425168	[1728018925]	2000000 OPS in 1.861074 seconds, throughput 1074648.294479
+425168	[1728018925]	2000000 OPS in 1.872512 seconds, throughput 1068083.942853
+425168	[1728018926]	2000000 OPS in 1.867442 seconds, throughput 1070983.730686
+425168	[1728018927]	2000000 OPS in 1.901024 seconds, throughput 1052064.571515
+425168	[1728018927]	2000000 OPS in 1.878916 seconds, throughput 1064443.540850
+425168	[1728018927]	2000000 OPS in 1.908016 seconds, throughput 1048209.239336
+425168	[1728018928]	2000000 OPS in 1.889603 seconds, throughput 1058423.383113
+425168	[1728018929]	2000000 OPS in 1.952902 seconds, throughput 1024116.929575
+425168	[1728018929]	2000000 OPS in 1.899750 seconds, throughput 1052770.101329
+425168	[1728018929]	2000000 OPS in 1.897106 seconds, throughput 1054237.348888
+425168	[1728018930]	2000000 OPS in 1.908691 seconds, throughput 1047838.544846
+425168	[1728018931]	2000000 OPS in 1.909574 seconds, throughput 1047354.017179
+425168	[1728018931]	2000000 OPS in 1.841265 seconds, throughput 1086209.752534
+425168	[1728018931]	2000000 OPS in 1.865527 seconds, throughput 1072083.116460
+425168	[1728018932]	2000000 OPS in 1.879305 seconds, throughput 1064223.210176
+425168	[1728018933]	2000000 OPS in 1.900415 seconds, throughput 1052401.712258
+425168	[1728018933]	2000000 OPS in 1.887376 seconds, throughput 1059672.264562
+425168	[1728018933]	2000000 OPS in 1.876358 seconds, throughput 1065894.674684
+425168	[1728018934]	2000000 OPS in 1.881495 seconds, throughput 1062984.488399
+425168	[1728018935]	2000000 OPS in 1.884966 seconds, throughput 1061027.095449
+425168	[1728018935]	2000000 OPS in 1.890137 seconds, throughput 1058124.358181
+425168	[1728018935]	2000000 OPS in 1.876365 seconds, throughput 1065890.698238
+425168	[1728018936]	2000000 OPS in 1.864718 seconds, throughput 1072548.235176
+425168	[1728018936]	2000000 OPS in 1.884001 seconds, throughput 1061570.561799
+425168	[1728018937]	2000000 OPS in 1.853294 seconds, throughput 1079159.593675
+425168	[1728018937]	2000000 OPS in 1.866971 seconds, throughput 1071253.918781
+425168	[1728018937]	2000000 OPS in 1.829751 seconds, throughput 1093044.900645
+425168	[1728018938]	2000000 OPS in 1.853894 seconds, throughput 1078810.331119
+425168	[1728018939]	2000000 OPS in 1.827714 seconds, throughput 1094263.106810
+425168	[1728018939]	2000000 OPS in 1.823474 seconds, throughput 1096807.522345
+425168	[1728018939]	2000000 OPS in 1.838754 seconds, throughput 1087693.079118
+425168	[1728018940]	2000000 OPS in 1.864467 seconds, throughput 1072692.624755
+425168	[1728018940]	2000000 OPS in 1.851285 seconds, throughput 1080330.689224
+425168	[1728018940]	2000000 OPS in 1.863592 seconds, throughput 1073196.279014
+425168	[1728018941]	2000000 OPS in 1.849114 seconds, throughput 1081599.079343
+425168	[1728018942]	2000000 OPS in 1.856615 seconds, throughput 1077229.258624
+425168	[1728018942]	2000000 OPS in 1.825351 seconds, throughput 1095679.680237
+425168	[1728018942]	2000000 OPS in 1.841869 seconds, throughput 1085853.554189
+425168	[1728018943]	2000000 OPS in 1.870429 seconds, throughput 1069273.412677
+425168	[1728018944]	2000000 OPS in 1.948200 seconds, throughput 1026588.645930
+425168	[1728018944]	2000000 OPS in 1.906067 seconds, throughput 1049281.058851
+425168	[1728018944]	2000000 OPS in 1.889234 seconds, throughput 1058630.111463
+425168	[1728018945]	2000000 OPS in 1.914292 seconds, throughput 1044772.688806
+425168	[1728018946]	2000000 OPS in 1.913132 seconds, throughput 1045406.171660
+425168	[1728018946]	2000000 OPS in 1.903489 seconds, throughput 1050702.157985
+425168	[1728018946]	2000000 OPS in 1.895214 seconds, throughput 1055289.798408
+425168	[1728018947]	2000000 OPS in 1.891287 seconds, throughput 1057480.964021
+425168	[1728018948]	2000000 OPS in 1.915938 seconds, throughput 1043875.114957
+425168	[1728018948]	2000000 OPS in 1.854660 seconds, throughput 1078364.767666
+425168	[1728018948]	2000000 OPS in 1.845989 seconds, throughput 1083430.074610
+425168	[1728018949]	2000000 OPS in 1.840937 seconds, throughput 1086403.282676
+425168	[1728018950]	2000000 OPS in 2.005521 seconds, throughput 997247.099382
+425168	[1728018950]	2000000 OPS in 1.940708 seconds, throughput 1030551.736789
+425168	[1728018950]	2000000 OPS in 1.961401 seconds, throughput 1019679.300663
+425168	[1728018951]	2000000 OPS in 1.926092 seconds, throughput 1038371.998845
+425168	[1728018952]	2000000 OPS in 1.900159 seconds, throughput 1052543.497676
+425168	[1728018952]	2000000 OPS in 1.873447 seconds, throughput 1067550.883478
+425168	[1728018952]	2000000 OPS in 1.888842 seconds, throughput 1058849.813801
+425168	[1728018952]	2000000 OPS in 1.934884 seconds, throughput 1033653.697069
+425168	[1728018954]	2000000 OPS in 1.920225 seconds, throughput 1041544.610658
+425168	[1728018954]	2000000 OPS in 1.964538 seconds, throughput 1018051.063405
+425168	[1728018954]	2000000 OPS in 1.982778 seconds, throughput 1008685.793367
+425168	[1728018954]	2000000 OPS in 1.865935 seconds, throughput 1071848.697838
+425168	[1728018956]	2000000 OPS in 1.829009 seconds, throughput 1093488.331659
+425168	[1728018956]	2000000 OPS in 1.840481 seconds, throughput 1086672.451386
+425168	[1728018956]	2000000 OPS in 1.867198 seconds, throughput 1071123.683723
+425168	[1728018956]	2000000 OPS in 1.842279 seconds, throughput 1085611.897004
+425168	[1728018957]	2000000 OPS in 1.839405 seconds, throughput 1087308.124094
+425168	[1728018957]	2000000 OPS in 1.845816 seconds, throughput 1083531.619620
+425168	[1728018957]	2000000 OPS in 1.855898 seconds, throughput 1077645.430945
+425168	[1728018958]	2000000 OPS in 1.829945 seconds, throughput 1092929.022457
+425168	[1728018959]	2000000 OPS in 1.827054 seconds, throughput 1094658.395428
+425168	[1728018959]	2000000 OPS in 1.832830 seconds, throughput 1091208.677291
+425168	[1728018959]	2000000 OPS in 1.855283 seconds, throughput 1078002.655121
+425168	[1728018960]	2000000 OPS in 1.842588 seconds, throughput 1085429.841071
+425168	[1728018961]	2000000 OPS in 1.880512 seconds, throughput 1063540.142259
+425168	[1728018961]	2000000 OPS in 1.894023 seconds, throughput 1055953.385994
+425168	[1728018961]	2000000 OPS in 1.905668 seconds, throughput 1049500.752492
+425168	[1728018962]	2000000 OPS in 1.895574 seconds, throughput 1055089.381897
+425168	[1728018963]	2000000 OPS in 1.846723 seconds, throughput 1082999.453627
+425168	[1728018963]	2000000 OPS in 1.849343 seconds, throughput 1081465.147352
+425168	[1728018963]	2000000 OPS in 1.884607 seconds, throughput 1061229.211183
+425168	[1728018964]	2000000 OPS in 1.830053 seconds, throughput 1092864.523596
+425168	[1728018965]	2000000 OPS in 1.839779 seconds, throughput 1087087.090352
+425168	[1728018965]	2000000 OPS in 1.838686 seconds, throughput 1087733.305197
+425168	[1728018965]	2000000 OPS in 1.869674 seconds, throughput 1069705.199944
+425168	[1728018965]	2000000 OPS in 1.841860 seconds, throughput 1085858.860065
+425168	[1728018967]	2000000 OPS in 1.885274 seconds, throughput 1060853.753884
+425168	[1728018967]	2000000 OPS in 1.896169 seconds, throughput 1054758.304771
+425168	[1728018967]	2000000 OPS in 1.900549 seconds, throughput 1052327.511682
+425168	[1728018967]	2000000 OPS in 1.919502 seconds, throughput 1041936.919055
+425168	[1728018969]	2000000 OPS in 1.883912 seconds, throughput 1061620.712645
+425168	[1728018969]	2000000 OPS in 1.930047 seconds, throughput 1036244.195090
+425168	[1728018969]	2000000 OPS in 1.919097 seconds, throughput 1042156.806040
+425168	[1728018969]	2000000 OPS in 1.868577 seconds, throughput 1070333.200077
+425168	[1728018970]	2000000 OPS in 1.849125 seconds, throughput 1081592.645170
+425168	[1728018970]	2000000 OPS in 1.849344 seconds, throughput 1081464.562569
+425168	[1728018971]	2000000 OPS in 1.861861 seconds, throughput 1074194.045635
+425168	[1728018971]	2000000 OPS in 1.850121 seconds, throughput 1081010.377159
+425168	[1728018972]	2000000 OPS in 1.849025 seconds, throughput 1081651.140466
+425168	[1728018972]	2000000 OPS in 1.849153 seconds, throughput 1081576.267621
+425168	[1728018972]	2000000 OPS in 1.880628 seconds, throughput 1063474.541483
+425168	[1728018973]	2000000 OPS in 1.849152 seconds, throughput 1081576.852525
+425168	[1728018974]	2000000 OPS in 1.827653 seconds, throughput 1094299.629087
+425168	[1728018974]	2000000 OPS in 1.832196 seconds, throughput 1091586.271338
+425168	[1728018974]	2000000 OPS in 1.852500 seconds, throughput 1079622.132254
+425168	[1728018975]	2000000 OPS in 1.830731 seconds, throughput 1092459.787921
+425168	[1728018976]	2000000 OPS in 1.837399 seconds, throughput 1088495.204362
+425168	[1728018976]	2000000 OPS in 1.843539 seconds, throughput 1084869.915961
+425168	[1728018976]	2000000 OPS in 1.865622 seconds, throughput 1072028.524535
+425168	[1728018977]	2000000 OPS in 1.842586 seconds, throughput 1085431.019231
+425168	[1728018978]	2000000 OPS in 1.869864 seconds, throughput 1069596.505414
+425168	[1728018978]	2000000 OPS in 1.885792 seconds, throughput 1060562.352582
+425168	[1728018978]	2000000 OPS in 1.943414 seconds, throughput 1029116.801670
+425168	[1728018978]	2000000 OPS in 1.910385 seconds, throughput 1046909.392609
+425168	[1728018980]	2000000 OPS in 1.870997 seconds, throughput 1068948.801094
+425168	[1728018980]	2000000 OPS in 1.854977 seconds, throughput 1078180.484179
+425168	[1728018980]	2000000 OPS in 1.905107 seconds, throughput 1049809.800709
+425168	[1728018980]	2000000 OPS in 1.886812 seconds, throughput 1059989.018514
+425168	[1728018982]	2000000 OPS in 1.916191 seconds, throughput 1043737.289237
+425168	[1728018982]	2000000 OPS in 1.892481 seconds, throughput 1056813.780429
+425168	[1728018982]	2000000 OPS in 1.915646 seconds, throughput 1044034.231794
+425168	[1728018982]	2000000 OPS in 1.873890 seconds, throughput 1067298.507383
+425168	[1728018983]	2000000 OPS in 1.876300 seconds, throughput 1065927.623514
+425168	[1728018984]	2000000 OPS in 1.892367 seconds, throughput 1056877.445020
+425168	[1728018984]	2000000 OPS in 1.925593 seconds, throughput 1038641.083552
+425168	[1728018984]	2000000 OPS in 1.891706 seconds, throughput 1057246.739187
+425168	[1728018985]	2000000 OPS in 1.912292 seconds, throughput 1045865.380392
+425168	[1728018985]	2000000 OPS in 1.880137 seconds, throughput 1063752.269117
+425168	[1728018986]	2000000 OPS in 1.919465 seconds, throughput 1041957.003644
+425168	[1728018986]	2000000 OPS in 1.900149 seconds, throughput 1052549.036944
+425168	[1728018987]	2000000 OPS in 1.885003 seconds, throughput 1061006.268956
+425168	[1728018987]	2000000 OPS in 1.910681 seconds, throughput 1046747.206886
+425168	[1728018988]	2000000 OPS in 1.887362 seconds, throughput 1059680.124957
+425168	[1728018988]	2000000 OPS in 1.862858 seconds, throughput 1073619.137905
+425168	[1728018989]	2000000 OPS in 1.846069 seconds, throughput 1083383.123816
+425168	[1728018989]	2000000 OPS in 1.853543 seconds, throughput 1079014.622267
+425168	[1728018990]	2000000 OPS in 1.854927 seconds, throughput 1078209.546791
+425168	[1728018990]	2000000 OPS in 1.858937 seconds, throughput 1075883.690518
+425168	[1728018991]	2000000 OPS in 1.887505 seconds, throughput 1059599.842120
+425168	[1728018991]	2000000 OPS in 1.876634 seconds, throughput 1065737.911601
+425168	[1728018991]	2000000 OPS in 1.879223 seconds, throughput 1064269.647615
+425168	[1728018992]	2000000 OPS in 1.856723 seconds, throughput 1077166.599434
+425168	[1728018993]	2000000 OPS in 1.856963 seconds, throughput 1077027.382883
+425168	[1728018993]	2000000 OPS in 1.845493 seconds, throughput 1083721.260390
+425168	[1728018993]	2000000 OPS in 1.861205 seconds, throughput 1074572.655887
+425168	[1728018993]	2000000 OPS in 1.856274 seconds, throughput 1077427.147070
+425168	[1728018995]	2000000 OPS in 1.855404 seconds, throughput 1077932.353277
+425168	[1728018995]	2000000 OPS in 1.865486 seconds, throughput 1072106.678903
+425168	[1728018995]	2000000 OPS in 1.933469 seconds, throughput 1034410.171562
+425168	[1728018995]	2000000 OPS in 1.914232 seconds, throughput 1044805.436332
+425168	[1728018997]	2000000 OPS in 1.917541 seconds, throughput 1043002.470351
+425168	[1728018997]	2000000 OPS in 1.915087 seconds, throughput 1044338.977811
+425168	[1728018997]	2000000 OPS in 1.910781 seconds, throughput 1046692.425767
+425168	[1728018997]	2000000 OPS in 1.894300 seconds, throughput 1055798.975875
+425168	[1728018998]	2000000 OPS in 1.869385 seconds, throughput 1069870.572408
+425168	[1728018999]	2000000 OPS in 1.897616 seconds, throughput 1053954.013878
+425168	[1728018999]	2000000 OPS in 1.929730 seconds, throughput 1036414.420670
+425168	[1728018999]	2000000 OPS in 1.914591 seconds, throughput 1044609.527570
+425168	[1728019000]	2000000 OPS in 1.868866 seconds, throughput 1070167.684574
+425168	[1728019000]	2000000 OPS in 1.887314 seconds, throughput 1059707.075770
+425168	[1728019001]	2000000 OPS in 1.869122 seconds, throughput 1070021.111517
+425168	[1728019001]	2000000 OPS in 1.830349 seconds, throughput 1092687.787957
+425168	[1728019002]	2000000 OPS in 1.844743 seconds, throughput 1084161.858861
+425168	[1728019002]	2000000 OPS in 1.854389 seconds, throughput 1078522.359656
+425168	[1728019003]	2000000 OPS in 1.867519 seconds, throughput 1070939.572770
+425168	[1728019003]	2000000 OPS in 1.838555 seconds, throughput 1087810.807944
+425168	[1728019004]	2000000 OPS in 1.844611 seconds, throughput 1084239.441270
+425168	[1728019004]	2000000 OPS in 1.855049 seconds, throughput 1078138.636769
+425168	[1728019005]	2000000 OPS in 1.885882 seconds, throughput 1060511.739335
+425168	[1728019005]	2000000 OPS in 1.859594 seconds, throughput 1075503.577663
+425168	[1728019006]	2000000 OPS in 1.884290 seconds, throughput 1061407.745092
+425168	[1728019006]	2000000 OPS in 1.908048 seconds, throughput 1048191.659749
+425168	[1728019007]	2000000 OPS in 1.895613 seconds, throughput 1055067.674678
+425168	[1728019007]	2000000 OPS in 1.931197 seconds, throughput 1035627.126596
+425168	[1728019008]	2000000 OPS in 1.835595 seconds, throughput 1089564.963949
+425168	[1728019008]	2000000 OPS in 1.844875 seconds, throughput 1084084.287553
+425168	[1728019008]	2000000 OPS in 1.862266 seconds, throughput 1073960.433150
+425168	[1728019009]	2000000 OPS in 1.896160 seconds, throughput 1054763.311113
+425168	[1728019010]	2000000 OPS in 1.877755 seconds, throughput 1065101.677269
+425168	[1728019010]	2000000 OPS in 1.884991 seconds, throughput 1061013.023404
+425168	[1728019010]	2000000 OPS in 1.900660 seconds, throughput 1052266.054949
+425168	[1728019010]	2000000 OPS in 1.905107 seconds, throughput 1049809.800709
+425168	[1728019011]	2000000 OPS in 1.906352 seconds, throughput 1049124.191125
+425168	[1728019012]	2000000 OPS in 1.870894 seconds, throughput 1069007.650888
+425168	[1728019012]	2000000 OPS in 1.883435 seconds, throughput 1061889.579412
+425168	[1728019012]	2000000 OPS in 1.890550 seconds, throughput 1057893.205681
+425168	[1728019013]	2000000 OPS in 1.858990 seconds, throughput 1075853.016961
+425168	[1728019014]	2000000 OPS in 1.860584 seconds, throughput 1074931.311889
+425168	[1728019014]	2000000 OPS in 1.859613 seconds, throughput 1075492.589049
+425168	[1728019014]	2000000 OPS in 1.884160 seconds, throughput 1061480.978261
+425168	[1728019015]	2000000 OPS in 1.840703 seconds, throughput 1086541.392066
+425168	[1728019015]	2000000 OPS in 1.864512 seconds, throughput 1072666.735317
+425168	[1728019016]	2000000 OPS in 1.902219 seconds, throughput 1051403.650158
+425168	[1728019016]	2000000 OPS in 1.930252 seconds, throughput 1036134.142071
+425168	[1728019017]	2000000 OPS in 1.890593 seconds, throughput 1057869.144760
+425168	[1728019017]	2000000 OPS in 1.873342 seconds, throughput 1067610.719239
+425168	[1728019018]	2000000 OPS in 1.845810 seconds, throughput 1083535.141753
+425168	[1728019018]	2000000 OPS in 1.877342 seconds, throughput 1065335.990992
+425168	[1728019019]	2000000 OPS in 1.850406 seconds, throughput 1080843.879667
+425168	[1728019019]	2000000 OPS in 1.857201 seconds, throughput 1076889.362002
+425168	[1728019020]	2000000 OPS in 1.895079 seconds, throughput 1055364.974231
+425168	[1728019020]	2000000 OPS in 1.935616 seconds, throughput 1033262.795926
+425168	[1728019021]	2000000 OPS in 1.872039 seconds, throughput 1068353.811005
+425168	[1728019021]	2000000 OPS in 1.878806 seconds, throughput 1064505.861702
+425168	[1728019022]	2000000 OPS in 1.847772 seconds, throughput 1082384.623211
+425168	[1728019022]	2000000 OPS in 1.882496 seconds, throughput 1062419.256137
+425168	[1728019023]	2000000 OPS in 1.850380 seconds, throughput 1080859.066786
+425168	[1728019023]	2000000 OPS in 1.880211 seconds, throughput 1063710.402715
+425168	[1728019023]	2000000 OPS in 1.873408 seconds, throughput 1067573.107406
+425168	[1728019024]	2000000 OPS in 1.898160 seconds, throughput 1053651.957685
+425168	[1728019025]	2000000 OPS in 1.884037 seconds, throughput 1061550.277410
+425168	[1728019025]	2000000 OPS in 1.888230 seconds, throughput 1059193.000853
+425168	[1728019025]	2000000 OPS in 1.875151 seconds, throughput 1066580.771362
+425168	[1728019026]	2000000 OPS in 1.896656 seconds, throughput 1054487.476907
+425168	[1728019026]	2000000 OPS in 1.851257 seconds, throughput 1080347.029073
+425168	[1728019027]	2000000 OPS in 1.854216 seconds, throughput 1078622.986750
+425168	[1728019027]	2000000 OPS in 1.873874 seconds, throughput 1067307.620470
+425168	[1728019028]	2000000 OPS in 1.915407 seconds, throughput 1044164.503941
+425168	[1728019028]	2000000 OPS in 1.949782 seconds, throughput 1025755.699868
+425168	[1728019029]	2000000 OPS in 1.932959 seconds, throughput 1034683.094675
+425168	[1728019029]	2000000 OPS in 1.910136 seconds, throughput 1047045.864797
+425168	[1728019029]	2000000 OPS in 1.912359 seconds, throughput 1045828.738223
+425168	[1728019030]	2000000 OPS in 1.880366 seconds, throughput 1063622.720258
+425168	[1728019030]	2000000 OPS in 1.881320 seconds, throughput 1063083.366998
+425168	[1728019031]	2000000 OPS in 1.886936 seconds, throughput 1059919.361335
+425168	[1728019031]	2000000 OPS in 1.895520 seconds, throughput 1055119.439521
+425168	[1728019032]	2000000 OPS in 1.872758 seconds, throughput 1067943.642478
+425168	[1728019032]	2000000 OPS in 1.865759 seconds, throughput 1071949.807022
+425168	[1728019033]	2000000 OPS in 1.842037 seconds, throughput 1085754.520675
+425168	[1728019033]	2000000 OPS in 1.851129 seconds, throughput 1080421.731819
+425168	[1728019034]	2000000 OPS in 1.854354 seconds, throughput 1078542.716224
+425168	[1728019034]	2000000 OPS in 1.877104 seconds, throughput 1065471.066068
+425168	[1728019035]	2000000 OPS in 1.894367 seconds, throughput 1055761.634361
+425168	[1728019035]	2000000 OPS in 1.919482 seconds, throughput 1041947.775494
+425168	[1728019036]	2000000 OPS in 1.866074 seconds, throughput 1071768.858041
+425168	[1728019036]	2000000 OPS in 1.866919 seconds, throughput 1071283.756821
+425168	[1728019037]	2000000 OPS in 1.847238 seconds, throughput 1082697.519215
+425168	[1728019037]	2000000 OPS in 1.873527 seconds, throughput 1067505.298829
+425168	[1728019038]	2000000 OPS in 1.874816 seconds, throughput 1066771.352495
+425168	[1728019038]	2000000 OPS in 1.876826 seconds, throughput 1065628.886215
+425168	[1728019039]	2000000 OPS in 1.915817 seconds, throughput 1043941.044473
+425168	[1728019039]	2000000 OPS in 1.953232 seconds, throughput 1023943.904257
+425168	[1728019040]	2000000 OPS in 1.918989 seconds, throughput 1042215.458244
+425168	[1728019040]	2000000 OPS in 1.886842 seconds, throughput 1059972.165131
+425168	[1728019040]	2000000 OPS in 1.869296 seconds, throughput 1069921.510558
+425168	[1728019041]	2000000 OPS in 1.869047 seconds, throughput 1070064.048684
+425168	[1728019041]	2000000 OPS in 1.839149 seconds, throughput 1087459.471745
+425168	[1728019042]	2000000 OPS in 1.838317 seconds, throughput 1087951.642725
+425168	[1728019042]	2000000 OPS in 1.848818 seconds, throughput 1081772.245835
+425168	[1728019043]	2000000 OPS in 1.884259 seconds, throughput 1061425.207469
+425168	[1728019043]	2000000 OPS in 1.864521 seconds, throughput 1072661.557580
+425168	[1728019044]	2000000 OPS in 1.897664 seconds, throughput 1053927.354895
+425168	[1728019044]	2000000 OPS in 1.867386 seconds, throughput 1071015.847822
+425168	[1728019045]	2000000 OPS in 1.874878 seconds, throughput 1066736.075627
+425168	[1728019045]	2000000 OPS in 1.843916 seconds, throughput 1084648.107614
+425168	[1728019045]	2000000 OPS in 1.853908 seconds, throughput 1078802.184359
+425168	[1728019046]	2000000 OPS in 1.845797 seconds, throughput 1083542.773122
+425168	[1728019046]	2000000 OPS in 1.867271 seconds, throughput 1071081.808693
+425168	[1728019047]	2000000 OPS in 1.836475 seconds, throughput 1089042.867450
+425168	[1728019047]	2000000 OPS in 1.838725 seconds, throughput 1087710.233994
+425168	[1728019048]	2000000 OPS in 1.829946 seconds, throughput 1092928.425210
+425168	[1728019048]	2000000 OPS in 1.871417 seconds, throughput 1068708.898124
+425168	[1728019049]	2000000 OPS in 1.859188 seconds, throughput 1075738.440653
+425168	[1728019049]	2000000 OPS in 1.851329 seconds, throughput 1080305.013317
+425168	[1728019050]	2000000 OPS in 1.880047 seconds, throughput 1063803.192154
+425168	[1728019050]	2000000 OPS in 1.892003 seconds, throughput 1057080.776299
+425168	[1728019051]	2000000 OPS in 1.839722 seconds, throughput 1087120.771508
+425168	[1728019051]	2000000 OPS in 1.849921 seconds, throughput 1081127.248137
+425168	[1728019052]	2000000 OPS in 1.832921 seconds, throughput 1091154.501476
+425168	[1728019052]	2000000 OPS in 1.919835 seconds, throughput 1041756.192589
+425168	[1728019053]	2000000 OPS in 1.899276 seconds, throughput 1053032.839882
+425168	[1728019053]	2000000 OPS in 1.922917 seconds, throughput 1040086.493593
+425168	[1728019053]	2000000 OPS in 1.905718 seconds, throughput 1049473.216919
+425168	[1728019054]	2000000 OPS in 1.892396 seconds, throughput 1056861.248914
+425168	[1728019054]	2000000 OPS in 1.859430 seconds, throughput 1075598.436080
+425168	[1728019055]	2000000 OPS in 1.849016 seconds, throughput 1081656.405353
+425168	[1728019055]	2000000 OPS in 1.875920 seconds, throughput 1066143.545567
+425168	[1728019056]	2000000 OPS in 1.907409 seconds, throughput 1048542.813838
+425168	[1728019056]	2000000 OPS in 1.895231 seconds, throughput 1055280.332582
+425168	[1728019057]	2000000 OPS in 1.884161 seconds, throughput 1061480.414890
+425168	[1728019057]	2000000 OPS in 1.879217 seconds, throughput 1064273.045635
+425168	[1728019058]	2000000 OPS in 1.930987 seconds, throughput 1035739.753815
+425168	[1728019058]	2000000 OPS in 1.928850 seconds, throughput 1036887.264432
+425168	[1728019059]	2000000 OPS in 1.957086 seconds, throughput 1021927.498332
+425168	[1728019059]	2000000 OPS in 1.913274 seconds, throughput 1045328.583360
+425168	[1728019060]	2000000 OPS in 1.878691 seconds, throughput 1064571.023122
+425168	[1728019060]	2000000 OPS in 1.866317 seconds, throughput 1071629.310562
+425168	[1728019060]	2000000 OPS in 1.858156 seconds, throughput 1076335.894295
+425168	[1728019061]	2000000 OPS in 1.848744 seconds, throughput 1081815.546122
+425168	[1728019062]	2000000 OPS in 1.887138 seconds, throughput 1059805.907146
+425168	[1728019062]	2000000 OPS in 1.884362 seconds, throughput 1061367.189532
+425168	[1728019062]	2000000 OPS in 1.888428 seconds, throughput 1059081.945406
+425168	[1728019063]	2000000 OPS in 1.901206 seconds, throughput 1051963.858730
+425168	[1728019064]	2000000 OPS in 1.914037 seconds, throughput 1044911.879969
+425168	[1728019064]	2000000 OPS in 1.869902 seconds, throughput 1069574.769159
+425168	[1728019064]	2000000 OPS in 1.906180 seconds, throughput 1049218.856561
+425168	[1728019065]	2000000 OPS in 1.894720 seconds, throughput 1055564.938355
+425168	[1728019065]	2000000 OPS in 1.902115 seconds, throughput 1051461.136682
+425168	[1728019066]	2000000 OPS in 1.858515 seconds, throughput 1076127.983901
+425168	[1728019066]	2000000 OPS in 1.860265 seconds, throughput 1075115.642126
+425168	[1728019067]	2000000 OPS in 1.840702 seconds, throughput 1086541.982352
+425168	[1728019067]	2000000 OPS in 1.890690 seconds, throughput 1057814.871819
+425168	[1728019068]	2000000 OPS in 1.847040 seconds, throughput 1082813.582814
+425168	[1728019068]	2000000 OPS in 1.850438 seconds, throughput 1080825.188415
+425168	[1728019068]	2000000 OPS in 1.846377 seconds, throughput 1083202.401243
+425168	[1728019069]	2000000 OPS in 1.924748 seconds, throughput 1039097.066213
+425168	[1728019070]	2000000 OPS in 1.900344 seconds, throughput 1052441.031729
+425168	[1728019070]	2000000 OPS in 1.904420 seconds, throughput 1050188.508837
+425168	[1728019070]	2000000 OPS in 1.876270 seconds, throughput 1065944.666812
+425168	[1728019071]	2000000 OPS in 1.861067 seconds, throughput 1074652.336536
+425168	[1728019071]	2000000 OPS in 1.840463 seconds, throughput 1086683.079203
+425168	[1728019072]	2000000 OPS in 1.833028 seconds, throughput 1091090.807124
+425168	[1728019072]	2000000 OPS in 1.830199 seconds, throughput 1092777.342792
+425168	[1728019073]	2000000 OPS in 1.896707 seconds, throughput 1054459.123101
+425168	[1728019073]	2000000 OPS in 1.882502 seconds, throughput 1062415.869943
+425168	[1728019074]	2000000 OPS in 1.880340 seconds, throughput 1063637.427274
+425168	[1728019074]	2000000 OPS in 1.885516 seconds, throughput 1060717.596668
+425168	[1728019075]	2000000 OPS in 1.950325 seconds, throughput 1025470.113955
+425168	[1728019075]	2000000 OPS in 1.899351 seconds, throughput 1052991.258593
+425168	[1728019075]	2000000 OPS in 1.883873 seconds, throughput 1061642.690351
+425168	[1728019076]	2000000 OPS in 1.896221 seconds, throughput 1054729.380172
+425168	[1728019077]	2000000 OPS in 1.905202 seconds, throughput 1049757.453540
+425168	[1728019077]	2000000 OPS in 1.834448 seconds, throughput 1090246.221207
+425168	[1728019077]	2000000 OPS in 1.840524 seconds, throughput 1086647.063554
+425168	[1728019078]	2000000 OPS in 1.854182 seconds, throughput 1078642.765381
+425168	[1728019079]	2000000 OPS in 1.917573 seconds, throughput 1042985.064975
+425168	[1728019079]	2000000 OPS in 1.866946 seconds, throughput 1071268.263785
+425168	[1728019079]	2000000 OPS in 1.865709 seconds, throughput 1071978.534702
+425168	[1728019080]	2000000 OPS in 1.867224 seconds, throughput 1071108.768953
+425168	[1728019081]	2000000 OPS in 1.876462 seconds, throughput 1065835.599122
+425168	[1728019081]	2000000 OPS in 1.848428 seconds, throughput 1082000.489064
+425168	[1728019081]	2000000 OPS in 1.881430 seconds, throughput 1063021.212588
+425168	[1728019081]	2000000 OPS in 1.852588 seconds, throughput 1079570.848996
+425168	[1728019083]	2000000 OPS in 1.870076 seconds, throughput 1069475.251273
+425168	[1728019083]	2000000 OPS in 1.916487 seconds, throughput 1043576.084784
+425168	[1728019083]	2000000 OPS in 1.852774 seconds, throughput 1079462.470868
+425168	[1728019083]	2000000 OPS in 1.890828 seconds, throughput 1057737.668365
+425168	[1728019084]	2000000 OPS in 1.845924 seconds, throughput 1083468.225127
+425168	[1728019084]	2000000 OPS in 1.875110 seconds, throughput 1066604.092560
+425168	[1728019085]	2000000 OPS in 1.859902 seconds, throughput 1075325.474138
+425168	[1728019085]	2000000 OPS in 1.829382 seconds, throughput 1093265.375958
+425168	[1728019086]	2000000 OPS in 1.834243 seconds, throughput 1090368.070098
+425168	[1728019086]	2000000 OPS in 1.886815 seconds, throughput 1059987.333151
+425168	[1728019087]	2000000 OPS in 1.862235 seconds, throughput 1073978.311008
+425168	[1728019087]	2000000 OPS in 1.872452 seconds, throughput 1068118.168049
+425168	[1728019088]	2000000 OPS in 1.880296 seconds, throughput 1063662.316997
+425168	[1728019088]	2000000 OPS in 1.901941 seconds, throughput 1051557.330117
+425168	[1728019089]	2000000 OPS in 1.938372 seconds, throughput 1031793.690788
+425168	[1728019089]	2000000 OPS in 1.874569 seconds, throughput 1066911.914152
+425168	[1728019090]	2000000 OPS in 1.899983 seconds, throughput 1052640.997314
+425168	[1728019090]	2000000 OPS in 1.930915 seconds, throughput 1035778.374501
+425168	[1728019090]	2000000 OPS in 1.910828 seconds, throughput 1046666.680622
+425168	[1728019091]	2000000 OPS in 1.921556 seconds, throughput 1040823.166226
+425168	[1728019092]	2000000 OPS in 1.934694 seconds, throughput 1033755.208834
+425168	[1728019092]	2000000 OPS in 1.947043 seconds, throughput 1027198.680255
+425168	[1728019092]	2000000 OPS in 1.880245 seconds, throughput 1063691.167906
+425168	[1728019093]	2000000 OPS in 1.873645 seconds, throughput 1067438.068578
+425168	[1728019094]	2000000 OPS in 1.844253 seconds, throughput 1084449.910072
+425168	[1728019094]	2000000 OPS in 1.866824 seconds, throughput 1071338.272917
+425168	[1728019094]	2000000 OPS in 1.854980 seconds, throughput 1078178.740472
+425168	[1728019095]	2000000 OPS in 1.875468 seconds, throughput 1066400.493104
+425168	[1728019096]	2000000 OPS in 1.885005 seconds, throughput 1061005.143222
+425168	[1728019096]	2000000 OPS in 1.875472 seconds, throughput 1066398.218688
+425168	[1728019096]	2000000 OPS in 1.882163 seconds, throughput 1062607.223710
+425168	[1728019096]	2000000 OPS in 1.871936 seconds, throughput 1068412.595302
+425168	[1728019098]	2000000 OPS in 1.866485 seconds, throughput 1071532.854537
+425168	[1728019098]	2000000 OPS in 1.868802 seconds, throughput 1070204.334114
+425168	[1728019098]	2000000 OPS in 1.853306 seconds, throughput 1079152.606208
+425168	[1728019098]	2000000 OPS in 1.867756 seconds, throughput 1070803.680995
+425168	[1728019099]	2000000 OPS in 1.848512 seconds, throughput 1081951.320846
+425168	[1728019100]	2000000 OPS in 1.880937 seconds, throughput 1063299.834072
+425168	[1728019100]	2000000 OPS in 1.882642 seconds, throughput 1062336.864895
+425168	[1728019100]	2000000 OPS in 1.883097 seconds, throughput 1062080.179619
+425168	[1728019101]	2000000 OPS in 1.865861 seconds, throughput 1071891.207330
+425168	[1728019101]	2000000 OPS in 1.864938 seconds, throughput 1072421.710534
+425168	[1728019102]	2000000 OPS in 1.843045 seconds, throughput 1085160.698735
+425168	[1728019102]	2000000 OPS in 1.863231 seconds, throughput 1073404.210213
+425168	[1728019103]	2000000 OPS in 1.873182 seconds, throughput 1067701.910439
+425168	[1728019103]	2000000 OPS in 1.888517 seconds, throughput 1059032.034130
+425168	[1728019103]	2000000 OPS in 1.864125 seconds, throughput 1072889.425334
+425168	[1728019104]	2000000 OPS in 1.861052 seconds, throughput 1074660.998188
+425168	[1728019105]	2000000 OPS in 1.862878 seconds, throughput 1073607.611449
+425168	[1728019105]	2000000 OPS in 1.903772 seconds, throughput 1050545.968740
+425168	[1728019105]	2000000 OPS in 1.874294 seconds, throughput 1067068.453508
+425168	[1728019106]	2000000 OPS in 1.874223 seconds, throughput 1067108.876585
+425168	[1728019107]	2000000 OPS in 1.889149 seconds, throughput 1058677.743259
+425168	[1728019107]	2000000 OPS in 1.921055 seconds, throughput 1041094.606870
+425168	[1728019107]	2000000 OPS in 1.908763 seconds, throughput 1047799.019574
+425168	[1728019108]	2000000 OPS in 1.877035 seconds, throughput 1065510.232894
+425168	[1728019109]	2000000 OPS in 1.868736 seconds, throughput 1070242.131580
+425168	[1728019109]	2000000 OPS in 1.884167 seconds, throughput 1061477.034679
+425168	[1728019109]	2000000 OPS in 1.875710 seconds, throughput 1066262.908445
+425168	[1728019110]	2000000 OPS in 1.873125 seconds, throughput 1067734.401068
+425168	[1728019111]	2000000 OPS in 1.827893 seconds, throughput 1094155.948953
+425168	[1728019111]	2000000 OPS in 1.843130 seconds, throughput 1085110.654159
+425168	[1728019111]	2000000 OPS in 1.825711 seconds, throughput 1095463.630334
+425168	[1728019111]	2000000 OPS in 1.848440 seconds, throughput 1081993.464759
+425168	[1728019112]	2000000 OPS in 1.888828 seconds, throughput 1058857.662000
+425168	[1728019113]	2000000 OPS in 1.880729 seconds, throughput 1063417.430156
+425168	[1728019113]	2000000 OPS in 1.945259 seconds, throughput 1028140.725734
+425168	[1728019113]	2000000 OPS in 1.938625 seconds, throughput 1031659.036688
+425168	[1728019114]	2000000 OPS in 1.926916 seconds, throughput 1037927.963648
+425168	[1728019115]	2000000 OPS in 1.942638 seconds, throughput 1029527.889396
+425168	[1728019115]	2000000 OPS in 1.966530 seconds, throughput 1017019.826802
+425168	[1728019115]	2000000 OPS in 1.898376 seconds, throughput 1053532.071623
+425168	[1728019116]	2000000 OPS in 1.880794 seconds, throughput 1063380.678586
+425168	[1728019117]	2000000 OPS in 1.826416 seconds, throughput 1095040.779319
+425168	[1728019117]	2000000 OPS in 1.852000 seconds, throughput 1079913.606911
+425168	[1728019117]	2000000 OPS in 1.839083 seconds, throughput 1087498.497893
+425168	[1728019118]	2000000 OPS in 1.884029 seconds, throughput 1061554.784985
+425168	[1728019119]	2000000 OPS in 1.890264 seconds, throughput 1058053.266634
+425168	[1728019119]	2000000 OPS in 1.924142 seconds, throughput 1039424.325232
+425168	[1728019119]	2000000 OPS in 1.928076 seconds, throughput 1037303.508783
+425168	[1728019120]	2000000 OPS in 1.873261 seconds, throughput 1067656.882837
+425168	[1728019120]	2000000 OPS in 1.851474 seconds, throughput 1080220.408172
+425168	[1728019120]	2000000 OPS in 1.853694 seconds, throughput 1078926.726849
+425168	[1728019121]	2000000 OPS in 1.843996 seconds, throughput 1084601.051195
+425168	[1728019122]	2000000 OPS in 1.838931 seconds, throughput 1087588.386949
+425168	[1728019122]	2000000 OPS in 1.842147 seconds, throughput 1085689.687088
+425168	[1728019122]	2000000 OPS in 1.857900 seconds, throughput 1076484.202594
+425168	[1728019123]	2000000 OPS in 1.853635 seconds, throughput 1078961.068387
+425168	[1728019124]	2000000 OPS in 1.832421 seconds, throughput 1091452.237232
+425168	[1728019124]	2000000 OPS in 1.878206 seconds, throughput 1064845.922119
+425168	[1728019124]	2000000 OPS in 1.883721 seconds, throughput 1061728.355738
+425168	[1728019125]	2000000 OPS in 1.907536 seconds, throughput 1048473.003917
+425168	[1728019126]	2000000 OPS in 1.905110 seconds, throughput 1049808.147561
+425168	[1728019126]	2000000 OPS in 1.875355 seconds, throughput 1066464.749341
+425168	[1728019126]	2000000 OPS in 1.915471 seconds, throughput 1044129.616162
+425168	[1728019126]	2000000 OPS in 1.845090 seconds, throughput 1083957.964110
+425168	[1728019127]	2000000 OPS in 1.829111 seconds, throughput 1093427.353507
+425168	[1728019128]	2000000 OPS in 1.847012 seconds, throughput 1082829.997856
+425168	[1728019128]	2000000 OPS in 1.849849 seconds, throughput 1081169.327875
+425168	[1728019128]	2000000 OPS in 1.872799 seconds, throughput 1067920.262666
+425168	[1728019129]	2000000 OPS in 1.870126 seconds, throughput 1069446.657605
+425168	[1728019130]	2000000 OPS in 1.886606 seconds, throughput 1060104.759552
+425168	[1728019130]	2000000 OPS in 1.853094 seconds, throughput 1079276.064787
+425168	[1728019130]	2000000 OPS in 1.867884 seconds, throughput 1070730.302310
+425168	[1728019131]	2000000 OPS in 1.861561 seconds, throughput 1074367.157455
+425168	[1728019132]	2000000 OPS in 1.865551 seconds, throughput 1072069.324291
+425168	[1728019132]	2000000 OPS in 1.897099 seconds, throughput 1054241.238860
+425168	[1728019132]	2000000 OPS in 1.865828 seconds, throughput 1071910.165353
+425168	[1728019133]	2000000 OPS in 1.855624 seconds, throughput 1077804.555233
+425168	[1728019133]	2000000 OPS in 1.901334 seconds, throughput 1051893.039308
+425168	[1728019134]	2000000 OPS in 1.884746 seconds, throughput 1061150.945539
+425168	[1728019134]	2000000 OPS in 1.890420 seconds, throughput 1057965.954656
+425168	[1728019135]	2000000 OPS in 1.953493 seconds, throughput 1023807.098362
+425168	[1728019135]	2000000 OPS in 1.944156 seconds, throughput 1028724.032434
+425168	[1728019135]	2000000 OPS in 1.915278 seconds, throughput 1044234.831706
+425168	[1728019136]	2000000 OPS in 1.889972 seconds, throughput 1058216.735486
+425168	[1728019137]	2000000 OPS in 1.839495 seconds, throughput 1087254.925944
+425168	[1728019137]	2000000 OPS in 1.840985 seconds, throughput 1086374.956884
+425168	[1728019137]	2000000 OPS in 1.857347 seconds, throughput 1076804.711236
+425168	[1728019138]	2000000 OPS in 1.868505 seconds, throughput 1070374.443740
+425168	[1728019139]	2000000 OPS in 1.883434 seconds, throughput 1061890.143217
+425168	[1728019139]	2000000 OPS in 1.870696 seconds, throughput 1069120.797821
+425168	[1728019139]	2000000 OPS in 1.879121 seconds, throughput 1064327.416915
+425168	[1728019140]	2000000 OPS in 1.909429 seconds, throughput 1047433.552125
+425168	[1728019141]	2000000 OPS in 1.928092 seconds, throughput 1037294.900866
+425168	[1728019141]	2000000 OPS in 1.921771 seconds, throughput 1040706.723122
+425168	[1728019141]	2000000 OPS in 1.933415 seconds, throughput 1034439.062488
+425168	[1728019142]	2000000 OPS in 1.878426 seconds, throughput 1064721.208075
+425168	[1728019143]	2000000 OPS in 1.887194 seconds, throughput 1059774.458800
+425168	[1728019143]	2000000 OPS in 1.900129 seconds, throughput 1052560.115655
+425168	[1728019143]	2000000 OPS in 1.893367 seconds, throughput 1056319.245028
+425168	[1728019143]	2000000 OPS in 1.860843 seconds, throughput 1074781.698402
+425168	[1728019144]	2000000 OPS in 1.881903 seconds, throughput 1062754.031425
+425168	[1728019145]	2000000 OPS in 1.885855 seconds, throughput 1060526.922802
+425168	[1728019145]	2000000 OPS in 1.907050 seconds, throughput 1048740.200834
+425168	[1728019145]	2000000 OPS in 1.891202 seconds, throughput 1057528.492461
+425168	[1728019146]	2000000 OPS in 1.884773 seconds, throughput 1061135.744198
+425168	[1728019147]	2000000 OPS in 1.872644 seconds, throughput 1068008.655142
+425168	[1728019147]	2000000 OPS in 1.854843 seconds, throughput 1078258.375507
+425168	[1728019147]	2000000 OPS in 1.883038 seconds, throughput 1062113.457084
+425168	[1728019148]	2000000 OPS in 1.912695 seconds, throughput 1045645.019201
+425168	[1728019149]	2000000 OPS in 1.915899 seconds, throughput 1043896.364057
+425168	[1728019149]	2000000 OPS in 1.939781 seconds, throughput 1031044.226127
+425168	[1728019149]	2000000 OPS in 1.886164 seconds, throughput 1060353.182438
+425168	[1728019150]	2000000 OPS in 1.877406 seconds, throughput 1065299.674125
+425168	[1728019150]	2000000 OPS in 1.850056 seconds, throughput 1081048.357455
+425168	[1728019151]	2000000 OPS in 1.885056 seconds, throughput 1060976.437835
+425168	[1728019151]	2000000 OPS in 1.873094 seconds, throughput 1067752.072240
+425168	[1728019152]	2000000 OPS in 1.942802 seconds, throughput 1029440.982663
+425168	[1728019152]	2000000 OPS in 1.883916 seconds, throughput 1061618.458572
+425168	[1728019153]	2000000 OPS in 1.938373 seconds, throughput 1031793.158489
+425168	[1728019153]	2000000 OPS in 1.878159 seconds, throughput 1064872.569362
+425168	[1728019154]	2000000 OPS in 1.887940 seconds, throughput 1059355.699863
+425168	[1728019154]	2000000 OPS in 1.860513 seconds, throughput 1074972.332900
+425168	[1728019154]	2000000 OPS in 1.871335 seconds, throughput 1068755.727863
+425168	[1728019155]	2000000 OPS in 1.858430 seconds, throughput 1076177.203338
+425168	[1728019156]	2000000 OPS in 1.856172 seconds, throughput 1077486.353635
+425168	[1728019156]	2000000 OPS in 1.891223 seconds, throughput 1057516.749743
+425168	[1728019156]	2000000 OPS in 1.859949 seconds, throughput 1075298.301190
+425168	[1728019157]	2000000 OPS in 1.859008 seconds, throughput 1075842.599924
+425168	[1728019158]	2000000 OPS in 1.867118 seconds, throughput 1071169.577927
+425168	[1728019158]	2000000 OPS in 1.877852 seconds, throughput 1065046.659694
+425168	[1728019158]	2000000 OPS in 1.859141 seconds, throughput 1075765.635850
+425168	[1728019158]	2000000 OPS in 1.863627 seconds, throughput 1073176.123763
+425168	[1728019159]	2000000 OPS in 1.845307 seconds, throughput 1083830.495414
+425168	[1728019160]	2000000 OPS in 1.834820 seconds, throughput 1090025.179582
+425168	[1728019160]	2000000 OPS in 1.869906 seconds, throughput 1069572.481184
+425168	[1728019160]	2000000 OPS in 1.841868 seconds, throughput 1085854.143728
+425168	[1728019161]	2000000 OPS in 1.842635 seconds, throughput 1085402.155066
+425168	[1728019162]	2000000 OPS in 1.845768 seconds, throughput 1083559.797331
+425168	[1728019162]	2000000 OPS in 1.877368 seconds, throughput 1065321.236966
+425168	[1728019162]	2000000 OPS in 1.844247 seconds, throughput 1084453.438178
+425168	[1728019163]	2000000 OPS in 1.874965 seconds, throughput 1066686.578149
+425168	[1728019164]	2000000 OPS in 1.857813 seconds, throughput 1076534.613548
+425168	[1728019164]	2000000 OPS in 1.842285 seconds, throughput 1085608.361356
+425168	[1728019164]	2000000 OPS in 1.830344 seconds, throughput 1092690.772882
+425168	[1728019165]	2000000 OPS in 1.849544 seconds, throughput 1081347.618656
+425168	[1728019165]	2000000 OPS in 1.846220 seconds, throughput 1083294.515280
+425168	[1728019166]	2000000 OPS in 1.889407 seconds, throughput 1058533.179987
+425168	[1728019166]	2000000 OPS in 1.874960 seconds, throughput 1066689.422708
+425168	[1728019167]	2000000 OPS in 1.905899 seconds, throughput 1049373.550225
+425168	[1728019167]	2000000 OPS in 1.937051 seconds, throughput 1032497.337447
+425168	[1728019168]	2000000 OPS in 1.951766 seconds, throughput 1024713.003506
+425168	[1728019168]	2000000 OPS in 1.930110 seconds, throughput 1036210.371430
+425168	[1728019169]	2000000 OPS in 1.929570 seconds, throughput 1036500.360184
+425168	[1728019169]	2000000 OPS in 1.921340 seconds, throughput 1040940.177168
+425168	[1728019170]	2000000 OPS in 1.909653 seconds, throughput 1047310.689429
+425168	[1728019170]	2000000 OPS in 1.873017 seconds, throughput 1067795.967682
+425168	[1728019171]	2000000 OPS in 1.848531 seconds, throughput 1081940.200083
+425168	[1728019171]	2000000 OPS in 1.853755 seconds, throughput 1078891.223490
+425168	[1728019171]	2000000 OPS in 1.896022 seconds, throughput 1054840.080970
+425168	[1728019171]	2000000 OPS in 1.877779 seconds, throughput 1065088.064144
+425168	[1728019173]	2000000 OPS in 1.857059 seconds, throughput 1076971.706338
+425168	[1728019173]	2000000 OPS in 1.864031 seconds, throughput 1072943.529373
+425168	[1728019173]	2000000 OPS in 1.861582 seconds, throughput 1074355.037812
+425168	[1728019173]	2000000 OPS in 1.836261 seconds, throughput 1089169.785777
+425168	[1728019174]	2000000 OPS in 1.872503 seconds, throughput 1068089.076493
+425168	[1728019175]	2000000 OPS in 1.868174 seconds, throughput 1070564.090925
+425168	[1728019175]	2000000 OPS in 1.869677 seconds, throughput 1069703.483543
+425168	[1728019175]	2000000 OPS in 1.858724 seconds, throughput 1076006.981133
+425168	[1728019176]	2000000 OPS in 1.870239 seconds, throughput 1069382.041547
+425168	[1728019177]	2000000 OPS in 1.875864 seconds, throughput 1066175.373055
+425168	[1728019177]	2000000 OPS in 1.884735 seconds, throughput 1061157.138802
+425168	[1728019177]	2000000 OPS in 1.955756 seconds, throughput 1022622.453926
+425168	[1728019178]	2000000 OPS in 1.895493 seconds, throughput 1055134.468975
+425168	[1728019179]	2000000 OPS in 1.888172 seconds, throughput 1059225.536657
+425168	[1728019179]	2000000 OPS in 1.877388 seconds, throughput 1065309.887993
+425168	[1728019179]	2000000 OPS in 1.898845 seconds, throughput 1053271.857366
+425168	[1728019180]	2000000 OPS in 1.884207 seconds, throughput 1061454.500487
+425168	[1728019180]	2000000 OPS in 1.909316 seconds, throughput 1047495.542906
+425168	[1728019181]	2000000 OPS in 1.882479 seconds, throughput 1062428.850468
+425168	[1728019181]	2000000 OPS in 1.870076 seconds, throughput 1069475.251273
+425168	[1728019182]	2000000 OPS in 1.861121 seconds, throughput 1074621.155744
+425168	[1728019182]	2000000 OPS in 1.853796 seconds, throughput 1078867.361889
+425168	[1728019183]	2000000 OPS in 1.852165 seconds, throughput 1079817.402877
+425168	[1728019183]	2000000 OPS in 1.870004 seconds, throughput 1069516.428842
+425168	[1728019184]	2000000 OPS in 1.883828 seconds, throughput 1061668.050374
+425168	[1728019184]	2000000 OPS in 1.871236 seconds, throughput 1068812.271675
+425168	[1728019185]	2000000 OPS in 1.877531 seconds, throughput 1065228.749885
+425168	[1728019185]	2000000 OPS in 1.876409 seconds, throughput 1065865.704119
+425168	[1728019186]	2000000 OPS in 1.833499 seconds, throughput 1090810.521304
+425168	[1728019186]	2000000 OPS in 1.848750 seconds, throughput 1081812.035159
+425168	[1728019186]	2000000 OPS in 1.879052 seconds, throughput 1064366.499703
+425168	[1728019187]	2000000 OPS in 1.906029 seconds, throughput 1049301.978092
+425168	[1728019188]	2000000 OPS in 1.909466 seconds, throughput 1047413.255853
+425168	[1728019188]	2000000 OPS in 1.909683 seconds, throughput 1047294.236792
+425168	[1728019188]	2000000 OPS in 1.892114 seconds, throughput 1057018.763140
+425168	[1728019188]	2000000 OPS in 1.889199 seconds, throughput 1058649.724036
+425168	[1728019189]	2000000 OPS in 1.843749 seconds, throughput 1084746.351049
+425168	[1728019190]	2000000 OPS in 1.865947 seconds, throughput 1071841.804724
+425168	[1728019190]	2000000 OPS in 1.870142 seconds, throughput 1069437.507954
+425168	[1728019190]	2000000 OPS in 1.872211 seconds, throughput 1068255.661354
+425168	[1728019192]	2000000 OPS in 1.828092 seconds, throughput 1094036.842785
+425168	[1728019194]	2000000 OPS in 1.644778 seconds, throughput 1215969.571577
+425168	[1728019195]	2000000 OPS in 1.646539 seconds, throughput 1214669.072521
+425168	[1728019197]	2000000 OPS in 1.646544 seconds, throughput 1214665.383980
+425168	[1728019199]	2000000 OPS in 1.650360 seconds, throughput 1211856.807000
+425168	[1728019200]	2000000 OPS in 1.649213 seconds, throughput 1212699.633098
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     235432 ms       919673 ms            4 CompactionCPUUsage=1.95937 CompactionThroughput=596.912M Lat_Get_Avg=849.531 Lat_Get_P50=875.729 Lat_Get_P95=1.35562k Lat_Get_P99=1.80785k Lat_Put_Avg=1051.63 Lat_Put_P50=1010.72 Lat_Put_P95=1.55617k Lat_Put_P99=1.85581k items_per_second=4.24751M/s
+5581.18user 27.54system 16:25.61elapsed 569%CPU (0avgtext+0avgdata 9117684maxresident)k
+315424inputs+16649760outputs (5771major+3612397minor)pagefaults 0swaps
