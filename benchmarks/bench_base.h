@@ -282,7 +282,7 @@ class BaseFixture : public benchmark::Fixture {
           //printf("%ld:", t1.tv_sec - ts.tv_sec);
           double elapsed = (t1.tv_sec-t0.tv_sec) + (t1.tv_usec-t0.tv_usec) / 1000000.0;
           double thrpt = REPORT_STEP / elapsed;
-          printf("[%ld]\t%d OPS in %lf seconds, throughput %lf\n", t1.tv_sec, REPORT_STEP, elapsed, thrpt);
+          printf("%d\t[%ld]\t%d OPS in %lf seconds, throughput %lf\n", getpid(), t1.tv_sec, REPORT_STEP, elapsed, thrpt);
         }
         t0 = t1;
       }
