@@ -8,6 +8,7 @@ Run the experiments using
 ```
 
 Here, we ran 5 configs, all using Linux 6.1:
+
 1. eval_pmbaseline_xfs_v5_4k: XFS DAX with 4K pages only. Set `PMEM_DEV_NOT_USING_PMD` in Linux kernel.
 2. eval_pmbaseline_xfs_v5_2m: XFS DAX with 2M pages enabled. Default Linux kernel. Set `VPM_HUGE` in pacman.
 3. eval_vpmbaseline_xfs_v5_4k_order0: VPM with 4K pages only. Set `PMEM_DEV_FORCE_4KB` in Linux kernel.  Unset `VPM_HUGE` in pacman.
@@ -30,6 +31,7 @@ roughput.csv False "['PMEM-4K', 'PMEM-2M', 'VPM-4K', 'VPM-32K', 'VPM-2M']"
 The figure is saved to `PMEM-4K_PMEM-2M_VPM-4K_VPM-32K_VPM-2M_throughput.pdf`.
 
 The results should desmontrate that:
+
 1. VPM-2M has competible performance as PMEM-2M.  They should have within 5% performance difference except PMEMRocksDB.
 2. VPM-4K is faster than PMEM-4K.
 3. VPM benefits from file mTHP optimizations in kernel: VPM-2M >= VPM-32K >= VPM-4K in throughput.
