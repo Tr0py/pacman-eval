@@ -1,0 +1,2352 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+[ 81%] Built target benchmark
+Scanning dependencies of target viper_bench
+[ 86%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/viper_bench.cpp.o
+[ 95%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/__/histogram.cpp.o
+[ 95%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/viper/hotkeyset.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/other/viper_bench.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable viper_bench
+[100%] Built target viper_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. ViperFixture/bench will be repeated at least 180 times.
+2024-10-08T03:21:41-05:00
+Running ./benchmarks/other/viper_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.26, 4.17, 4.35
+[1728375701]	Setup starts!
+threads of service / gc : 4 / 2
+[1728375701]	Setup starts!
+[1728375701]	Setup starts!
+[1728375701]	Setup starts!
+pool size 8141 MB, num_allocated_blocks 173693
+[1728375703]	DB init finished in 1.218591 seconds
+[1728375703]	DB init finished in 1.218895 seconds
+[1728375703]	DB init finished in 1.218858 seconds
+[1728375703]	DB init finished in 1.218883 seconds
+[1728375748]	DB load finished in 45.802476 seconds
+[1728375749]	DB load finished in 45.947350 seconds
+[1728375749]	DB load finished in 45.948819 seconds
+[1728375749]	DB load finished in 46.006444 seconds
+[1728375749]	DB warmup finished in 0.000016 seconds
+[1728375749]	DB warmup finished in 0.203985 seconds
+[1728375749]	DB warmup finished in 0.059331 seconds
+[1728375749]	DB warmup finished in 0.057867 seconds
+[1728375749]	ETC init!
+[1728375749]	ETC starts!
+[1728375749]	ETC init!
+[1728375749]	ETC starts!
+[1728375749]	ETC init!
+[1728375749]	ETC starts!
+[1728375749]	ETC init!
+[1728375749]	ETC starts!
+93550	[1728375757]	2000000 OPS in 8.427440 seconds, throughput 237319.992785
+93550	[1728375757]	2000000 OPS in 8.451961 seconds, throughput 236631.475228
+93550	[1728375757]	2000000 OPS in 8.541520 seconds, throughput 234150.361996
+93550	[1728375757]	2000000 OPS in 8.577411 seconds, throughput 233170.591919
+93550	[1728375764]	2000000 OPS in 6.692151 seconds, throughput 298857.572102
+93550	[1728375764]	2000000 OPS in 6.900141 seconds, throughput 289849.149459
+93550	[1728375764]	2000000 OPS in 6.844698 seconds, throughput 292196.967638
+93550	[1728375764]	2000000 OPS in 6.814521 seconds, throughput 293490.914475
+93550	[1728375768]	2000000 OPS in 4.609225 seconds, throughput 433912.425625
+93550	[1728375768]	2000000 OPS in 4.455814 seconds, throughput 448851.769845
+93550	[1728375769]	2000000 OPS in 4.486595 seconds, throughput 445772.350747
+93550	[1728375769]	2000000 OPS in 4.598748 seconds, throughput 434900.977396
+93550	[1728375771]	2000000 OPS in 2.687190 seconds, throughput 744271.897410
+93550	[1728375771]	2000000 OPS in 2.735663 seconds, throughput 731084.201526
+93550	[1728375771]	2000000 OPS in 2.702635 seconds, throughput 740018.537464
+93550	[1728375771]	2000000 OPS in 2.783722 seconds, throughput 718462.547625
+93550	[1728375774]	2000000 OPS in 2.740549 seconds, throughput 729780.784799
+93550	[1728375774]	2000000 OPS in 2.661484 seconds, throughput 751460.463411
+93550	[1728375774]	2000000 OPS in 2.634067 seconds, throughput 759282.129118
+93550	[1728375774]	2000000 OPS in 2.717708 seconds, throughput 735914.233612
+93550	[1728375776]	2000000 OPS in 2.482179 seconds, throughput 805743.663128
+93550	[1728375776]	2000000 OPS in 2.531000 seconds, throughput 790201.501383
+93550	[1728375776]	2000000 OPS in 2.500247 seconds, throughput 799920.967808
+93550	[1728375777]	2000000 OPS in 2.630832 seconds, throughput 760215.779647
+93550	[1728375779]	2000000 OPS in 2.193790 seconds, throughput 911664.288742
+93550	[1728375779]	2000000 OPS in 2.176082 seconds, throughput 919083.012497
+93550	[1728375779]	2000000 OPS in 2.202359 seconds, throughput 908117.159827
+93550	[1728375779]	2000000 OPS in 2.414241 seconds, throughput 828417.709748
+93550	[1728375781]	2000000 OPS in 2.247316 seconds, throughput 889950.500953
+93550	[1728375781]	2000000 OPS in 2.247963 seconds, throughput 889694.358848
+93550	[1728375781]	2000000 OPS in 2.260975 seconds, throughput 884574.132841
+93550	[1728375782]	2000000 OPS in 2.309049 seconds, throughput 866157.452700
+93550	[1728375783]	2000000 OPS in 2.070607 seconds, throughput 965900.337437
+93550	[1728375783]	2000000 OPS in 2.079565 seconds, throughput 961739.594579
+93550	[1728375783]	2000000 OPS in 2.088398 seconds, throughput 957671.861398
+93550	[1728375784]	2000000 OPS in 2.256694 seconds, throughput 886252.190151
+93550	[1728375785]	2000000 OPS in 2.070707 seconds, throughput 965853.691517
+93550	[1728375785]	2000000 OPS in 2.079679 seconds, throughput 961686.875715
+93550	[1728375785]	2000000 OPS in 2.087730 seconds, throughput 957978.282632
+93550	[1728375786]	2000000 OPS in 2.257709 seconds, throughput 885853.757061
+93550	[1728375787]	2000000 OPS in 2.070839 seconds, throughput 965792.125800
+93550	[1728375787]	2000000 OPS in 2.079903 seconds, throughput 961583.304606
+93550	[1728375787]	2000000 OPS in 2.088434 seconds, throughput 957655.353246
+93550	[1728375788]	2000000 OPS in 2.279168 seconds, throughput 877513.197798
+93550	[1728375789]	2000000 OPS in 2.095979 seconds, throughput 954208.033573
+93550	[1728375789]	2000000 OPS in 2.104892 seconds, throughput 950167.514533
+93550	[1728375789]	2000000 OPS in 2.111741 seconds, throughput 947085.840546
+93550	[1728375791]	2000000 OPS in 2.268342 seconds, throughput 881701.260216
+93550	[1728375791]	2000000 OPS in 2.112038 seconds, throughput 946952.658996
+93550	[1728375791]	2000000 OPS in 2.123018 seconds, throughput 942055.130950
+93550	[1728375791]	2000000 OPS in 2.135875 seconds, throughput 936384.385790
+93550	[1728375793]	2000000 OPS in 2.306387 seconds, throughput 867157.159661
+93550	[1728375793]	2000000 OPS in 2.169034 seconds, throughput 922069.455804
+93550	[1728375793]	2000000 OPS in 2.188630 seconds, throughput 913813.664256
+93550	[1728375794]	2000000 OPS in 2.196785 seconds, throughput 910421.365769
+93550	[1728375795]	2000000 OPS in 2.334426 seconds, throughput 856741.657264
+93550	[1728375796]	2000000 OPS in 2.127712 seconds, throughput 939976.838971
+93550	[1728375796]	2000000 OPS in 2.128512 seconds, throughput 939623.549221
+93550	[1728375796]	2000000 OPS in 2.131425 seconds, throughput 938339.373893
+93550	[1728375798]	2000000 OPS in 2.328521 seconds, throughput 858914.306549
+93550	[1728375798]	2000000 OPS in 2.174833 seconds, throughput 919610.839085
+93550	[1728375798]	2000000 OPS in 2.186495 seconds, throughput 914705.956337
+93550	[1728375798]	2000000 OPS in 2.196536 seconds, throughput 910524.571416
+93550	[1728375800]	2000000 OPS in 2.121768 seconds, throughput 942610.125141
+93550	[1728375800]	2000000 OPS in 2.286842 seconds, throughput 874568.509761
+93550	[1728375800]	2000000 OPS in 2.134654 seconds, throughput 936919.987970
+93550	[1728375800]	2000000 OPS in 2.140264 seconds, throughput 934464.159562
+93550	[1728375802]	2000000 OPS in 2.092495 seconds, throughput 955796.788045
+93550	[1728375802]	2000000 OPS in 2.102688 seconds, throughput 951163.463148
+93550	[1728375802]	2000000 OPS in 2.102667 seconds, throughput 951172.962718
+93550	[1728375802]	2000000 OPS in 2.271207 seconds, throughput 880589.043623
+93550	[1728375804]	2000000 OPS in 2.094701 seconds, throughput 954790.206335
+93550	[1728375804]	2000000 OPS in 2.102526 seconds, throughput 951236.750461
+93550	[1728375804]	2000000 OPS in 2.112395 seconds, throughput 946792.621645
+93550	[1728375804]	2000000 OPS in 2.265250 seconds, throughput 882904.756649
+93550	[1728375806]	2000000 OPS in 2.113708 seconds, throughput 946204.489930
+93550	[1728375806]	2000000 OPS in 2.127510 seconds, throughput 940066.086646
+93550	[1728375806]	2000000 OPS in 2.138679 seconds, throughput 935156.701871
+93550	[1728375807]	2000000 OPS in 2.284874 seconds, throughput 875321.790173
+93550	[1728375808]	2000000 OPS in 2.077367 seconds, throughput 962757.182530
+93550	[1728375808]	2000000 OPS in 2.079136 seconds, throughput 961938.035799
+93550	[1728375808]	2000000 OPS in 2.086694 seconds, throughput 958453.898847
+93550	[1728375809]	2000000 OPS in 2.254267 seconds, throughput 887206.351333
+93550	[1728375810]	2000000 OPS in 2.093165 seconds, throughput 955490.847592
+93550	[1728375810]	2000000 OPS in 2.102900 seconds, throughput 951067.573351
+93550	[1728375811]	2000000 OPS in 2.110271 seconds, throughput 947745.573910
+93550	[1728375811]	2000000 OPS in 2.278795 seconds, throughput 877656.831790
+93550	[1728375812]	2000000 OPS in 2.073101 seconds, throughput 964738.331610
+93550	[1728375813]	2000000 OPS in 2.077082 seconds, throughput 962889.284101
+93550	[1728375813]	2000000 OPS in 2.085596 seconds, throughput 958958.494358
+93550	[1728375813]	2000000 OPS in 2.256384 seconds, throughput 886373.950533
+93550	[1728375814]	2000000 OPS in 2.070830 seconds, throughput 965796.323213
+93550	[1728375815]	2000000 OPS in 2.079042 seconds, throughput 961981.528031
+93550	[1728375815]	2000000 OPS in 2.086409 seconds, throughput 958584.822056
+93550	[1728375816]	2000000 OPS in 2.276616 seconds, throughput 878496.856738
+93550	[1728375817]	2000000 OPS in 2.095225 seconds, throughput 954551.420492
+93550	[1728375817]	2000000 OPS in 2.103973 seconds, throughput 950582.540746
+93550	[1728375817]	2000000 OPS in 2.112259 seconds, throughput 946853.581876
+93550	[1728375818]	2000000 OPS in 2.256682 seconds, throughput 886256.902833
+93550	[1728375819]	2000000 OPS in 2.071696 seconds, throughput 965392.605865
+93550	[1728375819]	2000000 OPS in 2.085258 seconds, throughput 959113.932185
+93550	[1728375819]	2000000 OPS in 2.092522 seconds, throughput 955784.455313
+93550	[1728375820]	2000000 OPS in 2.270786 seconds, throughput 880752.303387
+93550	[1728375821]	2000000 OPS in 2.092958 seconds, throughput 955585.348583
+93550	[1728375821]	2000000 OPS in 2.102347 seconds, throughput 951317.741553
+93550	[1728375821]	2000000 OPS in 2.102478 seconds, throughput 951258.467389
+93550	[1728375823]	2000000 OPS in 2.273400 seconds, throughput 879739.597079
+93550	[1728375823]	2000000 OPS in 2.122068 seconds, throughput 942476.866905
+93550	[1728375823]	2000000 OPS in 2.125763 seconds, throughput 940838.654168
+93550	[1728375823]	2000000 OPS in 2.134675 seconds, throughput 936910.770960
+93550	[1728375825]	2000000 OPS in 2.253565 seconds, throughput 887482.721821
+93550	[1728375825]	2000000 OPS in 2.068614 seconds, throughput 966830.931242
+93550	[1728375825]	2000000 OPS in 2.077481 seconds, throughput 962704.352049
+93550	[1728375825]	2000000 OPS in 2.085541 seconds, throughput 958983.784064
+93550	[1728375827]	2000000 OPS in 2.071542 seconds, throughput 965464.373882
+93550	[1728375827]	2000000 OPS in 2.257124 seconds, throughput 886083.352089
+93550	[1728375827]	2000000 OPS in 2.078656 seconds, throughput 962160.165030
+93550	[1728375827]	2000000 OPS in 2.086645 seconds, throughput 958476.405905
+93550	[1728375829]	2000000 OPS in 2.070604 seconds, throughput 965901.736885
+93550	[1728375829]	2000000 OPS in 2.079133 seconds, throughput 961939.423789
+93550	[1728375829]	2000000 OPS in 2.259000 seconds, throughput 885347.498893
+93550	[1728375829]	2000000 OPS in 2.087005 seconds, throughput 958311.072566
+93550	[1728375831]	2000000 OPS in 2.115507 seconds, throughput 945399.849776
+93550	[1728375831]	2000000 OPS in 2.134635 seconds, throughput 936928.327325
+93550	[1728375832]	2000000 OPS in 2.143024 seconds, throughput 933260.663436
+93550	[1728375832]	2000000 OPS in 2.286685 seconds, throughput 874628.556185
+93550	[1728375833]	2000000 OPS in 2.107107 seconds, throughput 949168.694328
+93550	[1728375833]	2000000 OPS in 2.104730 seconds, throughput 950240.648444
+93550	[1728375834]	2000000 OPS in 2.110164 seconds, throughput 947793.631206
+93550	[1728375834]	2000000 OPS in 2.278045 seconds, throughput 877945.782458
+93550	[1728375835]	2000000 OPS in 2.108375 seconds, throughput 948597.853797
+93550	[1728375836]	2000000 OPS in 2.115983 seconds, throughput 945187.177780
+93550	[1728375836]	2000000 OPS in 2.125079 seconds, throughput 941141.482270
+93550	[1728375836]	2000000 OPS in 2.277443 seconds, throughput 878177.851213
+93550	[1728375837]	2000000 OPS in 2.093040 seconds, throughput 955547.911172
+93550	[1728375838]	2000000 OPS in 2.102820 seconds, throughput 951103.755909
+93550	[1728375838]	2000000 OPS in 2.113096 seconds, throughput 946478.531974
+93550	[1728375838]	2000000 OPS in 2.277326 seconds, throughput 878222.968517
+93550	[1728375840]	2000000 OPS in 2.092633 seconds, throughput 955733.757424
+93550	[1728375840]	2000000 OPS in 2.097486 seconds, throughput 953522.454977
+93550	[1728375840]	2000000 OPS in 2.101743 seconds, throughput 951591.131742
+93550	[1728375841]	2000000 OPS in 2.276486 seconds, throughput 878547.023790
+93550	[1728375842]	2000000 OPS in 2.102232 seconds, throughput 951369.782212
+93550	[1728375842]	2000000 OPS in 2.113988 seconds, throughput 946079.164120
+93550	[1728375842]	2000000 OPS in 2.123024 seconds, throughput 942052.468554
+93550	[1728375843]	2000000 OPS in 2.278329 seconds, throughput 877836.344093
+93550	[1728375844]	2000000 OPS in 2.091267 seconds, throughput 956358.035583
+93550	[1728375844]	2000000 OPS in 2.103713 seconds, throughput 950700.024195
+93550	[1728375844]	2000000 OPS in 2.115027 seconds, throughput 945614.405868
+93550	[1728375845]	2000000 OPS in 2.277567 seconds, throughput 878130.039643
+93550	[1728375846]	2000000 OPS in 2.101496 seconds, throughput 951702.977308
+93550	[1728375846]	2000000 OPS in 2.110893 seconds, throughput 947466.309282
+93550	[1728375846]	2000000 OPS in 2.113924 seconds, throughput 946107.807092
+93550	[1728375848]	2000000 OPS in 2.278566 seconds, throughput 877745.037888
+93550	[1728375848]	2000000 OPS in 2.093831 seconds, throughput 955186.927694
+93550	[1728375848]	2000000 OPS in 2.098722 seconds, throughput 952960.897156
+93550	[1728375848]	2000000 OPS in 2.106654 seconds, throughput 949372.796862
+93550	[1728375850]	2000000 OPS in 2.257209 seconds, throughput 886049.984738
+93550	[1728375850]	2000000 OPS in 2.071131 seconds, throughput 965655.962853
+93550	[1728375850]	2000000 OPS in 2.097369 seconds, throughput 953575.646441
+93550	[1728375851]	2000000 OPS in 2.109087 seconds, throughput 948277.619652
+93550	[1728375852]	2000000 OPS in 2.278407 seconds, throughput 877806.291852
+93550	[1728375852]	2000000 OPS in 2.108132 seconds, throughput 948707.196703
+93550	[1728375852]	2000000 OPS in 2.096304 seconds, throughput 954060.098154
+93550	[1728375853]	2000000 OPS in 2.096522 seconds, throughput 953960.893327
+93550	[1728375854]	2000000 OPS in 2.107233 seconds, throughput 949111.939686
+93550	[1728375854]	2000000 OPS in 2.252827 seconds, throughput 887773.450869
+93550	[1728375855]	2000000 OPS in 2.116400 seconds, throughput 945000.945001
+93550	[1728375855]	2000000 OPS in 2.122363 seconds, throughput 942345.866376
+93550	[1728375856]	2000000 OPS in 2.070658 seconds, throughput 965876.547455
+93550	[1728375857]	2000000 OPS in 2.255393 seconds, throughput 886763.415511
+93550	[1728375857]	2000000 OPS in 2.077938 seconds, throughput 962492.624900
+93550	[1728375857]	2000000 OPS in 2.084486 seconds, throughput 959469.144912
+93550	[1728375858]	2000000 OPS in 2.092957 seconds, throughput 955585.805155
+93550	[1728375859]	2000000 OPS in 2.103157 seconds, throughput 950951.355510
+93550	[1728375859]	2000000 OPS in 2.277426 seconds, throughput 878184.406431
+93550	[1728375859]	2000000 OPS in 2.109480 seconds, throughput 948100.953790
+93550	[1728375860]	2000000 OPS in 2.069230 seconds, throughput 966543.110239
+93550	[1728375861]	2000000 OPS in 2.078466 seconds, throughput 962248.119527
+93550	[1728375861]	2000000 OPS in 2.084767 seconds, throughput 959339.820709
+93550	[1728375861]	2000000 OPS in 2.255564 seconds, throughput 886696.187738
+93550	[1728375863]	2000000 OPS in 2.070231 seconds, throughput 966075.766424
+93550	[1728375863]	2000000 OPS in 2.079157 seconds, throughput 961928.319987
+93550	[1728375863]	2000000 OPS in 2.084629 seconds, throughput 959403.327882
+93550	[1728375863]	2000000 OPS in 2.255482 seconds, throughput 886728.424346
+93550	[1728375865]	2000000 OPS in 2.093692 seconds, throughput 955250.342457
+93550	[1728375865]	2000000 OPS in 2.102021 seconds, throughput 951465.280318
+93550	[1728375865]	2000000 OPS in 2.108788 seconds, throughput 948412.073665
+93550	[1728375866]	2000000 OPS in 2.280238 seconds, throughput 877101.425378
+93550	[1728375867]	2000000 OPS in 2.074656 seconds, throughput 964015.239153
+93550	[1728375867]	2000000 OPS in 2.088197 seconds, throughput 957764.042377
+93550	[1728375867]	2000000 OPS in 2.095762 seconds, throughput 954306.834459
+93550	[1728375868]	2000000 OPS in 2.254848 seconds, throughput 886977.747502
+93550	[1728375869]	2000000 OPS in 2.075635 seconds, throughput 963560.548940
+93550	[1728375869]	2000000 OPS in 2.079117 seconds, throughput 961946.826465
+93550	[1728375869]	2000000 OPS in 2.084476 seconds, throughput 959473.747839
+93550	[1728375870]	2000000 OPS in 2.255283 seconds, throughput 886806.666835
+93550	[1728375871]	2000000 OPS in 2.102671 seconds, throughput 951171.153262
+93550	[1728375871]	2000000 OPS in 2.111903 seconds, throughput 947013.191420
+93550	[1728375872]	2000000 OPS in 2.114720 seconds, throughput 945751.683438
+93550	[1728375872]	2000000 OPS in 2.270737 seconds, throughput 880771.309051
+93550	[1728375873]	2000000 OPS in 2.089821 seconds, throughput 957019.763894
+93550	[1728375873]	2000000 OPS in 2.107888 seconds, throughput 948817.014946
+93550	[1728375874]	2000000 OPS in 2.119240 seconds, throughput 943734.546347
+93550	[1728375875]	2000000 OPS in 2.253259 seconds, throughput 887603.244900
+93550	[1728375875]	2000000 OPS in 2.086185 seconds, throughput 958687.748210
+93550	[1728375875]	2000000 OPS in 2.081765 seconds, throughput 960723.232449
+93550	[1728375876]	2000000 OPS in 2.085847 seconds, throughput 958843.098271
+93550	[1728375877]	2000000 OPS in 2.254918 seconds, throughput 886950.212824
+93550	[1728375877]	2000000 OPS in 2.069746 seconds, throughput 966302.145287
+93550	[1728375878]	2000000 OPS in 2.097173 seconds, throughput 953664.766808
+93550	[1728375878]	2000000 OPS in 2.108517 seconds, throughput 948533.969610
+93550	[1728375879]	2000000 OPS in 2.278928 seconds, throughput 877605.611059
+93550	[1728375879]	2000000 OPS in 2.093994 seconds, throughput 955112.574344
+93550	[1728375880]	2000000 OPS in 2.082554 seconds, throughput 960359.251189
+93550	[1728375880]	2000000 OPS in 2.085243 seconds, throughput 959120.831481
+93550	[1728375881]	2000000 OPS in 2.070371 seconds, throughput 966010.439675
+93550	[1728375881]	2000000 OPS in 2.255331 seconds, throughput 886787.793011
+93550	[1728375882]	2000000 OPS in 2.078165 seconds, throughput 962387.490887
+93550	[1728375882]	2000000 OPS in 2.085804 seconds, throughput 958862.865351
+93550	[1728375883]	2000000 OPS in 2.086713 seconds, throughput 958445.171904
+93550	[1728375884]	2000000 OPS in 2.255640 seconds, throughput 886666.312000
+93550	[1728375884]	2000000 OPS in 2.094184 seconds, throughput 955025.919403
+93550	[1728375884]	2000000 OPS in 2.113390 seconds, throughput 946346.864516
+93550	[1728375885]	2000000 OPS in 2.098000 seconds, throughput 953288.846520
+93550	[1728375886]	2000000 OPS in 2.112715 seconds, throughput 946649.216766
+93550	[1728375886]	2000000 OPS in 2.277167 seconds, throughput 878284.289207
+93550	[1728375886]	2000000 OPS in 2.114439 seconds, throughput 945877.369837
+93550	[1728375888]	2000000 OPS in 2.086165 seconds, throughput 958696.939120
+93550	[1728375888]	2000000 OPS in 2.088031 seconds, throughput 957840.185323
+93550	[1728375888]	2000000 OPS in 2.255841 seconds, throughput 886587.308237
+93550	[1728375888]	2000000 OPS in 2.085787 seconds, throughput 958870.680467
+93550	[1728375890]	2000000 OPS in 2.071440 seconds, throughput 965511.914417
+93550	[1728375890]	2000000 OPS in 2.079388 seconds, throughput 961821.459006
+93550	[1728375890]	2000000 OPS in 2.087169 seconds, throughput 958235.772954
+93550	[1728375891]	2000000 OPS in 2.256168 seconds, throughput 886458.809805
+93550	[1728375892]	2000000 OPS in 2.093633 seconds, throughput 955277.262061
+93550	[1728375892]	2000000 OPS in 2.102114 seconds, throughput 951423.186373
+93550	[1728375893]	2000000 OPS in 2.108467 seconds, throughput 948556.463061
+93550	[1728375893]	2000000 OPS in 2.279630 seconds, throughput 877335.357054
+93550	[1728375894]	2000000 OPS in 2.071383 seconds, throughput 965538.483226
+93550	[1728375894]	2000000 OPS in 2.079222 seconds, throughput 961898.248479
+93550	[1728375895]	2000000 OPS in 2.083621 seconds, throughput 959867.461501
+93550	[1728375895]	2000000 OPS in 2.255874 seconds, throughput 886574.338815
+93550	[1728375896]	2000000 OPS in 2.071239 seconds, throughput 965605.610941
+93550	[1728375896]	2000000 OPS in 2.078912 seconds, throughput 962041.683342
+93550	[1728375897]	2000000 OPS in 2.086284 seconds, throughput 958642.255800
+93550	[1728375897]	2000000 OPS in 2.255724 seconds, throughput 886633.293789
+93550	[1728375898]	2000000 OPS in 2.091871 seconds, throughput 956081.899888
+93550	[1728375898]	2000000 OPS in 2.095407 seconds, throughput 954468.511368
+93550	[1728375899]	2000000 OPS in 2.102430 seconds, throughput 951280.185309
+93550	[1728375900]	2000000 OPS in 2.268638 seconds, throughput 881586.220455
+93550	[1728375900]	2000000 OPS in 2.075222 seconds, throughput 963752.311801
+93550	[1728375901]	2000000 OPS in 2.082144 seconds, throughput 960548.357847
+93550	[1728375901]	2000000 OPS in 2.090976 seconds, throughput 956491.131414
+93550	[1728375902]	2000000 OPS in 2.254494 seconds, throughput 887117.020493
+93550	[1728375902]	2000000 OPS in 2.086875 seconds, throughput 958370.769692
+93550	[1728375903]	2000000 OPS in 2.098071 seconds, throughput 953256.586646
+93550	[1728375903]	2000000 OPS in 2.102608 seconds, throughput 951199.653002
+93550	[1728375904]	2000000 OPS in 2.254404 seconds, throughput 887152.435854
+93550	[1728375904]	2000000 OPS in 2.074279 seconds, throughput 964190.448826
+93550	[1728375905]	2000000 OPS in 2.080859 seconds, throughput 961141.528571
+93550	[1728375905]	2000000 OPS in 2.084923 seconds, throughput 959268.040115
+93550	[1728375906]	2000000 OPS in 2.073264 seconds, throughput 964662.483890
+93550	[1728375906]	2000000 OPS in 2.256517 seconds, throughput 886321.707304
+93550	[1728375907]	2000000 OPS in 2.082561 seconds, throughput 960356.023185
+93550	[1728375907]	2000000 OPS in 2.089463 seconds, throughput 957183.735725
+93550	[1728375908]	2000000 OPS in 2.069891 seconds, throughput 966234.453892
+93550	[1728375909]	2000000 OPS in 2.255881 seconds, throughput 886571.587774
+93550	[1728375909]	2000000 OPS in 2.083326 seconds, throughput 960003.379212
+93550	[1728375909]	2000000 OPS in 2.089915 seconds, throughput 956976.719149
+93550	[1728375910]	2000000 OPS in 2.075797 seconds, throughput 963485.350446
+93550	[1728375911]	2000000 OPS in 2.257578 seconds, throughput 885905.160309
+93550	[1728375911]	2000000 OPS in 2.079405 seconds, throughput 961813.595716
+93550	[1728375911]	2000000 OPS in 2.107239 seconds, throughput 949109.237253
+93550	[1728375913]	2000000 OPS in 2.097599 seconds, throughput 953471.087658
+93550	[1728375913]	2000000 OPS in 2.106465 seconds, throughput 949457.978177
+93550	[1728375913]	2000000 OPS in 2.278706 seconds, throughput 877691.110657
+93550	[1728375913]	2000000 OPS in 2.089804 seconds, throughput 957027.548995
+93550	[1728375915]	2000000 OPS in 2.070012 seconds, throughput 966177.973847
+93550	[1728375915]	2000000 OPS in 2.077063 seconds, throughput 962898.092162
+93550	[1728375915]	2000000 OPS in 2.255514 seconds, throughput 886715.843927
+93550	[1728375916]	2000000 OPS in 2.084539 seconds, throughput 959444.750134
+93550	[1728375917]	2000000 OPS in 2.069832 seconds, throughput 966261.996143
+93550	[1728375917]	2000000 OPS in 2.076797 seconds, throughput 963021.421930
+93550	[1728375918]	2000000 OPS in 2.255358 seconds, throughput 886777.176838
+93550	[1728375918]	2000000 OPS in 2.086321 seconds, throughput 958625.254695
+93550	[1728375919]	2000000 OPS in 2.094560 seconds, throughput 954854.480177
+93550	[1728375919]	2000000 OPS in 2.103199 seconds, throughput 950932.365411
+93550	[1728375920]	2000000 OPS in 2.109881 seconds, throughput 947920.759512
+93550	[1728375920]	2000000 OPS in 2.271517 seconds, throughput 880468.867281
+93550	[1728375921]	2000000 OPS in 2.071126 seconds, throughput 965658.294087
+93550	[1728375921]	2000000 OPS in 2.078182 seconds, throughput 962379.618339
+93550	[1728375922]	2000000 OPS in 2.084331 seconds, throughput 959540.495248
+93550	[1728375922]	2000000 OPS in 2.258034 seconds, throughput 885726.255672
+93550	[1728375923]	2000000 OPS in 2.072121 seconds, throughput 965194.600122
+93550	[1728375923]	2000000 OPS in 2.080072 seconds, throughput 961505.178667
+93550	[1728375924]	2000000 OPS in 2.085260 seconds, throughput 959113.012286
+93550	[1728375924]	2000000 OPS in 2.257499 seconds, throughput 885936.162098
+93550	[1728375925]	2000000 OPS in 2.084783 seconds, throughput 959332.458102
+93550	[1728375926]	2000000 OPS in 2.103403 seconds, throughput 950840.138575
+93550	[1728375926]	2000000 OPS in 2.097194 seconds, throughput 953655.217400
+93550	[1728375927]	2000000 OPS in 2.271555 seconds, throughput 880454.138245
+93550	[1728375927]	2000000 OPS in 2.081168 seconds, throughput 960998.823737
+93550	[1728375928]	2000000 OPS in 2.078037 seconds, throughput 962446.770678
+93550	[1728375928]	2000000 OPS in 2.084408 seconds, throughput 959505.048916
+93550	[1728375929]	2000000 OPS in 2.256159 seconds, throughput 886462.345961
+93550	[1728375929]	2000000 OPS in 2.070551 seconds, throughput 965926.461121
+93550	[1728375930]	2000000 OPS in 2.079506 seconds, throughput 961766.881173
+93550	[1728375930]	2000000 OPS in 2.084809 seconds, throughput 959320.494108
+93550	[1728375931]	2000000 OPS in 2.069743 seconds, throughput 966303.545899
+93550	[1728375931]	2000000 OPS in 2.257431 seconds, throughput 885962.848920
+93550	[1728375932]	2000000 OPS in 2.093119 seconds, throughput 955511.846197
+93550	[1728375932]	2000000 OPS in 2.102005 seconds, throughput 951472.522663
+93550	[1728375933]	2000000 OPS in 2.093529 seconds, throughput 955324.717260
+93550	[1728375933]	2000000 OPS in 2.271079 seconds, throughput 880638.674392
+93550	[1728375934]	2000000 OPS in 2.083316 seconds, throughput 960007.987266
+93550	[1728375934]	2000000 OPS in 2.092017 seconds, throughput 956015.175785
+93550	[1728375935]	2000000 OPS in 2.079503 seconds, throughput 961768.268668
+93550	[1728375936]	2000000 OPS in 2.256255 seconds, throughput 886424.628422
+93550	[1728375936]	2000000 OPS in 2.081973 seconds, throughput 960627.251170
+93550	[1728375936]	2000000 OPS in 2.088161 seconds, throughput 957780.554277
+93550	[1728375937]	2000000 OPS in 2.070974 seconds, throughput 965729.168980
+93550	[1728375938]	2000000 OPS in 2.256591 seconds, throughput 886292.642309
+93550	[1728375938]	2000000 OPS in 2.078669 seconds, throughput 962154.147678
+93550	[1728375939]	2000000 OPS in 2.100900 seconds, throughput 951972.963968
+93550	[1728375940]	2000000 OPS in 2.088690 seconds, throughput 957537.978350
+93550	[1728375940]	2000000 OPS in 2.101884 seconds, throughput 951527.296464
+93550	[1728375940]	2000000 OPS in 2.269888 seconds, throughput 881100.741534
+93550	[1728375941]	2000000 OPS in 2.087551 seconds, throughput 958060.425829
+93550	[1728375942]	2000000 OPS in 2.070907 seconds, throughput 965760.413191
+93550	[1728375942]	2000000 OPS in 2.079059 seconds, throughput 961973.662123
+93550	[1728375943]	2000000 OPS in 2.255495 seconds, throughput 886723.313508
+93550	[1728375943]	2000000 OPS in 2.084026 seconds, throughput 959680.925286
+93550	[1728375944]	2000000 OPS in 2.070794 seconds, throughput 965813.113231
+93550	[1728375944]	2000000 OPS in 2.078381 seconds, throughput 962287.472797
+93550	[1728375945]	2000000 OPS in 2.254685 seconds, throughput 887041.870594
+93550	[1728375945]	2000000 OPS in 2.085338 seconds, throughput 959077.137615
+93550	[1728375946]	2000000 OPS in 2.093650 seconds, throughput 955269.505409
+93550	[1728375946]	2000000 OPS in 2.093796 seconds, throughput 955202.894647
+93550	[1728375947]	2000000 OPS in 2.102585 seconds, throughput 951210.058095
+93550	[1728375947]	2000000 OPS in 2.271717 seconds, throughput 880391.351564
+93550	[1728375948]	2000000 OPS in 2.071068 seconds, throughput 965685.337227
+93550	[1728375948]	2000000 OPS in 2.078985 seconds, throughput 962007.902895
+93550	[1728375949]	2000000 OPS in 2.084332 seconds, throughput 959540.034889
+93550	[1728375949]	2000000 OPS in 2.257170 seconds, throughput 886065.294152
+93550	[1728375950]	2000000 OPS in 2.072151 seconds, throughput 965180.626315
+93550	[1728375951]	2000000 OPS in 2.079286 seconds, throughput 961868.641447
+93550	[1728375951]	2000000 OPS in 2.086436 seconds, throughput 958572.417270
+93550	[1728375952]	2000000 OPS in 2.257415 seconds, throughput 885969.128406
+93550	[1728375952]	2000000 OPS in 2.090574 seconds, throughput 956675.056707
+93550	[1728375953]	2000000 OPS in 2.100919 seconds, throughput 951964.354647
+93550	[1728375953]	2000000 OPS in 2.102422 seconds, throughput 951283.805059
+93550	[1728375954]	2000000 OPS in 2.270373 seconds, throughput 880912.519661
+93550	[1728375954]	2000000 OPS in 2.073972 seconds, throughput 964333.173254
+93550	[1728375955]	2000000 OPS in 2.079112 seconds, throughput 961949.139825
+93550	[1728375955]	2000000 OPS in 2.087879 seconds, throughput 957909.917193
+93550	[1728375956]	2000000 OPS in 2.255515 seconds, throughput 886715.450795
+93550	[1728375956]	2000000 OPS in 2.077566 seconds, throughput 962664.964675
+93550	[1728375957]	2000000 OPS in 2.089508 seconds, throughput 957163.121654
+93550	[1728375957]	2000000 OPS in 2.096941 seconds, throughput 953770.277752
+93550	[1728375958]	2000000 OPS in 2.077579 seconds, throughput 962658.941008
+93550	[1728375958]	2000000 OPS in 2.256002 seconds, throughput 886524.036769
+93550	[1728375959]	2000000 OPS in 2.096758 seconds, throughput 953853.520530
+93550	[1728375960]	2000000 OPS in 2.102452 seconds, throughput 951270.231140
+93550	[1728375960]	2000000 OPS in 2.094343 seconds, throughput 954953.414985
+93550	[1728375961]	2000000 OPS in 2.269980 seconds, throughput 881065.031410
+93550	[1728375961]	2000000 OPS in 2.080382 seconds, throughput 961361.903727
+93550	[1728375962]	2000000 OPS in 2.085970 seconds, throughput 958786.559730
+93550	[1728375962]	2000000 OPS in 2.071150 seconds, throughput 965647.104266
+93550	[1728375963]	2000000 OPS in 2.256722 seconds, throughput 886241.194086
+93550	[1728375963]	2000000 OPS in 2.078896 seconds, throughput 962049.087593
+93550	[1728375964]	2000000 OPS in 2.085915 seconds, throughput 958811.840367
+93550	[1728375964]	2000000 OPS in 2.071787 seconds, throughput 965350.202506
+93550	[1728375965]	2000000 OPS in 2.256854 seconds, throughput 886189.359170
+93550	[1728375965]	2000000 OPS in 2.079877 seconds, throughput 961595.325108
+93550	[1728375966]	2000000 OPS in 2.087105 seconds, throughput 958265.156760
+93550	[1728375967]	2000000 OPS in 2.073285 seconds, throughput 964652.712965
+93550	[1728375967]	2000000 OPS in 2.081258 seconds, throughput 960957.267191
+93550	[1728375967]	2000000 OPS in 2.256800 seconds, throughput 886210.563630
+93550	[1728375968]	2000000 OPS in 2.085006 seconds, throughput 959229.853535
+93550	[1728375969]	2000000 OPS in 2.070469 seconds, throughput 965964.716207
+93550	[1728375969]	2000000 OPS in 2.077059 seconds, throughput 962899.946511
+93550	[1728375970]	2000000 OPS in 2.255864 seconds, throughput 886578.268903
+93550	[1728375970]	2000000 OPS in 2.084349 seconds, throughput 959532.208858
+93550	[1728375971]	2000000 OPS in 2.070286 seconds, throughput 966050.101290
+93550	[1728375971]	2000000 OPS in 2.078352 seconds, throughput 962300.899944
+93550	[1728375972]	2000000 OPS in 2.259685 seconds, throughput 885079.115009
+93550	[1728375972]	2000000 OPS in 2.098533 seconds, throughput 953046.723592
+93550	[1728375973]	2000000 OPS in 2.093720 seconds, throughput 955237.567583
+93550	[1728375974]	2000000 OPS in 2.111246 seconds, throughput 947307.893064
+93550	[1728375974]	2000000 OPS in 2.096195 seconds, throughput 954109.708305
+93550	[1728375974]	2000000 OPS in 2.266733 seconds, throughput 882327.120133
+93550	[1728375975]	2000000 OPS in 2.103345 seconds, throughput 950866.358111
+93550	[1728375976]	2000000 OPS in 2.109277 seconds, throughput 948192.200455
+93550	[1728375976]	2000000 OPS in 2.116269 seconds, throughput 945059.441876
+93550	[1728375976]	2000000 OPS in 2.273733 seconds, throughput 879610.754649
+93550	[1728375977]	2000000 OPS in 2.071517 seconds, throughput 965476.025541
+93550	[1728375978]	2000000 OPS in 2.078903 seconds, throughput 962045.848219
+93550	[1728375978]	2000000 OPS in 2.085718 seconds, throughput 958902.401955
+93550	[1728375979]	2000000 OPS in 2.263528 seconds, throughput 883576.434663
+93550	[1728375979]	2000000 OPS in 2.092204 seconds, throughput 955929.727694
+93550	[1728375980]	2000000 OPS in 2.092953 seconds, throughput 955587.631447
+93550	[1728375980]	2000000 OPS in 2.100239 seconds, throughput 952272.574693
+93550	[1728375981]	2000000 OPS in 2.261158 seconds, throughput 884502.542503
+93550	[1728375981]	2000000 OPS in 2.070302 seconds, throughput 966042.635326
+93550	[1728375982]	2000000 OPS in 2.078320 seconds, throughput 962315.716540
+93550	[1728375983]	2000000 OPS in 2.085346 seconds, throughput 959073.458313
+93550	[1728375983]	2000000 OPS in 2.068776 seconds, throughput 966755.221445
+93550	[1728375983]	2000000 OPS in 2.255504 seconds, throughput 886719.775270
+93550	[1728375984]	2000000 OPS in 2.077750 seconds, throughput 962579.713633
+93550	[1728375985]	2000000 OPS in 2.084235 seconds, throughput 959584.691745
+93550	[1728375985]	2000000 OPS in 2.069982 seconds, throughput 966191.976549
+93550	[1728375985]	2000000 OPS in 2.257344 seconds, throughput 885996.994698
+93550	[1728375986]	2000000 OPS in 2.102817 seconds, throughput 951105.112808
+93550	[1728375987]	2000000 OPS in 2.101435 seconds, throughput 951730.603135
+93550	[1728375987]	2000000 OPS in 2.087204 seconds, throughput 958219.704447
+93550	[1728375988]	2000000 OPS in 2.269919 seconds, throughput 881088.708452
+93550	[1728375988]	2000000 OPS in 2.078627 seconds, throughput 962173.588624
+93550	[1728375989]	2000000 OPS in 2.084786 seconds, throughput 959331.077626
+93550	[1728375989]	2000000 OPS in 2.072673 seconds, throughput 964937.546830
+93550	[1728375990]	2000000 OPS in 2.255567 seconds, throughput 886695.008395
+93550	[1728375990]	2000000 OPS in 2.081816 seconds, throughput 960699.696803
+93550	[1728375991]	2000000 OPS in 2.088092 seconds, throughput 957812.203677
+93550	[1728375991]	2000000 OPS in 2.072088 seconds, throughput 965209.971777
+93550	[1728375992]	2000000 OPS in 2.263586 seconds, throughput 883553.794731
+93550	[1728375992]	2000000 OPS in 2.090645 seconds, throughput 956642.567246
+93550	[1728375993]	2000000 OPS in 2.102990 seconds, throughput 951026.871264
+93550	[1728375994]	2000000 OPS in 2.094031 seconds, throughput 955095.698201
+93550	[1728375994]	2000000 OPS in 2.119085 seconds, throughput 943803.575600
+93550	[1728375995]	2000000 OPS in 2.286470 seconds, throughput 874710.798742
+93550	[1728375995]	2000000 OPS in 2.119623 seconds, throughput 943564.020583
+93550	[1728375996]	2000000 OPS in 2.105195 seconds, throughput 950030.757246
+93550	[1728375997]	2000000 OPS in 2.079545 seconds, throughput 961748.844098
+93550	[1728375997]	2000000 OPS in 2.254850 seconds, throughput 886976.960773
+93550	[1728375997]	2000000 OPS in 2.087105 seconds, throughput 958265.156760
+93550	[1728375998]	2000000 OPS in 2.069206 seconds, throughput 966554.320836
+93550	[1728375999]	2000000 OPS in 2.077931 seconds, throughput 962495.867283
+93550	[1728375999]	2000000 OPS in 2.255738 seconds, throughput 886627.790993
+93550	[1728375999]	2000000 OPS in 2.105255 seconds, throughput 950003.681264
+93550	[1728376000]	2000000 OPS in 2.094058 seconds, throughput 955083.383555
+93550	[1728376001]	2000000 OPS in 2.102890 seconds, throughput 951072.096020
+93550	[1728376001]	2000000 OPS in 2.274875 seconds, throughput 879169.185120
+93550	[1728376001]	2000000 OPS in 2.090600 seconds, throughput 956663.158902
+93550	[1728376002]	2000000 OPS in 2.076064 seconds, throughput 963361.437798
+93550	[1728376003]	2000000 OPS in 2.080569 seconds, throughput 961275.497232
+93550	[1728376003]	2000000 OPS in 2.072286 seconds, throughput 965117.749191
+93550	[1728376004]	2000000 OPS in 2.266454 seconds, throughput 882435.734412
+93550	[1728376004]	2000000 OPS in 2.095461 seconds, throughput 954443.914728
+93550	[1728376005]	2000000 OPS in 2.096480 seconds, throughput 953980.004579
+93550	[1728376006]	2000000 OPS in 2.102121 seconds, throughput 951420.018163
+93550	[1728376006]	2000000 OPS in 2.271515 seconds, throughput 880469.642507
+93550	[1728376006]	2000000 OPS in 2.091604 seconds, throughput 956203.946827
+93550	[1728376007]	2000000 OPS in 2.102718 seconds, throughput 951149.892663
+93550	[1728376008]	2000000 OPS in 2.111391 seconds, throughput 947242.836594
+93550	[1728376008]	2000000 OPS in 2.263573 seconds, throughput 883558.869098
+93550	[1728376008]	2000000 OPS in 2.076114 seconds, throughput 963338.236725
+93550	[1728376009]	2000000 OPS in 2.079863 seconds, throughput 961601.797811
+93550	[1728376010]	2000000 OPS in 2.084911 seconds, throughput 959273.561317
+93550	[1728376010]	2000000 OPS in 2.068776 seconds, throughput 966755.221445
+93550	[1728376010]	2000000 OPS in 2.255653 seconds, throughput 886661.201878
+93550	[1728376011]	2000000 OPS in 2.077864 seconds, throughput 962526.902627
+93550	[1728376012]	2000000 OPS in 2.084897 seconds, throughput 959280.002801
+93550	[1728376012]	2000000 OPS in 2.070063 seconds, throughput 966154.170187
+93550	[1728376013]	2000000 OPS in 2.272246 seconds, throughput 880186.388270
+93550	[1728376013]	2000000 OPS in 2.101717 seconds, throughput 951602.903721
+93550	[1728376014]	2000000 OPS in 2.108164 seconds, throughput 948692.796196
+93550	[1728376014]	2000000 OPS in 2.094022 seconds, throughput 955099.803154
+93550	[1728376015]	2000000 OPS in 2.261679 seconds, throughput 884298.788643
+93550	[1728376015]	2000000 OPS in 2.077328 seconds, throughput 962775.257446
+93550	[1728376016]	2000000 OPS in 2.083808 seconds, throughput 959781.323423
+93550	[1728376016]	2000000 OPS in 2.068962 seconds, throughput 966668.310003
+93550	[1728376017]	2000000 OPS in 2.256912 seconds, throughput 886166.585139
+93550	[1728376017]	2000000 OPS in 2.079311 seconds, throughput 961857.076695
+93550	[1728376018]	2000000 OPS in 2.084821 seconds, throughput 959314.972365
+93550	[1728376019]	2000000 OPS in 2.070149 seconds, throughput 966114.033338
+93550	[1728376019]	2000000 OPS in 2.266485 seconds, throughput 882423.664838
+93550	[1728376019]	2000000 OPS in 2.091101 seconds, throughput 956433.955127
+93550	[1728376020]	2000000 OPS in 2.100538 seconds, throughput 952137.023943
+93550	[1728376021]	2000000 OPS in 2.094295 seconds, throughput 954975.301951
+93550	[1728376022]	2000000 OPS in 2.080805 seconds, throughput 961166.471630
+93550	[1728376022]	2000000 OPS in 2.258186 seconds, throughput 885666.636849
+93550	[1728376022]	2000000 OPS in 2.085702 seconds, throughput 958909.757962
+93550	[1728376023]	2000000 OPS in 2.069324 seconds, throughput 966499.204571
+93550	[1728376024]	2000000 OPS in 2.077566 seconds, throughput 962664.964675
+93550	[1728376024]	2000000 OPS in 2.256748 seconds, throughput 886230.983699
+93550	[1728376024]	2000000 OPS in 2.085234 seconds, throughput 959124.971106
+93550	[1728376025]	2000000 OPS in 2.068942 seconds, throughput 966677.654569
+93550	[1728376026]	2000000 OPS in 2.076630 seconds, throughput 963098.866914
+93550	[1728376026]	2000000 OPS in 2.256622 seconds, throughput 886280.466999
+93550	[1728376026]	2000000 OPS in 2.085432 seconds, throughput 959033.907603
+93550	[1728376027]	2000000 OPS in 2.071148 seconds, throughput 965648.036741
+93550	[1728376028]	2000000 OPS in 2.077770 seconds, throughput 962570.448125
+93550	[1728376028]	2000000 OPS in 2.257210 seconds, throughput 886049.592196
+93550	[1728376029]	2000000 OPS in 2.084545 seconds, throughput 959441.988539
+93550	[1728376029]	2000000 OPS in 2.068936 seconds, throughput 966680.457975
+93550	[1728376030]	2000000 OPS in 2.079633 seconds, throughput 961708.147543
+93550	[1728376031]	2000000 OPS in 2.085188 seconds, throughput 959146.129749
+93550	[1728376031]	2000000 OPS in 2.257535 seconds, throughput 885922.034431
+93550	[1728376031]	2000000 OPS in 2.070977 seconds, throughput 965727.770033
+93550	[1728376032]	2000000 OPS in 2.077121 seconds, throughput 962871.204903
+93550	[1728376033]	2000000 OPS in 2.089215 seconds, throughput 957297.358099
+93550	[1728376033]	2000000 OPS in 2.269107 seconds, throughput 881404.006069
+93550	[1728376033]	2000000 OPS in 2.084160 seconds, throughput 959619.223092
+93550	[1728376034]	2000000 OPS in 2.103734 seconds, throughput 950690.534069
+93550	[1728376035]	2000000 OPS in 2.097161 seconds, throughput 953670.223698
+93550	[1728376035]	2000000 OPS in 2.071167 seconds, throughput 965639.178299
+93550	[1728376035]	2000000 OPS in 2.258416 seconds, throughput 885576.439416
+93550	[1728376036]	2000000 OPS in 2.078045 seconds, throughput 962443.065477
+93550	[1728376037]	2000000 OPS in 2.086051 seconds, throughput 958749.330673
+93550	[1728376037]	2000000 OPS in 2.068295 seconds, throughput 966980.048784
+93550	[1728376038]	2000000 OPS in 2.254631 seconds, throughput 887063.115871
+93550	[1728376038]	2000000 OPS in 2.077829 seconds, throughput 962543.115916
+93550	[1728376039]	2000000 OPS in 2.084001 seconds, throughput 959692.437768
+93550	[1728376039]	2000000 OPS in 2.069196 seconds, throughput 966558.991995
+93550	[1728376040]	2000000 OPS in 2.275585 seconds, throughput 878894.877581
+93550	[1728376040]	2000000 OPS in 2.103714 seconds, throughput 950699.572280
+93550	[1728376041]	2000000 OPS in 2.111456 seconds, throughput 947213.676250
+93550	[1728376041]	2000000 OPS in 2.094938 seconds, throughput 954682.191072
+93550	[1728376042]	2000000 OPS in 2.257784 seconds, throughput 885824.330405
+93550	[1728376042]	2000000 OPS in 2.080415 seconds, throughput 961346.654393
+93550	[1728376043]	2000000 OPS in 2.085723 seconds, throughput 958900.103226
+93550	[1728376043]	2000000 OPS in 2.070035 seconds, throughput 966167.238718
+93550	[1728376044]	2000000 OPS in 2.256911 seconds, throughput 886166.977785
+93550	[1728376044]	2000000 OPS in 2.078468 seconds, throughput 962247.193606
+93550	[1728376045]	2000000 OPS in 2.084263 seconds, throughput 959571.800680
+93550	[1728376046]	2000000 OPS in 2.070066 seconds, throughput 966152.770008
+93550	[1728376047]	2000000 OPS in 2.099383 seconds, throughput 952660.853213
+93550	[1728376047]	2000000 OPS in 2.270854 seconds, throughput 880725.929540
+93550	[1728376047]	2000000 OPS in 2.102308 seconds, throughput 951335.389486
+93550	[1728376048]	2000000 OPS in 2.085194 seconds, throughput 959143.369873
+93550	[1728376049]	2000000 OPS in 2.081997 seconds, throughput 960616.177641
+93550	[1728376049]	2000000 OPS in 2.260074 seconds, throughput 884926.776734
+93550	[1728376049]	2000000 OPS in 2.085155 seconds, throughput 959161.309351
+93550	[1728376050]	2000000 OPS in 2.069732 seconds, throughput 966308.681510
+93550	[1728376051]	2000000 OPS in 2.079226 seconds, throughput 961896.397987
+93550	[1728376051]	2000000 OPS in 2.256583 seconds, throughput 886295.784378
+93550	[1728376052]	2000000 OPS in 2.085516 seconds, throughput 958995.279825
+93550	[1728376052]	2000000 OPS in 2.069063 seconds, throughput 966621.122701
+93550	[1728376053]	2000000 OPS in 2.077874 seconds, throughput 962522.270359
+93550	[1728376053]	2000000 OPS in 2.270335 seconds, throughput 880927.264038
+93550	[1728376054]	2000000 OPS in 2.100138 seconds, throughput 952318.371459
+93550	[1728376054]	2000000 OPS in 2.092275 seconds, throughput 955897.288836
+93550	[1728376055]	2000000 OPS in 2.095400 seconds, throughput 954471.699914
+93550	[1728376056]	2000000 OPS in 2.258198 seconds, throughput 885661.930442
+93550	[1728376056]	2000000 OPS in 2.085329 seconds, throughput 959081.276863
+93550	[1728376056]	2000000 OPS in 2.071350 seconds, throughput 965553.865836
+93550	[1728376057]	2000000 OPS in 2.078992 seconds, throughput 962004.663799
+93550	[1728376058]	2000000 OPS in 2.084933 seconds, throughput 959263.439161
+93550	[1728376058]	2000000 OPS in 2.257127 seconds, throughput 886082.174375
+93550	[1728376058]	2000000 OPS in 2.070541 seconds, throughput 965931.126213
+93550	[1728376059]	2000000 OPS in 2.078682 seconds, throughput 962148.130402
+93550	[1728376060]	2000000 OPS in 2.100165 seconds, throughput 952306.128328
+93550	[1728376060]	2000000 OPS in 2.083680 seconds, throughput 959840.282577
+93550	[1728376060]	2000000 OPS in 2.269402 seconds, throughput 881289.432194
+93550	[1728376061]	2000000 OPS in 2.094537 seconds, throughput 954864.965384
+93550	[1728376062]	2000000 OPS in 2.087705 seconds, throughput 957989.754300
+93550	[1728376062]	2000000 OPS in 2.082911 seconds, throughput 960194.650660
+93550	[1728376062]	2000000 OPS in 2.257666 seconds, throughput 885870.629225
+93550	[1728376063]	2000000 OPS in 2.088014 seconds, throughput 957847.983778
+93550	[1728376064]	2000000 OPS in 2.090822 seconds, throughput 956561.582000
+93550	[1728376064]	2000000 OPS in 2.078028 seconds, throughput 962450.939063
+93550	[1728376065]	2000000 OPS in 2.255831 seconds, throughput 886591.238439
+93550	[1728376065]	2000000 OPS in 2.077101 seconds, throughput 962880.476202
+93550	[1728376066]	2000000 OPS in 2.086263 seconds, throughput 958651.905345
+93550	[1728376066]	2000000 OPS in 2.069828 seconds, throughput 966263.863471
+93550	[1728376067]	2000000 OPS in 2.278712 seconds, throughput 877688.799638
+93550	[1728376067]	2000000 OPS in 2.101514 seconds, throughput 951694.825730
+93550	[1728376068]	2000000 OPS in 2.109795 seconds, throughput 947959.398899
+93550	[1728376068]	2000000 OPS in 2.093300 seconds, throughput 955429.226580
+93550	[1728376069]	2000000 OPS in 2.256542 seconds, throughput 886311.887835
+93550	[1728376070]	2000000 OPS in 2.077397 seconds, throughput 962743.279210
+93550	[1728376070]	2000000 OPS in 2.085565 seconds, throughput 958972.748392
+93550	[1728376070]	2000000 OPS in 2.068721 seconds, throughput 966780.924059
+93550	[1728376071]	2000000 OPS in 2.256120 seconds, throughput 886477.669628
+93550	[1728376072]	2000000 OPS in 2.077758 seconds, throughput 962576.007408
+93550	[1728376072]	2000000 OPS in 2.085026 seconds, throughput 959220.652404
+93550	[1728376073]	2000000 OPS in 2.069829 seconds, throughput 966263.396638
+93550	[1728376074]	2000000 OPS in 2.100398 seconds, throughput 952200.487717
+93550	[1728376074]	2000000 OPS in 2.277867 seconds, throughput 878014.388022
+93550	[1728376075]	2000000 OPS in 2.108247 seconds, throughput 948655.446919
+93550	[1728376075]	2000000 OPS in 2.094169 seconds, throughput 955032.760011
+93550	[1728376076]	2000000 OPS in 2.079636 seconds, throughput 961706.760222
+93550	[1728376076]	2000000 OPS in 2.258638 seconds, throughput 885489.396707
+93550	[1728376077]	2000000 OPS in 2.085549 seconds, throughput 958980.105478
+93550	[1728376077]	2000000 OPS in 2.070331 seconds, throughput 966029.103559
+93550	[1728376078]	2000000 OPS in 2.078517 seconds, throughput 962224.509109
+93550	[1728376078]	2000000 OPS in 2.258670 seconds, throughput 885476.851421
+93550	[1728376079]	2000000 OPS in 2.085608 seconds, throughput 958952.976782
+93550	[1728376079]	2000000 OPS in 2.069419 seconds, throughput 966454.835874
+93550	[1728376080]	2000000 OPS in 2.078265 seconds, throughput 962341.183632
+93550	[1728376081]	2000000 OPS in 2.276354 seconds, throughput 878597.968506
+93550	[1728376081]	2000000 OPS in 2.109468 seconds, throughput 948106.347193
+93550	[1728376081]	2000000 OPS in 2.095075 seconds, throughput 954619.763016
+93550	[1728376082]	2000000 OPS in 2.140928 seconds, throughput 934174.339352
+93550	[1728376083]	2000000 OPS in 2.289350 seconds, throughput 873610.413436
+93550	[1728376083]	2000000 OPS in 2.110324 seconds, throughput 947721.771633
+93550	[1728376083]	2000000 OPS in 2.126289 seconds, throughput 940605.910109
+93550	[1728376084]	2000000 OPS in 2.079662 seconds, throughput 961694.736933
+93550	[1728376085]	2000000 OPS in 2.069835 seconds, throughput 966260.595651
+93550	[1728376085]	2000000 OPS in 2.085622 seconds, throughput 958946.539689
+93550	[1728376085]	2000000 OPS in 2.256225 seconds, throughput 886436.414808
+93550	[1728376086]	2000000 OPS in 2.077579 seconds, throughput 962658.941008
+93550	[1728376087]	2000000 OPS in 2.071340 seconds, throughput 965558.527330
+93550	[1728376087]	2000000 OPS in 2.086882 seconds, throughput 958367.555041
+93550	[1728376087]	2000000 OPS in 2.256791 seconds, throughput 886214.097805
+93550	[1728376088]	2000000 OPS in 2.080321 seconds, throughput 961390.093164
+93550	[1728376089]	2000000 OPS in 2.070119 seconds, throughput 966128.034185
+93550	[1728376089]	2000000 OPS in 2.085725 seconds, throughput 958899.183737
+93550	[1728376090]	2000000 OPS in 2.255885 seconds, throughput 886570.015759
+93550	[1728376090]	2000000 OPS in 2.078635 seconds, throughput 962169.885526
+93550	[1728376091]	2000000 OPS in 2.069047 seconds, throughput 966628.597610
+93550	[1728376091]	2000000 OPS in 2.085019 seconds, throughput 959223.872780
+93550	[1728376092]	2000000 OPS in 2.255668 seconds, throughput 886655.305657
+93550	[1728376092]	2000000 OPS in 2.078309 seconds, throughput 962320.809851
+93550	[1728376093]	2000000 OPS in 2.067584 seconds, throughput 967312.573516
+93550	[1728376093]	2000000 OPS in 2.085752 seconds, throughput 958886.770815
+93550	[1728376094]	2000000 OPS in 2.270030 seconds, throughput 881045.624948
+93550	[1728376095]	2000000 OPS in 2.094788 seconds, throughput 954750.552323
+93550	[1728376095]	2000000 OPS in 2.093861 seconds, throughput 955173.242159
+93550	[1728376096]	2000000 OPS in 2.101401 seconds, throughput 951746.001834
+93550	[1728376096]	2000000 OPS in 2.255769 seconds, throughput 886615.606474
+93550	[1728376097]	2000000 OPS in 2.078287 seconds, throughput 962330.996633
+93550	[1728376097]	2000000 OPS in 2.069058 seconds, throughput 966623.458598
+93550	[1728376098]	2000000 OPS in 2.083923 seconds, throughput 959728.358485
+93550	[1728376099]	2000000 OPS in 2.255754 seconds, throughput 886621.502167
+93550	[1728376099]	2000000 OPS in 2.079346 seconds, throughput 961840.886510
+93550	[1728376100]	2000000 OPS in 2.070142 seconds, throughput 966117.300166
+93550	[1728376100]	2000000 OPS in 2.085689 seconds, throughput 958915.734800
+93550	[1728376101]	2000000 OPS in 2.094279 seconds, throughput 954982.597830
+93550	[1728376101]	2000000 OPS in 2.270742 seconds, throughput 880769.369660
+93550	[1728376102]	2000000 OPS in 2.087259 seconds, throughput 958194.455025
+93550	[1728376102]	2000000 OPS in 2.108207 seconds, throughput 948673.446203
+93550	[1728376103]	2000000 OPS in 2.078932 seconds, throughput 962032.428189
+93550	[1728376103]	2000000 OPS in 2.255128 seconds, throughput 886867.619044
+93550	[1728376104]	2000000 OPS in 2.069644 seconds, throughput 966349.768366
+93550	[1728376104]	2000000 OPS in 2.085777 seconds, throughput 958875.277654
+93550	[1728376105]	2000000 OPS in 2.077002 seconds, throughput 962926.371761
+93550	[1728376105]	2000000 OPS in 2.256665 seconds, throughput 886263.579220
+93550	[1728376106]	2000000 OPS in 2.070794 seconds, throughput 965813.113231
+93550	[1728376106]	2000000 OPS in 2.083674 seconds, throughput 959843.046465
+93550	[1728376107]	2000000 OPS in 2.098456 seconds, throughput 953081.694351
+93550	[1728376108]	2000000 OPS in 2.278740 seconds, throughput 877678.015043
+93550	[1728376108]	2000000 OPS in 2.093970 seconds, throughput 955123.521349
+93550	[1728376108]	2000000 OPS in 2.108234 seconds, throughput 948661.296611
+93550	[1728376109]	2000000 OPS in 2.081927 seconds, throughput 960648.476147
+93550	[1728376110]	2000000 OPS in 2.068782 seconds, throughput 966752.417606
+93550	[1728376110]	2000000 OPS in 2.255853 seconds, throughput 886582.592039
+93550	[1728376110]	2000000 OPS in 2.086031 seconds, throughput 958758.522764
+93550	[1728376111]	2000000 OPS in 2.079975 seconds, throughput 961550.018630
+93550	[1728376112]	2000000 OPS in 2.069437 seconds, throughput 966446.429633
+93550	[1728376112]	2000000 OPS in 2.256717 seconds, throughput 886243.157649
+93550	[1728376112]	2000000 OPS in 2.087025 seconds, throughput 958301.889053
+93550	[1728376113]	2000000 OPS in 2.078648 seconds, throughput 962163.868053
+93550	[1728376114]	2000000 OPS in 2.092737 seconds, throughput 955686.261580
+93550	[1728376114]	2000000 OPS in 2.102622 seconds, throughput 951193.319579
+93550	[1728376114]	2000000 OPS in 2.271594 seconds, throughput 880439.022114
+93550	[1728376115]	2000000 OPS in 2.095132 seconds, throughput 954593.791704
+93550	[1728376116]	2000000 OPS in 2.072065 seconds, throughput 965220.685645
+93550	[1728376116]	2000000 OPS in 2.084931 seconds, throughput 959264.359348
+93550	[1728376117]	2000000 OPS in 2.256469 seconds, throughput 886340.561293
+93550	[1728376117]	2000000 OPS in 2.078805 seconds, throughput 962091.201435
+93550	[1728376118]	2000000 OPS in 2.070794 seconds, throughput 965813.113231
+93550	[1728376119]	2000000 OPS in 2.086857 seconds, throughput 958379.036034
+93550	[1728376119]	2000000 OPS in 2.256619 seconds, throughput 886281.645240
+93550	[1728376120]	2000000 OPS in 2.079283 seconds, throughput 961870.029236
+93550	[1728376120]	2000000 OPS in 2.069489 seconds, throughput 966422.145757
+93550	[1728376121]	2000000 OPS in 2.105562 seconds, throughput 949865.166640
+93550	[1728376121]	2000000 OPS in 2.270866 seconds, throughput 880721.275496
+93550	[1728376122]	2000000 OPS in 2.094611 seconds, throughput 954831.231193
+93550	[1728376122]	2000000 OPS in 2.087600 seconds, throughput 958037.938302
+93550	[1728376123]	2000000 OPS in 2.089399 seconds, throughput 957213.055046
+93550	[1728376124]	2000000 OPS in 2.254846 seconds, throughput 886978.534232
+93550	[1728376124]	2000000 OPS in 2.078316 seconds, throughput 962317.568647
+93550	[1728376124]	2000000 OPS in 2.069514 seconds, throughput 966410.471251
+93550	[1728376125]	2000000 OPS in 2.085406 seconds, throughput 959045.864450
+93550	[1728376126]	2000000 OPS in 2.256135 seconds, throughput 886471.775847
+93550	[1728376126]	2000000 OPS in 2.080000 seconds, throughput 961538.461538
+93550	[1728376127]	2000000 OPS in 2.069118 seconds, throughput 966595.428584
+93550	[1728376127]	2000000 OPS in 2.085674 seconds, throughput 958922.631245
+93550	[1728376128]	2000000 OPS in 2.103179 seconds, throughput 950941.408221
+93550	[1728376128]	2000000 OPS in 2.278915 seconds, throughput 877610.617333
+93550	[1728376129]	2000000 OPS in 2.094838 seconds, throughput 954727.764152
+93550	[1728376129]	2000000 OPS in 2.106678 seconds, throughput 949361.981280
+93550	[1728376130]	2000000 OPS in 2.077810 seconds, throughput 962551.917644
+93550	[1728376130]	2000000 OPS in 2.257043 seconds, throughput 886115.151550
+93550	[1728376131]	2000000 OPS in 2.069719 seconds, throughput 966314.750940
+93550	[1728376131]	2000000 OPS in 2.084201 seconds, throughput 959600.345648
+93550	[1728376132]	2000000 OPS in 2.078222 seconds, throughput 962361.095205
+93550	[1728376133]	2000000 OPS in 2.255860 seconds, throughput 886579.840948
+93550	[1728376133]	2000000 OPS in 2.069925 seconds, throughput 966218.582799
+93550	[1728376133]	2000000 OPS in 2.083555 seconds, throughput 959897.866867
+93550	[1728376134]	2000000 OPS in 2.098756 seconds, throughput 952945.459120
+93550	[1728376135]	2000000 OPS in 2.270391 seconds, throughput 880905.535654
+93550	[1728376135]	2000000 OPS in 2.088385 seconds, throughput 957677.822815
+93550	[1728376135]	2000000 OPS in 2.104433 seconds, throughput 950374.756526
+93550	[1728376136]	2000000 OPS in 2.084218 seconds, throughput 959592.518633
+93550	[1728376137]	2000000 OPS in 2.072703 seconds, throughput 964923.580465
+93550	[1728376137]	2000000 OPS in 2.256692 seconds, throughput 886252.975594
+93550	[1728376137]	2000000 OPS in 2.086861 seconds, throughput 958377.199056
+93550	[1728376138]	2000000 OPS in 2.078629 seconds, throughput 962172.662847
+93550	[1728376139]	2000000 OPS in 2.070386 seconds, throughput 966003.440904
+93550	[1728376139]	2000000 OPS in 2.257147 seconds, throughput 886074.323028
+93550	[1728376139]	2000000 OPS in 2.086240 seconds, throughput 958662.474116
+93550	[1728376140]	2000000 OPS in 2.079324 seconds, throughput 961851.063134
+93550	[1728376141]	2000000 OPS in 2.093423 seconds, throughput 955373.089911
+93550	[1728376142]	2000000 OPS in 2.108722 seconds, throughput 948441.757614
+93550	[1728376142]	2000000 OPS in 2.277616 seconds, throughput 878111.147797
+93550	[1728376143]	2000000 OPS in 2.102339 seconds, throughput 951321.361588
+93550	[1728376143]	2000000 OPS in 2.070840 seconds, throughput 965791.659423
+93550	[1728376144]	2000000 OPS in 2.086633 seconds, throughput 958481.917999
+93550	[1728376144]	2000000 OPS in 2.256312 seconds, throughput 886402.235152
+93550	[1728376145]	2000000 OPS in 2.078254 seconds, throughput 962346.277212
+93550	[1728376145]	2000000 OPS in 2.070185 seconds, throughput 966097.232856
+93550	[1728376146]	2000000 OPS in 2.084225 seconds, throughput 959589.295781
+93550	[1728376146]	2000000 OPS in 2.255419 seconds, throughput 886753.193087
+93550	[1728376147]	2000000 OPS in 2.079605 seconds, throughput 961721.096074
+93550	[1728376147]	2000000 OPS in 2.070078 seconds, throughput 966147.169334
+93550	[1728376148]	2000000 OPS in 2.086166 seconds, throughput 958696.479571
+93550	[1728376148]	2000000 OPS in 2.257566 seconds, throughput 885909.869302
+93550	[1728376149]	2000000 OPS in 2.079127 seconds, throughput 961942.199779
+93550	[1728376149]	2000000 OPS in 2.070431 seconds, throughput 965982.445201
+93550	[1728376150]	2000000 OPS in 2.079776 seconds, throughput 961642.022987
+93550	[1728376151]	2000000 OPS in 2.255413 seconds, throughput 886755.552087
+93550	[1728376151]	2000000 OPS in 2.078736 seconds, throughput 962123.136367
+93550	[1728376151]	2000000 OPS in 2.083183 seconds, throughput 960069.278599
+93550	[1728376152]	2000000 OPS in 2.074504 seconds, throughput 964085.873057
+93550	[1728376153]	2000000 OPS in 2.255263 seconds, throughput 886814.531166
+93550	[1728376153]	2000000 OPS in 2.078969 seconds, throughput 962015.306626
+93550	[1728376154]	2000000 OPS in 2.070408 seconds, throughput 965993.176224
+93550	[1728376154]	2000000 OPS in 2.105418 seconds, throughput 949930.132639
+93550	[1728376155]	2000000 OPS in 2.098180 seconds, throughput 953207.065171
+93550	[1728376155]	2000000 OPS in 2.269286 seconds, throughput 881334.481418
+93550	[1728376156]	2000000 OPS in 2.091098 seconds, throughput 956435.327278
+93550	[1728376156]	2000000 OPS in 2.093414 seconds, throughput 955377.197248
+93550	[1728376157]	2000000 OPS in 2.121297 seconds, throughput 942819.416612
+93550	[1728376157]	2000000 OPS in 2.293613 seconds, throughput 871986.686507
+93550	[1728376158]	2000000 OPS in 2.114060 seconds, throughput 946046.942849
+93550	[1728376158]	2000000 OPS in 2.126924 seconds, throughput 940325.089190
+93550	[1728376159]	2000000 OPS in 2.077902 seconds, throughput 962509.300246
+93550	[1728376160]	2000000 OPS in 2.255449 seconds, throughput 886741.398276
+93550	[1728376160]	2000000 OPS in 2.070589 seconds, throughput 965908.734181
+93550	[1728376160]	2000000 OPS in 2.084904 seconds, throughput 959276.782048
+93550	[1728376161]	2000000 OPS in 2.101379 seconds, throughput 951755.965963
+93550	[1728376162]	2000000 OPS in 2.094728 seconds, throughput 954777.899565
+93550	[1728376162]	2000000 OPS in 2.277714 seconds, throughput 878073.366542
+93550	[1728376162]	2000000 OPS in 2.109054 seconds, throughput 948292.457187
+93550	[1728376163]	2000000 OPS in 2.078504 seconds, throughput 962230.527341
+93550	[1728376164]	2000000 OPS in 2.070762 seconds, throughput 965828.038181
+93550	[1728376164]	2000000 OPS in 2.256054 seconds, throughput 886503.603194
+93550	[1728376165]	2000000 OPS in 2.085400 seconds, throughput 959048.623765
+93550	[1728376165]	2000000 OPS in 2.078061 seconds, throughput 962435.655161
+93550	[1728376166]	2000000 OPS in 2.070456 seconds, throughput 965970.781316
+93550	[1728376167]	2000000 OPS in 2.255682 seconds, throughput 886649.802587
+93550	[1728376167]	2000000 OPS in 2.085839 seconds, throughput 958846.775806
+93550	[1728376168]	2000000 OPS in 2.090731 seconds, throughput 956603.216770
+93550	[1728376168]	2000000 OPS in 2.093085 seconds, throughput 955527.367498
+93550	[1728376169]	2000000 OPS in 2.101348 seconds, throughput 951770.006681
+93550	[1728376169]	2000000 OPS in 2.270163 seconds, throughput 880994.007919
+93550	[1728376170]	2000000 OPS in 2.083917 seconds, throughput 959731.121729
+93550	[1728376170]	2000000 OPS in 2.070702 seconds, throughput 965856.023706
+93550	[1728376171]	2000000 OPS in 2.086597 seconds, throughput 958498.454661
+93550	[1728376171]	2000000 OPS in 2.258503 seconds, throughput 885542.326045
+93550	[1728376172]	2000000 OPS in 2.079067 seconds, throughput 961969.960564
+93550	[1728376172]	2000000 OPS in 2.069590 seconds, throughput 966374.982484
+93550	[1728376173]	2000000 OPS in 2.083726 seconds, throughput 959819.093297
+93550	[1728376173]	2000000 OPS in 2.256710 seconds, throughput 886245.906652
+93550	[1728376174]	2000000 OPS in 2.078376 seconds, throughput 962289.787796
+93550	[1728376174]	2000000 OPS in 2.080248 seconds, throughput 961423.830236
+93550	[1728376175]	2000000 OPS in 2.107878 seconds, throughput 948821.516236
+93550	[1728376176]	2000000 OPS in 2.270518 seconds, throughput 880856.262756
+93550	[1728376176]	2000000 OPS in 2.096401 seconds, throughput 954015.954009
+93550	[1728376176]	2000000 OPS in 2.076043 seconds, throughput 963371.182581
+93550	[1728376177]	2000000 OPS in 2.085717 seconds, throughput 958902.861702
+93550	[1728376178]	2000000 OPS in 2.257507 seconds, throughput 885933.022578
+93550	[1728376178]	2000000 OPS in 2.077745 seconds, throughput 962582.030037
+93550	[1728376179]	2000000 OPS in 2.069388 seconds, throughput 966469.313633
+93550	[1728376179]	2000000 OPS in 2.080290 seconds, throughput 961404.419576
+93550	[1728376180]	2000000 OPS in 2.079449 seconds, throughput 961793.244268
+93550	[1728376180]	2000000 OPS in 2.258183 seconds, throughput 885667.813459
+93550	[1728376181]	2000000 OPS in 2.083801 seconds, throughput 959784.547565
+93550	[1728376181]	2000000 OPS in 2.091479 seconds, throughput 956261.095617
+93550	[1728376182]	2000000 OPS in 2.103543 seconds, throughput 950776.856000
+93550	[1728376182]	2000000 OPS in 2.272191 seconds, throughput 880207.693807
+93550	[1728376183]	2000000 OPS in 2.089366 seconds, throughput 957228.173522
+93550	[1728376183]	2000000 OPS in 2.087073 seconds, throughput 958279.849339
+93550	[1728376184]	2000000 OPS in 2.080241 seconds, throughput 961427.065422
+93550	[1728376185]	2000000 OPS in 2.256085 seconds, throughput 886491.422087
+93550	[1728376185]	2000000 OPS in 2.068051 seconds, throughput 967094.138394
+93550	[1728376185]	2000000 OPS in 2.085146 seconds, throughput 959165.449326
+93550	[1728376186]	2000000 OPS in 2.119359 seconds, throughput 943681.556546
+93550	[1728376187]	2000000 OPS in 2.115549 seconds, throughput 945381.080750
+93550	[1728376187]	2000000 OPS in 2.293156 seconds, throughput 872160.463571
+93550	[1728376188]	2000000 OPS in 2.130070 seconds, throughput 938936.279089
+93550	[1728376188]	2000000 OPS in 2.100245 seconds, throughput 952269.854231
+93550	[1728376189]	2000000 OPS in 2.093588 seconds, throughput 955297.794982
+93550	[1728376189]	2000000 OPS in 2.270530 seconds, throughput 880851.607334
+93550	[1728376190]	2000000 OPS in 2.101526 seconds, throughput 951689.391423
+93550	[1728376191]	2000000 OPS in 2.078211 seconds, throughput 962366.188996
+93550	[1728376191]	2000000 OPS in 2.071049 seconds, throughput 965694.196516
+93550	[1728376191]	2000000 OPS in 2.255798 seconds, throughput 886604.208356
+93550	[1728376192]	2000000 OPS in 2.084540 seconds, throughput 959444.289867
+93550	[1728376193]	2000000 OPS in 2.076980 seconds, throughput 962936.571368
+93550	[1728376193]	2000000 OPS in 2.069900 seconds, throughput 966230.252669
+93550	[1728376194]	2000000 OPS in 2.255553 seconds, throughput 886700.512025
+93550	[1728376194]	2000000 OPS in 2.086637 seconds, throughput 958480.080627
+93550	[1728376195]	2000000 OPS in 2.097566 seconds, throughput 953486.088161
+93550	[1728376195]	2000000 OPS in 2.085185 seconds, throughput 959147.509693
+93550	[1728376196]	2000000 OPS in 2.270924 seconds, throughput 880698.781641
+93550	[1728376196]	2000000 OPS in 2.100206 seconds, throughput 952287.537508
+93550	[1728376197]	2000000 OPS in 2.082108 seconds, throughput 960564.965890
+93550	[1728376197]	2000000 OPS in 2.070258 seconds, throughput 966063.167006
+93550	[1728376198]	2000000 OPS in 2.085612 seconds, throughput 958951.137604
+93550	[1728376198]	2000000 OPS in 2.255081 seconds, throughput 886886.102983
+93550	[1728376199]	2000000 OPS in 2.078276 seconds, throughput 962336.090105
+93550	[1728376199]	2000000 OPS in 2.070656 seconds, throughput 965877.480373
+93550	[1728376200]	2000000 OPS in 2.085586 seconds, throughput 958963.092387
+93550	[1728376200]	2000000 OPS in 2.254376 seconds, throughput 887163.454544
+93550	[1728376201]	2000000 OPS in 2.078106 seconds, throughput 962414.814259
+93550	[1728376201]	2000000 OPS in 2.091396 seconds, throughput 956299.046187
+93550	[1728376202]	2000000 OPS in 2.101072 seconds, throughput 951895.032631
+93550	[1728376203]	2000000 OPS in 2.272567 seconds, throughput 880062.061977
+93550	[1728376203]	2000000 OPS in 2.116598 seconds, throughput 944912.543620
+93550	[1728376204]	2000000 OPS in 2.095925 seconds, throughput 954232.618056
+93550	[1728376204]	2000000 OPS in 2.109414 seconds, throughput 948130.618266
+93550	[1728376205]	2000000 OPS in 2.274105 seconds, throughput 879466.867185
+93550	[1728376205]	2000000 OPS in 2.079575 seconds, throughput 961734.969886
+93550	[1728376206]	2000000 OPS in 2.070833 seconds, throughput 965794.924072
+93550	[1728376206]	2000000 OPS in 2.085099 seconds, throughput 959187.069775
+93550	[1728376207]	2000000 OPS in 2.077916 seconds, throughput 962502.815321
+93550	[1728376207]	2000000 OPS in 2.256944 seconds, throughput 886154.020658
+93550	[1728376208]	2000000 OPS in 2.069227 seconds, throughput 966544.511549
+93550	[1728376209]	2000000 OPS in 2.085306 seconds, throughput 959091.855104
+93550	[1728376209]	2000000 OPS in 2.079335 seconds, throughput 961845.974795
+93550	[1728376210]	2000000 OPS in 2.258532 seconds, throughput 885530.955506
+93550	[1728376210]	2000000 OPS in 2.071624 seconds, throughput 965426.158415
+93550	[1728376211]	2000000 OPS in 2.084046 seconds, throughput 959671.715500
+93550	[1728376211]	2000000 OPS in 2.078832 seconds, throughput 962078.705735
+93550	[1728376212]	2000000 OPS in 2.256228 seconds, throughput 886435.236155
+93550	[1728376212]	2000000 OPS in 2.069980 seconds, throughput 966192.910076
+93550	[1728376213]	2000000 OPS in 2.086244 seconds, throughput 958660.636052
+93550	[1728376213]	2000000 OPS in 2.078266 seconds, throughput 962340.720581
+93550	[1728376214]	2000000 OPS in 2.069988 seconds, throughput 966189.175976
+93550	[1728376214]	2000000 OPS in 2.253602 seconds, throughput 887468.150987
+93550	[1728376215]	2000000 OPS in 2.105982 seconds, throughput 949675.733221
+93550	[1728376216]	2000000 OPS in 2.095415 seconds, throughput 954464.867341
+93550	[1728376216]	2000000 OPS in 2.086889 seconds, throughput 958364.340413
+93550	[1728376216]	2000000 OPS in 2.269591 seconds, throughput 881216.042891
+93550	[1728376217]	2000000 OPS in 2.087702 seconds, throughput 957991.130918
+93550	[1728376218]	2000000 OPS in 2.078364 seconds, throughput 962295.343838
+93550	[1728376218]	2000000 OPS in 2.069772 seconds, throughput 966290.006822
+93550	[1728376219]	2000000 OPS in 2.256024 seconds, throughput 886515.391680
+93550	[1728376219]	2000000 OPS in 2.084895 seconds, throughput 959280.923020
+93550	[1728376220]	2000000 OPS in 2.079263 seconds, throughput 961879.281265
+93550	[1728376220]	2000000 OPS in 2.069657 seconds, throughput 966343.698497
+93550	[1728376221]	2000000 OPS in 2.255868 seconds, throughput 886576.696863
+93550	[1728376221]	2000000 OPS in 2.085466 seconds, throughput 959018.272175
+93550	[1728376222]	2000000 OPS in 2.100674 seconds, throughput 952075.381520
+93550	[1728376222]	2000000 OPS in 2.085311 seconds, throughput 959089.555467
+93550	[1728376223]	2000000 OPS in 2.273496 seconds, throughput 879702.449444
+93550	[1728376223]	2000000 OPS in 2.102407 seconds, throughput 951290.592164
+93550	[1728376224]	2000000 OPS in 2.079663 seconds, throughput 961694.274505
+93550	[1728376224]	2000000 OPS in 2.070012 seconds, throughput 966177.973847
+93550	[1728376225]	2000000 OPS in 2.085383 seconds, throughput 959056.441910
+93550	[1728376225]	2000000 OPS in 2.256312 seconds, throughput 886402.235152
+93550	[1728376226]	2000000 OPS in 2.077320 seconds, throughput 962778.965205
+93550	[1728376226]	2000000 OPS in 2.075930 seconds, throughput 963423.622184
+93550	[1728376227]	2000000 OPS in 2.070369 seconds, throughput 966011.372852
+93550	[1728376228]	2000000 OPS in 2.256285 seconds, throughput 886412.842349
+93550	[1728376228]	2000000 OPS in 2.087103 seconds, throughput 958266.075033
+93550	[1728376228]	2000000 OPS in 2.098159 seconds, throughput 953216.605605
+93550	[1728376229]	2000000 OPS in 2.102509 seconds, throughput 951244.441760
+93550	[1728376230]	2000000 OPS in 2.272264 seconds, throughput 880179.415772
+93550	[1728376230]	2000000 OPS in 2.086390 seconds, throughput 958593.551541
+93550	[1728376230]	2000000 OPS in 2.070739 seconds, throughput 965838.765774
+93550	[1728376231]	2000000 OPS in 2.085854 seconds, throughput 958839.880452
+93550	[1728376232]	2000000 OPS in 2.257657 seconds, throughput 885874.160690
+93550	[1728376232]	2000000 OPS in 2.078267 seconds, throughput 962340.257532
+93550	[1728376233]	2000000 OPS in 2.070814 seconds, throughput 965803.785371
+93550	[1728376234]	2000000 OPS in 2.086581 seconds, throughput 958505.804472
+93550	[1728376234]	2000000 OPS in 2.077901 seconds, throughput 962509.763458
+93550	[1728376234]	2000000 OPS in 2.255201 seconds, throughput 886838.911476
+93550	[1728376235]	2000000 OPS in 2.069920 seconds, throughput 966220.916750
+93550	[1728376236]	2000000 OPS in 2.109390 seconds, throughput 948141.405809
+93550	[1728376236]	2000000 OPS in 2.095610 seconds, throughput 954376.052796
+93550	[1728376237]	2000000 OPS in 2.270290 seconds, throughput 880944.725123
+93550	[1728376237]	2000000 OPS in 2.086074 seconds, throughput 958738.759986
+93550	[1728376238]	2000000 OPS in 2.084837 seconds, throughput 959307.610139
+93550	[1728376238]	2000000 OPS in 2.078263 seconds, throughput 962342.109733
+93550	[1728376239]	2000000 OPS in 2.071437 seconds, throughput 965513.312739
+93550	[1728376239]	2000000 OPS in 2.257797 seconds, throughput 885819.229984
+93550	[1728376240]	2000000 OPS in 2.085384 seconds, throughput 959055.982016
+93550	[1728376241]	2000000 OPS in 2.079231 seconds, throughput 961894.084880
+93550	[1728376241]	2000000 OPS in 2.071068 seconds, throughput 965685.337227
+93550	[1728376241]	2000000 OPS in 2.256243 seconds, throughput 886429.342939
+93550	[1728376242]	2000000 OPS in 2.108555 seconds, throughput 948516.875301
+93550	[1728376243]	2000000 OPS in 2.103030 seconds, throughput 951008.782566
+93550	[1728376243]	2000000 OPS in 2.089289 seconds, throughput 957263.451825
+93550	[1728376243]	2000000 OPS in 2.272917 seconds, throughput 879926.543732
+93550	[1728376244]	2000000 OPS in 2.086227 seconds, throughput 958668.447873
+93550	[1728376245]	2000000 OPS in 2.077229 seconds, throughput 962821.142975
+93550	[1728376245]	2000000 OPS in 2.069943 seconds, throughput 966210.180667
+93550	[1728376246]	2000000 OPS in 2.256405 seconds, throughput 886365.701193
+93550	[1728376246]	2000000 OPS in 2.078445 seconds, throughput 962257.841800
+93550	[1728376247]	2000000 OPS in 2.079951 seconds, throughput 961561.113699
+93550	[1728376247]	2000000 OPS in 2.077731 seconds, throughput 962588.516030
+93550	[1728376248]	2000000 OPS in 2.256297 seconds, throughput 886408.128008
+93550	[1728376248]	2000000 OPS in 2.086975 seconds, throughput 958324.848165
+93550	[1728376249]	2000000 OPS in 2.094717 seconds, throughput 954782.913396
+93550	[1728376249]	2000000 OPS in 2.093698 seconds, throughput 955247.604955
+93550	[1728376250]	2000000 OPS in 2.270190 seconds, throughput 880983.530013
+93550	[1728376250]	2000000 OPS in 2.098178 seconds, throughput 953207.973775
+93550	[1728376251]	2000000 OPS in 2.078039 seconds, throughput 962445.844375
+93550	[1728376251]	2000000 OPS in 2.071310 seconds, throughput 965572.512082
+93550	[1728376252]	2000000 OPS in 2.086368 seconds, throughput 958603.659565
+93550	[1728376252]	2000000 OPS in 2.255648 seconds, throughput 886663.167303
+93550	[1728376253]	2000000 OPS in 2.079011 seconds, throughput 961995.872076
+93550	[1728376253]	2000000 OPS in 2.070604 seconds, throughput 965901.736885
+93550	[1728376254]	2000000 OPS in 2.087006 seconds, throughput 958310.613386
+93550	[1728376255]	2000000 OPS in 2.256876 seconds, throughput 886180.720607
+93550	[1728376255]	2000000 OPS in 2.096868 seconds, throughput 953803.482146
+93550	[1728376255]	2000000 OPS in 2.092344 seconds, throughput 955865.765859
+93550	[1728376257]	2000000 OPS in 2.108106 seconds, throughput 948718.897437
+93550	[1728376257]	2000000 OPS in 2.277941 seconds, throughput 877985.865306
+93550	[1728376257]	2000000 OPS in 2.084993 seconds, throughput 959235.834365
+93550	[1728376257]	2000000 OPS in 2.071292 seconds, throughput 965580.903127
+93550	[1728376259]	2000000 OPS in 2.084214 seconds, throughput 959594.360272
+93550	[1728376259]	2000000 OPS in 2.257074 seconds, throughput 886102.981116
+93550	[1728376259]	2000000 OPS in 2.080167 seconds, throughput 961461.267292
+93550	[1728376260]	2000000 OPS in 2.070358 seconds, throughput 966016.505358
+93550	[1728376261]	2000000 OPS in 2.085069 seconds, throughput 959200.870571
+93550	[1728376261]	2000000 OPS in 2.077370 seconds, throughput 962755.792180
+93550	[1728376262]	2000000 OPS in 2.257189 seconds, throughput 886057.835653
+93550	[1728376262]	2000000 OPS in 2.069095 seconds, throughput 966606.173230
+93550	[1728376263]	2000000 OPS in 2.108735 seconds, throughput 948435.910629
+93550	[1728376263]	2000000 OPS in 2.102527 seconds, throughput 951236.298036
+93550	[1728376264]	2000000 OPS in 2.093464 seconds, throughput 955354.379153
+93550	[1728376264]	2000000 OPS in 2.278712 seconds, throughput 877688.799638
+93550	[1728376265]	2000000 OPS in 2.084067 seconds, throughput 959662.045414
+93550	[1728376266]	2000000 OPS in 2.079326 seconds, throughput 961850.137977
+93550	[1728376266]	2000000 OPS in 2.074982 seconds, throughput 963863.782915
+93550	[1728376266]	2000000 OPS in 2.256410 seconds, throughput 886363.737087
+93550	[1728376267]	2000000 OPS in 2.078466 seconds, throughput 962248.119527
+93550	[1728376268]	2000000 OPS in 2.079026 seconds, throughput 961988.931355
+93550	[1728376268]	2000000 OPS in 2.074250 seconds, throughput 964203.929131
+93550	[1728376268]	2000000 OPS in 2.258504 seconds, throughput 885541.933953
+93550	[1728376269]	2000000 OPS in 2.088188 seconds, throughput 957768.170299
+93550	[1728376270]	2000000 OPS in 2.079577 seconds, throughput 961734.044952
+93550	[1728376270]	2000000 OPS in 2.071942 seconds, throughput 965277.985581
+93550	[1728376271]	2000000 OPS in 2.255745 seconds, throughput 886625.039621
+93550	[1728376271]	2000000 OPS in 2.084451 seconds, throughput 959485.255350
+93550	[1728376272]	2000000 OPS in 2.078575 seconds, throughput 962197.659454
+93550	[1728376272]	2000000 OPS in 2.070450 seconds, throughput 965973.580623
+93550	[1728376273]	2000000 OPS in 2.255320 seconds, throughput 886792.118192
+93550	[1728376273]	2000000 OPS in 2.085139 seconds, throughput 959168.669331
+93550	[1728376274]	2000000 OPS in 2.077823 seconds, throughput 962545.895391
+93550	[1728376274]	2000000 OPS in 2.069899 seconds, throughput 966230.719470
+93550	[1728376275]	2000000 OPS in 2.256606 seconds, throughput 886286.750988
+93550	[1728376275]	2000000 OPS in 2.112328 seconds, throughput 946822.652543
+93550	[1728376276]	2000000 OPS in 2.103260 seconds, throughput 950904.785904
+93550	[1728376276]	2000000 OPS in 2.092875 seconds, throughput 955623.245535
+93550	[1728376277]	2000000 OPS in 2.267337 seconds, throughput 882092.075417
+93550	[1728376277]	2000000 OPS in 2.089497 seconds, throughput 957168.160567
+93550	[1728376278]	2000000 OPS in 2.078484 seconds, throughput 962239.786306
+93550	[1728376278]	2000000 OPS in 2.069470 seconds, throughput 966431.018570
+93550	[1728376280]	2000000 OPS in 2.086520 seconds, throughput 958533.826659
+93550	[1728376280]	2000000 OPS in 2.256640 seconds, throughput 886273.397618
+93550	[1728376280]	2000000 OPS in 2.078652 seconds, throughput 962162.016538
+93550	[1728376280]	2000000 OPS in 2.070956 seconds, throughput 965737.562749
+93550	[1728376282]	2000000 OPS in 2.081854 seconds, throughput 960682.161189
+93550	[1728376282]	2000000 OPS in 2.271780 seconds, throughput 880366.936939
+93550	[1728376282]	2000000 OPS in 2.101338 seconds, throughput 951774.536034
+93550	[1728376282]	2000000 OPS in 2.101799 seconds, throughput 951565.777698
+93550	[1728376284]	2000000 OPS in 2.107539 seconds, throughput 948974.135235
+93550	[1728376284]	2000000 OPS in 2.263454 seconds, throughput 883605.321778
+93550	[1728376284]	2000000 OPS in 2.079637 seconds, throughput 961706.297782
+93550	[1728376284]	2000000 OPS in 2.070789 seconds, throughput 965815.445224
+93550	[1728376286]	2000000 OPS in 2.083236 seconds, throughput 960044.853296
+93550	[1728376286]	2000000 OPS in 2.078589 seconds, throughput 962191.178727
+93550	[1728376286]	2000000 OPS in 2.259086 seconds, throughput 885313.795048
+93550	[1728376287]	2000000 OPS in 2.070550 seconds, throughput 965926.927628
+93550	[1728376288]	2000000 OPS in 2.085581 seconds, throughput 958965.391419
+93550	[1728376289]	2000000 OPS in 2.089307 seconds, throughput 957255.204716
+93550	[1728376289]	2000000 OPS in 2.090687 seconds, throughput 956623.349167
+93550	[1728376289]	2000000 OPS in 2.275682 seconds, throughput 878857.415052
+93550	[1728376290]	2000000 OPS in 2.110267 seconds, throughput 947747.370356
+93550	[1728376291]	2000000 OPS in 2.092052 seconds, throughput 955999.181665
+93550	[1728376291]	2000000 OPS in 2.076066 seconds, throughput 963360.509733
+93550	[1728376291]	2000000 OPS in 2.261236 seconds, throughput 884472.032110
+93550	[1728376292]	2000000 OPS in 2.083176 seconds, throughput 960072.504676
+93550	[1728376293]	2000000 OPS in 2.078485 seconds, throughput 962239.323353
+93550	[1728376293]	2000000 OPS in 2.071125 seconds, throughput 965658.760336
+93550	[1728376293]	2000000 OPS in 2.256990 seconds, throughput 886135.959840
+93550	[1728376294]	2000000 OPS in 2.085253 seconds, throughput 959116.231939
+93550	[1728376295]	2000000 OPS in 2.080135 seconds, throughput 961476.058044
+93550	[1728376295]	2000000 OPS in 2.069651 seconds, throughput 966346.499965
+93550	[1728376295]	2000000 OPS in 2.265457 seconds, throughput 882824.083618
+93550	[1728376296]	2000000 OPS in 2.110027 seconds, throughput 947855.169626
+93550	[1728376297]	2000000 OPS in 2.095233 seconds, throughput 954547.775832
+93550	[1728376297]	2000000 OPS in 2.088858 seconds, throughput 957460.966710
+93550	[1728376298]	2000000 OPS in 2.261184 seconds, throughput 884492.372138
+93550	[1728376298]	2000000 OPS in 2.084721 seconds, throughput 959360.988833
+93550	[1728376299]	2000000 OPS in 2.079269 seconds, throughput 961876.505637
+93550	[1728376299]	2000000 OPS in 2.071076 seconds, throughput 965681.607049
+93550	[1728376300]	2000000 OPS in 2.255993 seconds, throughput 886527.573445
+93550	[1728376300]	2000000 OPS in 2.085072 seconds, throughput 959199.490473
+93550	[1728376301]	2000000 OPS in 2.079515 seconds, throughput 961762.718711
+93550	[1728376301]	2000000 OPS in 2.071147 seconds, throughput 965648.502979
+93550	[1728376302]	2000000 OPS in 2.267826 seconds, throughput 881901.874306
+93550	[1728376303]	2000000 OPS in 2.100093 seconds, throughput 952338.777378
+93550	[1728376303]	2000000 OPS in 2.101072 seconds, throughput 951895.032631
+93550	[1728376303]	2000000 OPS in 2.088819 seconds, throughput 957478.843308
+93550	[1728376305]	2000000 OPS in 2.260308 seconds, throughput 884835.164057
+93550	[1728376305]	2000000 OPS in 2.087547 seconds, throughput 958062.261592
+93550	[1728376305]	2000000 OPS in 2.079024 seconds, throughput 961989.856779
+93550	[1728376305]	2000000 OPS in 2.070639 seconds, throughput 965885.410253
+93550	[1728376307]	2000000 OPS in 2.085311 seconds, throughput 959089.555467
+93550	[1728376307]	2000000 OPS in 2.255375 seconds, throughput 886770.492712
+93550	[1728376307]	2000000 OPS in 2.079671 seconds, throughput 961690.575096
+93550	[1728376307]	2000000 OPS in 2.072534 seconds, throughput 965002.262930
+93550	[1728376309]	2000000 OPS in 2.103414 seconds, throughput 950835.166068
+93550	[1728376309]	2000000 OPS in 2.273937 seconds, throughput 879531.842791
+93550	[1728376309]	2000000 OPS in 2.100512 seconds, throughput 952148.809433
+93550	[1728376309]	2000000 OPS in 2.092951 seconds, throughput 955588.544596
+93550	[1728376311]	2000000 OPS in 2.092839 seconds, throughput 955639.683702
+93550	[1728376311]	2000000 OPS in 2.257930 seconds, throughput 885767.052123
+93550	[1728376311]	2000000 OPS in 2.078767 seconds, throughput 962108.788527
+93550	[1728376311]	2000000 OPS in 2.072097 seconds, throughput 965205.779459
+93550	[1728376313]	2000000 OPS in 2.085033 seconds, throughput 959217.432050
+93550	[1728376314]	2000000 OPS in 2.078919 seconds, throughput 962038.444018
+93550	[1728376314]	2000000 OPS in 2.255349 seconds, throughput 886780.715534
+93550	[1728376314]	2000000 OPS in 2.072385 seconds, throughput 965071.644506
+93550	[1728376315]	2000000 OPS in 2.085733 seconds, throughput 958895.505801
+93550	[1728376316]	2000000 OPS in 2.094105 seconds, throughput 955061.947706
+93550	[1728376316]	2000000 OPS in 2.081844 seconds, throughput 960686.775762
+93550	[1728376316]	2000000 OPS in 2.268556 seconds, throughput 881618.086571
+93550	[1728376317]	2000000 OPS in 2.100625 seconds, throughput 952097.590003
+93550	[1728376318]	2000000 OPS in 2.085713 seconds, throughput 958904.700695
+93550	[1728376318]	2000000 OPS in 2.077365 seconds, throughput 962758.109432
+93550	[1728376318]	2000000 OPS in 2.258893 seconds, throughput 885389.436330
+93550	[1728376319]	2000000 OPS in 2.085993 seconds, throughput 958775.988222
+93550	[1728376320]	2000000 OPS in 2.077757 seconds, throughput 962576.470684
+93550	[1728376320]	2000000 OPS in 2.069948 seconds, throughput 966207.846767
+93550	[1728376320]	2000000 OPS in 2.257445 seconds, throughput 885957.354443
+93550	[1728376321]	2000000 OPS in 2.084268 seconds, throughput 959569.498740
+93550	[1728376322]	2000000 OPS in 2.079026 seconds, throughput 961988.931355
+93550	[1728376322]	2000000 OPS in 2.071300 seconds, throughput 965577.173756
+93550	[1728376323]	2000000 OPS in 2.268127 seconds, throughput 881784.838327
+93550	[1728376324]	2000000 OPS in 2.102150 seconds, throughput 951406.892943
+93550	[1728376324]	2000000 OPS in 2.093662 seconds, throughput 955264.030202
+93550	[1728376324]	2000000 OPS in 2.094639 seconds, throughput 954818.467526
+93550	[1728376325]	2000000 OPS in 2.257274 seconds, throughput 886024.470224
+93550	[1728376326]	2000000 OPS in 2.086431 seconds, throughput 958574.714429
+93550	[1728376326]	2000000 OPS in 2.078193 seconds, throughput 962374.524407
+93550	[1728376326]	2000000 OPS in 2.071682 seconds, throughput 965399.129789
+93550	[1728376327]	2000000 OPS in 2.256039 seconds, throughput 886509.497398
+93550	[1728376328]	2000000 OPS in 2.085536 seconds, throughput 958986.083194
+93550	[1728376328]	2000000 OPS in 2.071729 seconds, throughput 965377.228392
+93550	[1728376328]	2000000 OPS in 2.078515 seconds, throughput 962225.434986
+93550	[1728376329]	2000000 OPS in 2.257465 seconds, throughput 885949.505308
+93550	[1728376330]	2000000 OPS in 2.085156 seconds, throughput 959160.849356
+93550	[1728376330]	2000000 OPS in 2.073379 seconds, throughput 964608.978870
+93550	[1728376330]	2000000 OPS in 2.078371 seconds, throughput 962292.102806
+93550	[1728376332]	2000000 OPS in 2.257339 seconds, throughput 885998.957179
+93550	[1728376332]	2000000 OPS in 2.084711 seconds, throughput 959365.590722
+93550	[1728376332]	2000000 OPS in 2.071502 seconds, throughput 965483.016671
+93550	[1728376332]	2000000 OPS in 2.078131 seconds, throughput 962403.236370
+93550	[1728376334]	2000000 OPS in 2.255891 seconds, throughput 886567.657746
+93550	[1728376334]	2000000 OPS in 2.085568 seconds, throughput 958971.368951
+93550	[1728376334]	2000000 OPS in 2.070848 seconds, throughput 965787.928424
+93550	[1728376334]	2000000 OPS in 2.078437 seconds, throughput 962261.545575
+93550	[1728376336]	2000000 OPS in 2.107944 seconds, throughput 948791.808511
+93550	[1728376336]	2000000 OPS in 2.271906 seconds, throughput 880318.111753
+93550	[1728376336]	2000000 OPS in 2.086616 seconds, throughput 958489.726907
+93550	[1728376336]	2000000 OPS in 2.094768 seconds, throughput 954759.667896
+93550	[1728376338]	2000000 OPS in 2.085537 seconds, throughput 958985.623367
+93550	[1728376338]	2000000 OPS in 2.256488 seconds, throughput 886333.098160
+93550	[1728376338]	2000000 OPS in 2.071617 seconds, throughput 965429.420593
+93550	[1728376339]	2000000 OPS in 2.079247 seconds, throughput 961886.683016
+93550	[1728376340]	2000000 OPS in 2.086840 seconds, throughput 958386.843265
+93550	[1728376341]	2000000 OPS in 2.071589 seconds, throughput 965442.469525
+93550	[1728376341]	2000000 OPS in 2.078313 seconds, throughput 962318.957732
+93550	[1728376341]	2000000 OPS in 2.254884 seconds, throughput 886963.586597
+93550	[1728376342]	2000000 OPS in 2.084280 seconds, throughput 959563.974130
+93550	[1728376343]	2000000 OPS in 2.085712 seconds, throughput 958905.160444
+93550	[1728376343]	2000000 OPS in 2.100905 seconds, throughput 951970.698342
+93550	[1728376343]	2000000 OPS in 2.269165 seconds, throughput 881381.477328
+93550	[1728376344]	2000000 OPS in 2.102001 seconds, throughput 951474.333266
+93550	[1728376345]	2000000 OPS in 2.073549 seconds, throughput 964529.895363
+93550	[1728376345]	2000000 OPS in 2.080385 seconds, throughput 961360.517404
+93550	[1728376345]	2000000 OPS in 2.256081 seconds, throughput 886492.993824
+93550	[1728376346]	2000000 OPS in 2.084809 seconds, throughput 959320.494108
+93550	[1728376347]	2000000 OPS in 2.070805 seconds, throughput 965807.982886
+93550	[1728376347]	2000000 OPS in 2.078075 seconds, throughput 962429.171228
+93550	[1728376347]	2000000 OPS in 2.255824 seconds, throughput 886593.989602
+93550	[1728376349]	2000000 OPS in 2.084434 seconds, throughput 959493.080616
+93550	[1728376349]	2000000 OPS in 2.069181 seconds, throughput 966565.998818
+93550	[1728376349]	2000000 OPS in 2.077146 seconds, throughput 962859.616031
+93550	[1728376350]	2000000 OPS in 2.270573 seconds, throughput 880834.925809
+93550	[1728376351]	2000000 OPS in 2.101931 seconds, throughput 951506.019941
+93550	[1728376351]	2000000 OPS in 2.093811 seconds, throughput 955196.051602
+93550	[1728376351]	2000000 OPS in 2.094505 seconds, throughput 954879.553880
+93550	[1728376352]	2000000 OPS in 2.257256 seconds, throughput 886031.535634
+93550	[1728376353]	2000000 OPS in 2.085051 seconds, throughput 959209.151239
+93550	[1728376353]	2000000 OPS in 2.070912 seconds, throughput 965758.081464
+93550	[1728376353]	2000000 OPS in 2.078258 seconds, throughput 962344.424994
+93550	[1728376354]	2000000 OPS in 2.256895 seconds, throughput 886173.260165
+93550	[1728376355]	2000000 OPS in 2.085519 seconds, throughput 958993.900319
+93550	[1728376355]	2000000 OPS in 2.070284 seconds, throughput 966051.034544
+93550	[1728376355]	2000000 OPS in 2.077308 seconds, throughput 962784.526897
+93550	[1728376357]	2000000 OPS in 2.270615 seconds, throughput 880818.632837
+93550	[1728376357]	2000000 OPS in 2.109590 seconds, throughput 948051.517119
+93550	[1728376357]	2000000 OPS in 2.088564 seconds, throughput 957595.745211
+93550	[1728376357]	2000000 OPS in 2.097325 seconds, throughput 953595.651604
+93550	[1728376359]	2000000 OPS in 2.255229 seconds, throughput 886827.900847
+93550	[1728376359]	2000000 OPS in 2.086917 seconds, throughput 958351.482115
+93550	[1728376359]	2000000 OPS in 2.069775 seconds, throughput 966288.606249
+93550	[1728376359]	2000000 OPS in 2.078392 seconds, throughput 962282.379840
+93550	[1728376361]	2000000 OPS in 2.256874 seconds, throughput 886181.505924
+93550	[1728376361]	2000000 OPS in 2.084496 seconds, throughput 959464.542028
+93550	[1728376361]	2000000 OPS in 2.069647 seconds, throughput 966348.367620
+93550	[1728376361]	2000000 OPS in 2.079697 seconds, throughput 961678.552212
+93550	[1728376363]	2000000 OPS in 2.108995 seconds, throughput 948318.986057
+93550	[1728376363]	2000000 OPS in 2.278301 seconds, throughput 877847.132578
+93550	[1728376363]	2000000 OPS in 2.093709 seconds, throughput 955242.586243
+93550	[1728376364]	2000000 OPS in 2.103266 seconds, throughput 950902.073252
+93550	[1728376365]	2000000 OPS in 2.085089 seconds, throughput 959191.669996
+93550	[1728376365]	2000000 OPS in 2.069364 seconds, throughput 966480.522518
+93550	[1728376366]	2000000 OPS in 2.255533 seconds, throughput 886708.374473
+93550	[1728376366]	2000000 OPS in 2.078975 seconds, throughput 962012.530213
+93550	[1728376367]	2000000 OPS in 2.085301 seconds, throughput 959094.154753
+93550	[1728376368]	2000000 OPS in 2.070138 seconds, throughput 966119.166935
+93550	[1728376368]	2000000 OPS in 2.078642 seconds, throughput 962166.645339
+93550	[1728376368]	2000000 OPS in 2.257195 seconds, throughput 886055.480364
+93550	[1728376370]	2000000 OPS in 2.097720 seconds, throughput 953416.089850
+93550	[1728376370]	2000000 OPS in 2.093372 seconds, throughput 955396.365290
+93550	[1728376370]	2000000 OPS in 2.093605 seconds, throughput 955290.037997
+93550	[1728376370]	2000000 OPS in 2.270592 seconds, throughput 880827.555105
+93550	[1728376372]	2000000 OPS in 2.087324 seconds, throughput 958164.616514
+93550	[1728376372]	2000000 OPS in 2.073183 seconds, throughput 964700.173598
+93550	[1728376372]	2000000 OPS in 2.079725 seconds, throughput 961665.604828
+93550	[1728376372]	2000000 OPS in 2.255594 seconds, throughput 886684.394443
+93550	[1728376374]	2000000 OPS in 2.084882 seconds, throughput 959286.904487
+93550	[1728376374]	2000000 OPS in 2.071398 seconds, throughput 965531.491292
+93550	[1728376374]	2000000 OPS in 2.079640 seconds, throughput 961704.910465
+93550	[1728376375]	2000000 OPS in 2.258327 seconds, throughput 885611.339722
+93550	[1728376376]	2000000 OPS in 2.086018 seconds, throughput 958764.497718
+93550	[1728376376]	2000000 OPS in 2.071813 seconds, throughput 965338.087945
+93550	[1728376376]	2000000 OPS in 2.079832 seconds, throughput 961616.130534
+93550	[1728376377]	2000000 OPS in 2.280316 seconds, throughput 877071.423434
+93550	[1728376378]	2000000 OPS in 2.109181 seconds, throughput 948235.357705
+93550	[1728376378]	2000000 OPS in 2.095234 seconds, throughput 954547.320252
+93550	[1728376378]	2000000 OPS in 2.102611 seconds, throughput 951198.295833
+93550	[1728376379]	2000000 OPS in 2.256651 seconds, throughput 886269.077496
+93550	[1728376380]	2000000 OPS in 2.086601 seconds, throughput 958496.617226
+93550	[1728376380]	2000000 OPS in 2.071806 seconds, throughput 965341.349528
+93550	[1728376380]	2000000 OPS in 2.078659 seconds, throughput 962158.776403
+93550	[1728376381]	2000000 OPS in 2.257276 seconds, throughput 886023.685185
+93550	[1728376382]	2000000 OPS in 2.085538 seconds, throughput 958985.163541
+93550	[1728376382]	2000000 OPS in 2.069840 seconds, throughput 966258.261508
+93550	[1728376382]	2000000 OPS in 2.078974 seconds, throughput 962012.992947
+93550	[1728376384]	2000000 OPS in 2.271080 seconds, throughput 880638.286630
+93550	[1728376384]	2000000 OPS in 2.101960 seconds, throughput 951492.892348
+93550	[1728376384]	2000000 OPS in 2.095166 seconds, throughput 954578.300717
+93550	[1728376384]	2000000 OPS in 2.094498 seconds, throughput 954882.745173
+93550	[1728376386]	2000000 OPS in 2.255970 seconds, throughput 886536.611746
+93550	[1728376386]	2000000 OPS in 2.084542 seconds, throughput 959443.369335
+93550	[1728376386]	2000000 OPS in 2.071809 seconds, throughput 965339.951704
+93550	[1728376386]	2000000 OPS in 2.078342 seconds, throughput 962305.530081
+93550	[1728376388]	2000000 OPS in 2.257497 seconds, throughput 885936.946982
+93550	[1728376388]	2000000 OPS in 2.085391 seconds, throughput 959052.762767
+93550	[1728376388]	2000000 OPS in 2.070669 seconds, throughput 965871.416436
+93550	[1728376389]	2000000 OPS in 2.077872 seconds, throughput 962523.196809
+93550	[1728376390]	2000000 OPS in 2.087147 seconds, throughput 958245.873434
+93550	[1728376390]	2000000 OPS in 2.070963 seconds, throughput 965734.298488
+93550	[1728376390]	2000000 OPS in 2.257444 seconds, throughput 885957.746903
+93550	[1728376391]	2000000 OPS in 2.080849 seconds, throughput 961146.147558
+93550	[1728376392]	2000000 OPS in 2.071356 seconds, throughput 965551.068962
+93550	[1728376392]	2000000 OPS in 2.086464 seconds, throughput 958559.553388
+93550	[1728376393]	2000000 OPS in 2.255459 seconds, throughput 886737.466742
+93550	[1728376393]	2000000 OPS in 2.077697 seconds, throughput 962604.268091
+93550	[1728376395]	2000000 OPS in 2.070151 seconds, throughput 966113.099962
+93550	[1728376395]	2000000 OPS in 2.086395 seconds, throughput 958591.254293
+93550	[1728376395]	2000000 OPS in 2.078766 seconds, throughput 962109.251354
+93550	[1728376395]	2000000 OPS in 2.256183 seconds, throughput 886452.916275
+93550	[1728376397]	2000000 OPS in 2.094856 seconds, throughput 954719.560676
+93550	[1728376397]	2000000 OPS in 2.110607 seconds, throughput 947594.696692
+93550	[1728376397]	2000000 OPS in 2.103335 seconds, throughput 950870.878866
+93550	[1728376397]	2000000 OPS in 2.278088 seconds, throughput 877929.210812
+93550	[1728376399]	2000000 OPS in 2.073040 seconds, throughput 964766.719407
+93550	[1728376399]	2000000 OPS in 2.086050 seconds, throughput 958749.790273
+93550	[1728376399]	2000000 OPS in 2.079174 seconds, throughput 961920.454950
+93550	[1728376399]	2000000 OPS in 2.256314 seconds, throughput 886401.449444
+93550	[1728376401]	2000000 OPS in 2.070977 seconds, throughput 965727.770033
+93550	[1728376401]	2000000 OPS in 2.086808 seconds, throughput 958401.539576
+93550	[1728376401]	2000000 OPS in 2.079130 seconds, throughput 961940.811782
+93550	[1728376402]	2000000 OPS in 2.256840 seconds, throughput 886194.856525
+93550	[1728376403]	2000000 OPS in 2.075228 seconds, throughput 963749.525353
+93550	[1728376403]	2000000 OPS in 2.094812 seconds, throughput 954739.613865
+93550	[1728376403]	2000000 OPS in 2.098951 seconds, throughput 952856.927103
+93550	[1728376404]	2000000 OPS in 2.271311 seconds, throughput 880548.722742
+93550	[1728376405]	2000000 OPS in 2.083717 seconds, throughput 959823.238952
+93550	[1728376405]	2000000 OPS in 2.092451 seconds, throughput 955816.886513
+93550	[1728376405]	2000000 OPS in 2.080998 seconds, throughput 961077.329243
+93550	[1728376406]	2000000 OPS in 2.257032 seconds, throughput 886119.470171
+93550	[1728376407]	2000000 OPS in 2.071064 seconds, throughput 965687.202327
+93550	[1728376407]	2000000 OPS in 2.086878 seconds, throughput 958369.391982
+93550	[1728376407]	2000000 OPS in 2.078813 seconds, throughput 962087.498972
+93550	[1728376409]	2000000 OPS in 2.256209 seconds, throughput 886442.701009
+93550	[1728376409]	2000000 OPS in 2.070549 seconds, throughput 965927.394136
+93550	[1728376409]	2000000 OPS in 2.084966 seconds, throughput 959248.256326
+93550	[1728376409]	2000000 OPS in 2.078247 seconds, throughput 962349.518609
+93550	[1728376411]	2000000 OPS in 2.279291 seconds, throughput 877465.843545
+93550	[1728376411]	2000000 OPS in 2.094387 seconds, throughput 954933.352814
+93550	[1728376411]	2000000 OPS in 2.107921 seconds, throughput 948802.160992
+93550	[1728376411]	2000000 OPS in 2.101842 seconds, throughput 951546.310332
+93550	[1728376413]	2000000 OPS in 2.257144 seconds, throughput 886075.500721
+93550	[1728376413]	2000000 OPS in 2.073003 seconds, throughput 964783.939049
+93550	[1728376413]	2000000 OPS in 2.085416 seconds, throughput 959041.265628
+93550	[1728376414]	2000000 OPS in 2.078698 seconds, throughput 962140.724627
+93550	[1728376415]	2000000 OPS in 2.256475 seconds, throughput 886338.204500
+93550	[1728376415]	2000000 OPS in 2.072721 seconds, throughput 964915.200840
+93550	[1728376415]	2000000 OPS in 2.086418 seconds, throughput 958580.687091
+93550	[1728376416]	2000000 OPS in 2.077556 seconds, throughput 962669.598316
+93550	[1728376417]	2000000 OPS in 2.088030 seconds, throughput 957840.644052
+93550	[1728376418]	2000000 OPS in 2.270304 seconds, throughput 880939.292711
+93550	[1728376418]	2000000 OPS in 2.107846 seconds, throughput 948835.920651
+93550	[1728376418]	2000000 OPS in 2.094496 seconds, throughput 954883.656975
+93550	[1728376419]	2000000 OPS in 2.069854 seconds, throughput 966251.725967
+93550	[1728376420]	2000000 OPS in 2.085643 seconds, throughput 958936.884213
+93550	[1728376420]	2000000 OPS in 2.080838 seconds, throughput 961151.228495
+93550	[1728376420]	2000000 OPS in 2.256787 seconds, throughput 886215.668559
+93550	[1728376422]	2000000 OPS in 2.071443 seconds, throughput 965510.516099
+93550	[1728376422]	2000000 OPS in 2.085340 seconds, throughput 959076.217787
+93550	[1728376422]	2000000 OPS in 2.077485 seconds, throughput 962702.498454
+93550	[1728376422]	2000000 OPS in 2.256327 seconds, throughput 886396.342374
+93550	[1728376424]	2000000 OPS in 2.095098 seconds, throughput 954609.283193
+93550	[1728376424]	2000000 OPS in 2.111248 seconds, throughput 947306.995673
+93550	[1728376424]	2000000 OPS in 2.102652 seconds, throughput 951179.748242
+93550	[1728376424]	2000000 OPS in 2.278548 seconds, throughput 877751.971870
+93550	[1728376426]	2000000 OPS in 2.076141 seconds, throughput 963325.708610
+93550	[1728376426]	2000000 OPS in 2.080396 seconds, throughput 961355.434254
+93550	[1728376426]	2000000 OPS in 2.079954 seconds, throughput 961559.726802
+93550	[1728376427]	2000000 OPS in 2.256451 seconds, throughput 886347.631746
+93550	[1728376428]	2000000 OPS in 2.075427 seconds, throughput 963657.117306
+93550	[1728376428]	2000000 OPS in 2.083865 seconds, throughput 959755.070506
+93550	[1728376428]	2000000 OPS in 2.078294 seconds, throughput 962327.755361
+93550	[1728376429]	2000000 OPS in 2.256507 seconds, throughput 886325.635152
+93550	[1728376430]	2000000 OPS in 2.088069 seconds, throughput 957822.753942
+93550	[1728376430]	2000000 OPS in 2.106258 seconds, throughput 949551.289538
+93550	[1728376430]	2000000 OPS in 2.100606 seconds, throughput 952106.201734
+93550	[1728376431]	2000000 OPS in 2.277245 seconds, throughput 878254.206289
+93550	[1728376432]	2000000 OPS in 2.077993 seconds, throughput 962467.149793
+93550	[1728376432]	2000000 OPS in 2.087211 seconds, throughput 958216.490810
+93550	[1728376432]	2000000 OPS in 2.079006 seconds, throughput 961998.185671
+93550	[1728376433]	2000000 OPS in 2.256381 seconds, throughput 886375.129023
+93550	[1728376434]	2000000 OPS in 2.070525 seconds, throughput 965938.590454
+93550	[1728376434]	2000000 OPS in 2.085793 seconds, throughput 958867.922176
+93550	[1728376434]	2000000 OPS in 2.078888 seconds, throughput 962052.789761
+93550	[1728376436]	2000000 OPS in 2.256958 seconds, throughput 886148.523809
+93550	[1728376436]	2000000 OPS in 2.083021 seconds, throughput 960143.944780
+93550	[1728376436]	2000000 OPS in 2.071705 seconds, throughput 965388.411960
+93550	[1728376436]	2000000 OPS in 2.078552 seconds, throughput 962208.306552
+93550	[1728376438]	2000000 OPS in 2.270380 seconds, throughput 880909.803645
+93550	[1728376438]	2000000 OPS in 2.087278 seconds, throughput 958185.732806
+93550	[1728376439]	2000000 OPS in 2.101553 seconds, throughput 951677.164459
+93550	[1728376439]	2000000 OPS in 2.102678 seconds, throughput 951167.986729
+93550	[1728376440]	2000000 OPS in 2.255567 seconds, throughput 886695.008395
+93550	[1728376440]	2000000 OPS in 2.070946 seconds, throughput 965742.226017
+93550	[1728376441]	2000000 OPS in 2.085275 seconds, throughput 959106.113103
+93550	[1728376441]	2000000 OPS in 2.078781 seconds, throughput 962102.308997
+93550	[1728376442]	2000000 OPS in 2.072823 seconds, throughput 964867.719048
+93550	[1728376442]	2000000 OPS in 2.257726 seconds, throughput 885847.086848
+93550	[1728376443]	2000000 OPS in 2.084607 seconds, throughput 959413.452991
+93550	[1728376443]	2000000 OPS in 2.078737 seconds, throughput 962122.673527
+93550	[1728376444]	2000000 OPS in 2.094512 seconds, throughput 954876.362609
+93550	[1728376445]	2000000 OPS in 2.278296 seconds, throughput 877849.059121
+93550	[1728376445]	2000000 OPS in 2.108287 seconds, throughput 948637.448317
+93550	[1728376445]	2000000 OPS in 2.101033 seconds, throughput 951912.701990
+93550	[1728376447]	2000000 OPS in 2.071513 seconds, throughput 965477.889832
+93550	[1728376447]	2000000 OPS in 2.085167 seconds, throughput 959155.789440
+93550	[1728376447]	2000000 OPS in 2.078434 seconds, throughput 962262.934498
+93550	[1728376447]	2000000 OPS in 2.257066 seconds, throughput 886106.121841
+93550	[1728376449]	2000000 OPS in 2.070766 seconds, throughput 965826.172537
+93550	[1728376449]	2000000 OPS in 2.084673 seconds, throughput 959383.078305
+93550	[1728376449]	2000000 OPS in 2.078889 seconds, throughput 962052.326988
+93550	[1728376449]	2000000 OPS in 2.256640 seconds, throughput 886273.397618
+93550	[1728376451]	2000000 OPS in 2.072928 seconds, throughput 964818.845614
+93550	[1728376451]	2000000 OPS in 2.085616 seconds, throughput 958949.298433
+93550	[1728376451]	2000000 OPS in 2.081127 seconds, throughput 961017.756245
+93550	[1728376452]	2000000 OPS in 2.254728 seconds, throughput 887024.953786
+93550	[1728376453]	2000000 OPS in 2.071846 seconds, throughput 965322.712209
+93550	[1728376453]	2000000 OPS in 2.086386 seconds, throughput 958595.389348
+93550	[1728376453]	2000000 OPS in 2.079609 seconds, throughput 961719.246262
+93550	[1728376454]	2000000 OPS in 2.257380 seconds, throughput 885982.865091
+93550	[1728376455]	2000000 OPS in 2.071364 seconds, throughput 965547.339821
+93550	[1728376455]	2000000 OPS in 2.085678 seconds, throughput 958920.792184
+93550	[1728376455]	2000000 OPS in 2.077896 seconds, throughput 962512.079527
+93550	[1728376456]	2000000 OPS in 2.256799 seconds, throughput 886210.956315
+93550	[1728376457]	2000000 OPS in 2.083751 seconds, throughput 959807.577777
+93550	[1728376457]	2000000 OPS in 2.109084 seconds, throughput 948278.968500
+93550	[1728376457]	2000000 OPS in 2.093964 seconds, throughput 955126.258140
+93550	[1728376458]	2000000 OPS in 2.269003 seconds, throughput 881444.405318
+93550	[1728376459]	2000000 OPS in 2.074851 seconds, throughput 963924.638444
+93550	[1728376459]	2000000 OPS in 2.086403 seconds, throughput 958587.578718
+93550	[1728376459]	2000000 OPS in 2.078941 seconds, throughput 962028.263428
+93550	[1728376461]	2000000 OPS in 2.255550 seconds, throughput 886701.691383
+93550	[1728376461]	2000000 OPS in 2.072104 seconds, throughput 965202.518792
+93550	[1728376461]	2000000 OPS in 2.086619 seconds, throughput 958488.348855
+93550	[1728376461]	2000000 OPS in 2.079897 seconds, throughput 961586.078541
+93550	[1728376463]	2000000 OPS in 2.256675 seconds, throughput 886259.651922
+93550	[1728376463]	2000000 OPS in 2.072547 seconds, throughput 964996.209977
+93550	[1728376464]	2000000 OPS in 2.098596 seconds, throughput 953018.113062
+93550	[1728376464]	2000000 OPS in 2.099370 seconds, throughput 952666.752407
+93550	[1728376465]	2000000 OPS in 2.271542 seconds, throughput 880459.177070
+93550	[1728376465]	2000000 OPS in 2.087734 seconds, throughput 957976.447191
+93550	[1728376466]	2000000 OPS in 2.088659 seconds, throughput 957552.190185
+93550	[1728376466]	2000000 OPS in 2.082220 seconds, throughput 960513.298307
+93550	[1728376467]	2000000 OPS in 2.071064 seconds, throughput 965687.202327
+93550	[1728376467]	2000000 OPS in 2.256342 seconds, throughput 886390.449675
+93550	[1728376468]	2000000 OPS in 2.077324 seconds, throughput 962777.111322
+93550	[1728376468]	2000000 OPS in 2.085435 seconds, throughput 959032.527986
+93550	[1728376469]	2000000 OPS in 2.072269 seconds, throughput 965125.666600
+93550	[1728376470]	2000000 OPS in 2.256190 seconds, throughput 886450.165988
+93550	[1728376470]	2000000 OPS in 2.079113 seconds, throughput 961948.677152
+93550	[1728376470]	2000000 OPS in 2.080636 seconds, throughput 961244.542534
+93550	[1728376471]	2000000 OPS in 2.099190 seconds, throughput 952748.441065
+93550	[1728376472]	2000000 OPS in 2.270581 seconds, throughput 880831.822340
+93550	[1728376472]	2000000 OPS in 2.093161 seconds, throughput 955492.673521
+93550	[1728376472]	2000000 OPS in 2.099990 seconds, throughput 952385.487550
+93550	[1728376474]	2000000 OPS in 2.070665 seconds, throughput 965873.282255
+93550	[1728376474]	2000000 OPS in 2.078624 seconds, throughput 962174.977293
+93550	[1728376474]	2000000 OPS in 2.085501 seconds, throughput 959002.177414
+93550	[1728376474]	2000000 OPS in 2.258192 seconds, throughput 885664.283639
+93550	[1728376476]	2000000 OPS in 2.069793 seconds, throughput 966280.202900
+93550	[1728376476]	2000000 OPS in 2.078674 seconds, throughput 962151.833332
+93550	[1728376476]	2000000 OPS in 2.085299 seconds, throughput 959095.074615
+93550	[1728376476]	2000000 OPS in 2.254929 seconds, throughput 886945.886101
+93550	[1728376478]	2000000 OPS in 2.088115 seconds, throughput 957801.653645
+93550	[1728376478]	2000000 OPS in 2.095268 seconds, throughput 954531.830773
+93550	[1728376478]	2000000 OPS in 2.101670 seconds, throughput 951624.184577
+93550	[1728376479]	2000000 OPS in 2.271327 seconds, throughput 880542.519857
+93550	[1728376480]	2000000 OPS in 2.071615 seconds, throughput 965430.352648
+93550	[1728376480]	2000000 OPS in 2.077782 seconds, throughput 962564.888906
+93550	[1728376480]	2000000 OPS in 2.084765 seconds, throughput 959340.741043
+93550	[1728376481]	2000000 OPS in 2.256750 seconds, throughput 886230.198294
+93550	[1728376482]	2000000 OPS in 2.071330 seconds, throughput 965563.188869
+93550	[1728376482]	2000000 OPS in 2.079387 seconds, throughput 961821.921557
+93550	[1728376482]	2000000 OPS in 2.084523 seconds, throughput 959452.114465
+93550	[1728376483]	2000000 OPS in 2.256000 seconds, throughput 886524.822695
+93550	[1728376484]	2000000 OPS in 2.091645 seconds, throughput 956185.203512
+93550	[1728376484]	2000000 OPS in 2.101162 seconds, throughput 951854.259691
+93550	[1728376484]	2000000 OPS in 2.109248 seconds, throughput 948205.237127
+93550	[1728376485]	2000000 OPS in 2.278949 seconds, throughput 877597.524122
+93550	[1728376486]	2000000 OPS in 2.072272 seconds, throughput 965124.269401
+93550	[1728376487]	2000000 OPS in 2.078500 seconds, throughput 962232.379120
+93550	[1728376487]	2000000 OPS in 2.085433 seconds, throughput 959033.447730
+93550	[1728376488]	2000000 OPS in 2.255787 seconds, throughput 886608.531745
+93550	[1728376488]	2000000 OPS in 2.071242 seconds, throughput 965604.212352
+93550	[1728376489]	2000000 OPS in 2.079444 seconds, throughput 961795.556889
+93550	[1728376489]	2000000 OPS in 2.087094 seconds, throughput 958270.207283
+93550	[1728376490]	2000000 OPS in 2.257256 seconds, throughput 886031.535634
+93550	[1728376490]	2000000 OPS in 2.070963 seconds, throughput 965734.298488
+93550	[1728376491]	2000000 OPS in 2.099288 seconds, throughput 952703.964392
+93550	[1728376491]	2000000 OPS in 2.100948 seconds, throughput 951951.214404
+93550	[1728376492]	2000000 OPS in 2.096037 seconds, throughput 954181.629427
+93550	[1728376492]	2000000 OPS in 2.269872 seconds, throughput 881106.952286
+93550	[1728376493]	2000000 OPS in 2.091719 seconds, throughput 956151.375974
+93550	[1728376493]	2000000 OPS in 2.098409 seconds, throughput 953103.041399
+93550	[1728376494]	2000000 OPS in 2.082051 seconds, throughput 960591.263134
+93550	[1728376494]	2000000 OPS in 2.258591 seconds, throughput 885507.823240
+93550	[1728376495]	2000000 OPS in 2.078083 seconds, throughput 962425.466163
+93550	[1728376495]	2000000 OPS in 2.084337 seconds, throughput 959537.733102
+93550	[1728376496]	2000000 OPS in 2.070564 seconds, throughput 965920.396568
+93550	[1728376497]	2000000 OPS in 2.254869 seconds, throughput 886969.486919
+93550	[1728376497]	2000000 OPS in 2.076666 seconds, throughput 963082.171134
+93550	[1728376497]	2000000 OPS in 2.090750 seconds, throughput 956594.523496
+93550	[1728376498]	2000000 OPS in 2.094060 seconds, throughput 955082.471371
+93550	[1728376499]	2000000 OPS in 2.270960 seconds, throughput 880684.820516
+93550	[1728376499]	2000000 OPS in 2.094248 seconds, throughput 954996.733911
+93550	[1728376499]	2000000 OPS in 2.097480 seconds, throughput 953525.182600
+93550	[1728376501]	2000000 OPS in 2.071016 seconds, throughput 965709.584088
+93550	[1728376501]	2000000 OPS in 2.077098 seconds, throughput 962881.866912
+93550	[1728376501]	2000000 OPS in 2.084345 seconds, throughput 959534.050265
+93550	[1728376501]	2000000 OPS in 2.256195 seconds, throughput 886448.201507
+93550	[1728376503]	2000000 OPS in 2.069141 seconds, throughput 966584.684176
+93550	[1728376503]	2000000 OPS in 2.077657 seconds, throughput 962622.800587
+93550	[1728376503]	2000000 OPS in 2.085543 seconds, throughput 958982.864415
+93550	[1728376504]	2000000 OPS in 2.256895 seconds, throughput 886173.260165
+93550	[1728376505]	2000000 OPS in 2.087523 seconds, throughput 958073.276318
+93550	[1728376505]	2000000 OPS in 2.103445 seconds, throughput 950821.152918
+93550	[1728376505]	2000000 OPS in 2.100105 seconds, throughput 952333.335714
+93550	[1728376506]	2000000 OPS in 2.269998 seconds, throughput 881058.044985
+93550	[1728376507]	2000000 OPS in 2.071122 seconds, throughput 965660.159083
+93550	[1728376507]	2000000 OPS in 2.078034 seconds, throughput 962448.160136
+93550	[1728376507]	2000000 OPS in 2.086306 seconds, throughput 958632.146962
+93550	[1728376508]	2000000 OPS in 2.255271 seconds, throughput 886811.385417
+93550	[1728376509]	2000000 OPS in 2.069828 seconds, throughput 966263.863471
+93550	[1728376509]	2000000 OPS in 2.079470 seconds, throughput 961783.531381
+93550	[1728376510]	2000000 OPS in 2.085844 seconds, throughput 958844.477343
+93550	[1728376510]	2000000 OPS in 2.258065 seconds, throughput 885714.095918
+93550	[1728376511]	2000000 OPS in 2.071687 seconds, throughput 965396.799806
+93550	[1728376512]	2000000 OPS in 2.079192 seconds, throughput 961912.127403
+93550	[1728376512]	2000000 OPS in 2.086889 seconds, throughput 958364.340413
+93550	[1728376513]	2000000 OPS in 2.257871 seconds, throughput 885790.197934
+93550	[1728376513]	2000000 OPS in 2.071214 seconds, throughput 965617.266009
+93550	[1728376514]	2000000 OPS in 2.077934 seconds, throughput 962494.477688
+93550	[1728376514]	2000000 OPS in 2.084975 seconds, throughput 959244.115637
+93550	[1728376515]	2000000 OPS in 2.256129 seconds, throughput 886474.133350
+93550	[1728376515]	2000000 OPS in 2.071290 seconds, throughput 965581.835475
+93550	[1728376516]	2000000 OPS in 2.078129 seconds, throughput 962404.162590
+93550	[1728376516]	2000000 OPS in 2.085155 seconds, throughput 959161.309351
+93550	[1728376517]	2000000 OPS in 2.256406 seconds, throughput 886365.308371
+93550	[1728376517]	2000000 OPS in 2.071940 seconds, throughput 965278.917343
+93550	[1728376518]	2000000 OPS in 2.102550 seconds, throughput 951225.892369
+93550	[1728376518]	2000000 OPS in 2.109597 seconds, throughput 948048.371324
+93550	[1728376519]	2000000 OPS in 2.096636 seconds, throughput 953909.023789
+93550	[1728376519]	2000000 OPS in 2.277520 seconds, throughput 878148.161158
+93550	[1728376520]	2000000 OPS in 2.078329 seconds, throughput 962311.549326
+93550	[1728376520]	2000000 OPS in 2.086437 seconds, throughput 958571.957840
+93550	[1728376521]	2000000 OPS in 2.070922 seconds, throughput 965753.418043
+93550	[1728376522]	2000000 OPS in 2.256751 seconds, throughput 886229.805592
+93550	[1728376522]	2000000 OPS in 2.078675 seconds, throughput 962151.370464
+93550	[1728376522]	2000000 OPS in 2.086927 seconds, throughput 958346.889949
+93550	[1728376523]	2000000 OPS in 2.071224 seconds, throughput 965612.603948
+93550	[1728376524]	2000000 OPS in 2.257885 seconds, throughput 885784.705598
+93550	[1728376524]	2000000 OPS in 2.098106 seconds, throughput 953240.684694
+93550	[1728376524]	2000000 OPS in 2.107298 seconds, throughput 949082.664151
+93550	[1728376525]	2000000 OPS in 2.096178 seconds, throughput 954117.446133
+93550	[1728376526]	2000000 OPS in 2.085019 seconds, throughput 959223.872780
+93550	[1728376526]	2000000 OPS in 2.277590 seconds, throughput 878121.171941
+93550	[1728376526]	2000000 OPS in 2.080583 seconds, throughput 961269.028921
+93550	[1728376528]	2000000 OPS in 2.084155 seconds, throughput 959621.525270
+93550	[1728376528]	2000000 OPS in 2.078941 seconds, throughput 962028.263428
+93550	[1728376528]	2000000 OPS in 2.069967 seconds, throughput 966198.978051
+93550	[1728376528]	2000000 OPS in 2.255784 seconds, throughput 886609.710859
+93550	[1728376530]	2000000 OPS in 2.086380 seconds, throughput 958598.146071
+93550	[1728376530]	2000000 OPS in 2.077104 seconds, throughput 962879.085496
+93550	[1728376530]	2000000 OPS in 2.071203 seconds, throughput 965622.394328
+93550	[1728376531]	2000000 OPS in 2.255313 seconds, throughput 886794.870601
+93550	[1728376532]	2000000 OPS in 2.107142 seconds, throughput 949152.928469
+93550	[1728376532]	2000000 OPS in 2.103112 seconds, throughput 950971.702886
+93550	[1728376533]	2000000 OPS in 2.104298 seconds, throughput 950435.727259
+93550	[1728376533]	2000000 OPS in 2.279296 seconds, throughput 877463.918684
+93550	[1728376534]	2000000 OPS in 2.069019 seconds, throughput 966641.678979
+93550	[1728376534]	2000000 OPS in 2.079339 seconds, throughput 961844.124503
+93550	[1728376535]	2000000 OPS in 2.085115 seconds, throughput 959179.709512
+93550	[1728376535]	2000000 OPS in 2.255363 seconds, throughput 886775.210908
+93550	[1728376536]	2000000 OPS in 2.071609 seconds, throughput 965433.148823
+93550	[1728376537]	2000000 OPS in 2.079562 seconds, throughput 961740.981995
+93550	[1728376537]	2000000 OPS in 2.085362 seconds, throughput 959066.099795
+93550	[1728376537]	2000000 OPS in 2.262073 seconds, throughput 884144.764559
+93550	[1728376538]	2000000 OPS in 2.094163 seconds, throughput 955035.496282
+93550	[1728376539]	2000000 OPS in 2.095151 seconds, throughput 954585.134914
+93550	[1728376539]	2000000 OPS in 2.101683 seconds, throughput 951618.298288
+93550	[1728376540]	2000000 OPS in 2.264949 seconds, throughput 883022.090122
+93550	[1728376540]	2000000 OPS in 2.071006 seconds, throughput 965714.247086
+93550	[1728376541]	2000000 OPS in 2.077806 seconds, throughput 962553.770660
+93550	[1728376541]	2000000 OPS in 2.085918 seconds, throughput 958810.461389
+93550	[1728376542]	2000000 OPS in 2.257027 seconds, throughput 886121.433195
+93550	[1728376542]	2000000 OPS in 2.071683 seconds, throughput 965398.663792
+93550	[1728376543]	2000000 OPS in 2.078081 seconds, throughput 962426.392426
+93550	[1728376543]	2000000 OPS in 2.085958 seconds, throughput 958792.075392
+93550	[1728376544]	2000000 OPS in 2.076227 seconds, throughput 963285.806417
+93550	[1728376544]	2000000 OPS in 2.264417 seconds, throughput 883229.546501
+93550	[1728376545]	2000000 OPS in 2.093558 seconds, throughput 955311.484086
+93550	[1728376545]	2000000 OPS in 2.102308 seconds, throughput 951335.389486
+93550	[1728376546]	2000000 OPS in 2.090847 seconds, throughput 956550.144511
+93550	[1728376547]	2000000 OPS in 2.263582 seconds, throughput 883555.356068
+93550	[1728376547]	2000000 OPS in 2.078735 seconds, throughput 962123.599208
+93550	[1728376547]	2000000 OPS in 2.077978 seconds, throughput 962474.097416
+93550	[1728376548]	2000000 OPS in 2.069714 seconds, throughput 966317.085356
+93550	[1728376549]	2000000 OPS in 2.255111 seconds, throughput 886874.304635
+93550	[1728376549]	2000000 OPS in 2.077902 seconds, throughput 962509.300246
+93550	[1728376549]	2000000 OPS in 2.083712 seconds, throughput 959825.542109
+93550	[1728376550]	2000000 OPS in 2.069579 seconds, throughput 966380.118855
+93550	[1728376551]	2000000 OPS in 2.277042 seconds, throughput 878332.503309
+93550	[1728376551]	2000000 OPS in 2.100320 seconds, throughput 952235.849775
+93550	[1728376551]	2000000 OPS in 2.106682 seconds, throughput 949360.178708
+93550	[1728376553]	2000000 OPS in 2.094582 seconds, throughput 954844.451065
+93550	[1728376553]	2000000 OPS in 2.081278 seconds, throughput 960948.032891
+93550	[1728376553]	2000000 OPS in 2.260383 seconds, throughput 884805.805034
+93550	[1728376553]	2000000 OPS in 2.085402 seconds, throughput 959047.703992
+93550	[1728376555]	2000000 OPS in 2.071175 seconds, throughput 965635.448477
+93550	[1728376555]	2000000 OPS in 2.078279 seconds, throughput 962334.700971
+93550	[1728376556]	2000000 OPS in 2.084456 seconds, throughput 959482.953826
+93550	[1728376556]	2000000 OPS in 2.256169 seconds, throughput 886458.416901
+93550	[1728376557]	2000000 OPS in 2.071705 seconds, throughput 965388.411960
+93550	[1728376557]	2000000 OPS in 2.077405 seconds, throughput 962739.571725
+93550	[1728376558]	2000000 OPS in 2.087121 seconds, throughput 958257.810640
+93550	[1728376558]	2000000 OPS in 2.267532 seconds, throughput 882016.218514
+93550	[1728376559]	2000000 OPS in 2.086617 seconds, throughput 958489.267556
+93550	[1728376559]	2000000 OPS in 2.101399 seconds, throughput 951746.907655
+93550	[1728376560]	2000000 OPS in 2.101116 seconds, throughput 951875.098757
+93550	[1728376560]	2000000 OPS in 2.259807 seconds, throughput 885031.332322
+93550	[1728376561]	2000000 OPS in 2.072685 seconds, throughput 964931.960235
+93550	[1728376562]	2000000 OPS in 2.078872 seconds, throughput 962060.194182
+93550	[1728376562]	2000000 OPS in 2.085139 seconds, throughput 959168.669331
+93550	[1728376562]	2000000 OPS in 2.257182 seconds, throughput 886060.583506
+93550	[1728376563]	2000000 OPS in 2.072532 seconds, throughput 965003.194161
+93550	[1728376564]	2000000 OPS in 2.078205 seconds, throughput 962368.967450
+93550	[1728376564]	2000000 OPS in 2.086890 seconds, throughput 958363.881182
+93550	[1728376565]	2000000 OPS in 2.273419 seconds, throughput 879732.244694
+93550	[1728376565]	2000000 OPS in 2.095410 seconds, throughput 954467.144855
+93550	[1728376566]	2000000 OPS in 2.103071 seconds, throughput 950990.242365
+93550	[1728376566]	2000000 OPS in 2.099759 seconds, throughput 952490.261978
+93550	[1728376567]	2000000 OPS in 2.257051 seconds, throughput 886112.010761
+93550	[1728376567]	2000000 OPS in 2.083617 seconds, throughput 959869.304196
+93550	[1728376568]	2000000 OPS in 2.080566 seconds, throughput 961276.883310
+93550	[1728376568]	2000000 OPS in 2.075202 seconds, throughput 963761.600076
+93550	[1728376569]	2000000 OPS in 2.255895 seconds, throughput 886566.085744
+93550	[1728376569]	2000000 OPS in 2.071004 seconds, throughput 965715.179691
+93550	[1728376570]	2000000 OPS in 2.077783 seconds, throughput 962564.425640
+93550	[1728376570]	2000000 OPS in 2.084370 seconds, throughput 959522.541583
+93550	[1728376571]	2000000 OPS in 2.072699 seconds, throughput 964925.442623
+93550	[1728376571]	2000000 OPS in 2.255799 seconds, throughput 886603.815322
+93550	[1728376572]	2000000 OPS in 2.079912 seconds, throughput 961579.143733
+93550	[1728376572]	2000000 OPS in 2.085549 seconds, throughput 958980.105478
+93550	[1728376573]	2000000 OPS in 2.070994 seconds, throughput 965719.842742
+93550	[1728376574]	2000000 OPS in 2.257954 seconds, throughput 885757.637224
+93550	[1728376574]	2000000 OPS in 2.078036 seconds, throughput 962447.233830
+93550	[1728376574]	2000000 OPS in 2.086564 seconds, throughput 958513.613769
+93550	[1728376575]	2000000 OPS in 2.071523 seconds, throughput 965473.229117
+93550	[1728376576]	2000000 OPS in 2.266138 seconds, throughput 882558.785034
+93550	[1728376576]	2000000 OPS in 2.077377 seconds, throughput 962752.548045
+93550	[1728376576]	2000000 OPS in 2.084137 seconds, throughput 959629.813203
+93550	[1728376577]	2000000 OPS in 2.069856 seconds, throughput 966250.792326
+93550	[1728376578]	2000000 OPS in 2.267374 seconds, throughput 882077.681053
+93550	[1728376578]	2000000 OPS in 2.093918 seconds, throughput 955147.240723
+93550	[1728376579]	2000000 OPS in 2.108056 seconds, throughput 948741.399659
+93550	[1728376580]	2000000 OPS in 2.088143 seconds, throughput 957788.810441
+93550	[1728376580]	2000000 OPS in 2.078902 seconds, throughput 962046.310985
+93550	[1728376580]	2000000 OPS in 2.256416 seconds, throughput 886361.380171
+93550	[1728376581]	2000000 OPS in 2.085933 seconds, throughput 958803.566558
+93550	[1728376582]	2000000 OPS in 2.074271 seconds, throughput 964194.167493
+93550	[1728376582]	2000000 OPS in 2.083888 seconds, throughput 959744.477630
+93550	[1728376583]	2000000 OPS in 2.255461 seconds, throughput 886736.680439
+93550	[1728376583]	2000000 OPS in 2.089301 seconds, throughput 957257.953737
+93550	[1728376584]	2000000 OPS in 2.073727 seconds, throughput 964447.104175
+93550	[1728376584]	2000000 OPS in 2.094007 seconds, throughput 955106.644820
+93550	[1728376585]	2000000 OPS in 2.098733 seconds, throughput 952955.902442
+93550	[1728376585]	2000000 OPS in 2.302987 seconds, throughput 868437.381540
+93550	[1728376586]	2000000 OPS in 2.126915 seconds, throughput 940329.068157
+93550	[1728376587]	2000000 OPS in 2.128350 seconds, throughput 939695.068950
+93550	[1728376587]	2000000 OPS in 2.128017 seconds, throughput 939842.115923
+93550	[1728376587]	2000000 OPS in 2.256420 seconds, throughput 886359.808901
+93550	[1728376588]	2000000 OPS in 2.070251 seconds, throughput 966066.433490
+93550	[1728376589]	2000000 OPS in 2.086794 seconds, throughput 958407.969354
+93550	[1728376589]	2000000 OPS in 2.095222 seconds, throughput 954552.787246
+93550	[1728376590]	2000000 OPS in 2.261170 seconds, throughput 884497.848459
+93550	[1728376590]	2000000 OPS in 2.079913 seconds, throughput 961578.681416
+93550	[1728376591]	2000000 OPS in 2.078770 seconds, throughput 962107.400049
+93550	[1728376591]	2000000 OPS in 2.085019 seconds, throughput 959223.872780
+93550	[1728376592]	2000000 OPS in 2.276071 seconds, throughput 878707.210803
+93550	[1728376592]	2000000 OPS in 2.085451 seconds, throughput 959025.170095
+93550	[1728376593]	2000000 OPS in 2.095837 seconds, throughput 954272.684374
+93550	[1728376593]	2000000 OPS in 2.101719 seconds, throughput 951601.998174
+93550	[1728376594]	2000000 OPS in 2.256124 seconds, throughput 886476.097945
+93550	[1728376594]	2000000 OPS in 2.071580 seconds, throughput 965446.663899
+93550	[1728376595]	2000000 OPS in 2.078385 seconds, throughput 962285.620807
+93550	[1728376595]	2000000 OPS in 2.084761 seconds, throughput 959342.581716
+93550	[1728376596]	2000000 OPS in 2.071137 seconds, throughput 965653.165387
+93550	[1728376596]	2000000 OPS in 2.256333 seconds, throughput 886393.985285
+93550	[1728376597]	2000000 OPS in 2.078417 seconds, throughput 962270.805137
+93550	[1728376597]	2000000 OPS in 2.084875 seconds, throughput 959290.125307
+93550	[1728376598]	2000000 OPS in 2.093119 seconds, throughput 955511.846197
+93550	[1728376599]	2000000 OPS in 2.271171 seconds, throughput 880603.001711
+93550	[1728376599]	2000000 OPS in 2.093402 seconds, throughput 955382.673753
+93550	[1728376599]	2000000 OPS in 2.102086 seconds, throughput 951435.859427
+93550	[1728376600]	2000000 OPS in 2.071384 seconds, throughput 965538.017094
+93550	[1728376601]	2000000 OPS in 2.256225 seconds, throughput 886436.414808
+93550	[1728376601]	2000000 OPS in 2.077968 seconds, throughput 962478.729220
+93550	[1728376602]	2000000 OPS in 2.084165 seconds, throughput 959616.920925
+93550	[1728376602]	2000000 OPS in 2.070713 seconds, throughput 965850.892905
+93550	[1728376603]	2000000 OPS in 2.256666 seconds, throughput 886263.186488
+93550	[1728376603]	2000000 OPS in 2.076049 seconds, throughput 963368.398337
+93550	[1728376604]	2000000 OPS in 2.084084 seconds, throughput 959654.217392
+93550	[1728376604]	2000000 OPS in 2.071178 seconds, throughput 965634.049802
+93550	[1728376605]	2000000 OPS in 2.271993 seconds, throughput 880284.402285
+93550	[1728376605]	2000000 OPS in 2.099558 seconds, throughput 952581.448095
+93550	[1728376606]	2000000 OPS in 2.109472 seconds, throughput 948104.549385
+93550	[1728376607]	2000000 OPS in 2.096063 seconds, throughput 954169.793561
+93550	[1728376607]	2000000 OPS in 2.079325 seconds, throughput 961850.600555
+93550	[1728376608]	2000000 OPS in 2.256902 seconds, throughput 886170.511613
+93550	[1728376608]	2000000 OPS in 2.083728 seconds, throughput 959818.172045
+93550	[1728376609]	2000000 OPS in 2.072056 seconds, throughput 965224.878092
+93550	[1728376610]	2000000 OPS in 2.078487 seconds, throughput 962238.397450
+93550	[1728376610]	2000000 OPS in 2.255077 seconds, throughput 886887.676119
+93550	[1728376610]	2000000 OPS in 2.084949 seconds, throughput 959256.077727
+93550	[1728376611]	2000000 OPS in 2.070883 seconds, throughput 965771.605639
+93550	[1728376612]	2000000 OPS in 2.098642 seconds, throughput 952997.223919
+93550	[1728376612]	2000000 OPS in 2.099953 seconds, throughput 952402.268051
+93550	[1728376612]	2000000 OPS in 2.270261 seconds, throughput 880955.978189
+93550	[1728376613]	2000000 OPS in 2.087554 seconds, throughput 958059.049011
+93550	[1728376614]	2000000 OPS in 2.080437 seconds, throughput 961336.488440
+93550	[1728376614]	2000000 OPS in 2.086572 seconds, throughput 958509.938790
+93550	[1728376614]	2000000 OPS in 2.255249 seconds, throughput 886820.036280
+93550	[1728376615]	2000000 OPS in 2.070416 seconds, throughput 965989.443667
+93550	[1728376616]	2000000 OPS in 2.078073 seconds, throughput 962430.097499
+93550	[1728376616]	2000000 OPS in 2.085775 seconds, throughput 958876.197097
+93550	[1728376617]	2000000 OPS in 2.256003 seconds, throughput 886523.643807
+93550	[1728376617]	2000000 OPS in 2.071381 seconds, throughput 965539.415491
+93550	[1728376618]	2000000 OPS in 2.080249 seconds, throughput 961423.368068
+93550	[1728376618]	2000000 OPS in 2.098408 seconds, throughput 953103.495602
+93550	[1728376619]	2000000 OPS in 2.277777 seconds, throughput 878049.080309
+93550	[1728376619]	2000000 OPS in 2.087684 seconds, throughput 957999.390712
+93550	[1728376620]	2000000 OPS in 2.093746 seconds, throughput 955225.705506
+93550	[1728376620]	2000000 OPS in 2.089389 seconds, throughput 957217.636352
+93550	[1728376621]	2000000 OPS in 2.071240 seconds, throughput 965605.144744
+93550	[1728376621]	2000000 OPS in 2.256681 seconds, throughput 886257.295559
+93550	[1728376622]	2000000 OPS in 2.078621 seconds, throughput 962176.365966
+93550	[1728376622]	2000000 OPS in 2.085863 seconds, throughput 958835.743287
+93550	[1728376623]	2000000 OPS in 2.070485 seconds, throughput 965957.251562
+93550	[1728376623]	2000000 OPS in 2.256314 seconds, throughput 886401.449444
+93550	[1728376624]	2000000 OPS in 2.078716 seconds, throughput 962132.393266
+93550	[1728376625]	2000000 OPS in 2.085988 seconds, throughput 958778.286356
+93550	[1728376625]	2000000 OPS in 2.094326 seconds, throughput 954961.166504
+93550	[1728376626]	2000000 OPS in 2.278529 seconds, throughput 877759.291192
+93550	[1728376626]	2000000 OPS in 2.102082 seconds, throughput 951437.669891
+93550	[1728376627]	2000000 OPS in 2.108337 seconds, throughput 948614.951025
+93550	[1728376627]	2000000 OPS in 2.070873 seconds, throughput 965776.269235
+93550	[1728376628]	2000000 OPS in 2.256028 seconds, throughput 886513.819864
+93550	[1728376628]	2000000 OPS in 2.079149 seconds, throughput 961932.021226
+93550	[1728376629]	2000000 OPS in 2.084277 seconds, throughput 959565.355277
+93550	[1728376629]	2000000 OPS in 2.072232 seconds, throughput 965142.899058
+93550	[1728376630]	2000000 OPS in 2.253949 seconds, throughput 887331.523473
+93550	[1728376630]	2000000 OPS in 2.075973 seconds, throughput 963403.666618
+93550	[1728376631]	2000000 OPS in 2.085327 seconds, throughput 959082.196701
+93550	[1728376631]	2000000 OPS in 2.071513 seconds, throughput 965477.889832
+93550	[1728376632]	2000000 OPS in 2.079779 seconds, throughput 961640.635856
+93550	[1728376632]	2000000 OPS in 2.255540 seconds, throughput 886705.622600
+93550	[1728376633]	2000000 OPS in 2.086456 seconds, throughput 958563.228748
+93550	[1728376634]	2000000 OPS in 2.073049 seconds, throughput 964762.530939
+93550	[1728376635]	2000000 OPS in 2.078929 seconds, throughput 962033.816451
+93550	[1728376635]	2000000 OPS in 2.255286 seconds, throughput 886805.487198
+93550	[1728376635]	2000000 OPS in 2.084548 seconds, throughput 959440.607748
+93550	[1728376636]	2000000 OPS in 2.070923 seconds, throughput 965752.951703
+93550	[1728376637]	2000000 OPS in 2.076739 seconds, throughput 963048.317579
+93550	[1728376637]	2000000 OPS in 2.255868 seconds, throughput 886576.696863
+93550	[1728376637]	2000000 OPS in 2.083982 seconds, throughput 959701.187438
+93550	[1728376638]	2000000 OPS in 2.072033 seconds, throughput 965235.592290
+93550	[1728376639]	2000000 OPS in 2.101637 seconds, throughput 951639.127023
+93550	[1728376639]	2000000 OPS in 2.100968 seconds, throughput 951942.152379
+93550	[1728376639]	2000000 OPS in 2.270958 seconds, throughput 880685.596123
+93550	[1728376640]	2000000 OPS in 2.087491 seconds, throughput 958087.963014
+93550	[1728376641]	2000000 OPS in 2.079507 seconds, throughput 961766.418675
+93550	[1728376641]	2000000 OPS in 2.084385 seconds, throughput 959515.636507
+93550	[1728376642]	2000000 OPS in 2.254846 seconds, throughput 886978.534232
+93550	[1728376642]	2000000 OPS in 2.071746 seconds, throughput 965369.306855
+93550	[1728376643]	2000000 OPS in 2.080708 seconds, throughput 961211.280007
+93550	[1728376643]	2000000 OPS in 2.084539 seconds, throughput 959444.750134
+93550	[1728376644]	2000000 OPS in 2.256278 seconds, throughput 886415.592405
+93550	[1728376644]	2000000 OPS in 2.069885 seconds, throughput 966237.254727
+93550	[1728376645]	2000000 OPS in 2.096633 seconds, throughput 953910.388704
+93550	[1728376645]	2000000 OPS in 2.109505 seconds, throughput 948089.717730
+93550	[1728376646]	2000000 OPS in 2.093390 seconds, throughput 955388.150321
+93550	[1728376646]	2000000 OPS in 2.277583 seconds, throughput 878123.870788
+93550	[1728376647]	2000000 OPS in 2.085522 seconds, throughput 958992.520817
+93550	[1728376648]	2000000 OPS in 2.085328 seconds, throughput 959081.736782
+93550	[1728376648]	2000000 OPS in 2.071046 seconds, throughput 965695.595366
+93550	[1728376648]	2000000 OPS in 2.255969 seconds, throughput 886537.004719
+93550	[1728376649]	2000000 OPS in 2.078204 seconds, throughput 962369.430528
+93550	[1728376650]	2000000 OPS in 2.084905 seconds, throughput 959276.321943
+93550	[1728376650]	2000000 OPS in 2.070096 seconds, throughput 966138.768444
+93550	[1728376651]	2000000 OPS in 2.256746 seconds, throughput 886231.769105
+93550	[1728376651]	2000000 OPS in 2.079146 seconds, throughput 961933.409198
+93550	[1728376652]	2000000 OPS in 2.097558 seconds, throughput 953489.724718
+93550	[1728376652]	2000000 OPS in 2.094798 seconds, throughput 954745.994602
+93550	[1728376653]	2000000 OPS in 2.271148 seconds, throughput 880611.919611
+93550	[1728376653]	2000000 OPS in 2.093762 seconds, throughput 955218.405912
+93550	[1728376654]	2000000 OPS in 2.088199 seconds, throughput 957763.125066
+93550	[1728376654]	2000000 OPS in 2.071310 seconds, throughput 965572.512082
+93550	[1728376655]	2000000 OPS in 2.256905 seconds, throughput 886169.333667
+93550	[1728376655]	2000000 OPS in 2.078099 seconds, throughput 962418.056118
+93550	[1728376656]	2000000 OPS in 2.085970 seconds, throughput 958786.559730
+93550	[1728376656]	2000000 OPS in 2.070915 seconds, throughput 965756.682433
+93550	[1728376657]	2000000 OPS in 2.256147 seconds, throughput 886467.060879
+93550	[1728376657]	2000000 OPS in 2.078902 seconds, throughput 962046.310985
+93550	[1728376658]	2000000 OPS in 2.085875 seconds, throughput 958830.227123
+93550	[1728376658]	2000000 OPS in 2.090803 seconds, throughput 956570.274674
+93550	[1728376660]	2000000 OPS in 2.101549 seconds, throughput 951678.975841
+93550	[1728376660]	2000000 OPS in 2.278487 seconds, throughput 877775.471179
+93550	[1728376660]	2000000 OPS in 2.108728 seconds, throughput 948439.058997
+93550	[1728376661]	2000000 OPS in 2.075422 seconds, throughput 963659.438900
+93550	[1728376662]	2000000 OPS in 2.079482 seconds, throughput 961777.981247
+93550	[1728376662]	2000000 OPS in 2.254262 seconds, throughput 887208.319175
+93550	[1728376662]	2000000 OPS in 2.084489 seconds, throughput 959467.764042
+93550	[1728376663]	2000000 OPS in 2.071434 seconds, throughput 965514.711065
+93550	[1728376664]	2000000 OPS in 2.077666 seconds, throughput 962618.630714
+93550	[1728376664]	2000000 OPS in 2.257045 seconds, throughput 886114.366351
+93550	[1728376664]	2000000 OPS in 2.087467 seconds, throughput 958098.978331
+93550	[1728376665]	2000000 OPS in 2.071263 seconds, throughput 965594.422340
+93550	[1728376666]	2000000 OPS in 2.103188 seconds, throughput 950937.338935
+93550	[1728376666]	2000000 OPS in 2.101781 seconds, throughput 951573.927065
+93550	[1728376666]	2000000 OPS in 2.277223 seconds, throughput 878262.691006
+93550	[1728376667]	2000000 OPS in 2.104979 seconds, throughput 950128.243560
+93550	[1728376668]	2000000 OPS in 2.078143 seconds, throughput 962397.679082
+93550	[1728376668]	2000000 OPS in 2.071606 seconds, throughput 965434.546917
+93550	[1728376669]	2000000 OPS in 2.254604 seconds, throughput 887073.738892
+93550	[1728376669]	2000000 OPS in 2.084587 seconds, throughput 959422.657821
+93550	[1728376670]	2000000 OPS in 2.078269 seconds, throughput 962339.331434
+93550	[1728376671]	2000000 OPS in 2.080794 seconds, throughput 961171.552782
+93550	[1728376671]	2000000 OPS in 2.254942 seconds, throughput 886940.772756
+93550	[1728376671]	2000000 OPS in 2.073789 seconds, throughput 964418.270133
+93550	[1728376672]	2000000 OPS in 2.091165 seconds, throughput 956404.683514
+93550	[1728376673]	2000000 OPS in 2.102147 seconds, throughput 951408.250707
+93550	[1728376673]	2000000 OPS in 2.086899 seconds, throughput 958359.748124
+93550	[1728376673]	2000000 OPS in 2.278626 seconds, throughput 877721.925406
+93550	[1728376674]	2000000 OPS in 2.080555 seconds, throughput 961281.965629
+93550	[1728376675]	2000000 OPS in 2.084415 seconds, throughput 959501.826652
+93550	[1728376675]	2000000 OPS in 2.071057 seconds, throughput 965690.466269
+93550	[1728376675]	2000000 OPS in 2.257231 seconds, throughput 886041.348892
+93550	[1728376676]	2000000 OPS in 2.076058 seconds, throughput 963364.222002
+93550	[1728376677]	2000000 OPS in 2.085326 seconds, throughput 959082.656621
+93550	[1728376677]	2000000 OPS in 2.070198 seconds, throughput 966091.166159
+93550	[1728376678]	2000000 OPS in 2.255855 seconds, throughput 886581.806011
+93550	[1728376678]	2000000 OPS in 2.080120 seconds, throughput 961482.991366
+93550	[1728376679]	2000000 OPS in 2.107902 seconds, throughput 948810.713212
+93550	[1728376679]	2000000 OPS in 2.095823 seconds, throughput 954279.058871
+93550	[1728376680]	2000000 OPS in 2.277016 seconds, throughput 878342.532507
+93550	[1728376680]	2000000 OPS in 2.101747 seconds, throughput 951589.320694
+93550	[1728376681]	2000000 OPS in 2.085240 seconds, throughput 959122.211352
+93550	[1728376681]	2000000 OPS in 2.071342 seconds, throughput 965557.595028
+93550	[1728376682]	2000000 OPS in 2.255779 seconds, throughput 886611.676055
+93550	[1728376683]	2000000 OPS in 2.077705 seconds, throughput 962600.561677
+93550	[1728376683]	2000000 OPS in 2.084608 seconds, throughput 959412.992755
+93550	[1728376683]	2000000 OPS in 2.070000 seconds, throughput 966183.574879
+93550	[1728376685]	2000000 OPS in 2.256760 seconds, throughput 886226.271292
+93550	[1728376685]	2000000 OPS in 2.079733 seconds, throughput 961661.905639
+93550	[1728376685]	2000000 OPS in 2.084108 seconds, throughput 959643.166285
+93550	[1728376686]	2000000 OPS in 2.091650 seconds, throughput 956182.917792
+93550	[1728376687]	2000000 OPS in 2.101365 seconds, throughput 951762.306881
+93550	[1728376687]	2000000 OPS in 2.278282 seconds, throughput 877854.453487
+93550	[1728376687]	2000000 OPS in 2.109929 seconds, throughput 947899.194712
+93550	[1728376688]	2000000 OPS in 2.074803 seconds, throughput 963946.938577
+93550	[1728376689]	2000000 OPS in 2.078239 seconds, throughput 962353.223089
+93550	[1728376689]	2000000 OPS in 2.255628 seconds, throughput 886671.029088
+93550	[1728376689]	2000000 OPS in 2.085142 seconds, throughput 959167.289326
+93550	[1728376690]	2000000 OPS in 2.070653 seconds, throughput 965878.879754
+93550	[1728376691]	2000000 OPS in 2.079033 seconds, throughput 961985.692387
+93550	[1728376691]	2000000 OPS in 2.255972 seconds, throughput 886535.825799
+93550	[1728376691]	2000000 OPS in 2.085670 seconds, throughput 958924.470314
+93550	[1728376692]	2000000 OPS in 2.072103 seconds, throughput 965202.984601
+93550	[1728376693]	2000000 OPS in 2.079440 seconds, throughput 961797.406994
+93550	[1728376694]	2000000 OPS in 2.087536 seconds, throughput 958067.309977
+93550	[1728376694]	2000000 OPS in 2.257019 seconds, throughput 886124.574051
+93550	[1728376694]	2000000 OPS in 2.070155 seconds, throughput 966111.233217
+93550	[1728376695]	2000000 OPS in 2.078011 seconds, throughput 962458.812778
+93550	[1728376696]	2000000 OPS in 2.084714 seconds, throughput 959364.210151
+93550	[1728376696]	2000000 OPS in 2.255716 seconds, throughput 886636.438275
+93550	[1728376696]	2000000 OPS in 2.069450 seconds, throughput 966440.358549
+93550	[1728376697]	2000000 OPS in 2.079449 seconds, throughput 961793.244268
+93550	[1728376698]	2000000 OPS in 2.085955 seconds, throughput 958793.454317
+93550	[1728376698]	2000000 OPS in 2.070151 seconds, throughput 966113.099962
+93550	[1728376698]	2000000 OPS in 2.256757 seconds, throughput 886227.449389
+93550	[1728376699]	2000000 OPS in 2.100812 seconds, throughput 952012.840749
+93550	[1728376700]	2000000 OPS in 2.109224 seconds, throughput 948216.026368
+93550	[1728376700]	2000000 OPS in 2.094356 seconds, throughput 954947.487438
+93550	[1728376700]	2000000 OPS in 2.278281 seconds, throughput 877854.838802
+93550	[1728376701]	2000000 OPS in 2.079959 seconds, throughput 961557.415314
+93550	[1728376702]	2000000 OPS in 2.084050 seconds, throughput 959669.873563
+93550	[1728376702]	2000000 OPS in 2.069015 seconds, throughput 966643.547775
+93550	[1728376703]	2000000 OPS in 2.254646 seconds, throughput 887057.214303
+93550	[1728376703]	2000000 OPS in 2.077119 seconds, throughput 962872.132025
+93550	[1728376704]	2000000 OPS in 2.085466 seconds, throughput 959018.272175
+93550	[1728376704]	2000000 OPS in 2.069803 seconds, throughput 966275.534435
+93550	[1728376705]	2000000 OPS in 2.257226 seconds, throughput 886043.311569
+93550	[1728376705]	2000000 OPS in 2.097942 seconds, throughput 953315.201278
+93550	[1728376706]	2000000 OPS in 2.109719 seconds, throughput 947993.547956
+93550	[1728376706]	2000000 OPS in 2.094604 seconds, throughput 954834.422163
+93550	[1728376707]	2000000 OPS in 2.279670 seconds, throughput 877319.962977
+93550	[1728376708]	2000000 OPS in 2.082554 seconds, throughput 960359.251189
+93550	[1728376708]	2000000 OPS in 2.085592 seconds, throughput 958960.333565
+93550	[1728376708]	2000000 OPS in 2.071351 seconds, throughput 965553.399689
+93550	[1728376709]	2000000 OPS in 2.255104 seconds, throughput 886877.057555
+93550	[1728376710]	2000000 OPS in 2.077581 seconds, throughput 962658.014296
+93550	[1728376710]	2000000 OPS in 2.084771 seconds, throughput 959337.980047
+93550	[1728376710]	2000000 OPS in 2.071255 seconds, throughput 965598.151845
+93550	[1728376712]	2000000 OPS in 2.255673 seconds, throughput 886653.340267
+93550	[1728376712]	2000000 OPS in 2.078522 seconds, throughput 962222.194425
+93550	[1728376712]	2000000 OPS in 2.098690 seconds, throughput 952975.427529
+93550	[1728376713]	2000000 OPS in 2.092597 seconds, throughput 955750.199393
+93550	[1728376714]	2000000 OPS in 2.095326 seconds, throughput 954505.408705
+93550	[1728376714]	2000000 OPS in 2.270599 seconds, throughput 880824.839613
+93550	[1728376714]	2000000 OPS in 2.085844 seconds, throughput 958844.477343
+93550	[1728376715]	2000000 OPS in 2.071365 seconds, throughput 965546.873680
+93550	[1728376716]	2000000 OPS in 2.079354 seconds, throughput 961837.185972
+93550	[1728376716]	2000000 OPS in 2.256660 seconds, throughput 886265.542882
+93550	[1728376717]	2000000 OPS in 2.084442 seconds, throughput 959489.398122
+93550	[1728376717]	2000000 OPS in 2.071816 seconds, throughput 965336.690131
+93550	[1728376718]	2000000 OPS in 2.079931 seconds, throughput 961570.359786
+93550	[1728376718]	2000000 OPS in 2.256457 seconds, throughput 886345.274915
+93550	[1728376719]	2000000 OPS in 2.085215 seconds, throughput 959133.710433
+93550	[1728376719]	2000000 OPS in 2.071627 seconds, throughput 965424.760345
+93550	[1728376720]	2000000 OPS in 2.094410 seconds, throughput 954922.866105
+93550	[1728376721]	2000000 OPS in 2.270527 seconds, throughput 880852.771185
+93550	[1728376721]	2000000 OPS in 2.107973 seconds, throughput 948778.755705
+93550	[1728376721]	2000000 OPS in 2.088298 seconds, throughput 957717.720364
+93550	[1728376722]	2000000 OPS in 2.078431 seconds, throughput 962264.323425
+93550	[1728376723]	2000000 OPS in 2.084209 seconds, throughput 959596.662331
+93550	[1728376723]	2000000 OPS in 2.071189 seconds, throughput 965628.921359
+93550	[1728376723]	2000000 OPS in 2.255211 seconds, throughput 886834.979077
+93550	[1728376724]	2000000 OPS in 2.078194 seconds, throughput 962374.061324
+93550	[1728376725]	2000000 OPS in 2.086018 seconds, throughput 958764.497718
+93550	[1728376725]	2000000 OPS in 2.070693 seconds, throughput 965860.221675
+93550	[1728376725]	2000000 OPS in 2.256863 seconds, throughput 886185.825192
+93550	[1728376726]	2000000 OPS in 2.101250 seconds, throughput 951814.396193
+93550	[1728376727]	2000000 OPS in 2.102400 seconds, throughput 951293.759513
+93550	[1728376727]	2000000 OPS in 2.088175 seconds, throughput 957774.132915
+93550	[1728376727]	2000000 OPS in 2.270665 seconds, throughput 880799.237228
+93550	[1728376728]	2000000 OPS in 2.079198 seconds, throughput 961909.351587
+93550	[1728376729]	2000000 OPS in 2.085555 seconds, throughput 958977.346558
+93550	[1728376729]	2000000 OPS in 2.071764 seconds, throughput 965360.919487
+93550	[1728376730]	2000000 OPS in 2.256393 seconds, throughput 886370.415083
+93550	[1728376730]	2000000 OPS in 2.078996 seconds, throughput 962002.812896
+93550	[1728376731]	2000000 OPS in 2.085786 seconds, throughput 958871.140184
+93550	[1728376731]	2000000 OPS in 2.071949 seconds, throughput 965274.724426
+93550	[1728376732]	2000000 OPS in 2.255553 seconds, throughput 886700.512025
+93550	[1728376733]	2000000 OPS in 2.094047 seconds, throughput 955088.400595
+93550	[1728376733]	2000000 OPS in 2.087648 seconds, throughput 958015.910728
+93550	[1728376733]	2000000 OPS in 2.100627 seconds, throughput 952096.683514
+93550	[1728376734]	2000000 OPS in 2.277628 seconds, throughput 878106.521346
+93550	[1728376735]	2000000 OPS in 2.082069 seconds, throughput 960582.958586
+93550	[1728376735]	2000000 OPS in 2.070485 seconds, throughput 965957.251562
+93550	[1728376735]	2000000 OPS in 2.084181 seconds, throughput 959609.554065
+93550	[1728376737]	2000000 OPS in 2.255058 seconds, throughput 886895.148595
+93550	[1728376737]	2000000 OPS in 2.078181 seconds, throughput 962380.081427
+93550	[1728376737]	2000000 OPS in 2.071492 seconds, throughput 965487.677481
+93550	[1728376737]	2000000 OPS in 2.085119 seconds, throughput 959177.869465
+93550	[1728376739]	2000000 OPS in 2.078913 seconds, throughput 962041.220580
+93550	[1728376739]	2000000 OPS in 2.256983 seconds, throughput 886138.708178
+93550	[1728376740]	2000000 OPS in 2.095177 seconds, throughput 954573.289035
+93550	[1728376740]	2000000 OPS in 2.108296 seconds, throughput 948633.398726
+93550	[1728376741]	2000000 OPS in 2.102410 seconds, throughput 951289.234735
+93550	[1728376741]	2000000 OPS in 2.277299 seconds, throughput 878233.380860
+93550	[1728376742]	2000000 OPS in 2.072395 seconds, throughput 965066.987712
+93550	[1728376742]	2000000 OPS in 2.086169 seconds, throughput 958695.100924
+93550	[1728376743]	2000000 OPS in 2.079585 seconds, throughput 961730.345237
+93550	[1728376743]	2000000 OPS in 2.255413 seconds, throughput 886755.552087
+93550	[1728376744]	2000000 OPS in 2.071304 seconds, throughput 965575.309081
+93550	[1728376744]	2000000 OPS in 2.085915 seconds, throughput 958811.840367
+93550	[1728376745]	2000000 OPS in 2.079948 seconds, throughput 961562.500601
+93550	[1728376746]	2000000 OPS in 2.256705 seconds, throughput 886247.870236
+93550	[1728376746]	2000000 OPS in 2.092326 seconds, throughput 955873.989044
+93550	[1728376746]	2000000 OPS in 2.099122 seconds, throughput 952779.304871
+93550	[1728376747]	2000000 OPS in 2.103215 seconds, throughput 950925.131287
+93550	[1728376748]	2000000 OPS in 2.093240 seconds, throughput 955456.612715
+93550	[1728376748]	2000000 OPS in 2.278180 seconds, throughput 877893.757297
+93550	[1728376748]	2000000 OPS in 2.074260 seconds, throughput 964199.280707
+93550	[1728376749]	2000000 OPS in 2.078687 seconds, throughput 962145.816085
+93550	[1728376750]	2000000 OPS in 2.071884 seconds, throughput 965305.007423
+93550	[1728376750]	2000000 OPS in 2.081973 seconds, throughput 960627.251170
+93550	[1728376750]	2000000 OPS in 2.254896 seconds, throughput 886958.866396
+93550	[1728376751]	2000000 OPS in 2.078515 seconds, throughput 962225.434986
+93550	[1728376752]	2000000 OPS in 2.070250 seconds, throughput 966066.900133
+93550	[1728376752]	2000000 OPS in 2.085122 seconds, throughput 959176.489433
+93550	[1728376752]	2000000 OPS in 2.255780 seconds, throughput 886611.283015
+93550	[1728376753]	2000000 OPS in 2.079714 seconds, throughput 961670.691259
+93550	[1728376754]	2000000 OPS in 2.071205 seconds, throughput 965621.461903
+93550	[1728376754]	2000000 OPS in 2.086922 seconds, throughput 958349.186026
+93550	[1728376755]	2000000 OPS in 2.256168 seconds, throughput 886458.809805
+93550	[1728376755]	2000000 OPS in 2.078194 seconds, throughput 962374.061324
+93550	[1728376756]	2000000 OPS in 2.069106 seconds, throughput 966601.034456
+93550	[1728376756]	2000000 OPS in 2.085704 seconds, throughput 958908.838455
+93550	[1728376757]	2000000 OPS in 2.257475 seconds, throughput 885945.580793
+93550	[1728376758]	2000000 OPS in 2.078275 seconds, throughput 962336.553151
+93550	[1728376758]	2000000 OPS in 2.070226 seconds, throughput 966078.099686
+93550	[1728376758]	2000000 OPS in 2.084208 seconds, throughput 959597.122744
+93550	[1728376759]	2000000 OPS in 2.274332 seconds, throughput 879379.088014
+93550	[1728376760]	2000000 OPS in 2.103033 seconds, throughput 951007.425941
+93550	[1728376760]	2000000 OPS in 2.095152 seconds, throughput 954584.679298
+93550	[1728376760]	2000000 OPS in 2.109629 seconds, throughput 948033.990811
+93550	[1728376761]	2000000 OPS in 2.261607 seconds, throughput 884326.940976
+93550	[1728376762]	2000000 OPS in 2.079810 seconds, throughput 961626.302403
+93550	[1728376762]	2000000 OPS in 2.072345 seconds, throughput 965090.272131
+93550	[1728376763]	2000000 OPS in 2.087037 seconds, throughput 958296.379029
+93550	[1728376764]	2000000 OPS in 2.257657 seconds, throughput 885874.160690
+93550	[1728376764]	2000000 OPS in 2.080608 seconds, throughput 961257.478583
+93550	[1728376764]	2000000 OPS in 2.070926 seconds, throughput 965751.552687
+93550	[1728376765]	2000000 OPS in 2.084850 seconds, throughput 959301.628415
+93550	[1728376766]	2000000 OPS in 2.089984 seconds, throughput 956945.124939
+93550	[1728376766]	2000000 OPS in 2.275073 seconds, throughput 879092.670873
+93550	[1728376767]	2000000 OPS in 2.086919 seconds, throughput 958350.563678
+93550	[1728376767]	2000000 OPS in 2.101479 seconds, throughput 951710.676148
+93550	[1728376768]	2000000 OPS in 2.100031 seconds, throughput 952366.893632
+93550	[1728376768]	2000000 OPS in 2.270241 seconds, throughput 880963.739092
+93550	[1728376769]	2000000 OPS in 2.087500 seconds, throughput 958083.832335
+93550	[1728376769]	2000000 OPS in 2.101966 seconds, throughput 951490.176340
+93550	[1728376770]	2000000 OPS in 2.078469 seconds, throughput 962246.730646
+93550	[1728376770]	2000000 OPS in 2.255426 seconds, throughput 886750.440937
+93550	[1728376771]	2000000 OPS in 2.070950 seconds, throughput 965740.360704
+93550	[1728376771]	2000000 OPS in 2.085083 seconds, throughput 959194.430150
+93550	[1728376772]	2000000 OPS in 2.079476 seconds, throughput 961780.756306
+93550	[1728376773]	2000000 OPS in 2.276201 seconds, throughput 878657.025456
+93550	[1728376773]	2000000 OPS in 2.094105 seconds, throughput 955061.947706
+93550	[1728376773]	2000000 OPS in 2.109201 seconds, throughput 948226.366288
+93550	[1728376774]	2000000 OPS in 2.102208 seconds, throughput 951380.643590
+93550	[1728376775]	2000000 OPS in 2.071901 seconds, throughput 965297.087071
+93550	[1728376775]	2000000 OPS in 2.258422 seconds, throughput 885574.086685
+93550	[1728376775]	2000000 OPS in 2.084877 seconds, throughput 959289.205071
+93550	[1728376776]	2000000 OPS in 2.077092 seconds, throughput 962884.648345
+93550	[1728376777]	2000000 OPS in 2.071733 seconds, throughput 965375.364490
+93550	[1728376777]	2000000 OPS in 2.084740 seconds, throughput 959352.245364
+93550	[1728376777]	2000000 OPS in 2.256240 seconds, throughput 886430.521576
+93550	[1728376778]	2000000 OPS in 2.078586 seconds, throughput 962192.567447
+93550	[1728376779]	2000000 OPS in 2.070436 seconds, throughput 965980.112401
+93550	[1728376779]	2000000 OPS in 2.094905 seconds, throughput 954697.229707
+93550	[1728376780]	2000000 OPS in 2.268165 seconds, throughput 881770.065229
+93550	[1728376781]	2000000 OPS in 2.100921 seconds, throughput 951963.448411
+93550	[1728376781]	2000000 OPS in 2.087502 seconds, throughput 958082.914412
+93550	[1728376781]	2000000 OPS in 2.089408 seconds, throughput 957208.931908
+93550	[1728376782]	2000000 OPS in 2.256857 seconds, throughput 886188.181174
+93550	[1728376783]	2000000 OPS in 2.077104 seconds, throughput 962879.085496
+93550	[1728376783]	2000000 OPS in 2.071415 seconds, throughput 965523.567223
+93550	[1728376783]	2000000 OPS in 2.085987 seconds, throughput 958778.745985
+93550	[1728376784]	2000000 OPS in 2.256060 seconds, throughput 886501.245534
+93550	[1728376785]	2000000 OPS in 2.077683 seconds, throughput 962610.754384
+93550	[1728376785]	2000000 OPS in 2.068978 seconds, throughput 966660.834480
+93550	[1728376786]	2000000 OPS in 2.085060 seconds, throughput 959205.010887
+93550	[1728376786]	2000000 OPS in 2.277409 seconds, throughput 878190.961746
+93550	[1728376787]	2000000 OPS in 2.102403 seconds, throughput 951292.402075
+93550	[1728376787]	2000000 OPS in 2.096398 seconds, throughput 954017.319230
+93550	[1728376788]	2000000 OPS in 2.108530 seconds, throughput 948528.121487
+93550	[1728376789]	2000000 OPS in 2.257567 seconds, throughput 885909.476884
+93550	[1728376789]	2000000 OPS in 2.077073 seconds, throughput 962893.456321
+93550	[1728376789]	2000000 OPS in 2.070247 seconds, throughput 966068.300063
+93550	[1728376790]	2000000 OPS in 2.086912 seconds, throughput 958353.778214
+93550	[1728376791]	2000000 OPS in 2.256545 seconds, throughput 886310.709514
+93550	[1728376791]	2000000 OPS in 2.079289 seconds, throughput 961867.253662
+93550	[1728376791]	2000000 OPS in 2.069165 seconds, throughput 966573.472874
+93550	[1728376792]	2000000 OPS in 2.085627 seconds, throughput 958944.240749
+93550	[1728376793]	2000000 OPS in 2.100109 seconds, throughput 952331.521840
+93550	[1728376793]	2000000 OPS in 2.278005 seconds, throughput 877961.198505
+93550	[1728376794]	2000000 OPS in 2.094168 seconds, throughput 955033.216055
+93550	[1728376794]	2000000 OPS in 2.109069 seconds, throughput 948285.712796
+93550	[1728376795]	2000000 OPS in 2.079618 seconds, throughput 961715.084213
+93550	[1728376795]	2000000 OPS in 2.255614 seconds, throughput 886676.532421
+93550	[1728376796]	2000000 OPS in 2.071511 seconds, throughput 965478.821981
+93550	[1728376796]	2000000 OPS in 2.084914 seconds, throughput 959272.181011
+93550	[1728376797]	2000000 OPS in 2.078773 seconds, throughput 962106.011575
+93550	[1728376798]	2000000 OPS in 2.255511 seconds, throughput 886717.023326
+93550	[1728376798]	2000000 OPS in 2.071993 seconds, throughput 965254.226245
+93550	[1728376798]	2000000 OPS in 2.085638 seconds, throughput 958939.183118
+93550	[1728376799]	2000000 OPS in 2.077473 seconds, throughput 962708.059262
+93550	[1728376800]	2000000 OPS in 2.086153 seconds, throughput 958702.453751
+93550	[1728376800]	2000000 OPS in 2.270568 seconds, throughput 880836.865489
+93550	[1728376800]	2000000 OPS in 2.109687 seconds, throughput 948007.927242
+93550	[1728376801]	2000000 OPS in 2.094378 seconds, throughput 954937.456371
+93550	[1728376802]	2000000 OPS in 2.073820 seconds, throughput 964403.853758
+93550	[1728376802]	2000000 OPS in 2.257584 seconds, throughput 885902.805831
+93550	[1728376802]	2000000 OPS in 2.085521 seconds, throughput 958992.980651
+93550	[1728376803]	2000000 OPS in 2.079390 seconds, throughput 961820.533907
+93550	[1728376804]	2000000 OPS in 2.083722 seconds, throughput 959820.935806
+93550	[1728376804]	2000000 OPS in 2.240955 seconds, throughput 892476.645002
+93550	[1728376805]	2000000 OPS in 2.071239 seconds, throughput 965605.610941
+93550	[1728376806]	2000000 OPS in 2.102251 seconds, throughput 951361.183798
+93550	[1728376807]	2000000 OPS in 2.216332 seconds, throughput 902391.879917
+93550	[1728376808]	2000000 OPS in 2.019760 seconds, throughput 990216.659405
+93550	[1728376809]	2000000 OPS in 2.051469 seconds, throughput 974911.149035
+93550	[1728376811]	2000000 OPS in 1.931414 seconds, throughput 1035510.770865
+93550	[1728376812]	2000000 OPS in 1.782228 seconds, throughput 1122190.875690
+93550	[1728376814]	2000000 OPS in 1.785314 seconds, throughput 1120251.115490
+93550	[1728376816]	2000000 OPS in 1.785755 seconds, throughput 1119974.464582
+93550	[1728376818]	2000000 OPS in 1.785381 seconds, throughput 1120209.075822
+93550	[1728376820]	2000000 OPS in 1.810285 seconds, throughput 1104798.415719
+93550	[1728376821]	2000000 OPS in 1.827685 seconds, throughput 1094280.469556
+93550	[1728376823]	2000000 OPS in 1.789388 seconds, throughput 1117700.576957
+93550	[1728376825]	2000000 OPS in 1.784812 seconds, throughput 1120566.199689
+93550	[1728376827]	2000000 OPS in 1.819364 seconds, throughput 1099285.244734
+93550	[1728376829]	2000000 OPS in 1.794357 seconds, throughput 1114605.399037
+93550	[1728376830]	2000000 OPS in 1.789387 seconds, throughput 1117701.201585
+93550	[1728376832]	2000000 OPS in 1.790975 seconds, throughput 1116710.171834
+93550	[1728376834]	2000000 OPS in 1.842706 seconds, throughput 1085360.334204
+93550	[1728376836]	2000000 OPS in 1.788023 seconds, throughput 1118553.844106
+93550	[1728376838]	2000000 OPS in 1.781792 seconds, throughput 1122465.472962
+93550	[1728376839]	2000000 OPS in 1.786459 seconds, throughput 1119533.109912
+93550	[1728376841]	2000000 OPS in 1.852600 seconds, throughput 1079563.856202
+93550	[1728376843]	2000000 OPS in 1.783632 seconds, throughput 1121307.534290
+93550	[1728376845]	2000000 OPS in 1.779906 seconds, throughput 1123654.844694
+93550	[1728376847]	2000000 OPS in 1.780419 seconds, throughput 1123331.081055
+93550	[1728376848]	2000000 OPS in 1.841119 seconds, throughput 1086295.888533
+93550	[1728376850]	2000000 OPS in 1.782423 seconds, throughput 1122068.106168
+93550	[1728376852]	2000000 OPS in 1.786952 seconds, throughput 1119224.243292
+93550	[1728376854]	2000000 OPS in 1.809458 seconds, throughput 1105303.356033
+93550	[1728376856]	2000000 OPS in 1.795954 seconds, throughput 1113614.268517
+93550	[1728376857]	2000000 OPS in 1.782418 seconds, throughput 1122071.253769
+93550	[1728376859]	2000000 OPS in 1.784050 seconds, throughput 1121044.813766
+93550	[1728376861]	2000000 OPS in 1.831771 seconds, throughput 1091839.536711
+93550	[1728376863]	2000000 OPS in 1.788945 seconds, throughput 1117977.355369
+93550	[1728376865]	2000000 OPS in 1.784274 seconds, throughput 1120904.076392
+93550	[1728376866]	2000000 OPS in 1.783627 seconds, throughput 1121310.677625
+93550	[1728376868]	2000000 OPS in 1.855106 seconds, throughput 1078105.509874
+93550	[1728376870]	2000000 OPS in 1.789781 seconds, throughput 1117455.152334
+93550	[1728376872]	2000000 OPS in 1.784902 seconds, throughput 1120509.697451
+93550	[1728376874]	2000000 OPS in 1.785009 seconds, throughput 1120442.529982
+93550	[1728376875]	2000000 OPS in 1.795675 seconds, throughput 1113787.294471
+-----------------------------------------------------------------------------------------------------------------
+Benchmark                                                       Time             CPU   Iterations UserCounters...
+-----------------------------------------------------------------------------------------------------------------
+ViperFixture/bench/50/iterations:1/real_time/threads:4  269020867 us   1071973792 us            4 CompactionCPUUsage=1.88046 CompactionThroughput=816.776k Lat_Get_Avg=621.12 Lat_Get_P50=593.478 Lat_Get_P95=1.22019k Lat_Get_P99=1.84389k Lat_Put_Avg=1.51003k Lat_Put_P50=1.47927k Lat_Put_P95=2.44038k Lat_Put_P99=2.99685k items_per_second=3.71718M/s
+6419.27user 118.18system 19:59.15elapsed 545%CPU (0avgtext+0avgdata 2271380maxresident)k
+321976inputs+33840outputs (1557major+16109269minor)pagefaults 0swaps

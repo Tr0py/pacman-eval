@@ -1,0 +1,2368 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-07T22:14:05-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 4.12, 4.94, 4.36
+[1728357245]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728357245]	Setup starts!
+[1728357245]	Setup starts!
+[1728357245]	Setup starts!
+Using MADVISE_RANDOM
+Using MADV_NOHUGEPAGE
+DB index type: CCEH
+Using MADVISE_RANDOM
+Using MADVISE_NOHUGEPAGE
+[1728357262]	Initializing log segments...
+Log: pool_start 0x7f55e7a00000 total segments: 2028  cleaners: 2
+[1728357262]Initialized 2026 free log segments...
+[1728357262]	DB init finished in 17.213948 seconds
+[1728357262]	DB init finished in 17.214191 seconds
+[1728357262]	DB init finished in 17.214095 seconds
+[1728357262]	DB init finished in 17.214135 seconds
+[1728357316]	DB load finished in 53.919653 seconds
+[1728357316]	DB load finished in 53.938292 seconds
+[1728357316]	DB load finished in 54.078977 seconds
+[1728357316]	DB load finished in 54.202565 seconds
+[1728357316]	DB warmup finished in 0.000018 seconds
+[1728357316]	DB warmup finished in 0.282941 seconds
+[1728357316]	DB warmup finished in 0.123812 seconds
+[1728357316]	DB warmup finished in 0.264491 seconds
+[1728357316]	ETC init!
+[1728357316]	ETC init!
+[1728357316]	ETC starts!
+[1728357316]	ETC starts!
+[1728357316]	ETC init!
+[1728357316]	ETC init!
+[1728357316]	ETC starts!
+[1728357316]	ETC starts!
+18771	[1728357328]	2000000 OPS in 11.238634 seconds, throughput 177957.570288
+18771	[1728357328]	2000000 OPS in 11.374897 seconds, throughput 175825.767917
+18771	[1728357328]	2000000 OPS in 11.377915 seconds, throughput 175779.130008
+18771	[1728357328]	2000000 OPS in 11.402090 seconds, throughput 175406.438644
+18771	[1728357339]	2000000 OPS in 10.998101 seconds, throughput 181849.575668
+18771	[1728357339]	2000000 OPS in 11.122647 seconds, throughput 179813.312425
+18771	[1728357339]	2000000 OPS in 11.218777 seconds, throughput 178272.551455
+18771	[1728357339]	2000000 OPS in 11.233479 seconds, throughput 178039.234328
+18771	[1728357349]	2000000 OPS in 10.813649 seconds, throughput 184951.444235
+18771	[1728357350]	2000000 OPS in 10.898859 seconds, throughput 183505.447680
+18771	[1728357350]	2000000 OPS in 10.845652 seconds, throughput 184405.695481
+18771	[1728357350]	2000000 OPS in 11.292190 seconds, throughput 177113.562560
+18771	[1728357361]	2000000 OPS in 11.202767 seconds, throughput 178527.322759
+18771	[1728357361]	2000000 OPS in 11.110583 seconds, throughput 180008.555807
+18771	[1728357361]	2000000 OPS in 11.145196 seconds, throughput 179449.513494
+18771	[1728357362]	2000000 OPS in 11.583811 seconds, throughput 172654.750669
+18771	[1728357372]	2000000 OPS in 11.238717 seconds, throughput 177956.256039
+18771	[1728357372]	2000000 OPS in 11.054665 seconds, throughput 180919.096146
+18771	[1728357372]	2000000 OPS in 11.088432 seconds, throughput 180368.153045
+18771	[1728357372]	2000000 OPS in 10.379056 seconds, throughput 192695.751907
+18771	[1728357373]	2000000 OPS in 1.644430 seconds, throughput 1216226.899290
+18771	[1728357374]	2000000 OPS in 1.536634 seconds, throughput 1301546.106620
+18771	[1728357374]	2000000 OPS in 1.514369 seconds, throughput 1320682.079467
+18771	[1728357374]	2000000 OPS in 1.467988 seconds, throughput 1362408.957021
+18771	[1728357375]	2000000 OPS in 1.455936 seconds, throughput 1373686.755462
+18771	[1728357375]	2000000 OPS in 1.463430 seconds, throughput 1366652.316817
+18771	[1728357375]	2000000 OPS in 1.460176 seconds, throughput 1369697.899431
+18771	[1728357375]	2000000 OPS in 1.471383 seconds, throughput 1359265.398608
+18771	[1728357377]	2000000 OPS in 1.590786 seconds, throughput 1257240.131608
+18771	[1728357377]	2000000 OPS in 1.617725 seconds, throughput 1236304.068986
+18771	[1728357377]	2000000 OPS in 1.623612 seconds, throughput 1231821.395752
+18771	[1728357377]	2000000 OPS in 1.671808 seconds, throughput 1196309.624072
+18771	[1728357378]	2000000 OPS in 1.587355 seconds, throughput 1259957.602427
+18771	[1728357378]	2000000 OPS in 1.603018 seconds, throughput 1247646.626551
+18771	[1728357378]	2000000 OPS in 1.644707 seconds, throughput 1216022.063504
+18771	[1728357378]	2000000 OPS in 1.570024 seconds, throughput 1273865.877210
+18771	[1728357380]	2000000 OPS in 1.536490 seconds, throughput 1301668.087654
+18771	[1728357380]	2000000 OPS in 1.537126 seconds, throughput 1301129.510528
+18771	[1728357380]	2000000 OPS in 1.533721 seconds, throughput 1304018.136284
+18771	[1728357380]	2000000 OPS in 1.523264 seconds, throughput 1312970.043275
+18771	[1728357381]	2000000 OPS in 1.453837 seconds, throughput 1375670.037288
+18771	[1728357381]	2000000 OPS in 1.455517 seconds, throughput 1374082.198971
+18771	[1728357381]	2000000 OPS in 1.456005 seconds, throughput 1373621.656519
+18771	[1728357381]	2000000 OPS in 1.465814 seconds, throughput 1364429.593386
+18771	[1728357383]	2000000 OPS in 1.442134 seconds, throughput 1386833.678424
+18771	[1728357383]	2000000 OPS in 1.447183 seconds, throughput 1381995.227970
+18771	[1728357383]	2000000 OPS in 1.444436 seconds, throughput 1384623.479337
+18771	[1728357383]	2000000 OPS in 1.454382 seconds, throughput 1375154.532991
+18771	[1728357384]	2000000 OPS in 1.442600 seconds, throughput 1386385.692500
+18771	[1728357384]	2000000 OPS in 1.451342 seconds, throughput 1378034.949722
+18771	[1728357384]	2000000 OPS in 1.445806 seconds, throughput 1383311.453957
+18771	[1728357384]	2000000 OPS in 1.457284 seconds, throughput 1372416.083619
+18771	[1728357385]	2000000 OPS in 1.442032 seconds, throughput 1386931.774052
+18771	[1728357386]	2000000 OPS in 1.443500 seconds, throughput 1385521.302390
+18771	[1728357386]	2000000 OPS in 1.444010 seconds, throughput 1385031.959612
+18771	[1728357386]	2000000 OPS in 1.452493 seconds, throughput 1376942.952565
+18771	[1728357387]	2000000 OPS in 1.446972 seconds, throughput 1382196.752943
+18771	[1728357387]	2000000 OPS in 1.448626 seconds, throughput 1380618.599970
+18771	[1728357387]	2000000 OPS in 1.449756 seconds, throughput 1379542.488529
+18771	[1728357387]	2000000 OPS in 1.462220 seconds, throughput 1367783.233713
+18771	[1728357388]	2000000 OPS in 1.444822 seconds, throughput 1384253.562030
+18771	[1728357388]	2000000 OPS in 1.445904 seconds, throughput 1383217.696334
+18771	[1728357388]	2000000 OPS in 1.448773 seconds, throughput 1380478.515268
+18771	[1728357389]	2000000 OPS in 1.458900 seconds, throughput 1370895.880458
+18771	[1728357390]	2000000 OPS in 1.446101 seconds, throughput 1383029.262825
+18771	[1728357390]	2000000 OPS in 1.446348 seconds, throughput 1382793.076079
+18771	[1728357390]	2000000 OPS in 1.449213 seconds, throughput 1380059.383955
+18771	[1728357390]	2000000 OPS in 1.458289 seconds, throughput 1371470.264125
+18771	[1728357391]	2000000 OPS in 1.448135 seconds, throughput 1381086.708076
+18771	[1728357391]	2000000 OPS in 1.447863 seconds, throughput 1381346.163276
+18771	[1728357391]	2000000 OPS in 1.449854 seconds, throughput 1379449.241096
+18771	[1728357392]	2000000 OPS in 1.458782 seconds, throughput 1371006.771402
+18771	[1728357393]	2000000 OPS in 1.448411 seconds, throughput 1380823.536966
+18771	[1728357393]	2000000 OPS in 1.450942 seconds, throughput 1378414.850490
+18771	[1728357393]	2000000 OPS in 1.450934 seconds, throughput 1378422.450642
+18771	[1728357393]	2000000 OPS in 1.459559 seconds, throughput 1370276.912410
+18771	[1728357394]	2000000 OPS in 1.451601 seconds, throughput 1377789.075648
+18771	[1728357394]	2000000 OPS in 1.453097 seconds, throughput 1376370.607055
+18771	[1728357394]	2000000 OPS in 1.455107 seconds, throughput 1374469.368919
+18771	[1728357394]	2000000 OPS in 1.463375 seconds, throughput 1366703.681558
+18771	[1728357396]	2000000 OPS in 1.452044 seconds, throughput 1377368.729873
+18771	[1728357396]	2000000 OPS in 1.452544 seconds, throughput 1376894.606979
+18771	[1728357396]	2000000 OPS in 1.457711 seconds, throughput 1372014.068632
+18771	[1728357396]	2000000 OPS in 1.464437 seconds, throughput 1365712.557112
+18771	[1728357397]	2000000 OPS in 1.456299 seconds, throughput 1373344.347555
+18771	[1728357397]	2000000 OPS in 1.455477 seconds, throughput 1374119.962047
+18771	[1728357397]	2000000 OPS in 1.456029 seconds, throughput 1373599.014855
+18771	[1728357397]	2000000 OPS in 1.462682 seconds, throughput 1367351.208260
+18771	[1728357398]	2000000 OPS in 1.452811 seconds, throughput 1376641.559019
+18771	[1728357399]	2000000 OPS in 1.451861 seconds, throughput 1377542.340486
+18771	[1728357399]	2000000 OPS in 1.452831 seconds, throughput 1376622.607860
+18771	[1728357399]	2000000 OPS in 1.468756 seconds, throughput 1361696.564984
+18771	[1728357400]	2000000 OPS in 1.451846 seconds, throughput 1377556.572805
+18771	[1728357400]	2000000 OPS in 1.452916 seconds, throughput 1376542.071255
+18771	[1728357400]	2000000 OPS in 1.452338 seconds, throughput 1377089.906069
+18771	[1728357400]	2000000 OPS in 1.461852 seconds, throughput 1368127.553268
+18771	[1728357401]	2000000 OPS in 1.450534 seconds, throughput 1378802.565124
+18771	[1728357402]	2000000 OPS in 1.453240 seconds, throughput 1376235.171066
+18771	[1728357402]	2000000 OPS in 1.453662 seconds, throughput 1375835.648177
+18771	[1728357402]	2000000 OPS in 1.463697 seconds, throughput 1366403.019204
+18771	[1728357403]	2000000 OPS in 1.453062 seconds, throughput 1376403.759785
+18771	[1728357403]	2000000 OPS in 1.447776 seconds, throughput 1381429.171364
+18771	[1728357403]	2000000 OPS in 1.456444 seconds, throughput 1373207.620753
+18771	[1728357403]	2000000 OPS in 1.460536 seconds, throughput 1369360.289647
+18771	[1728357404]	2000000 OPS in 1.452909 seconds, throughput 1376548.703326
+18771	[1728357404]	2000000 OPS in 1.449144 seconds, throughput 1380125.094539
+18771	[1728357404]	2000000 OPS in 1.453092 seconds, throughput 1376375.343062
+18771	[1728357405]	2000000 OPS in 1.460352 seconds, throughput 1369532.824963
+18771	[1728357406]	2000000 OPS in 1.444498 seconds, throughput 1384564.049241
+18771	[1728357406]	2000000 OPS in 1.449749 seconds, throughput 1379549.149542
+18771	[1728357406]	2000000 OPS in 1.446763 seconds, throughput 1382396.425676
+18771	[1728357406]	2000000 OPS in 1.459002 seconds, throughput 1370800.040027
+18771	[1728357407]	2000000 OPS in 1.447111 seconds, throughput 1382063.988181
+18771	[1728357407]	2000000 OPS in 1.446807 seconds, throughput 1382354.384517
+18771	[1728357407]	2000000 OPS in 1.450698 seconds, throughput 1378646.692833
+18771	[1728357408]	2000000 OPS in 1.459535 seconds, throughput 1370299.444686
+18771	[1728357409]	2000000 OPS in 1.447309 seconds, throughput 1381874.914065
+18771	[1728357409]	2000000 OPS in 1.449830 seconds, throughput 1379472.076037
+18771	[1728357409]	2000000 OPS in 1.445491 seconds, throughput 1383612.903851
+18771	[1728357409]	2000000 OPS in 1.457031 seconds, throughput 1372654.391018
+18771	[1728357410]	2000000 OPS in 1.446113 seconds, throughput 1383017.786300
+18771	[1728357410]	2000000 OPS in 1.446628 seconds, throughput 1382525.431555
+18771	[1728357410]	2000000 OPS in 1.445752 seconds, throughput 1383363.121753
+18771	[1728357411]	2000000 OPS in 1.460549 seconds, throughput 1369348.101296
+18771	[1728357412]	2000000 OPS in 1.445715 seconds, throughput 1383398.525989
+18771	[1728357412]	2000000 OPS in 1.450372 seconds, throughput 1378956.571142
+18771	[1728357412]	2000000 OPS in 1.451012 seconds, throughput 1378348.352736
+18771	[1728357412]	2000000 OPS in 1.455369 seconds, throughput 1374221.932719
+18771	[1728357413]	2000000 OPS in 1.446455 seconds, throughput 1382690.785403
+18771	[1728357413]	2000000 OPS in 1.448618 seconds, throughput 1380626.224443
+18771	[1728357413]	2000000 OPS in 1.453123 seconds, throughput 1376345.980347
+18771	[1728357413]	2000000 OPS in 1.457406 seconds, throughput 1372301.198156
+18771	[1728357414]	2000000 OPS in 1.448898 seconds, throughput 1380359.417985
+18771	[1728357415]	2000000 OPS in 1.451081 seconds, throughput 1378282.811228
+18771	[1728357415]	2000000 OPS in 1.451758 seconds, throughput 1377640.074999
+18771	[1728357415]	2000000 OPS in 1.458033 seconds, throughput 1371711.065525
+18771	[1728357416]	2000000 OPS in 1.449116 seconds, throughput 1380151.761488
+18771	[1728357416]	2000000 OPS in 1.449274 seconds, throughput 1380001.297201
+18771	[1728357416]	2000000 OPS in 1.447325 seconds, throughput 1381859.637607
+18771	[1728357416]	2000000 OPS in 1.459100 seconds, throughput 1370707.970667
+18771	[1728357417]	2000000 OPS in 1.450440 seconds, throughput 1378891.922451
+18771	[1728357417]	2000000 OPS in 1.450692 seconds, throughput 1378652.394857
+18771	[1728357417]	2000000 OPS in 1.452350 seconds, throughput 1377078.527903
+18771	[1728357418]	2000000 OPS in 1.457390 seconds, throughput 1372316.264006
+18771	[1728357419]	2000000 OPS in 1.449846 seconds, throughput 1379456.852659
+18771	[1728357419]	2000000 OPS in 1.449638 seconds, throughput 1379654.782780
+18771	[1728357419]	2000000 OPS in 1.451532 seconds, throughput 1377854.570206
+18771	[1728357419]	2000000 OPS in 1.457464 seconds, throughput 1372246.587223
+18771	[1728357420]	2000000 OPS in 1.447556 seconds, throughput 1381639.121388
+18771	[1728357420]	2000000 OPS in 1.451287 seconds, throughput 1378087.173660
+18771	[1728357420]	2000000 OPS in 1.449481 seconds, throughput 1379804.219579
+18771	[1728357421]	2000000 OPS in 1.456858 seconds, throughput 1372817.391949
+18771	[1728357422]	2000000 OPS in 1.447602 seconds, throughput 1381595.217470
+18771	[1728357422]	2000000 OPS in 1.450865 seconds, throughput 1378488.005431
+18771	[1728357422]	2000000 OPS in 1.451531 seconds, throughput 1377855.519448
+18771	[1728357422]	2000000 OPS in 1.458454 seconds, throughput 1371315.104899
+18771	[1728357423]	2000000 OPS in 1.446469 seconds, throughput 1382677.402696
+18771	[1728357423]	2000000 OPS in 1.450363 seconds, throughput 1378965.128040
+18771	[1728357423]	2000000 OPS in 1.451054 seconds, throughput 1378308.457163
+18771	[1728357424]	2000000 OPS in 1.456292 seconds, throughput 1373350.948848
+18771	[1728357425]	2000000 OPS in 1.449151 seconds, throughput 1380118.427962
+18771	[1728357425]	2000000 OPS in 1.453146 seconds, throughput 1376324.195917
+18771	[1728357425]	2000000 OPS in 1.450445 seconds, throughput 1378887.169110
+18771	[1728357425]	2000000 OPS in 1.457684 seconds, throughput 1372039.481808
+18771	[1728357426]	2000000 OPS in 1.453715 seconds, throughput 1375785.487527
+18771	[1728357426]	2000000 OPS in 1.451419 seconds, throughput 1377961.842859
+18771	[1728357426]	2000000 OPS in 1.448845 seconds, throughput 1380409.912724
+18771	[1728357427]	2000000 OPS in 1.459586 seconds, throughput 1370251.564485
+18771	[1728357427]	2000000 OPS in 1.450713 seconds, throughput 1378632.437980
+18771	[1728357428]	2000000 OPS in 1.450846 seconds, throughput 1378506.057845
+18771	[1728357428]	2000000 OPS in 1.450679 seconds, throughput 1378664.749404
+18771	[1728357428]	2000000 OPS in 1.458889 seconds, throughput 1370906.216991
+18771	[1728357429]	2000000 OPS in 1.446840 seconds, throughput 1382322.855326
+18771	[1728357429]	2000000 OPS in 1.450566 seconds, throughput 1378772.148251
+18771	[1728357429]	2000000 OPS in 1.448014 seconds, throughput 1381202.115449
+18771	[1728357430]	2000000 OPS in 1.457682 seconds, throughput 1372041.364303
+18771	[1728357430]	2000000 OPS in 1.447621 seconds, throughput 1381577.084057
+18771	[1728357431]	2000000 OPS in 1.450168 seconds, throughput 1379150.553591
+18771	[1728357431]	2000000 OPS in 1.451258 seconds, throughput 1378114.711512
+18771	[1728357431]	2000000 OPS in 1.458934 seconds, throughput 1370863.932159
+18771	[1728357432]	2000000 OPS in 1.447804 seconds, throughput 1381402.455028
+18771	[1728357432]	2000000 OPS in 1.450440 seconds, throughput 1378891.922451
+18771	[1728357432]	2000000 OPS in 1.449929 seconds, throughput 1379377.886779
+18771	[1728357432]	2000000 OPS in 1.457490 seconds, throughput 1372222.107870
+18771	[1728357433]	2000000 OPS in 1.446515 seconds, throughput 1382633.432768
+18771	[1728357433]	2000000 OPS in 1.451058 seconds, throughput 1378304.657705
+18771	[1728357433]	2000000 OPS in 1.446563 seconds, throughput 1382587.554085
+18771	[1728357434]	2000000 OPS in 1.459852 seconds, throughput 1370001.890603
+18771	[1728357435]	2000000 OPS in 1.448124 seconds, throughput 1381097.198859
+18771	[1728357435]	2000000 OPS in 1.449178 seconds, throughput 1380092.714629
+18771	[1728357435]	2000000 OPS in 1.447690 seconds, throughput 1381511.235140
+18771	[1728357435]	2000000 OPS in 1.460788 seconds, throughput 1369124.061808
+18771	[1728357436]	2000000 OPS in 1.449683 seconds, throughput 1379611.956545
+18771	[1728357436]	2000000 OPS in 1.447770 seconds, throughput 1381434.896427
+18771	[1728357436]	2000000 OPS in 1.450462 seconds, throughput 1378871.007996
+18771	[1728357437]	2000000 OPS in 1.457084 seconds, throughput 1372604.462063
+18771	[1728357438]	2000000 OPS in 1.450898 seconds, throughput 1378456.652363
+18771	[1728357438]	2000000 OPS in 1.454158 seconds, throughput 1375366.363215
+18771	[1728357438]	2000000 OPS in 1.450762 seconds, throughput 1378585.874182
+18771	[1728357438]	2000000 OPS in 1.460250 seconds, throughput 1369628.488273
+18771	[1728357439]	2000000 OPS in 1.452080 seconds, throughput 1377334.582117
+18771	[1728357439]	2000000 OPS in 1.449310 seconds, throughput 1379967.018788
+18771	[1728357439]	2000000 OPS in 1.449778 seconds, throughput 1379521.554335
+18771	[1728357440]	2000000 OPS in 1.455520 seconds, throughput 1374079.366824
+18771	[1728357441]	2000000 OPS in 1.447759 seconds, throughput 1381445.392500
+18771	[1728357441]	2000000 OPS in 1.452076 seconds, throughput 1377338.376228
+18771	[1728357441]	2000000 OPS in 1.450747 seconds, throughput 1378600.128072
+18771	[1728357441]	2000000 OPS in 1.459388 seconds, throughput 1370437.471050
+18771	[1728357442]	2000000 OPS in 1.447500 seconds, throughput 1381692.573402
+18771	[1728357442]	2000000 OPS in 1.450583 seconds, throughput 1378755.989833
+18771	[1728357442]	2000000 OPS in 1.449507 seconds, throughput 1379779.469847
+18771	[1728357443]	2000000 OPS in 1.457321 seconds, throughput 1372381.239274
+18771	[1728357443]	2000000 OPS in 1.448040 seconds, throughput 1381177.315544
+18771	[1728357444]	2000000 OPS in 1.449642 seconds, throughput 1379650.975896
+18771	[1728357444]	2000000 OPS in 1.448311 seconds, throughput 1380918.877230
+18771	[1728357444]	2000000 OPS in 1.461354 seconds, throughput 1368593.783573
+18771	[1728357445]	2000000 OPS in 1.450007 seconds, throughput 1379303.686120
+18771	[1728357445]	2000000 OPS in 1.452668 seconds, throughput 1376777.075010
+18771	[1728357445]	2000000 OPS in 1.449053 seconds, throughput 1380211.765891
+18771	[1728357446]	2000000 OPS in 1.460986 seconds, throughput 1368938.511389
+18771	[1728357446]	2000000 OPS in 1.453050 seconds, throughput 1376415.126802
+18771	[1728357446]	2000000 OPS in 1.451881 seconds, throughput 1377523.364518
+18771	[1728357446]	2000000 OPS in 1.448963 seconds, throughput 1380297.495519
+18771	[1728357447]	2000000 OPS in 1.458758 seconds, throughput 1371029.327688
+18771	[1728357448]	2000000 OPS in 1.451692 seconds, throughput 1377702.708288
+18771	[1728357448]	2000000 OPS in 1.452010 seconds, throughput 1377400.982087
+18771	[1728357448]	2000000 OPS in 1.453413 seconds, throughput 1376071.357556
+18771	[1728357448]	2000000 OPS in 1.457466 seconds, throughput 1372244.704165
+18771	[1728357449]	2000000 OPS in 1.446219 seconds, throughput 1382916.418606
+18771	[1728357449]	2000000 OPS in 1.448163 seconds, throughput 1381060.004986
+18771	[1728357449]	2000000 OPS in 1.449080 seconds, throughput 1380186.049079
+18771	[1728357450]	2000000 OPS in 1.460599 seconds, throughput 1369301.225045
+18771	[1728357451]	2000000 OPS in 1.446029 seconds, throughput 1383098.125971
+18771	[1728357451]	2000000 OPS in 1.448064 seconds, throughput 1381154.424114
+18771	[1728357451]	2000000 OPS in 1.451669 seconds, throughput 1377724.536378
+18771	[1728357451]	2000000 OPS in 1.456227 seconds, throughput 1373412.249601
+18771	[1728357452]	2000000 OPS in 1.449396 seconds, throughput 1379885.138361
+18771	[1728357452]	2000000 OPS in 1.449394 seconds, throughput 1379887.042447
+18771	[1728357452]	2000000 OPS in 1.449408 seconds, throughput 1379873.713958
+18771	[1728357453]	2000000 OPS in 1.460303 seconds, throughput 1369578.779199
+18771	[1728357454]	2000000 OPS in 1.449176 seconds, throughput 1380094.619287
+18771	[1728357454]	2000000 OPS in 1.451980 seconds, throughput 1377429.441177
+18771	[1728357454]	2000000 OPS in 1.452340 seconds, throughput 1377088.009695
+18771	[1728357454]	2000000 OPS in 1.457539 seconds, throughput 1372175.976080
+18771	[1728357455]	2000000 OPS in 1.449198 seconds, throughput 1380073.668332
+18771	[1728357455]	2000000 OPS in 1.450069 seconds, throughput 1379244.711803
+18771	[1728357455]	2000000 OPS in 1.451749 seconds, throughput 1377648.615566
+18771	[1728357456]	2000000 OPS in 1.458060 seconds, throughput 1371685.664513
+18771	[1728357456]	2000000 OPS in 1.445719 seconds, throughput 1383394.698416
+18771	[1728357457]	2000000 OPS in 1.449556 seconds, throughput 1379732.828535
+18771	[1728357457]	2000000 OPS in 1.451773 seconds, throughput 1377625.840954
+18771	[1728357457]	2000000 OPS in 1.460776 seconds, throughput 1369135.308904
+18771	[1728357458]	2000000 OPS in 1.450045 seconds, throughput 1379267.539973
+18771	[1728357458]	2000000 OPS in 1.448910 seconds, throughput 1380347.985727
+18771	[1728357458]	2000000 OPS in 1.454161 seconds, throughput 1375363.525772
+18771	[1728357459]	2000000 OPS in 1.463546 seconds, throughput 1366543.996567
+18771	[1728357459]	2000000 OPS in 1.445219 seconds, throughput 1383873.309166
+18771	[1728357460]	2000000 OPS in 1.450726 seconds, throughput 1378620.084013
+18771	[1728357460]	2000000 OPS in 1.449390 seconds, throughput 1379890.850634
+18771	[1728357460]	2000000 OPS in 1.464057 seconds, throughput 1366067.031543
+18771	[1728357461]	2000000 OPS in 1.452321 seconds, throughput 1377106.025459
+18771	[1728357461]	2000000 OPS in 1.457897 seconds, throughput 1371839.025665
+18771	[1728357461]	2000000 OPS in 1.450534 seconds, throughput 1378802.565124
+18771	[1728357462]	2000000 OPS in 1.460577 seconds, throughput 1369321.850200
+18771	[1728357462]	2000000 OPS in 1.451824 seconds, throughput 1377577.447404
+18771	[1728357462]	2000000 OPS in 1.452306 seconds, throughput 1377120.248763
+18771	[1728357462]	2000000 OPS in 1.451626 seconds, throughput 1377765.347273
+18771	[1728357463]	2000000 OPS in 1.462321 seconds, throughput 1367688.763274
+18771	[1728357464]	2000000 OPS in 1.447709 seconds, throughput 1381493.103932
+18771	[1728357464]	2000000 OPS in 1.453123 seconds, throughput 1376345.980347
+18771	[1728357464]	2000000 OPS in 1.448032 seconds, throughput 1381184.946189
+18771	[1728357465]	2000000 OPS in 1.459585 seconds, throughput 1370252.503280
+18771	[1728357465]	2000000 OPS in 1.447328 seconds, throughput 1381856.773309
+18771	[1728357465]	2000000 OPS in 1.450679 seconds, throughput 1378664.749404
+18771	[1728357465]	2000000 OPS in 1.448242 seconds, throughput 1380984.669689
+18771	[1728357466]	2000000 OPS in 1.464622 seconds, throughput 1365540.050607
+18771	[1728357467]	2000000 OPS in 1.447556 seconds, throughput 1381639.121388
+18771	[1728357467]	2000000 OPS in 1.450205 seconds, throughput 1379115.366448
+18771	[1728357467]	2000000 OPS in 1.448435 seconds, throughput 1380800.657261
+18771	[1728357467]	2000000 OPS in 1.465736 seconds, throughput 1364502.202307
+18771	[1728357468]	2000000 OPS in 1.454580 seconds, throughput 1374967.344526
+18771	[1728357468]	2000000 OPS in 1.452221 seconds, throughput 1377200.853038
+18771	[1728357468]	2000000 OPS in 1.450629 seconds, throughput 1378712.268954
+18771	[1728357469]	2000000 OPS in 1.464529 seconds, throughput 1365626.764646
+18771	[1728357469]	2000000 OPS in 1.449128 seconds, throughput 1380140.332669
+18771	[1728357470]	2000000 OPS in 1.451470 seconds, throughput 1377913.425699
+18771	[1728357470]	2000000 OPS in 1.452460 seconds, throughput 1376974.236812
+18771	[1728357470]	2000000 OPS in 1.465264 seconds, throughput 1364941.744286
+18771	[1728357471]	2000000 OPS in 1.449316 seconds, throughput 1379961.305885
+18771	[1728357471]	2000000 OPS in 1.452588 seconds, throughput 1376852.899790
+18771	[1728357471]	2000000 OPS in 1.449821 seconds, throughput 1379480.639334
+18771	[1728357472]	2000000 OPS in 1.461881 seconds, throughput 1368100.413098
+18771	[1728357472]	2000000 OPS in 1.446593 seconds, throughput 1382558.881455
+18771	[1728357473]	2000000 OPS in 1.450449 seconds, throughput 1378883.366461
+18771	[1728357473]	2000000 OPS in 1.452718 seconds, throughput 1376729.688763
+18771	[1728357473]	2000000 OPS in 1.461129 seconds, throughput 1368804.534028
+18771	[1728357474]	2000000 OPS in 1.446981 seconds, throughput 1382188.155891
+18771	[1728357474]	2000000 OPS in 1.450614 seconds, throughput 1378726.525457
+18771	[1728357474]	2000000 OPS in 1.449498 seconds, throughput 1379788.036962
+18771	[1728357475]	2000000 OPS in 1.460336 seconds, throughput 1369547.830088
+18771	[1728357475]	2000000 OPS in 1.449704 seconds, throughput 1379591.971878
+18771	[1728357475]	2000000 OPS in 1.450221 seconds, throughput 1379100.150943
+18771	[1728357476]	2000000 OPS in 1.450779 seconds, throughput 1378569.720130
+18771	[1728357476]	2000000 OPS in 1.460557 seconds, throughput 1369340.600880
+18771	[1728357477]	2000000 OPS in 1.450554 seconds, throughput 1378783.554421
+18771	[1728357477]	2000000 OPS in 1.448007 seconds, throughput 1381208.792499
+18771	[1728357477]	2000000 OPS in 1.451554 seconds, throughput 1377833.687207
+18771	[1728357478]	2000000 OPS in 1.463425 seconds, throughput 1366656.986180
+18771	[1728357478]	2000000 OPS in 1.449381 seconds, throughput 1379899.419131
+18771	[1728357478]	2000000 OPS in 1.450115 seconds, throughput 1379200.959924
+18771	[1728357478]	2000000 OPS in 1.452103 seconds, throughput 1377312.766381
+18771	[1728357479]	2000000 OPS in 1.458608 seconds, throughput 1371170.321293
+18771	[1728357480]	2000000 OPS in 1.447624 seconds, throughput 1381574.220930
+18771	[1728357480]	2000000 OPS in 1.447827 seconds, throughput 1381380.510241
+18771	[1728357480]	2000000 OPS in 1.447382 seconds, throughput 1381805.217973
+18771	[1728357481]	2000000 OPS in 1.460043 seconds, throughput 1369822.669606
+18771	[1728357481]	2000000 OPS in 1.450925 seconds, throughput 1378431.000913
+18771	[1728357481]	2000000 OPS in 1.454193 seconds, throughput 1375333.260441
+18771	[1728357481]	2000000 OPS in 1.452130 seconds, throughput 1377287.157486
+18771	[1728357482]	2000000 OPS in 1.459588 seconds, throughput 1370249.686898
+18771	[1728357483]	2000000 OPS in 1.451011 seconds, throughput 1378349.302659
+18771	[1728357483]	2000000 OPS in 1.451337 seconds, throughput 1378039.697190
+18771	[1728357483]	2000000 OPS in 1.453828 seconds, throughput 1375678.553446
+18771	[1728357484]	2000000 OPS in 1.460015 seconds, throughput 1369848.939908
+18771	[1728357484]	2000000 OPS in 1.448042 seconds, throughput 1381175.407896
+18771	[1728357484]	2000000 OPS in 1.448399 seconds, throughput 1380834.977102
+18771	[1728357484]	2000000 OPS in 1.451969 seconds, throughput 1377439.876471
+18771	[1728357485]	2000000 OPS in 1.461255 seconds, throughput 1368686.505778
+18771	[1728357485]	2000000 OPS in 1.448187 seconds, throughput 1381037.117444
+18771	[1728357486]	2000000 OPS in 1.451590 seconds, throughput 1377799.516392
+18771	[1728357486]	2000000 OPS in 1.451486 seconds, throughput 1377898.236704
+18771	[1728357486]	2000000 OPS in 1.459315 seconds, throughput 1370506.025087
+18771	[1728357487]	2000000 OPS in 1.443021 seconds, throughput 1385981.215797
+18771	[1728357487]	2000000 OPS in 1.449344 seconds, throughput 1379934.646295
+18771	[1728357487]	2000000 OPS in 1.450948 seconds, throughput 1378409.150431
+18771	[1728357488]	2000000 OPS in 1.456467 seconds, throughput 1373185.935555
+18771	[1728357488]	2000000 OPS in 1.447046 seconds, throughput 1382126.069247
+18771	[1728357489]	2000000 OPS in 1.448051 seconds, throughput 1381166.823544
+18771	[1728357489]	2000000 OPS in 1.447388 seconds, throughput 1381799.489840
+18771	[1728357489]	2000000 OPS in 1.456352 seconds, throughput 1373294.368394
+18771	[1728357490]	2000000 OPS in 1.447943 seconds, throughput 1381269.842805
+18771	[1728357490]	2000000 OPS in 1.457265 seconds, throughput 1372433.977348
+18771	[1728357490]	2000000 OPS in 1.450227 seconds, throughput 1379094.445214
+18771	[1728357491]	2000000 OPS in 1.461624 seconds, throughput 1368340.968676
+18771	[1728357491]	2000000 OPS in 1.449326 seconds, throughput 1379951.784485
+18771	[1728357491]	2000000 OPS in 1.454039 seconds, throughput 1375478.924568
+18771	[1728357491]	2000000 OPS in 1.449755 seconds, throughput 1379543.440098
+18771	[1728357492]	2000000 OPS in 1.464598 seconds, throughput 1365562.427369
+18771	[1728357493]	2000000 OPS in 1.450402 seconds, throughput 1378928.048913
+18771	[1728357493]	2000000 OPS in 1.450435 seconds, throughput 1378896.675825
+18771	[1728357493]	2000000 OPS in 1.451221 seconds, throughput 1378149.847611
+18771	[1728357494]	2000000 OPS in 1.460223 seconds, throughput 1369653.813150
+18771	[1728357494]	2000000 OPS in 1.448989 seconds, throughput 1380272.728088
+18771	[1728357494]	2000000 OPS in 1.450446 seconds, throughput 1378886.218446
+18771	[1728357494]	2000000 OPS in 1.449888 seconds, throughput 1379416.892891
+18771	[1728357495]	2000000 OPS in 1.457203 seconds, throughput 1372492.370658
+18771	[1728357496]	2000000 OPS in 1.447599 seconds, throughput 1381598.080684
+18771	[1728357496]	2000000 OPS in 1.448664 seconds, throughput 1380582.384873
+18771	[1728357496]	2000000 OPS in 1.448334 seconds, throughput 1380896.947803
+18771	[1728357497]	2000000 OPS in 1.459491 seconds, throughput 1370340.755784
+18771	[1728357497]	2000000 OPS in 1.449283 seconds, throughput 1379992.727438
+18771	[1728357497]	2000000 OPS in 1.450156 seconds, throughput 1379161.966023
+18771	[1728357497]	2000000 OPS in 1.453196 seconds, throughput 1376276.840839
+18771	[1728357498]	2000000 OPS in 1.458623 seconds, throughput 1371156.220627
+18771	[1728357498]	2000000 OPS in 1.445394 seconds, throughput 1383705.757738
+18771	[1728357499]	2000000 OPS in 1.451060 seconds, throughput 1378302.757984
+18771	[1728357499]	2000000 OPS in 1.451149 seconds, throughput 1378218.225696
+18771	[1728357500]	2000000 OPS in 1.462316 seconds, throughput 1367693.439722
+18771	[1728357500]	2000000 OPS in 1.450255 seconds, throughput 1379067.819108
+18771	[1728357500]	2000000 OPS in 1.451057 seconds, throughput 1378305.607567
+18771	[1728357500]	2000000 OPS in 1.454451 seconds, throughput 1375089.294861
+18771	[1728357501]	2000000 OPS in 1.461528 seconds, throughput 1368430.847716
+18771	[1728357501]	2000000 OPS in 1.451324 seconds, throughput 1378052.040757
+18771	[1728357502]	2000000 OPS in 1.450943 seconds, throughput 1378413.900477
+18771	[1728357502]	2000000 OPS in 1.450746 seconds, throughput 1378601.078342
+18771	[1728357503]	2000000 OPS in 1.458996 seconds, throughput 1370805.677329
+18771	[1728357503]	2000000 OPS in 1.449951 seconds, throughput 1379356.957580
+18771	[1728357503]	2000000 OPS in 1.448880 seconds, throughput 1380376.566727
+18771	[1728357503]	2000000 OPS in 1.450179 seconds, throughput 1379140.092361
+18771	[1728357504]	2000000 OPS in 1.457354 seconds, throughput 1372350.163378
+18771	[1728357504]	2000000 OPS in 1.448079 seconds, throughput 1381140.117355
+18771	[1728357504]	2000000 OPS in 1.448307 seconds, throughput 1380922.691115
+18771	[1728357505]	2000000 OPS in 1.451201 seconds, throughput 1378168.840843
+18771	[1728357505]	2000000 OPS in 1.460772 seconds, throughput 1369139.057978
+18771	[1728357506]	2000000 OPS in 1.451775 seconds, throughput 1377623.943104
+18771	[1728357506]	2000000 OPS in 1.452585 seconds, throughput 1376855.743382
+18771	[1728357506]	2000000 OPS in 1.454204 seconds, throughput 1375322.857041
+18771	[1728357507]	2000000 OPS in 1.459413 seconds, throughput 1370413.995216
+18771	[1728357507]	2000000 OPS in 1.444437 seconds, throughput 1384622.520747
+18771	[1728357507]	2000000 OPS in 1.447952 seconds, throughput 1381261.257279
+18771	[1728357507]	2000000 OPS in 1.447799 seconds, throughput 1381407.225727
+18771	[1728357508]	2000000 OPS in 1.459061 seconds, throughput 1370744.609033
+18771	[1728357509]	2000000 OPS in 1.449251 seconds, throughput 1380023.198190
+18771	[1728357509]	2000000 OPS in 1.452887 seconds, throughput 1376569.547391
+18771	[1728357509]	2000000 OPS in 1.450763 seconds, throughput 1378584.923933
+18771	[1728357510]	2000000 OPS in 1.459174 seconds, throughput 1370638.457100
+18771	[1728357510]	2000000 OPS in 1.448877 seconds, throughput 1380379.424893
+18771	[1728357510]	2000000 OPS in 1.450965 seconds, throughput 1378393.000520
+18771	[1728357510]	2000000 OPS in 1.453242 seconds, throughput 1376233.277045
+18771	[1728357511]	2000000 OPS in 1.462493 seconds, throughput 1367527.912954
+18771	[1728357511]	2000000 OPS in 1.447946 seconds, throughput 1381266.980951
+18771	[1728357512]	2000000 OPS in 1.447730 seconds, throughput 1381473.064729
+18771	[1728357512]	2000000 OPS in 1.453659 seconds, throughput 1375838.487568
+18771	[1728357513]	2000000 OPS in 1.464326 seconds, throughput 1365816.081938
+18771	[1728357513]	2000000 OPS in 1.449790 seconds, throughput 1379510.135951
+18771	[1728357513]	2000000 OPS in 1.454924 seconds, throughput 1374642.249355
+18771	[1728357513]	2000000 OPS in 1.453523 seconds, throughput 1375967.218957
+18771	[1728357514]	2000000 OPS in 1.459970 seconds, throughput 1369891.162147
+18771	[1728357514]	2000000 OPS in 1.446054 seconds, throughput 1383074.214379
+18771	[1728357515]	2000000 OPS in 1.452519 seconds, throughput 1376918.305372
+18771	[1728357515]	2000000 OPS in 1.448753 seconds, throughput 1380497.572740
+18771	[1728357516]	2000000 OPS in 1.462048 seconds, throughput 1367944.144105
+18771	[1728357516]	2000000 OPS in 1.449857 seconds, throughput 1379446.386782
+18771	[1728357516]	2000000 OPS in 1.452536 seconds, throughput 1376902.190376
+18771	[1728357516]	2000000 OPS in 1.452350 seconds, throughput 1377078.527903
+18771	[1728357517]	2000000 OPS in 1.461444 seconds, throughput 1368509.501561
+18771	[1728357517]	2000000 OPS in 1.449496 seconds, throughput 1379789.940779
+18771	[1728357518]	2000000 OPS in 1.451240 seconds, throughput 1378131.804526
+18771	[1728357518]	2000000 OPS in 1.449201 seconds, throughput 1380070.811433
+18771	[1728357519]	2000000 OPS in 1.456759 seconds, throughput 1372910.687355
+18771	[1728357519]	2000000 OPS in 1.451270 seconds, throughput 1378103.316406
+18771	[1728357519]	2000000 OPS in 1.450615 seconds, throughput 1378725.575015
+18771	[1728357519]	2000000 OPS in 1.452135 seconds, throughput 1377282.415202
+18771	[1728357520]	2000000 OPS in 1.460480 seconds, throughput 1369412.795793
+18771	[1728357520]	2000000 OPS in 1.449949 seconds, throughput 1379358.860208
+18771	[1728357520]	2000000 OPS in 1.455247 seconds, throughput 1374337.140018
+18771	[1728357520]	2000000 OPS in 1.450382 seconds, throughput 1378947.063601
+18771	[1728357522]	2000000 OPS in 1.460968 seconds, throughput 1368955.377531
+18771	[1728357522]	2000000 OPS in 1.449194 seconds, throughput 1380077.477550
+18771	[1728357522]	2000000 OPS in 1.450022 seconds, throughput 1379289.417678
+18771	[1728357522]	2000000 OPS in 1.450313 seconds, throughput 1379012.668300
+18771	[1728357523]	2000000 OPS in 1.458564 seconds, throughput 1371211.684917
+18771	[1728357523]	2000000 OPS in 1.447959 seconds, throughput 1381254.579722
+18771	[1728357523]	2000000 OPS in 1.450450 seconds, throughput 1378882.415802
+18771	[1728357523]	2000000 OPS in 1.450487 seconds, throughput 1378847.242340
+18771	[1728357524]	2000000 OPS in 1.461747 seconds, throughput 1368225.828409
+18771	[1728357525]	2000000 OPS in 1.449097 seconds, throughput 1380169.857504
+18771	[1728357525]	2000000 OPS in 1.454380 seconds, throughput 1375156.424043
+18771	[1728357525]	2000000 OPS in 1.452002 seconds, throughput 1377408.571063
+18771	[1728357526]	2000000 OPS in 1.460640 seconds, throughput 1369262.788914
+18771	[1728357526]	2000000 OPS in 1.449516 seconds, throughput 1379770.902839
+18771	[1728357526]	2000000 OPS in 1.454102 seconds, throughput 1375419.330969
+18771	[1728357526]	2000000 OPS in 1.455741 seconds, throughput 1373870.764099
+18771	[1728357527]	2000000 OPS in 1.458030 seconds, throughput 1371713.887917
+18771	[1728357527]	2000000 OPS in 1.448869 seconds, throughput 1380387.046724
+18771	[1728357528]	2000000 OPS in 1.461422 seconds, throughput 1368530.102872
+18771	[1728357528]	2000000 OPS in 1.449715 seconds, throughput 1379581.503951
+18771	[1728357529]	2000000 OPS in 1.461364 seconds, throughput 1368584.418393
+18771	[1728357529]	2000000 OPS in 1.448413 seconds, throughput 1380821.630295
+18771	[1728357529]	2000000 OPS in 1.454680 seconds, throughput 1374872.824264
+18771	[1728357529]	2000000 OPS in 1.451589 seconds, throughput 1377800.465559
+18771	[1728357530]	2000000 OPS in 1.457471 seconds, throughput 1372239.996542
+18771	[1728357530]	2000000 OPS in 1.448803 seconds, throughput 1380449.930046
+18771	[1728357531]	2000000 OPS in 1.448939 seconds, throughput 1380320.358552
+18771	[1728357531]	2000000 OPS in 1.447637 seconds, throughput 1381561.814184
+18771	[1728357532]	2000000 OPS in 1.459795 seconds, throughput 1370055.384489
+18771	[1728357532]	2000000 OPS in 1.447444 seconds, throughput 1381746.029553
+18771	[1728357532]	2000000 OPS in 1.450758 seconds, throughput 1378589.675190
+18771	[1728357532]	2000000 OPS in 1.447603 seconds, throughput 1381594.263068
+18771	[1728357533]	2000000 OPS in 1.459334 seconds, throughput 1370488.181595
+18771	[1728357533]	2000000 OPS in 1.450757 seconds, throughput 1378590.625446
+18771	[1728357534]	2000000 OPS in 1.453230 seconds, throughput 1376244.641247
+18771	[1728357534]	2000000 OPS in 1.451501 seconds, throughput 1377883.997324
+18771	[1728357535]	2000000 OPS in 1.460125 seconds, throughput 1369745.740947
+18771	[1728357535]	2000000 OPS in 1.449726 seconds, throughput 1379571.036182
+18771	[1728357535]	2000000 OPS in 1.448117 seconds, throughput 1381103.874894
+18771	[1728357535]	2000000 OPS in 1.452313 seconds, throughput 1377113.611184
+18771	[1728357536]	2000000 OPS in 1.458833 seconds, throughput 1370958.841759
+18771	[1728357536]	2000000 OPS in 1.449323 seconds, throughput 1379954.640891
+18771	[1728357536]	2000000 OPS in 1.453060 seconds, throughput 1376405.654274
+18771	[1728357536]	2000000 OPS in 1.453940 seconds, throughput 1375572.582087
+18771	[1728357538]	2000000 OPS in 1.460772 seconds, throughput 1369139.057978
+18771	[1728357538]	2000000 OPS in 1.449116 seconds, throughput 1380151.761488
+18771	[1728357538]	2000000 OPS in 1.450582 seconds, throughput 1378756.940318
+18771	[1728357538]	2000000 OPS in 1.452792 seconds, throughput 1376659.563103
+18771	[1728357539]	2000000 OPS in 1.447907 seconds, throughput 1381304.185973
+18771	[1728357539]	2000000 OPS in 1.455461 seconds, throughput 1374135.067858
+18771	[1728357539]	2000000 OPS in 1.449515 seconds, throughput 1379771.854724
+18771	[1728357539]	2000000 OPS in 1.451284 seconds, throughput 1378090.022353
+18771	[1728357540]	2000000 OPS in 1.450236 seconds, throughput 1379085.886711
+18771	[1728357540]	2000000 OPS in 1.461723 seconds, throughput 1368248.293281
+18771	[1728357541]	2000000 OPS in 1.451597 seconds, throughput 1377792.872264
+18771	[1728357541]	2000000 OPS in 1.452385 seconds, throughput 1377045.342661
+18771	[1728357542]	2000000 OPS in 1.449712 seconds, throughput 1379584.358824
+18771	[1728357542]	2000000 OPS in 1.458815 seconds, throughput 1370975.757721
+18771	[1728357542]	2000000 OPS in 1.450551 seconds, throughput 1378786.405993
+18771	[1728357542]	2000000 OPS in 1.454400 seconds, throughput 1375137.513751
+18771	[1728357543]	2000000 OPS in 1.444388 seconds, throughput 1384669.493239
+18771	[1728357543]	2000000 OPS in 1.454881 seconds, throughput 1374682.877844
+18771	[1728357544]	2000000 OPS in 1.448689 seconds, throughput 1380558.560188
+18771	[1728357544]	2000000 OPS in 1.452523 seconds, throughput 1376914.513574
+18771	[1728357545]	2000000 OPS in 1.450747 seconds, throughput 1378600.128072
+18771	[1728357545]	2000000 OPS in 1.458741 seconds, throughput 1371045.305507
+18771	[1728357545]	2000000 OPS in 1.449754 seconds, throughput 1379544.391669
+18771	[1728357545]	2000000 OPS in 1.454675 seconds, throughput 1374877.549968
+18771	[1728357546]	2000000 OPS in 1.449631 seconds, throughput 1379661.444878
+18771	[1728357546]	2000000 OPS in 1.457141 seconds, throughput 1372550.768937
+18771	[1728357547]	2000000 OPS in 1.449783 seconds, throughput 1379516.796652
+18771	[1728357547]	2000000 OPS in 1.450142 seconds, throughput 1379175.280766
+18771	[1728357548]	2000000 OPS in 1.451216 seconds, throughput 1378154.595870
+18771	[1728357548]	2000000 OPS in 1.461702 seconds, throughput 1368267.950649
+18771	[1728357548]	2000000 OPS in 1.451110 seconds, throughput 1378255.266658
+18771	[1728357548]	2000000 OPS in 1.452457 seconds, throughput 1376977.080905
+18771	[1728357549]	2000000 OPS in 1.447000 seconds, throughput 1382170.006911
+18771	[1728357549]	2000000 OPS in 1.459903 seconds, throughput 1369954.031192
+18771	[1728357549]	2000000 OPS in 1.450138 seconds, throughput 1379179.085025
+18771	[1728357550]	2000000 OPS in 1.449996 seconds, throughput 1379314.149832
+18771	[1728357551]	2000000 OPS in 1.446737 seconds, throughput 1382421.269381
+18771	[1728357551]	2000000 OPS in 1.457426 seconds, throughput 1372282.366309
+18771	[1728357551]	2000000 OPS in 1.449979 seconds, throughput 1379330.321336
+18771	[1728357551]	2000000 OPS in 1.451817 seconds, throughput 1377584.089455
+18771	[1728357552]	2000000 OPS in 1.448846 seconds, throughput 1380408.959958
+18771	[1728357552]	2000000 OPS in 1.461427 seconds, throughput 1368525.420702
+18771	[1728357552]	2000000 OPS in 1.451242 seconds, throughput 1378129.905281
+18771	[1728357552]	2000000 OPS in 1.452784 seconds, throughput 1376667.143911
+18771	[1728357554]	2000000 OPS in 1.449471 seconds, throughput 1379813.738943
+18771	[1728357554]	2000000 OPS in 1.459933 seconds, throughput 1369925.880160
+18771	[1728357554]	2000000 OPS in 1.451121 seconds, throughput 1378244.819005
+18771	[1728357554]	2000000 OPS in 1.449660 seconds, throughput 1379633.845177
+18771	[1728357555]	2000000 OPS in 1.454089 seconds, throughput 1375431.627638
+18771	[1728357555]	2000000 OPS in 1.460558 seconds, throughput 1369339.663334
+18771	[1728357555]	2000000 OPS in 1.449617 seconds, throughput 1379674.769267
+18771	[1728357555]	2000000 OPS in 1.453090 seconds, throughput 1376377.237473
+18771	[1728357556]	2000000 OPS in 1.453233 seconds, throughput 1376241.800179
+18771	[1728357557]	2000000 OPS in 1.460930 seconds, throughput 1368990.985194
+18771	[1728357557]	2000000 OPS in 1.455015 seconds, throughput 1374556.276052
+18771	[1728357557]	2000000 OPS in 1.453286 seconds, throughput 1376191.609910
+18771	[1728357558]	2000000 OPS in 1.449662 seconds, throughput 1379631.941791
+18771	[1728357558]	2000000 OPS in 1.457302 seconds, throughput 1372399.132095
+18771	[1728357558]	2000000 OPS in 1.452007 seconds, throughput 1377403.827943
+18771	[1728357558]	2000000 OPS in 1.456816 seconds, throughput 1372856.970269
+18771	[1728357559]	2000000 OPS in 1.446331 seconds, throughput 1382809.329261
+18771	[1728357559]	2000000 OPS in 1.457489 seconds, throughput 1372223.049368
+18771	[1728357560]	2000000 OPS in 1.449371 seconds, throughput 1379908.939809
+18771	[1728357560]	2000000 OPS in 1.451003 seconds, throughput 1378356.902088
+18771	[1728357561]	2000000 OPS in 1.449029 seconds, throughput 1380234.626084
+18771	[1728357561]	2000000 OPS in 1.460605 seconds, throughput 1369295.600111
+18771	[1728357561]	2000000 OPS in 1.451317 seconds, throughput 1378058.687385
+18771	[1728357561]	2000000 OPS in 1.452456 seconds, throughput 1376978.028939
+18771	[1728357562]	2000000 OPS in 1.452114 seconds, throughput 1377302.333012
+18771	[1728357562]	2000000 OPS in 1.460447 seconds, throughput 1369443.738801
+18771	[1728357563]	2000000 OPS in 1.450962 seconds, throughput 1378395.850477
+18771	[1728357563]	2000000 OPS in 1.452323 seconds, throughput 1377104.129040
+18771	[1728357564]	2000000 OPS in 1.449700 seconds, throughput 1379595.778437
+18771	[1728357564]	2000000 OPS in 1.457846 seconds, throughput 1371887.016873
+18771	[1728357564]	2000000 OPS in 1.448393 seconds, throughput 1380840.697242
+18771	[1728357564]	2000000 OPS in 1.453667 seconds, throughput 1375830.915884
+18771	[1728357565]	2000000 OPS in 1.449801 seconds, throughput 1379499.669265
+18771	[1728357565]	2000000 OPS in 1.458498 seconds, throughput 1371273.735034
+18771	[1728357565]	2000000 OPS in 1.451915 seconds, throughput 1377491.106573
+18771	[1728357565]	2000000 OPS in 1.453968 seconds, throughput 1375546.091798
+18771	[1728357567]	2000000 OPS in 1.445676 seconds, throughput 1383435.845930
+18771	[1728357567]	2000000 OPS in 1.455800 seconds, throughput 1373815.084490
+18771	[1728357567]	2000000 OPS in 1.448776 seconds, throughput 1380475.656692
+18771	[1728357567]	2000000 OPS in 1.452064 seconds, throughput 1377349.758688
+18771	[1728357568]	2000000 OPS in 1.448033 seconds, throughput 1381183.992354
+18771	[1728357568]	2000000 OPS in 1.459309 seconds, throughput 1370511.659971
+18771	[1728357568]	2000000 OPS in 1.449216 seconds, throughput 1380056.527115
+18771	[1728357568]	2000000 OPS in 1.452495 seconds, throughput 1376941.056596
+18771	[1728357569]	2000000 OPS in 1.446496 seconds, throughput 1382651.593921
+18771	[1728357570]	2000000 OPS in 1.459885 seconds, throughput 1369970.922367
+18771	[1728357570]	2000000 OPS in 1.449733 seconds, throughput 1379564.374957
+18771	[1728357570]	2000000 OPS in 1.452694 seconds, throughput 1376752.433754
+18771	[1728357571]	2000000 OPS in 1.448626 seconds, throughput 1380618.599970
+18771	[1728357571]	2000000 OPS in 1.460568 seconds, throughput 1369330.287943
+18771	[1728357571]	2000000 OPS in 1.451742 seconds, throughput 1377655.258303
+18771	[1728357571]	2000000 OPS in 1.454796 seconds, throughput 1374763.197039
+18771	[1728357572]	2000000 OPS in 1.449173 seconds, throughput 1380097.476285
+18771	[1728357573]	2000000 OPS in 1.459497 seconds, throughput 1370335.122306
+18771	[1728357573]	2000000 OPS in 1.451142 seconds, throughput 1378224.873927
+18771	[1728357573]	2000000 OPS in 1.453809 seconds, throughput 1375696.532351
+18771	[1728357574]	2000000 OPS in 1.448203 seconds, throughput 1381021.859505
+18771	[1728357574]	2000000 OPS in 1.461570 seconds, throughput 1368391.524183
+18771	[1728357574]	2000000 OPS in 1.451786 seconds, throughput 1377613.505021
+18771	[1728357574]	2000000 OPS in 1.453792 seconds, throughput 1375712.619137
+18771	[1728357575]	2000000 OPS in 1.447520 seconds, throughput 1381673.482923
+18771	[1728357576]	2000000 OPS in 1.458710 seconds, throughput 1371074.442487
+18771	[1728357576]	2000000 OPS in 1.450111 seconds, throughput 1379204.764325
+18771	[1728357576]	2000000 OPS in 1.454527 seconds, throughput 1375017.445534
+18771	[1728357577]	2000000 OPS in 1.449526 seconds, throughput 1379761.384066
+18771	[1728357577]	2000000 OPS in 1.458627 seconds, throughput 1371152.460499
+18771	[1728357577]	2000000 OPS in 1.450946 seconds, throughput 1378411.050446
+18771	[1728357577]	2000000 OPS in 1.453066 seconds, throughput 1376399.970820
+18771	[1728357578]	2000000 OPS in 1.454650 seconds, throughput 1374901.178978
+18771	[1728357578]	2000000 OPS in 1.459471 seconds, throughput 1370359.534379
+18771	[1728357579]	2000000 OPS in 1.448756 seconds, throughput 1380494.714086
+18771	[1728357579]	2000000 OPS in 1.451152 seconds, throughput 1378215.376473
+18771	[1728357580]	2000000 OPS in 1.452161 seconds, throughput 1377257.755855
+18771	[1728357580]	2000000 OPS in 1.458633 seconds, throughput 1371146.820345
+18771	[1728357580]	2000000 OPS in 1.449224 seconds, throughput 1380048.908933
+18771	[1728357580]	2000000 OPS in 1.456158 seconds, throughput 1373477.328696
+18771	[1728357581]	2000000 OPS in 1.450621 seconds, throughput 1378719.872386
+18771	[1728357581]	2000000 OPS in 1.462215 seconds, throughput 1367787.910807
+18771	[1728357581]	2000000 OPS in 1.449405 seconds, throughput 1379876.570041
+18771	[1728357581]	2000000 OPS in 1.454763 seconds, throughput 1374794.382315
+18771	[1728357583]	2000000 OPS in 1.449611 seconds, throughput 1379680.479798
+18771	[1728357583]	2000000 OPS in 1.457897 seconds, throughput 1371839.025665
+18771	[1728357583]	2000000 OPS in 1.452576 seconds, throughput 1376864.274227
+18771	[1728357583]	2000000 OPS in 1.449494 seconds, throughput 1379791.844602
+18771	[1728357584]	2000000 OPS in 1.452639 seconds, throughput 1376804.560527
+18771	[1728357584]	2000000 OPS in 1.458674 seconds, throughput 1371108.280534
+18771	[1728357584]	2000000 OPS in 1.455007 seconds, throughput 1374563.833714
+18771	[1728357584]	2000000 OPS in 1.451670 seconds, throughput 1377723.587317
+18771	[1728357585]	2000000 OPS in 1.448067 seconds, throughput 1381151.562738
+18771	[1728357586]	2000000 OPS in 1.459683 seconds, throughput 1370160.507453
+18771	[1728357586]	2000000 OPS in 1.450620 seconds, throughput 1378720.822821
+18771	[1728357586]	2000000 OPS in 1.454892 seconds, throughput 1374672.484281
+18771	[1728357587]	2000000 OPS in 1.448655 seconds, throughput 1380590.961961
+18771	[1728357587]	2000000 OPS in 1.458605 seconds, throughput 1371173.141461
+18771	[1728357587]	2000000 OPS in 1.449464 seconds, throughput 1379820.402576
+18771	[1728357587]	2000000 OPS in 1.454083 seconds, throughput 1375437.303098
+18771	[1728357588]	2000000 OPS in 1.446293 seconds, throughput 1382845.661287
+18771	[1728357589]	2000000 OPS in 1.460065 seconds, throughput 1369802.029362
+18771	[1728357589]	2000000 OPS in 1.452164 seconds, throughput 1377254.910602
+18771	[1728357589]	2000000 OPS in 1.452461 seconds, throughput 1376973.288784
+18771	[1728357590]	2000000 OPS in 1.448660 seconds, throughput 1380586.196899
+18771	[1728357590]	2000000 OPS in 1.455485 seconds, throughput 1374112.409266
+18771	[1728357590]	2000000 OPS in 1.450353 seconds, throughput 1378974.635830
+18771	[1728357590]	2000000 OPS in 1.454010 seconds, throughput 1375506.358278
+18771	[1728357591]	2000000 OPS in 1.451290 seconds, throughput 1378084.324980
+18771	[1728357592]	2000000 OPS in 1.459432 seconds, throughput 1370396.154120
+18771	[1728357592]	2000000 OPS in 1.451232 seconds, throughput 1378139.401557
+18771	[1728357592]	2000000 OPS in 1.450869 seconds, throughput 1378484.204983
+18771	[1728357593]	2000000 OPS in 1.446889 seconds, throughput 1382276.041908
+18771	[1728357593]	2000000 OPS in 1.450228 seconds, throughput 1379093.494264
+18771	[1728357593]	2000000 OPS in 1.459688 seconds, throughput 1370155.814119
+18771	[1728357593]	2000000 OPS in 1.453452 seconds, throughput 1376034.433886
+18771	[1728357594]	2000000 OPS in 1.447875 seconds, throughput 1381334.714668
+18771	[1728357594]	2000000 OPS in 1.456039 seconds, throughput 1373589.581048
+18771	[1728357594]	2000000 OPS in 1.460098 seconds, throughput 1369771.070161
+18771	[1728357595]	2000000 OPS in 1.452857 seconds, throughput 1376597.972134
+18771	[1728357596]	2000000 OPS in 1.447625 seconds, throughput 1381573.266557
+18771	[1728357596]	2000000 OPS in 1.450798 seconds, throughput 1378551.666049
+18771	[1728357596]	2000000 OPS in 1.464891 seconds, throughput 1365289.294562
+18771	[1728357596]	2000000 OPS in 1.455424 seconds, throughput 1374170.001319
+18771	[1728357597]	2000000 OPS in 1.447559 seconds, throughput 1381636.258004
+18771	[1728357597]	2000000 OPS in 1.450828 seconds, throughput 1378523.160568
+18771	[1728357597]	2000000 OPS in 1.455892 seconds, throughput 1373728.271053
+18771	[1728357597]	2000000 OPS in 1.449304 seconds, throughput 1379972.731739
+18771	[1728357598]	2000000 OPS in 1.449153 seconds, throughput 1380116.523238
+18771	[1728357599]	2000000 OPS in 1.450277 seconds, throughput 1379046.899316
+18771	[1728357599]	2000000 OPS in 1.461227 seconds, throughput 1368712.732519
+18771	[1728357599]	2000000 OPS in 1.457645 seconds, throughput 1372076.191391
+18771	[1728357600]	2000000 OPS in 1.447282 seconds, throughput 1381900.693852
+18771	[1728357600]	2000000 OPS in 1.447466 seconds, throughput 1381725.028429
+18771	[1728357600]	2000000 OPS in 1.462268 seconds, throughput 1367738.335244
+18771	[1728357600]	2000000 OPS in 1.451581 seconds, throughput 1377808.058937
+18771	[1728357601]	2000000 OPS in 1.451124 seconds, throughput 1378241.969673
+18771	[1728357602]	2000000 OPS in 1.450802 seconds, throughput 1378547.865250
+18771	[1728357602]	2000000 OPS in 1.463978 seconds, throughput 1366140.748017
+18771	[1728357602]	2000000 OPS in 1.452974 seconds, throughput 1376487.122275
+18771	[1728357603]	2000000 OPS in 1.451487 seconds, throughput 1377897.287403
+18771	[1728357603]	2000000 OPS in 1.450831 seconds, throughput 1378520.310084
+18771	[1728357603]	2000000 OPS in 1.458699 seconds, throughput 1371084.781713
+18771	[1728357603]	2000000 OPS in 1.449890 seconds, throughput 1379414.990103
+18771	[1728357604]	2000000 OPS in 1.449529 seconds, throughput 1379758.528460
+18771	[1728357605]	2000000 OPS in 1.451263 seconds, throughput 1378109.963528
+18771	[1728357605]	2000000 OPS in 1.465078 seconds, throughput 1365115.031418
+18771	[1728357605]	2000000 OPS in 1.452021 seconds, throughput 1377390.547382
+18771	[1728357606]	2000000 OPS in 1.448838 seconds, throughput 1380416.582116
+18771	[1728357606]	2000000 OPS in 1.452430 seconds, throughput 1377002.678270
+18771	[1728357606]	2000000 OPS in 1.458532 seconds, throughput 1371241.769121
+18771	[1728357606]	2000000 OPS in 1.451210 seconds, throughput 1378160.293824
+18771	[1728357607]	2000000 OPS in 1.448793 seconds, throughput 1380459.458322
+18771	[1728357608]	2000000 OPS in 1.449756 seconds, throughput 1379542.488529
+18771	[1728357608]	2000000 OPS in 1.450940 seconds, throughput 1378416.750520
+18771	[1728357608]	2000000 OPS in 1.457697 seconds, throughput 1372027.245717
+18771	[1728357609]	2000000 OPS in 1.447561 seconds, throughput 1381634.349088
+18771	[1728357609]	2000000 OPS in 1.450216 seconds, throughput 1379104.905752
+18771	[1728357609]	2000000 OPS in 1.452832 seconds, throughput 1376621.660316
+18771	[1728357609]	2000000 OPS in 1.457363 seconds, throughput 1372341.688378
+18771	[1728357610]	2000000 OPS in 1.449875 seconds, throughput 1379429.261143
+18771	[1728357610]	2000000 OPS in 1.449910 seconds, throughput 1379395.962508
+18771	[1728357611]	2000000 OPS in 1.452090 seconds, throughput 1377325.096929
+18771	[1728357611]	2000000 OPS in 1.462682 seconds, throughput 1367351.208260
+18771	[1728357611]	2000000 OPS in 1.447649 seconds, throughput 1381550.362001
+18771	[1728357612]	2000000 OPS in 1.452305 seconds, throughput 1377121.196994
+18771	[1728357612]	2000000 OPS in 1.455161 seconds, throughput 1374418.363329
+18771	[1728357612]	2000000 OPS in 1.459596 seconds, throughput 1370242.176602
+18771	[1728357613]	2000000 OPS in 1.445128 seconds, throughput 1383960.451946
+18771	[1728357613]	2000000 OPS in 1.450015 seconds, throughput 1379296.076247
+18771	[1728357613]	2000000 OPS in 1.458031 seconds, throughput 1371712.947118
+18771	[1728357613]	2000000 OPS in 1.456900 seconds, throughput 1372777.815910
+18771	[1728357614]	2000000 OPS in 1.448219 seconds, throughput 1381006.601902
+18771	[1728357615]	2000000 OPS in 1.449645 seconds, throughput 1379648.120747
+18771	[1728357615]	2000000 OPS in 1.453616 seconds, throughput 1375879.186800
+18771	[1728357615]	2000000 OPS in 1.457917 seconds, throughput 1371820.206500
+18771	[1728357616]	2000000 OPS in 1.449350 seconds, throughput 1379928.933660
+18771	[1728357616]	2000000 OPS in 1.450137 seconds, throughput 1379180.036093
+18771	[1728357616]	2000000 OPS in 1.454508 seconds, throughput 1375035.407162
+18771	[1728357616]	2000000 OPS in 1.458191 seconds, throughput 1371562.435922
+18771	[1728357617]	2000000 OPS in 1.448518 seconds, throughput 1380721.537461
+18771	[1728357618]	2000000 OPS in 1.450304 seconds, throughput 1379021.225895
+18771	[1728357618]	2000000 OPS in 1.449905 seconds, throughput 1379400.719357
+18771	[1728357618]	2000000 OPS in 1.457631 seconds, throughput 1372089.369669
+18771	[1728357619]	2000000 OPS in 1.447053 seconds, throughput 1382119.383326
+18771	[1728357619]	2000000 OPS in 1.451282 seconds, throughput 1378091.921487
+18771	[1728357619]	2000000 OPS in 1.452807 seconds, throughput 1376645.349313
+18771	[1728357619]	2000000 OPS in 1.458633 seconds, throughput 1371146.820345
+18771	[1728357620]	2000000 OPS in 1.448132 seconds, throughput 1381089.569183
+18771	[1728357621]	2000000 OPS in 1.448892 seconds, throughput 1380365.134185
+18771	[1728357621]	2000000 OPS in 1.451021 seconds, throughput 1378339.803490
+18771	[1728357621]	2000000 OPS in 1.459933 seconds, throughput 1369925.880160
+18771	[1728357622]	2000000 OPS in 1.449728 seconds, throughput 1379569.132968
+18771	[1728357622]	2000000 OPS in 1.447346 seconds, throughput 1381839.587770
+18771	[1728357622]	2000000 OPS in 1.453584 seconds, throughput 1375909.476164
+18771	[1728357622]	2000000 OPS in 1.456770 seconds, throughput 1372900.320572
+18771	[1728357623]	2000000 OPS in 1.448622 seconds, throughput 1380622.412196
+18771	[1728357623]	2000000 OPS in 1.451166 seconds, throughput 1378202.080258
+18771	[1728357624]	2000000 OPS in 1.450847 seconds, throughput 1378505.107706
+18771	[1728357624]	2000000 OPS in 1.458162 seconds, throughput 1371589.713626
+18771	[1728357625]	2000000 OPS in 1.447668 seconds, throughput 1381532.229765
+18771	[1728357625]	2000000 OPS in 1.450069 seconds, throughput 1379244.711803
+18771	[1728357625]	2000000 OPS in 1.453159 seconds, throughput 1376311.883283
+18771	[1728357625]	2000000 OPS in 1.458642 seconds, throughput 1371138.360201
+18771	[1728357626]	2000000 OPS in 1.445335 seconds, throughput 1383762.241972
+18771	[1728357626]	2000000 OPS in 1.447842 seconds, throughput 1381366.198798
+18771	[1728357627]	2000000 OPS in 1.451236 seconds, throughput 1378135.603031
+18771	[1728357627]	2000000 OPS in 1.460425 seconds, throughput 1369464.368249
+18771	[1728357627]	2000000 OPS in 1.451726 seconds, throughput 1377670.441943
+18771	[1728357628]	2000000 OPS in 1.449014 seconds, throughput 1380248.914089
+18771	[1728357628]	2000000 OPS in 1.451499 seconds, throughput 1377885.895891
+18771	[1728357628]	2000000 OPS in 1.460709 seconds, throughput 1369198.108590
+18771	[1728357629]	2000000 OPS in 1.449029 seconds, throughput 1380234.626084
+18771	[1728357629]	2000000 OPS in 1.452479 seconds, throughput 1376956.224496
+18771	[1728357629]	2000000 OPS in 1.453204 seconds, throughput 1376269.264329
+18771	[1728357630]	2000000 OPS in 1.458853 seconds, throughput 1370940.046735
+18771	[1728357630]	2000000 OPS in 1.449136 seconds, throughput 1380132.713562
+18771	[1728357631]	2000000 OPS in 1.446486 seconds, throughput 1382661.152614
+18771	[1728357631]	2000000 OPS in 1.451682 seconds, throughput 1377712.198677
+18771	[1728357631]	2000000 OPS in 1.457656 seconds, throughput 1372065.837207
+18771	[1728357632]	2000000 OPS in 1.450188 seconds, throughput 1379131.533291
+18771	[1728357632]	2000000 OPS in 1.449499 seconds, throughput 1379787.085055
+18771	[1728357632]	2000000 OPS in 1.450626 seconds, throughput 1378715.120231
+18771	[1728357632]	2000000 OPS in 1.460632 seconds, throughput 1369270.288478
+18771	[1728357633]	2000000 OPS in 1.448882 seconds, throughput 1380374.661291
+18771	[1728357634]	2000000 OPS in 1.454935 seconds, throughput 1374631.856406
+18771	[1728357634]	2000000 OPS in 1.453717 seconds, throughput 1375783.594744
+18771	[1728357634]	2000000 OPS in 1.458978 seconds, throughput 1370822.589511
+18771	[1728357635]	2000000 OPS in 1.449347 seconds, throughput 1379931.789972
+18771	[1728357635]	2000000 OPS in 1.458083 seconds, throughput 1371664.027356
+18771	[1728357635]	2000000 OPS in 1.453583 seconds, throughput 1375910.422728
+18771	[1728357635]	2000000 OPS in 1.460507 seconds, throughput 1369387.479827
+18771	[1728357636]	2000000 OPS in 1.447480 seconds, throughput 1381711.664410
+18771	[1728357637]	2000000 OPS in 1.456480 seconds, throughput 1373173.679007
+18771	[1728357637]	2000000 OPS in 1.457798 seconds, throughput 1371932.188136
+18771	[1728357637]	2000000 OPS in 1.460252 seconds, throughput 1369626.612393
+18771	[1728357638]	2000000 OPS in 1.450244 seconds, throughput 1379078.279241
+18771	[1728357638]	2000000 OPS in 1.450013 seconds, throughput 1379297.978708
+18771	[1728357638]	2000000 OPS in 1.454926 seconds, throughput 1374640.359716
+18771	[1728357638]	2000000 OPS in 1.456739 seconds, throughput 1372929.536451
+18771	[1728357639]	2000000 OPS in 1.448397 seconds, throughput 1380836.883810
+18771	[1728357639]	2000000 OPS in 1.450378 seconds, throughput 1378950.866602
+18771	[1728357640]	2000000 OPS in 1.449758 seconds, throughput 1379540.585394
+18771	[1728357640]	2000000 OPS in 1.457981 seconds, throughput 1371759.988642
+18771	[1728357640]	2000000 OPS in 1.449938 seconds, throughput 1379369.324757
+18771	[1728357641]	2000000 OPS in 1.451139 seconds, throughput 1378227.723188
+18771	[1728357641]	2000000 OPS in 1.451761 seconds, throughput 1377637.228166
+18771	[1728357641]	2000000 OPS in 1.457203 seconds, throughput 1372492.370658
+18771	[1728357642]	2000000 OPS in 1.449011 seconds, throughput 1380251.771726
+18771	[1728357642]	2000000 OPS in 1.452316 seconds, throughput 1377110.766527
+18771	[1728357643]	2000000 OPS in 1.455863 seconds, throughput 1373755.634974
+18771	[1728357643]	2000000 OPS in 1.461681 seconds, throughput 1368287.608582
+18771	[1728357643]	2000000 OPS in 1.452575 seconds, throughput 1376865.222106
+18771	[1728357644]	2000000 OPS in 1.451184 seconds, throughput 1378184.985501
+18771	[1728357644]	2000000 OPS in 1.453202 seconds, throughput 1376271.158449
+18771	[1728357644]	2000000 OPS in 1.462682 seconds, throughput 1367351.208260
+18771	[1728357645]	2000000 OPS in 1.449751 seconds, throughput 1379547.246389
+18771	[1728357645]	2000000 OPS in 1.452432 seconds, throughput 1377000.782136
+18771	[1728357645]	2000000 OPS in 1.451940 seconds, throughput 1377467.388460
+18771	[1728357646]	2000000 OPS in 1.464262 seconds, throughput 1365875.779061
+18771	[1728357646]	2000000 OPS in 1.447392 seconds, throughput 1381795.671111
+18771	[1728357647]	2000000 OPS in 1.450356 seconds, throughput 1378971.783479
+18771	[1728357647]	2000000 OPS in 1.452146 seconds, throughput 1377271.982294
+18771	[1728357647]	2000000 OPS in 1.461154 seconds, throughput 1368781.114106
+18771	[1728357648]	2000000 OPS in 1.449744 seconds, throughput 1379553.907448
+18771	[1728357648]	2000000 OPS in 1.447117 seconds, throughput 1382058.257902
+18771	[1728357648]	2000000 OPS in 1.455483 seconds, throughput 1374114.297453
+18771	[1728357648]	2000000 OPS in 1.460213 seconds, throughput 1369663.192973
+18771	[1728357649]	2000000 OPS in 1.449998 seconds, throughput 1379312.247327
+18771	[1728357650]	2000000 OPS in 1.453157 seconds, throughput 1376313.777520
+18771	[1728357650]	2000000 OPS in 1.453767 seconds, throughput 1375736.276859
+18771	[1728357650]	2000000 OPS in 1.462192 seconds, throughput 1367809.425848
+18771	[1728357651]	2000000 OPS in 1.448331 seconds, throughput 1380899.808124
+18771	[1728357651]	2000000 OPS in 1.451447 seconds, throughput 1377935.260468
+18771	[1728357651]	2000000 OPS in 1.454827 seconds, throughput 1374733.903069
+18771	[1728357651]	2000000 OPS in 1.462172 seconds, throughput 1367828.135130
+18771	[1728357652]	2000000 OPS in 1.446822 seconds, throughput 1382340.052888
+18771	[1728357653]	2000000 OPS in 1.451118 seconds, throughput 1378247.668350
+18771	[1728357653]	2000000 OPS in 1.452773 seconds, throughput 1376677.567659
+18771	[1728357653]	2000000 OPS in 1.459663 seconds, throughput 1370179.281108
+18771	[1728357654]	2000000 OPS in 1.452659 seconds, throughput 1376785.604880
+18771	[1728357654]	2000000 OPS in 1.451062 seconds, throughput 1378300.858268
+18771	[1728357654]	2000000 OPS in 1.452425 seconds, throughput 1377007.418627
+18771	[1728357654]	2000000 OPS in 1.458199 seconds, throughput 1371554.911230
+18771	[1728357655]	2000000 OPS in 1.449213 seconds, throughput 1380059.383955
+18771	[1728357655]	2000000 OPS in 1.449715 seconds, throughput 1379581.503951
+18771	[1728357656]	2000000 OPS in 1.452790 seconds, throughput 1376661.458297
+18771	[1728357656]	2000000 OPS in 1.457817 seconds, throughput 1371914.307489
+18771	[1728357656]	2000000 OPS in 1.445999 seconds, throughput 1383126.820973
+18771	[1728357657]	2000000 OPS in 1.447143 seconds, throughput 1382033.427243
+18771	[1728357657]	2000000 OPS in 1.450254 seconds, throughput 1379068.770022
+18771	[1728357657]	2000000 OPS in 1.461621 seconds, throughput 1368343.777217
+18771	[1728357658]	2000000 OPS in 1.448668 seconds, throughput 1380578.572868
+18771	[1728357658]	2000000 OPS in 1.452112 seconds, throughput 1377304.229977
+18771	[1728357658]	2000000 OPS in 1.456564 seconds, throughput 1373094.488124
+18771	[1728357659]	2000000 OPS in 1.460084 seconds, throughput 1369784.204196
+18771	[1728357659]	2000000 OPS in 1.447165 seconds, throughput 1382012.417382
+18771	[1728357660]	2000000 OPS in 1.451503 seconds, throughput 1377882.098762
+18771	[1728357660]	2000000 OPS in 1.453430 seconds, throughput 1376055.262379
+18771	[1728357660]	2000000 OPS in 1.462034 seconds, throughput 1367957.243128
+18771	[1728357661]	2000000 OPS in 1.448403 seconds, throughput 1380831.163702
+18771	[1728357661]	2000000 OPS in 1.447887 seconds, throughput 1381323.266249
+18771	[1728357661]	2000000 OPS in 1.453147 seconds, throughput 1376323.248784
+18771	[1728357662]	2000000 OPS in 1.459731 seconds, throughput 1370115.452779
+18771	[1728357662]	2000000 OPS in 1.447957 seconds, throughput 1381256.487589
+18771	[1728357663]	2000000 OPS in 1.449446 seconds, throughput 1379837.537928
+18771	[1728357663]	2000000 OPS in 1.450923 seconds, throughput 1378432.900988
+18771	[1728357663]	2000000 OPS in 1.458990 seconds, throughput 1370811.314677
+18771	[1728357664]	2000000 OPS in 1.444878 seconds, throughput 1384199.911688
+18771	[1728357664]	2000000 OPS in 1.450574 seconds, throughput 1378764.544242
+18771	[1728357664]	2000000 OPS in 1.453261 seconds, throughput 1376215.284109
+18771	[1728357665]	2000000 OPS in 1.459673 seconds, throughput 1370169.894216
+18771	[1728357665]	2000000 OPS in 1.450224 seconds, throughput 1379097.298073
+18771	[1728357666]	2000000 OPS in 1.452699 seconds, throughput 1376747.695152
+18771	[1728357666]	2000000 OPS in 1.453196 seconds, throughput 1376276.840839
+18771	[1728357666]	2000000 OPS in 1.459311 seconds, throughput 1370509.781671
+18771	[1728357667]	2000000 OPS in 1.449246 seconds, throughput 1380027.959366
+18771	[1728357667]	2000000 OPS in 1.451338 seconds, throughput 1378038.747694
+18771	[1728357667]	2000000 OPS in 1.452506 seconds, throughput 1376930.628858
+18771	[1728357667]	2000000 OPS in 1.461489 seconds, throughput 1368467.364448
+18771	[1728357668]	2000000 OPS in 1.446736 seconds, throughput 1382422.224926
+18771	[1728357668]	2000000 OPS in 1.447341 seconds, throughput 1381844.361488
+18771	[1728357669]	2000000 OPS in 1.455391 seconds, throughput 1374201.159688
+18771	[1728357669]	2000000 OPS in 1.458552 seconds, throughput 1371222.966339
+18771	[1728357669]	2000000 OPS in 1.448716 seconds, throughput 1380532.830451
+18771	[1728357670]	2000000 OPS in 1.451117 seconds, throughput 1378248.618133
+18771	[1728357670]	2000000 OPS in 1.452173 seconds, throughput 1377246.374915
+18771	[1728357670]	2000000 OPS in 1.457329 seconds, throughput 1372373.705594
+18771	[1728357671]	2000000 OPS in 1.445231 seconds, throughput 1383861.818630
+18771	[1728357671]	2000000 OPS in 1.446080 seconds, throughput 1383049.347201
+18771	[1728357672]	2000000 OPS in 1.452209 seconds, throughput 1377212.233225
+18771	[1728357672]	2000000 OPS in 1.460071 seconds, throughput 1369796.400312
+18771	[1728357672]	2000000 OPS in 1.446214 seconds, throughput 1382921.199767
+18771	[1728357673]	2000000 OPS in 1.450320 seconds, throughput 1379006.012466
+18771	[1728357673]	2000000 OPS in 1.455754 seconds, throughput 1373858.495323
+18771	[1728357673]	2000000 OPS in 1.462355 seconds, throughput 1367656.964280
+18771	[1728357674]	2000000 OPS in 1.450261 seconds, throughput 1379062.113647
+18771	[1728357674]	2000000 OPS in 1.455398 seconds, throughput 1374194.550219
+18771	[1728357674]	2000000 OPS in 1.451649 seconds, throughput 1377743.517889
+18771	[1728357675]	2000000 OPS in 1.456523 seconds, throughput 1373133.139676
+18771	[1728357675]	2000000 OPS in 1.446793 seconds, throughput 1382367.760972
+18771	[1728357676]	2000000 OPS in 1.448668 seconds, throughput 1380578.572868
+18771	[1728357676]	2000000 OPS in 1.450597 seconds, throughput 1378742.683185
+18771	[1728357676]	2000000 OPS in 1.457649 seconds, throughput 1372072.426215
+18771	[1728357677]	2000000 OPS in 1.450049 seconds, throughput 1379263.735225
+18771	[1728357677]	2000000 OPS in 1.450611 seconds, throughput 1378729.376794
+18771	[1728357677]	2000000 OPS in 1.452250 seconds, throughput 1377173.351696
+18771	[1728357678]	2000000 OPS in 1.459630 seconds, throughput 1370210.258764
+18771	[1728357678]	2000000 OPS in 1.446294 seconds, throughput 1382844.705157
+18771	[1728357679]	2000000 OPS in 1.449273 seconds, throughput 1380002.249404
+18771	[1728357679]	2000000 OPS in 1.450113 seconds, throughput 1379202.862122
+18771	[1728357679]	2000000 OPS in 1.457337 seconds, throughput 1372366.171997
+18771	[1728357680]	2000000 OPS in 1.444847 seconds, throughput 1384229.610471
+18771	[1728357680]	2000000 OPS in 1.449494 seconds, throughput 1379791.844602
+18771	[1728357680]	2000000 OPS in 1.452050 seconds, throughput 1377363.038463
+18771	[1728357681]	2000000 OPS in 1.462166 seconds, throughput 1367833.748015
+18771	[1728357681]	2000000 OPS in 1.449140 seconds, throughput 1380128.904040
+18771	[1728357682]	2000000 OPS in 1.451299 seconds, throughput 1378075.779009
+18771	[1728357682]	2000000 OPS in 1.454206 seconds, throughput 1375320.965530
+18771	[1728357682]	2000000 OPS in 1.460302 seconds, throughput 1369579.717072
+18771	[1728357682]	2000000 OPS in 1.446861 seconds, throughput 1382302.792044
+18771	[1728357683]	2000000 OPS in 1.448106 seconds, throughput 1381114.365937
+18771	[1728357683]	2000000 OPS in 1.453139 seconds, throughput 1376330.825888
+18771	[1728357684]	2000000 OPS in 1.458804 seconds, throughput 1370986.095459
+18771	[1728357684]	2000000 OPS in 1.446367 seconds, throughput 1382774.911209
+18771	[1728357684]	2000000 OPS in 1.452613 seconds, throughput 1376829.203649
+18771	[1728357685]	2000000 OPS in 1.453324 seconds, throughput 1376155.626688
+18771	[1728357685]	2000000 OPS in 1.456622 seconds, throughput 1373039.814035
+18771	[1728357685]	2000000 OPS in 1.446229 seconds, throughput 1382906.856383
+18771	[1728357686]	2000000 OPS in 1.450747 seconds, throughput 1378600.128072
+18771	[1728357686]	2000000 OPS in 1.452425 seconds, throughput 1377007.418627
+18771	[1728357686]	2000000 OPS in 1.461527 seconds, throughput 1368431.784018
+18771	[1728357687]	2000000 OPS in 1.444444 seconds, throughput 1384615.810651
+18771	[1728357687]	2000000 OPS in 1.451498 seconds, throughput 1377886.845177
+18771	[1728357688]	2000000 OPS in 1.450929 seconds, throughput 1378427.200780
+18771	[1728357688]	2000000 OPS in 1.460061 seconds, throughput 1369805.782087
+18771	[1728357688]	2000000 OPS in 1.448789 seconds, throughput 1380463.269669
+18771	[1728357689]	2000000 OPS in 1.451634 seconds, throughput 1377757.754365
+18771	[1728357689]	2000000 OPS in 1.454569 seconds, throughput 1374977.742548
+18771	[1728357689]	2000000 OPS in 1.460715 seconds, throughput 1369192.484502
+18771	[1728357690]	2000000 OPS in 1.447143 seconds, throughput 1382033.427243
+18771	[1728357690]	2000000 OPS in 1.446727 seconds, throughput 1382430.824890
+18771	[1728357690]	2000000 OPS in 1.454302 seconds, throughput 1375230.179151
+18771	[1728357691]	2000000 OPS in 1.459668 seconds, throughput 1370174.587646
+18771	[1728357691]	2000000 OPS in 1.451482 seconds, throughput 1377902.033921
+18771	[1728357692]	2000000 OPS in 1.448817 seconds, throughput 1380436.590681
+18771	[1728357692]	2000000 OPS in 1.449928 seconds, throughput 1379378.838122
+18771	[1728357692]	2000000 OPS in 1.458459 seconds, throughput 1371310.403652
+18771	[1728357693]	2000000 OPS in 1.452130 seconds, throughput 1377287.157486
+18771	[1728357693]	2000000 OPS in 1.450264 seconds, throughput 1379059.260935
+18771	[1728357693]	2000000 OPS in 1.454227 seconds, throughput 1375301.104986
+18771	[1728357694]	2000000 OPS in 1.456364 seconds, throughput 1373283.052863
+18771	[1728357694]	2000000 OPS in 1.452606 seconds, throughput 1376835.838486
+18771	[1728357695]	2000000 OPS in 1.450258 seconds, throughput 1379064.966372
+18771	[1728357695]	2000000 OPS in 1.448345 seconds, throughput 1380886.460063
+18771	[1728357695]	2000000 OPS in 1.461482 seconds, throughput 1368473.918940
+18771	[1728357695]	2000000 OPS in 1.448924 seconds, throughput 1380334.648332
+18771	[1728357696]	2000000 OPS in 1.452140 seconds, throughput 1377277.672952
+18771	[1728357696]	2000000 OPS in 1.458825 seconds, throughput 1370966.359913
+18771	[1728357697]	2000000 OPS in 1.464209 seconds, throughput 1365925.219692
+18771	[1728357697]	2000000 OPS in 1.449744 seconds, throughput 1379553.907448
+18771	[1728357697]	2000000 OPS in 1.448636 seconds, throughput 1380609.069497
+18771	[1728357698]	2000000 OPS in 1.457970 seconds, throughput 1371770.338210
+18771	[1728357698]	2000000 OPS in 1.458213 seconds, throughput 1371541.743216
+18771	[1728357698]	2000000 OPS in 1.448261 seconds, throughput 1380966.552300
+18771	[1728357699]	2000000 OPS in 1.450805 seconds, throughput 1378545.014664
+18771	[1728357699]	2000000 OPS in 1.457816 seconds, throughput 1371915.248564
+18771	[1728357700]	2000000 OPS in 1.458736 seconds, throughput 1371050.004936
+18771	[1728357700]	2000000 OPS in 1.450403 seconds, throughput 1378927.098193
+18771	[1728357700]	2000000 OPS in 1.451496 seconds, throughput 1377888.743751
+18771	[1728357701]	2000000 OPS in 1.455832 seconds, throughput 1373784.887267
+18771	[1728357701]	2000000 OPS in 1.458536 seconds, throughput 1371238.008524
+18771	[1728357701]	2000000 OPS in 1.448881 seconds, throughput 1380375.614008
+18771	[1728357702]	2000000 OPS in 1.452146 seconds, throughput 1377271.982294
+18771	[1728357702]	2000000 OPS in 1.450495 seconds, throughput 1378839.637503
+18771	[1728357703]	2000000 OPS in 1.461065 seconds, throughput 1368864.492682
+18771	[1728357703]	2000000 OPS in 1.447525 seconds, throughput 1381668.710385
+18771	[1728357703]	2000000 OPS in 1.452594 seconds, throughput 1376847.212642
+18771	[1728357704]	2000000 OPS in 1.450866 seconds, throughput 1378487.055317
+18771	[1728357704]	2000000 OPS in 1.460943 seconds, throughput 1368978.803417
+18771	[1728357704]	2000000 OPS in 1.451178 seconds, throughput 1378190.683707
+18771	[1728357705]	2000000 OPS in 1.456226 seconds, throughput 1373413.192732
+18771	[1728357705]	2000000 OPS in 1.453401 seconds, throughput 1376082.719084
+18771	[1728357705]	2000000 OPS in 1.461180 seconds, throughput 1368756.758236
+18771	[1728357706]	2000000 OPS in 1.447266 seconds, throughput 1381915.971217
+18771	[1728357706]	2000000 OPS in 1.445658 seconds, throughput 1383453.071197
+18771	[1728357706]	2000000 OPS in 1.454601 seconds, throughput 1374947.494193
+18771	[1728357707]	2000000 OPS in 1.465024 seconds, throughput 1365165.348827
+18771	[1728357707]	2000000 OPS in 1.450288 seconds, throughput 1379036.439659
+18771	[1728357708]	2000000 OPS in 1.449165 seconds, throughput 1380105.095003
+18771	[1728357708]	2000000 OPS in 1.455891 seconds, throughput 1373729.214618
+18771	[1728357708]	2000000 OPS in 1.459215 seconds, throughput 1370599.945861
+18771	[1728357709]	2000000 OPS in 1.449118 seconds, throughput 1380149.856671
+18771	[1728357709]	2000000 OPS in 1.451635 seconds, throughput 1377756.805258
+18771	[1728357709]	2000000 OPS in 1.454374 seconds, throughput 1375162.097232
+18771	[1728357710]	2000000 OPS in 1.456243 seconds, throughput 1373397.159677
+18771	[1728357710]	2000000 OPS in 1.449791 seconds, throughput 1379509.184427
+18771	[1728357711]	2000000 OPS in 1.450088 seconds, throughput 1379226.640038
+18771	[1728357711]	2000000 OPS in 1.458084 seconds, throughput 1371663.086626
+18771	[1728357711]	2000000 OPS in 1.459630 seconds, throughput 1370210.258764
+18771	[1728357711]	2000000 OPS in 1.446595 seconds, throughput 1382556.969988
+18771	[1728357712]	2000000 OPS in 1.450608 seconds, throughput 1378732.228142
+18771	[1728357712]	2000000 OPS in 1.456279 seconds, throughput 1373363.208561
+18771	[1728357713]	2000000 OPS in 1.460280 seconds, throughput 1369600.350618
+18771	[1728357713]	2000000 OPS in 1.450845 seconds, throughput 1378507.007985
+18771	[1728357713]	2000000 OPS in 1.452807 seconds, throughput 1376645.349313
+18771	[1728357714]	2000000 OPS in 1.453235 seconds, throughput 1376239.906140
+18771	[1728357714]	2000000 OPS in 1.463904 seconds, throughput 1366209.806108
+18771	[1728357714]	2000000 OPS in 1.451885 seconds, throughput 1377519.569387
+18771	[1728357715]	2000000 OPS in 1.450241 seconds, throughput 1379081.132033
+18771	[1728357715]	2000000 OPS in 1.450224 seconds, throughput 1379097.298073
+18771	[1728357716]	2000000 OPS in 1.456258 seconds, throughput 1373383.013175
+18771	[1728357716]	2000000 OPS in 1.447944 seconds, throughput 1381268.888852
+18771	[1728357716]	2000000 OPS in 1.449058 seconds, throughput 1380207.003446
+18771	[1728357717]	2000000 OPS in 1.453325 seconds, throughput 1376154.679786
+18771	[1728357717]	2000000 OPS in 1.456610 seconds, throughput 1373051.125559
+18771	[1728357717]	2000000 OPS in 1.448852 seconds, throughput 1380403.243395
+18771	[1728357718]	2000000 OPS in 1.451399 seconds, throughput 1377980.830909
+18771	[1728357718]	2000000 OPS in 1.451646 seconds, throughput 1377746.365161
+18771	[1728357719]	2000000 OPS in 1.460254 seconds, throughput 1369624.736518
+18771	[1728357719]	2000000 OPS in 1.449271 seconds, throughput 1380004.153813
+18771	[1728357719]	2000000 OPS in 1.447891 seconds, throughput 1381319.450152
+18771	[1728357720]	2000000 OPS in 1.453420 seconds, throughput 1376064.730085
+18771	[1728357720]	2000000 OPS in 1.457075 seconds, throughput 1372612.940308
+18771	[1728357720]	2000000 OPS in 1.450397 seconds, throughput 1378932.802536
+18771	[1728357721]	2000000 OPS in 1.450214 seconds, throughput 1379106.807685
+18771	[1728357721]	2000000 OPS in 1.450702 seconds, throughput 1378642.891510
+18771	[1728357721]	2000000 OPS in 1.463746 seconds, throughput 1366357.277834
+18771	[1728357722]	2000000 OPS in 1.452127 seconds, throughput 1377290.002872
+18771	[1728357722]	2000000 OPS in 1.450310 seconds, throughput 1379015.520820
+18771	[1728357722]	2000000 OPS in 1.453075 seconds, throughput 1376391.445727
+18771	[1728357723]	2000000 OPS in 1.461923 seconds, throughput 1368061.108554
+18771	[1728357723]	2000000 OPS in 1.447129 seconds, throughput 1382046.797487
+18771	[1728357724]	2000000 OPS in 1.447591 seconds, throughput 1381605.715979
+18771	[1728357724]	2000000 OPS in 1.450958 seconds, throughput 1378399.650438
+18771	[1728357724]	2000000 OPS in 1.457474 seconds, throughput 1372237.171984
+18771	[1728357724]	2000000 OPS in 1.448557 seconds, throughput 1380684.363819
+18771	[1728357725]	2000000 OPS in 1.453168 seconds, throughput 1376303.359281
+18771	[1728357725]	2000000 OPS in 1.453127 seconds, throughput 1376342.191701
+18771	[1728357726]	2000000 OPS in 1.456307 seconds, throughput 1373336.803298
+18771	[1728357726]	2000000 OPS in 1.447579 seconds, throughput 1381617.169080
+18771	[1728357726]	2000000 OPS in 1.450454 seconds, throughput 1378878.613179
+18771	[1728357727]	2000000 OPS in 1.452373 seconds, throughput 1377056.720278
+18771	[1728357727]	2000000 OPS in 1.458146 seconds, throughput 1371604.763858
+18771	[1728357727]	2000000 OPS in 1.448903 seconds, throughput 1380354.654521
+18771	[1728357728]	2000000 OPS in 1.451354 seconds, throughput 1378023.555935
+18771	[1728357728]	2000000 OPS in 1.453430 seconds, throughput 1376055.262379
+18771	[1728357729]	2000000 OPS in 1.459893 seconds, throughput 1369963.415127
+18771	[1728357729]	2000000 OPS in 1.447335 seconds, throughput 1381850.089993
+18771	[1728357729]	2000000 OPS in 1.451684 seconds, throughput 1377710.300589
+18771	[1728357730]	2000000 OPS in 1.451940 seconds, throughput 1377467.388460
+18771	[1728357730]	2000000 OPS in 1.463502 seconds, throughput 1366585.081537
+18771	[1728357730]	2000000 OPS in 1.450054 seconds, throughput 1379258.979321
+18771	[1728357731]	2000000 OPS in 1.451172 seconds, throughput 1378196.381959
+18771	[1728357731]	2000000 OPS in 1.452764 seconds, throughput 1376686.096296
+18771	[1728357732]	2000000 OPS in 1.465872 seconds, throughput 1364375.607147
+18771	[1728357732]	2000000 OPS in 1.446926 seconds, throughput 1382240.695101
+18771	[1728357732]	2000000 OPS in 1.452052 seconds, throughput 1377361.141337
+18771	[1728357733]	2000000 OPS in 1.451563 seconds, throughput 1377825.144344
+18771	[1728357733]	2000000 OPS in 1.461212 seconds, throughput 1368726.782972
+18771	[1728357733]	2000000 OPS in 1.452483 seconds, throughput 1376952.432490
+18771	[1728357734]	2000000 OPS in 1.449649 seconds, throughput 1379644.313899
+18771	[1728357734]	2000000 OPS in 1.449718 seconds, throughput 1379578.649089
+18771	[1728357735]	2000000 OPS in 1.449165 seconds, throughput 1380105.095003
+18771	[1728357735]	2000000 OPS in 1.461423 seconds, throughput 1368529.166436
+18771	[1728357735]	2000000 OPS in 1.452270 seconds, throughput 1377154.385892
+18771	[1728357736]	2000000 OPS in 1.453001 seconds, throughput 1376461.544073
+18771	[1728357736]	2000000 OPS in 1.448900 seconds, throughput 1380357.512596
+18771	[1728357736]	2000000 OPS in 1.457416 seconds, throughput 1372291.782168
+18771	[1728357737]	2000000 OPS in 1.449339 seconds, throughput 1379939.406861
+18771	[1728357737]	2000000 OPS in 1.450634 seconds, throughput 1378707.516851
+18771	[1728357738]	2000000 OPS in 1.447277 seconds, throughput 1381905.467993
+18771	[1728357738]	2000000 OPS in 1.456756 seconds, throughput 1372913.514686
+18771	[1728357738]	2000000 OPS in 1.449801 seconds, throughput 1379499.669265
+18771	[1728357738]	2000000 OPS in 1.451142 seconds, throughput 1378224.873927
+18771	[1728357739]	2000000 OPS in 1.452924 seconds, throughput 1376534.491825
+18771	[1728357739]	2000000 OPS in 1.462849 seconds, throughput 1367195.110363
+18771	[1728357740]	2000000 OPS in 1.451102 seconds, throughput 1378262.865050
+18771	[1728357740]	2000000 OPS in 1.453315 seconds, throughput 1376164.148860
+18771	[1728357740]	2000000 OPS in 1.450786 seconds, throughput 1378563.068571
+18771	[1728357740]	2000000 OPS in 1.459032 seconds, throughput 1370771.854216
+18771	[1728357741]	2000000 OPS in 1.453418 seconds, throughput 1376066.623642
+18771	[1728357741]	2000000 OPS in 1.450857 seconds, throughput 1378495.606390
+18771	[1728357742]	2000000 OPS in 1.449416 seconds, throughput 1379866.097794
+18771	[1728357742]	2000000 OPS in 1.459346 seconds, throughput 1370476.912261
+18771	[1728357742]	2000000 OPS in 1.449094 seconds, throughput 1380172.714814
+18771	[1728357743]	2000000 OPS in 1.451122 seconds, throughput 1378243.869227
+18771	[1728357743]	2000000 OPS in 1.447716 seconds, throughput 1381486.424133
+18771	[1728357743]	2000000 OPS in 1.456277 seconds, throughput 1373365.094690
+18771	[1728357744]	2000000 OPS in 1.450575 seconds, throughput 1378763.593747
+18771	[1728357744]	2000000 OPS in 1.451782 seconds, throughput 1377617.300669
+18771	[1728357745]	2000000 OPS in 1.450833 seconds, throughput 1378518.409769
+18771	[1728357745]	2000000 OPS in 1.457546 seconds, throughput 1372169.386078
+18771	[1728357745]	2000000 OPS in 1.450324 seconds, throughput 1379002.209162
+18771	[1728357746]	2000000 OPS in 1.450573 seconds, throughput 1378765.494739
+18771	[1728357746]	2000000 OPS in 1.448637 seconds, throughput 1380608.116457
+18771	[1728357746]	2000000 OPS in 1.457841 seconds, throughput 1371891.722074
+18771	[1728357747]	2000000 OPS in 1.452263 seconds, throughput 1377161.023864
+18771	[1728357747]	2000000 OPS in 1.456065 seconds, throughput 1373565.053758
+18771	[1728357748]	2000000 OPS in 1.450622 seconds, throughput 1378718.921952
+18771	[1728357748]	2000000 OPS in 1.462815 seconds, throughput 1367226.887884
+18771	[1728357748]	2000000 OPS in 1.452503 seconds, throughput 1376933.472771
+18771	[1728357749]	2000000 OPS in 1.452424 seconds, throughput 1377008.366703
+18771	[1728357749]	2000000 OPS in 1.449454 seconds, throughput 1379829.922164
+18771	[1728357749]	2000000 OPS in 1.458677 seconds, throughput 1371105.460633
+18771	[1728357750]	2000000 OPS in 1.450476 seconds, throughput 1378857.699128
+18771	[1728357750]	2000000 OPS in 1.451037 seconds, throughput 1378324.605093
+18771	[1728357751]	2000000 OPS in 1.444066 seconds, throughput 1384978.248917
+18771	[1728357751]	2000000 OPS in 1.460209 seconds, throughput 1369666.944937
+18771	[1728357751]	2000000 OPS in 1.447708 seconds, throughput 1381494.058194
+18771	[1728357751]	2000000 OPS in 1.450780 seconds, throughput 1378568.769903
+18771	[1728357752]	2000000 OPS in 1.447517 seconds, throughput 1381676.346461
+18771	[1728357752]	2000000 OPS in 1.459719 seconds, throughput 1370126.716169
+18771	[1728357753]	2000000 OPS in 1.451397 seconds, throughput 1377982.729742
+18771	[1728357753]	2000000 OPS in 1.453316 seconds, throughput 1376163.201946
+18771	[1728357753]	2000000 OPS in 1.447160 seconds, throughput 1382017.192294
+18771	[1728357754]	2000000 OPS in 1.459928 seconds, throughput 1369930.571919
+18771	[1728357754]	2000000 OPS in 1.450085 seconds, throughput 1379229.493443
+18771	[1728357754]	2000000 OPS in 1.454852 seconds, throughput 1374710.279809
+18771	[1728357755]	2000000 OPS in 1.449824 seconds, throughput 1379477.784890
+18771	[1728357755]	2000000 OPS in 1.459856 seconds, throughput 1369998.136803
+18771	[1728357755]	2000000 OPS in 1.453081 seconds, throughput 1376385.762390
+18771	[1728357756]	2000000 OPS in 1.453801 seconds, throughput 1375704.102556
+18771	[1728357756]	2000000 OPS in 1.446379 seconds, throughput 1382763.438905
+18771	[1728357757]	2000000 OPS in 1.461813 seconds, throughput 1368164.053815
+18771	[1728357757]	2000000 OPS in 1.451054 seconds, throughput 1378308.457163
+18771	[1728357757]	2000000 OPS in 1.449996 seconds, throughput 1379314.149832
+18771	[1728357758]	2000000 OPS in 1.446004 seconds, throughput 1383122.038390
+18771	[1728357758]	2000000 OPS in 1.455992 seconds, throughput 1373633.921066
+18771	[1728357758]	2000000 OPS in 1.449619 seconds, throughput 1379672.865767
+18771	[1728357759]	2000000 OPS in 1.448826 seconds, throughput 1380428.015510
+18771	[1728357759]	2000000 OPS in 1.447962 seconds, throughput 1381251.717932
+18771	[1728357759]	2000000 OPS in 1.457306 seconds, throughput 1372395.365146
+18771	[1728357760]	2000000 OPS in 1.448221 seconds, throughput 1381004.694725
+18771	[1728357760]	2000000 OPS in 1.453069 seconds, throughput 1376397.129111
+18771	[1728357761]	2000000 OPS in 1.447120 seconds, throughput 1382055.392780
+18771	[1728357761]	2000000 OPS in 1.461060 seconds, throughput 1368869.177173
+18771	[1728357761]	2000000 OPS in 1.449086 seconds, throughput 1380180.334362
+18771	[1728357762]	2000000 OPS in 1.451990 seconds, throughput 1377419.954683
+18771	[1728357762]	2000000 OPS in 1.449361 seconds, throughput 1379918.460618
+18771	[1728357762]	2000000 OPS in 1.462836 seconds, throughput 1367207.260417
+18771	[1728357763]	2000000 OPS in 1.450545 seconds, throughput 1378792.109173
+18771	[1728357763]	2000000 OPS in 1.454363 seconds, throughput 1375172.498200
+18771	[1728357764]	2000000 OPS in 1.453338 seconds, throughput 1376142.370185
+18771	[1728357764]	2000000 OPS in 1.460935 seconds, throughput 1368986.299870
+18771	[1728357764]	2000000 OPS in 1.449956 seconds, throughput 1379352.201032
+18771	[1728357765]	2000000 OPS in 1.451976 seconds, throughput 1377433.235811
+18771	[1728357765]	2000000 OPS in 1.446305 seconds, throughput 1382834.187810
+18771	[1728357765]	2000000 OPS in 1.459248 seconds, throughput 1370568.950583
+18771	[1728357766]	2000000 OPS in 1.448904 seconds, throughput 1380353.701833
+18771	[1728357766]	2000000 OPS in 1.452493 seconds, throughput 1376942.952565
+18771	[1728357766]	2000000 OPS in 1.447838 seconds, throughput 1381370.015154
+18771	[1728357767]	2000000 OPS in 1.458291 seconds, throughput 1371468.383196
+18771	[1728357767]	2000000 OPS in 1.452567 seconds, throughput 1376872.805179
+18771	[1728357767]	2000000 OPS in 1.451121 seconds, throughput 1378244.819005
+18771	[1728357768]	2000000 OPS in 1.448072 seconds, throughput 1381146.793806
+18771	[1728357768]	2000000 OPS in 1.462475 seconds, throughput 1367544.744355
+18771	[1728357769]	2000000 OPS in 1.451879 seconds, throughput 1377525.262091
+18771	[1728357769]	2000000 OPS in 1.451410 seconds, throughput 1377970.387416
+18771	[1728357769]	2000000 OPS in 1.447849 seconds, throughput 1381359.520226
+18771	[1728357770]	2000000 OPS in 1.458953 seconds, throughput 1370846.079346
+18771	[1728357770]	2000000 OPS in 1.452160 seconds, throughput 1377258.704275
+18771	[1728357770]	2000000 OPS in 1.452631 seconds, throughput 1376812.142932
+18771	[1728357771]	2000000 OPS in 1.449815 seconds, throughput 1379486.348258
+18771	[1728357771]	2000000 OPS in 1.461017 seconds, throughput 1368909.465119
+18771	[1728357771]	2000000 OPS in 1.450776 seconds, throughput 1378572.570817
+18771	[1728357772]	2000000 OPS in 1.452860 seconds, throughput 1376595.129606
+18771	[1728357772]	2000000 OPS in 1.446604 seconds, throughput 1382548.368455
+18771	[1728357773]	2000000 OPS in 1.457073 seconds, throughput 1372614.824377
+18771	[1728357773]	2000000 OPS in 1.450646 seconds, throughput 1378696.111939
+18771	[1728357773]	2000000 OPS in 1.451363 seconds, throughput 1378015.010718
+18771	[1728357774]	2000000 OPS in 1.448530 seconds, throughput 1380710.099204
+18771	[1728357774]	2000000 OPS in 1.459372 seconds, throughput 1370452.496005
+18771	[1728357774]	2000000 OPS in 1.450681 seconds, throughput 1378662.848690
+18771	[1728357775]	2000000 OPS in 1.450527 seconds, throughput 1378809.218994
+18771	[1728357775]	2000000 OPS in 1.446359 seconds, throughput 1382782.559517
+18771	[1728357775]	2000000 OPS in 1.460183 seconds, throughput 1369691.333210
+18771	[1728357776]	2000000 OPS in 1.449665 seconds, throughput 1379629.086720
+18771	[1728357776]	2000000 OPS in 1.454520 seconds, throughput 1375024.062921
+18771	[1728357777]	2000000 OPS in 1.448109 seconds, throughput 1381111.504728
+18771	[1728357777]	2000000 OPS in 1.456554 seconds, throughput 1373103.915131
+18771	[1728357777]	2000000 OPS in 1.450857 seconds, throughput 1378495.606390
+18771	[1728357778]	2000000 OPS in 1.449727 seconds, throughput 1379570.084575
+18771	[1728357778]	2000000 OPS in 1.452943 seconds, throughput 1376516.491012
+18771	[1728357778]	2000000 OPS in 1.461891 seconds, throughput 1368091.054668
+18771	[1728357779]	2000000 OPS in 1.452403 seconds, throughput 1377028.276587
+18771	[1728357779]	2000000 OPS in 1.454652 seconds, throughput 1374899.288627
+18771	[1728357780]	2000000 OPS in 1.448180 seconds, throughput 1381043.792899
+18771	[1728357780]	2000000 OPS in 1.456698 seconds, throughput 1372968.178717
+18771	[1728357780]	2000000 OPS in 1.450223 seconds, throughput 1379098.249028
+18771	[1728357781]	2000000 OPS in 1.453197 seconds, throughput 1376275.893771
+18771	[1728357781]	2000000 OPS in 1.448388 seconds, throughput 1380845.464061
+18771	[1728357781]	2000000 OPS in 1.462915 seconds, throughput 1367133.428805
+18771	[1728357782]	2000000 OPS in 1.450653 seconds, throughput 1378689.459161
+18771	[1728357782]	2000000 OPS in 1.451260 seconds, throughput 1378112.812315
+18771	[1728357782]	2000000 OPS in 1.447024 seconds, throughput 1382147.082564
+18771	[1728357783]	2000000 OPS in 1.459876 seconds, throughput 1369979.368111
+18771	[1728357783]	2000000 OPS in 1.450119 seconds, throughput 1379197.155544
+18771	[1728357783]	2000000 OPS in 1.455765 seconds, throughput 1373848.114222
+18771	[1728357784]	2000000 OPS in 1.450048 seconds, throughput 1379264.686410
+18771	[1728357784]	2000000 OPS in 1.459181 seconds, throughput 1370631.881857
+18771	[1728357785]	2000000 OPS in 1.450736 seconds, throughput 1378610.581112
+18771	[1728357785]	2000000 OPS in 1.451274 seconds, throughput 1378099.518079
+18771	[1728357785]	2000000 OPS in 1.448384 seconds, throughput 1380849.277540
+18771	[1728357786]	2000000 OPS in 1.461031 seconds, throughput 1368896.347853
+18771	[1728357786]	2000000 OPS in 1.455695 seconds, throughput 1373914.178451
+18771	[1728357786]	2000000 OPS in 1.454302 seconds, throughput 1375230.179151
+18771	[1728357787]	2000000 OPS in 1.449711 seconds, throughput 1379585.310452
+18771	[1728357787]	2000000 OPS in 1.456946 seconds, throughput 1372734.473344
+18771	[1728357787]	2000000 OPS in 1.445774 seconds, throughput 1383342.071444
+18771	[1728357788]	2000000 OPS in 1.450867 seconds, throughput 1378486.105205
+18771	[1728357788]	2000000 OPS in 1.449980 seconds, throughput 1379329.370060
+18771	[1728357789]	2000000 OPS in 1.461192 seconds, throughput 1368745.517358
+18771	[1728357789]	2000000 OPS in 1.451695 seconds, throughput 1377699.861197
+18771	[1728357789]	2000000 OPS in 1.456320 seconds, throughput 1373324.544056
+18771	[1728357790]	2000000 OPS in 1.449031 seconds, throughput 1380232.721039
+18771	[1728357790]	2000000 OPS in 1.454975 seconds, throughput 1374594.065190
+18771	[1728357790]	2000000 OPS in 1.445691 seconds, throughput 1383421.491868
+18771	[1728357791]	2000000 OPS in 1.452344 seconds, throughput 1377084.216962
+18771	[1728357791]	2000000 OPS in 1.446572 seconds, throughput 1382578.952171
+18771	[1728357792]	2000000 OPS in 1.460757 seconds, throughput 1369153.117185
+18771	[1728357792]	2000000 OPS in 1.449798 seconds, throughput 1379502.523800
+18771	[1728357792]	2000000 OPS in 1.452428 seconds, throughput 1377004.574409
+18771	[1728357793]	2000000 OPS in 1.448068 seconds, throughput 1381150.608949
+18771	[1728357793]	2000000 OPS in 1.457297 seconds, throughput 1372403.840809
+18771	[1728357793]	2000000 OPS in 1.448137 seconds, throughput 1381084.800678
+18771	[1728357794]	2000000 OPS in 1.456087 seconds, throughput 1373544.300581
+18771	[1728357794]	2000000 OPS in 1.449623 seconds, throughput 1379669.058783
+18771	[1728357794]	2000000 OPS in 1.461219 seconds, throughput 1368720.226058
+18771	[1728357795]	2000000 OPS in 1.453628 seconds, throughput 1375867.828633
+18771	[1728357795]	2000000 OPS in 1.451796 seconds, throughput 1377604.015991
+18771	[1728357795]	2000000 OPS in 1.448153 seconds, throughput 1381069.541685
+18771	[1728357796]	2000000 OPS in 1.462424 seconds, throughput 1367592.435573
+18771	[1728357796]	2000000 OPS in 1.447555 seconds, throughput 1381640.075852
+18771	[1728357797]	2000000 OPS in 1.451343 seconds, throughput 1378034.000233
+18771	[1728357797]	2000000 OPS in 1.451121 seconds, throughput 1378244.819005
+18771	[1728357797]	2000000 OPS in 1.460931 seconds, throughput 1368990.048127
+18771	[1728357798]	2000000 OPS in 1.448496 seconds, throughput 1380742.508091
+18771	[1728357798]	2000000 OPS in 1.450871 seconds, throughput 1378482.304767
+18771	[1728357798]	2000000 OPS in 1.446188 seconds, throughput 1382946.062338
+18771	[1728357799]	2000000 OPS in 1.464928 seconds, throughput 1365254.811158
+18771	[1728357799]	2000000 OPS in 1.451364 seconds, throughput 1378014.061255
+18771	[1728357799]	2000000 OPS in 1.453399 seconds, throughput 1376084.612691
+18771	[1728357800]	2000000 OPS in 1.450488 seconds, throughput 1378846.291731
+18771	[1728357800]	2000000 OPS in 1.460732 seconds, throughput 1369176.549839
+18771	[1728357800]	2000000 OPS in 1.449271 seconds, throughput 1380004.153813
+18771	[1728357801]	2000000 OPS in 1.449234 seconds, throughput 1380039.386324
+18771	[1728357801]	2000000 OPS in 1.450853 seconds, throughput 1378499.406901
+18771	[1728357802]	2000000 OPS in 1.460777 seconds, throughput 1369134.371639
+18771	[1728357802]	2000000 OPS in 1.453441 seconds, throughput 1376044.848054
+18771	[1728357802]	2000000 OPS in 1.452718 seconds, throughput 1376729.688763
+18771	[1728357803]	2000000 OPS in 1.451805 seconds, throughput 1377595.475976
+18771	[1728357803]	2000000 OPS in 1.458610 seconds, throughput 1371168.441187
+18771	[1728357803]	2000000 OPS in 1.450909 seconds, throughput 1378446.201657
+18771	[1728357804]	2000000 OPS in 1.452229 seconds, throughput 1377193.266351
+18771	[1728357804]	2000000 OPS in 1.452484 seconds, throughput 1376951.484491
+18771	[1728357805]	2000000 OPS in 1.458811 seconds, throughput 1370979.516881
+18771	[1728357805]	2000000 OPS in 1.450185 seconds, throughput 1379134.386302
+18771	[1728357805]	2000000 OPS in 1.453935 seconds, throughput 1375577.312603
+18771	[1728357806]	2000000 OPS in 1.453483 seconds, throughput 1376005.085715
+18771	[1728357806]	2000000 OPS in 1.458649 seconds, throughput 1371131.780161
+18771	[1728357806]	2000000 OPS in 1.452297 seconds, throughput 1377128.782887
+18771	[1728357807]	2000000 OPS in 1.452796 seconds, throughput 1376655.772731
+18771	[1728357807]	2000000 OPS in 1.447245 seconds, throughput 1381936.023272
+18771	[1728357808]	2000000 OPS in 1.460140 seconds, throughput 1369731.669566
+18771	[1728357808]	2000000 OPS in 1.454321 seconds, throughput 1375212.212435
+18771	[1728357808]	2000000 OPS in 1.450368 seconds, throughput 1378960.374195
+18771	[1728357809]	2000000 OPS in 1.449973 seconds, throughput 1379336.029016
+18771	[1728357809]	2000000 OPS in 1.457841 seconds, throughput 1371891.722074
+18771	[1728357809]	2000000 OPS in 1.451241 seconds, throughput 1378130.854903
+18771	[1728357810]	2000000 OPS in 1.452525 seconds, throughput 1376912.617683
+18771	[1728357810]	2000000 OPS in 1.449110 seconds, throughput 1380157.475968
+18771	[1728357811]	2000000 OPS in 1.461101 seconds, throughput 1368830.765293
+18771	[1728357811]	2000000 OPS in 1.453227 seconds, throughput 1376247.482327
+18771	[1728357811]	2000000 OPS in 1.453461 seconds, throughput 1376025.913320
+18771	[1728357811]	2000000 OPS in 1.448407 seconds, throughput 1380827.350323
+18771	[1728357812]	2000000 OPS in 1.459537 seconds, throughput 1370297.566968
+18771	[1728357812]	2000000 OPS in 1.453218 seconds, throughput 1376256.005637
+18771	[1728357812]	2000000 OPS in 1.452196 seconds, throughput 1377224.561974
+18771	[1728357813]	2000000 OPS in 1.448858 seconds, throughput 1380397.526880
+18771	[1728357813]	2000000 OPS in 1.458049 seconds, throughput 1371696.012960
+18771	[1728357814]	2000000 OPS in 1.454157 seconds, throughput 1375367.309032
+18771	[1728357814]	2000000 OPS in 1.452450 seconds, throughput 1376983.717168
+18771	[1728357814]	2000000 OPS in 1.445638 seconds, throughput 1383472.210885
+18771	[1728357815]	2000000 OPS in 1.458098 seconds, throughput 1371649.916535
+18771	[1728357815]	2000000 OPS in 1.454123 seconds, throughput 1375399.467583
+18771	[1728357815]	2000000 OPS in 1.450708 seconds, throughput 1378637.189565
+18771	[1728357816]	2000000 OPS in 1.446183 seconds, throughput 1382950.843704
+18771	[1728357816]	2000000 OPS in 1.458698 seconds, throughput 1371085.721650
+18771	[1728357816]	2000000 OPS in 1.456413 seconds, throughput 1373236.849712
+18771	[1728357817]	2000000 OPS in 1.453077 seconds, throughput 1376389.551276
+18771	[1728357817]	2000000 OPS in 1.448360 seconds, throughput 1380872.158856
+18771	[1728357818]	2000000 OPS in 1.459980 seconds, throughput 1369881.779202
+18771	[1728357818]	2000000 OPS in 1.449650 seconds, throughput 1379643.362191
+18771	[1728357818]	2000000 OPS in 1.455142 seconds, throughput 1374436.309309
+18771	[1728357819]	2000000 OPS in 1.450837 seconds, throughput 1378514.609153
+18771	[1728357819]	2000000 OPS in 1.462924 seconds, throughput 1367125.018114
+18771	[1728357819]	2000000 OPS in 1.451559 seconds, throughput 1377828.941159
+18771	[1728357820]	2000000 OPS in 1.454453 seconds, throughput 1375087.403993
+18771	[1728357820]	2000000 OPS in 1.447046 seconds, throughput 1382126.069247
+18771	[1728357821]	2000000 OPS in 1.464664 seconds, throughput 1365500.893038
+18771	[1728357821]	2000000 OPS in 1.446901 seconds, throughput 1382264.577881
+18771	[1728357821]	2000000 OPS in 1.455044 seconds, throughput 1374528.880226
+18771	[1728357822]	2000000 OPS in 1.447314 seconds, throughput 1381870.140135
+18771	[1728357822]	2000000 OPS in 1.460358 seconds, throughput 1369527.198125
+18771	[1728357822]	2000000 OPS in 1.452131 seconds, throughput 1377286.209027
+18771	[1728357823]	2000000 OPS in 1.452379 seconds, throughput 1377051.031446
+18771	[1728357823]	2000000 OPS in 1.449328 seconds, throughput 1379949.880220
+18771	[1728357824]	2000000 OPS in 1.458366 seconds, throughput 1371397.852117
+18771	[1728357824]	2000000 OPS in 1.450064 seconds, throughput 1379249.467610
+18771	[1728357824]	2000000 OPS in 1.454408 seconds, throughput 1375129.949780
+18771	[1728357824]	2000000 OPS in 1.451677 seconds, throughput 1377716.943921
+18771	[1728357825]	2000000 OPS in 1.459181 seconds, throughput 1370631.881857
+18771	[1728357825]	2000000 OPS in 1.455814 seconds, throughput 1373801.873041
+18771	[1728357826]	2000000 OPS in 1.455736 seconds, throughput 1373875.482917
+18771	[1728357826]	2000000 OPS in 1.449850 seconds, throughput 1379453.046867
+18771	[1728357827]	2000000 OPS in 1.459069 seconds, throughput 1370737.093311
+18771	[1728357827]	2000000 OPS in 1.451904 seconds, throughput 1377501.542802
+18771	[1728357827]	2000000 OPS in 1.457143 seconds, throughput 1372548.885044
+18771	[1728357827]	2000000 OPS in 1.448412 seconds, throughput 1380822.583630
+18771	[1728357828]	2000000 OPS in 1.450590 seconds, throughput 1378749.336477
+18771	[1728357828]	2000000 OPS in 1.461970 seconds, throughput 1368017.127574
+18771	[1728357828]	2000000 OPS in 1.453562 seconds, throughput 1375930.300875
+18771	[1728357829]	2000000 OPS in 1.450932 seconds, throughput 1378424.350693
+18771	[1728357829]	2000000 OPS in 1.452320 seconds, throughput 1377106.973670
+18771	[1728357830]	2000000 OPS in 1.457641 seconds, throughput 1372079.956587
+18771	[1728357830]	2000000 OPS in 1.454072 seconds, throughput 1375447.708229
+18771	[1728357830]	2000000 OPS in 1.448346 seconds, throughput 1380885.506640
+18771	[1728357831]	2000000 OPS in 1.447606 seconds, throughput 1381591.399870
+18771	[1728357831]	2000000 OPS in 1.459107 seconds, throughput 1370701.394757
+18771	[1728357831]	2000000 OPS in 1.452996 seconds, throughput 1376466.280706
+18771	[1728357832]	2000000 OPS in 1.446738 seconds, throughput 1382420.313837
+18771	[1728357832]	2000000 OPS in 1.450352 seconds, throughput 1378975.586616
+18771	[1728357832]	2000000 OPS in 1.464089 seconds, throughput 1366037.173970
+18771	[1728357833]	2000000 OPS in 1.452123 seconds, throughput 1377293.796738
+18771	[1728357833]	2000000 OPS in 1.449890 seconds, throughput 1379414.990103
+18771	[1728357834]	2000000 OPS in 1.448495 seconds, throughput 1380743.461317
+18771	[1728357834]	2000000 OPS in 1.459447 seconds, throughput 1370382.069373
+18771	[1728357834]	2000000 OPS in 1.454997 seconds, throughput 1374573.280907
+18771	[1728357835]	2000000 OPS in 1.449828 seconds, throughput 1379473.978982
+18771	[1728357835]	2000000 OPS in 1.450503 seconds, throughput 1378832.032750
+18771	[1728357835]	2000000 OPS in 1.460700 seconds, throughput 1369206.544807
+18771	[1728357836]	2000000 OPS in 1.453682 seconds, throughput 1375816.719200
+18771	[1728357836]	2000000 OPS in 1.447505 seconds, throughput 1381687.800733
+18771	[1728357837]	2000000 OPS in 1.449821 seconds, throughput 1379480.639334
+18771	[1728357837]	2000000 OPS in 1.457084 seconds, throughput 1372604.462063
+18771	[1728357837]	2000000 OPS in 1.454074 seconds, throughput 1375445.816375
+18771	[1728357837]	2000000 OPS in 1.448135 seconds, throughput 1381086.708076
+18771	[1728357838]	2000000 OPS in 1.452217 seconds, throughput 1377204.646413
+18771	[1728357838]	2000000 OPS in 1.458422 seconds, throughput 1371345.193641
+18771	[1728357839]	2000000 OPS in 1.454635 seconds, throughput 1374915.356773
+18771	[1728357839]	2000000 OPS in 1.449764 seconds, throughput 1379534.876021
+18771	[1728357840]	2000000 OPS in 1.451844 seconds, throughput 1377558.470469
+18771	[1728357840]	2000000 OPS in 1.458524 seconds, throughput 1371249.290378
+18771	[1728357840]	2000000 OPS in 1.453907 seconds, throughput 1375603.804095
+18771	[1728357840]	2000000 OPS in 1.449435 seconds, throughput 1379848.009742
+18771	[1728357841]	2000000 OPS in 1.448951 seconds, throughput 1380308.926941
+18771	[1728357841]	2000000 OPS in 1.458198 seconds, throughput 1371555.851812
+18771	[1728357842]	2000000 OPS in 1.449230 seconds, throughput 1380043.195352
+18771	[1728357842]	2000000 OPS in 1.449140 seconds, throughput 1380128.904040
+18771	[1728357843]	2000000 OPS in 1.450558 seconds, throughput 1378779.752344
+18771	[1728357843]	2000000 OPS in 1.463116 seconds, throughput 1366945.614702
+18771	[1728357843]	2000000 OPS in 1.454158 seconds, throughput 1375366.363215
+18771	[1728357843]	2000000 OPS in 1.449414 seconds, throughput 1379868.001827
+18771	[1728357844]	2000000 OPS in 1.452222 seconds, throughput 1377199.904698
+18771	[1728357844]	2000000 OPS in 1.460209 seconds, throughput 1369666.944937
+18771	[1728357844]	2000000 OPS in 1.458566 seconds, throughput 1371209.804699
+18771	[1728357845]	2000000 OPS in 1.447557 seconds, throughput 1381638.166925
+18771	[1728357845]	2000000 OPS in 1.452023 seconds, throughput 1377388.650180
+18771	[1728357846]	2000000 OPS in 1.458430 seconds, throughput 1371337.671332
+18771	[1728357846]	2000000 OPS in 1.455761 seconds, throughput 1373851.889149
+18771	[1728357846]	2000000 OPS in 1.450535 seconds, throughput 1378801.614577
+18771	[1728357847]	2000000 OPS in 1.451850 seconds, throughput 1377552.777491
+18771	[1728357847]	2000000 OPS in 1.458140 seconds, throughput 1371610.407780
+18771	[1728357847]	2000000 OPS in 1.459126 seconds, throughput 1370683.546178
+18771	[1728357848]	2000000 OPS in 1.451031 seconds, throughput 1378330.304452
+18771	[1728357848]	2000000 OPS in 1.452455 seconds, throughput 1376978.976973
+18771	[1728357848]	2000000 OPS in 1.457861 seconds, throughput 1371872.901463
+18771	[1728357849]	2000000 OPS in 1.454884 seconds, throughput 1374680.043220
+18771	[1728357849]	2000000 OPS in 1.449831 seconds, throughput 1379471.124566
+18771	[1728357850]	2000000 OPS in 1.446803 seconds, throughput 1382358.206335
+18771	[1728357850]	2000000 OPS in 1.456357 seconds, throughput 1373289.653567
+18771	[1728357850]	2000000 OPS in 1.456050 seconds, throughput 1373579.204011
+18771	[1728357851]	2000000 OPS in 1.450731 seconds, throughput 1378615.332546
+18771	[1728357851]	2000000 OPS in 1.451503 seconds, throughput 1377882.098762
+18771	[1728357851]	2000000 OPS in 1.461281 seconds, throughput 1368662.153275
+18771	[1728357852]	2000000 OPS in 1.453751 seconds, throughput 1375751.418228
+18771	[1728357852]	2000000 OPS in 1.452683 seconds, throughput 1376762.858793
+18771	[1728357853]	2000000 OPS in 1.454274 seconds, throughput 1375256.657274
+18771	[1728357853]	2000000 OPS in 1.459374 seconds, throughput 1370450.617868
+18771	[1728357853]	2000000 OPS in 1.454653 seconds, throughput 1374898.343454
+18771	[1728357853]	2000000 OPS in 1.449045 seconds, throughput 1380219.385871
+18771	[1728357854]	2000000 OPS in 1.451796 seconds, throughput 1377604.015991
+18771	[1728357854]	2000000 OPS in 1.461914 seconds, throughput 1368069.530766
+18771	[1728357855]	2000000 OPS in 1.453670 seconds, throughput 1375828.076524
+18771	[1728357855]	2000000 OPS in 1.448694 seconds, throughput 1380553.795349
+18771	[1728357856]	2000000 OPS in 1.453055 seconds, throughput 1376410.390522
+18771	[1728357856]	2000000 OPS in 1.463709 seconds, throughput 1366391.816953
+18771	[1728357856]	2000000 OPS in 1.452746 seconds, throughput 1376703.153889
+18771	[1728357856]	2000000 OPS in 1.449527 seconds, throughput 1379760.432196
+18771	[1728357857]	2000000 OPS in 1.445505 seconds, throughput 1383599.503288
+18771	[1728357857]	2000000 OPS in 1.461113 seconds, throughput 1368819.523199
+18771	[1728357858]	2000000 OPS in 1.455540 seconds, throughput 1374060.486143
+18771	[1728357858]	2000000 OPS in 1.446350 seconds, throughput 1382791.163964
+18771	[1728357859]	2000000 OPS in 1.449357 seconds, throughput 1379922.268979
+18771	[1728357859]	2000000 OPS in 1.457970 seconds, throughput 1371770.338210
+18771	[1728357859]	2000000 OPS in 1.457620 seconds, throughput 1372099.724208
+18771	[1728357859]	2000000 OPS in 1.447048 seconds, throughput 1382124.158977
+18771	[1728357860]	2000000 OPS in 1.451447 seconds, throughput 1377935.260468
+18771	[1728357860]	2000000 OPS in 1.459695 seconds, throughput 1370149.243506
+18771	[1728357860]	2000000 OPS in 1.455351 seconds, throughput 1374238.929303
+18771	[1728357861]	2000000 OPS in 1.451084 seconds, throughput 1378279.961739
+18771	[1728357861]	2000000 OPS in 1.448373 seconds, throughput 1380859.764715
+18771	[1728357862]	2000000 OPS in 1.459203 seconds, throughput 1370611.217219
+18771	[1728357862]	2000000 OPS in 1.452094 seconds, throughput 1377321.302891
+18771	[1728357862]	2000000 OPS in 1.449689 seconds, throughput 1379606.246581
+18771	[1728357863]	2000000 OPS in 1.450329 seconds, throughput 1378997.455060
+18771	[1728357863]	2000000 OPS in 1.459513 seconds, throughput 1370320.099924
+18771	[1728357863]	2000000 OPS in 1.452196 seconds, throughput 1377224.561974
+18771	[1728357864]	2000000 OPS in 1.452235 seconds, throughput 1377187.576391
+18771	[1728357864]	2000000 OPS in 1.449893 seconds, throughput 1379412.135930
+18771	[1728357865]	2000000 OPS in 1.458530 seconds, throughput 1371243.649428
+18771	[1728357865]	2000000 OPS in 1.451676 seconds, throughput 1377717.892973
+18771	[1728357865]	2000000 OPS in 1.448424 seconds, throughput 1380811.143698
+18771	[1728357866]	2000000 OPS in 1.448540 seconds, throughput 1380700.567468
+18771	[1728357866]	2000000 OPS in 1.458182 seconds, throughput 1371570.901300
+18771	[1728357866]	2000000 OPS in 1.455816 seconds, throughput 1373799.985712
+18771	[1728357866]	2000000 OPS in 1.449102 seconds, throughput 1380165.095349
+18771	[1728357867]	2000000 OPS in 1.452891 seconds, throughput 1376565.757514
+18771	[1728357867]	2000000 OPS in 1.461843 seconds, throughput 1368135.976298
+18771	[1728357868]	2000000 OPS in 1.454814 seconds, throughput 1374746.187485
+18771	[1728357868]	2000000 OPS in 1.450008 seconds, throughput 1379302.734881
+18771	[1728357869]	2000000 OPS in 1.452784 seconds, throughput 1376667.143911
+18771	[1728357869]	2000000 OPS in 1.458312 seconds, throughput 1371448.633763
+18771	[1728357869]	2000000 OPS in 1.450983 seconds, throughput 1378375.901027
+18771	[1728357869]	2000000 OPS in 1.449206 seconds, throughput 1380066.049961
+18771	[1728357870]	2000000 OPS in 1.449413 seconds, throughput 1379868.953845
+18771	[1728357870]	2000000 OPS in 1.457812 seconds, throughput 1371919.012877
+18771	[1728357871]	2000000 OPS in 1.452832 seconds, throughput 1376621.660316
+18771	[1728357871]	2000000 OPS in 1.449222 seconds, throughput 1380050.813471
+18771	[1728357872]	2000000 OPS in 1.451024 seconds, throughput 1378336.953765
+18771	[1728357872]	2000000 OPS in 1.459447 seconds, throughput 1370382.069373
+18771	[1728357872]	2000000 OPS in 1.454059 seconds, throughput 1375460.005406
+18771	[1728357872]	2000000 OPS in 1.447439 seconds, throughput 1381750.802624
+18771	[1728357873]	2000000 OPS in 1.450140 seconds, throughput 1379177.182893
+18771	[1728357873]	2000000 OPS in 1.458859 seconds, throughput 1370934.408329
+18771	[1728357874]	2000000 OPS in 1.455913 seconds, throughput 1373708.456481
+18771	[1728357874]	2000000 OPS in 1.444750 seconds, throughput 1384322.547153
+18771	[1728357874]	2000000 OPS in 1.448949 seconds, throughput 1380310.832196
+18771	[1728357875]	2000000 OPS in 1.457832 seconds, throughput 1371900.191517
+18771	[1728357875]	2000000 OPS in 1.453802 seconds, throughput 1375703.156276
+18771	[1728357875]	2000000 OPS in 1.446865 seconds, throughput 1382298.970533
+18771	[1728357876]	2000000 OPS in 1.449953 seconds, throughput 1379355.054957
+18771	[1728357876]	2000000 OPS in 1.460904 seconds, throughput 1369015.349400
+18771	[1728357876]	2000000 OPS in 1.450874 seconds, throughput 1378479.454453
+18771	[1728357877]	2000000 OPS in 1.449530 seconds, throughput 1379757.576594
+18771	[1728357877]	2000000 OPS in 1.453539 seconds, throughput 1375952.072837
+18771	[1728357878]	2000000 OPS in 1.456936 seconds, throughput 1372743.895408
+18771	[1728357878]	2000000 OPS in 1.450211 seconds, throughput 1379109.660594
+18771	[1728357878]	2000000 OPS in 1.449577 seconds, throughput 1379712.840367
+18771	[1728357879]	2000000 OPS in 1.449923 seconds, throughput 1379383.594853
+18771	[1728357879]	2000000 OPS in 1.459167 seconds, throughput 1370645.032405
+18771	[1728357879]	2000000 OPS in 1.453753 seconds, throughput 1375749.525538
+18771	[1728357880]	2000000 OPS in 1.449329 seconds, throughput 1379948.928090
+18771	[1728357880]	2000000 OPS in 1.450893 seconds, throughput 1378461.402736
+18771	[1728357881]	2000000 OPS in 1.462649 seconds, throughput 1367382.058170
+18771	[1728357881]	2000000 OPS in 1.454784 seconds, throughput 1374774.536976
+18771	[1728357881]	2000000 OPS in 1.448484 seconds, throughput 1380753.946885
+18771	[1728357882]	2000000 OPS in 1.449864 seconds, throughput 1379439.726761
+18771	[1728357882]	2000000 OPS in 1.459316 seconds, throughput 1370505.085944
+18771	[1728357882]	2000000 OPS in 1.455174 seconds, throughput 1374406.084771
+18771	[1728357882]	2000000 OPS in 1.449456 seconds, throughput 1379828.018236
+18771	[1728357883]	2000000 OPS in 1.452515 seconds, throughput 1376922.097190
+18771	[1728357884]	2000000 OPS in 1.458591 seconds, throughput 1371186.302397
+18771	[1728357884]	2000000 OPS in 1.452550 seconds, throughput 1376888.919486
+18771	[1728357884]	2000000 OPS in 1.446717 seconds, throughput 1382440.380531
+18771	[1728357885]	2000000 OPS in 1.450554 seconds, throughput 1378783.554421
+18771	[1728357885]	2000000 OPS in 1.461128 seconds, throughput 1368805.470842
+18771	[1728357885]	2000000 OPS in 1.456826 seconds, throughput 1372847.546653
+18771	[1728357885]	2000000 OPS in 1.447748 seconds, throughput 1381455.888732
+18771	[1728357886]	2000000 OPS in 1.454790 seconds, throughput 1374768.866984
+18771	[1728357886]	2000000 OPS in 1.460900 seconds, throughput 1369019.097816
+18771	[1728357887]	2000000 OPS in 1.454612 seconds, throughput 1374937.096628
+18771	[1728357887]	2000000 OPS in 1.451679 seconds, throughput 1377715.045819
+18771	[1728357888]	2000000 OPS in 1.450638 seconds, throughput 1378703.715193
+18771	[1728357888]	2000000 OPS in 1.460075 seconds, throughput 1369792.647638
+18771	[1728357888]	2000000 OPS in 1.453846 seconds, throughput 1375661.521234
+18771	[1728357888]	2000000 OPS in 1.447774 seconds, throughput 1381431.079713
+18771	[1728357889]	2000000 OPS in 1.449773 seconds, throughput 1379526.312050
+18771	[1728357889]	2000000 OPS in 1.459366 seconds, throughput 1370458.130448
+18771	[1728357890]	2000000 OPS in 1.453273 seconds, throughput 1376203.920392
+18771	[1728357890]	2000000 OPS in 1.448672 seconds, throughput 1380574.760884
+18771	[1728357890]	2000000 OPS in 1.450442 seconds, throughput 1378890.021111
+18771	[1728357891]	2000000 OPS in 1.459988 seconds, throughput 1369874.272939
+18771	[1728357891]	2000000 OPS in 1.450713 seconds, throughput 1378632.437980
+18771	[1728357891]	2000000 OPS in 1.449769 seconds, throughput 1379530.118246
+18771	[1728357892]	2000000 OPS in 1.451066 seconds, throughput 1378297.058852
+18771	[1728357892]	2000000 OPS in 1.458345 seconds, throughput 1371417.600088
+18771	[1728357892]	2000000 OPS in 1.450929 seconds, throughput 1378427.200780
+18771	[1728357893]	2000000 OPS in 1.450046 seconds, throughput 1379266.588784
+18771	[1728357893]	2000000 OPS in 1.457686 seconds, throughput 1372037.599318
+18771	[1728357894]	2000000 OPS in 1.459412 seconds, throughput 1370414.934234
+18771	[1728357894]	2000000 OPS in 1.455823 seconds, throughput 1373793.380102
+18771	[1728357894]	2000000 OPS in 1.450744 seconds, throughput 1378602.978885
+18771	[1728357895]	2000000 OPS in 1.452616 seconds, throughput 1376826.360167
+18771	[1728357895]	2000000 OPS in 1.462101 seconds, throughput 1367894.557216
+18771	[1728357895]	2000000 OPS in 1.455611 seconds, throughput 1373993.463913
+18771	[1728357895]	2000000 OPS in 1.448828 seconds, throughput 1380426.109932
+18771	[1728357896]	2000000 OPS in 1.449139 seconds, throughput 1380129.856418
+18771	[1728357897]	2000000 OPS in 1.459396 seconds, throughput 1370429.958695
+18771	[1728357897]	2000000 OPS in 1.451122 seconds, throughput 1378243.869227
+18771	[1728357897]	2000000 OPS in 1.448431 seconds, throughput 1380804.470493
+18771	[1728357898]	2000000 OPS in 1.450623 seconds, throughput 1378717.971520
+18771	[1728357898]	2000000 OPS in 1.457323 seconds, throughput 1372379.355846
+18771	[1728357898]	2000000 OPS in 1.453696 seconds, throughput 1375803.469226
+18771	[1728357898]	2000000 OPS in 1.446804 seconds, throughput 1382357.250878
+18771	[1728357899]	2000000 OPS in 1.448597 seconds, throughput 1380646.239085
+18771	[1728357900]	2000000 OPS in 1.461201 seconds, throughput 1368737.086821
+18771	[1728357900]	2000000 OPS in 1.453709 seconds, throughput 1375791.165907
+18771	[1728357900]	2000000 OPS in 1.447051 seconds, throughput 1382121.293583
+18771	[1728357901]	2000000 OPS in 1.450341 seconds, throughput 1378986.045351
+18771	[1728357901]	2000000 OPS in 1.462924 seconds, throughput 1367125.018114
+18771	[1728357901]	2000000 OPS in 1.455013 seconds, throughput 1374558.165460
+18771	[1728357901]	2000000 OPS in 1.453977 seconds, throughput 1375537.577279
+18771	[1728357902]	2000000 OPS in 1.454024 seconds, throughput 1375493.114281
+18771	[1728357902]	2000000 OPS in 1.461489 seconds, throughput 1368467.364448
+18771	[1728357903]	2000000 OPS in 1.453230 seconds, throughput 1376244.641247
+18771	[1728357903]	2000000 OPS in 1.451547 seconds, throughput 1377840.331729
+18771	[1728357903]	2000000 OPS in 1.448573 seconds, throughput 1380669.113673
+18771	[1728357904]	2000000 OPS in 1.457965 seconds, throughput 1371775.042611
+18771	[1728357904]	2000000 OPS in 1.452142 seconds, throughput 1377275.776060
+18771	[1728357904]	2000000 OPS in 1.449331 seconds, throughput 1379947.023834
+18771	[1728357905]	2000000 OPS in 1.452551 seconds, throughput 1376887.971576
+18771	[1728357905]	2000000 OPS in 1.459745 seconds, throughput 1370102.312390
+18771	[1728357906]	2000000 OPS in 1.451004 seconds, throughput 1378355.952155
+18771	[1728357906]	2000000 OPS in 1.450298 seconds, throughput 1379026.931017
+18771	[1728357906]	2000000 OPS in 1.452804 seconds, throughput 1376648.192048
+18771	[1728357907]	2000000 OPS in 1.458152 seconds, throughput 1371599.119982
+18771	[1728357907]	2000000 OPS in 1.450721 seconds, throughput 1378624.835513
+18771	[1728357907]	2000000 OPS in 1.447307 seconds, throughput 1381876.823646
+18771	[1728357908]	2000000 OPS in 1.449928 seconds, throughput 1379378.838122
+18771	[1728357908]	2000000 OPS in 1.461750 seconds, throughput 1368223.020352
+18771	[1728357908]	2000000 OPS in 1.454707 seconds, throughput 1374847.306021
+18771	[1728357909]	2000000 OPS in 1.451209 seconds, throughput 1378161.243487
+18771	[1728357909]	2000000 OPS in 1.450970 seconds, throughput 1378388.250619
+18771	[1728357910]	2000000 OPS in 1.460291 seconds, throughput 1369590.033767
+18771	[1728357910]	2000000 OPS in 1.456865 seconds, throughput 1372810.795784
+18771	[1728357910]	2000000 OPS in 1.450602 seconds, throughput 1378737.930873
+18771	[1728357911]	2000000 OPS in 1.450638 seconds, throughput 1378703.715193
+18771	[1728357911]	2000000 OPS in 1.454032 seconds, throughput 1375485.546398
+18771	[1728357911]	2000000 OPS in 1.451957 seconds, throughput 1377451.260609
+18771	[1728357911]	2000000 OPS in 1.451419 seconds, throughput 1377961.842859
+18771	[1728357912]	2000000 OPS in 1.449053 seconds, throughput 1380211.765891
+18771	[1728357913]	2000000 OPS in 1.458940 seconds, throughput 1370858.294378
+18771	[1728357913]	2000000 OPS in 1.453889 seconds, throughput 1375620.834878
+18771	[1728357913]	2000000 OPS in 1.451448 seconds, throughput 1377934.311116
+18771	[1728357914]	2000000 OPS in 1.449700 seconds, throughput 1379595.778437
+18771	[1728357914]	2000000 OPS in 1.459688 seconds, throughput 1370155.814119
+18771	[1728357914]	2000000 OPS in 1.449320 seconds, throughput 1379957.497309
+18771	[1728357914]	2000000 OPS in 1.447583 seconds, throughput 1381613.351359
+18771	[1728357915]	2000000 OPS in 1.450072 seconds, throughput 1379241.858335
+18771	[1728357916]	2000000 OPS in 1.458907 seconds, throughput 1370889.302745
+18771	[1728357916]	2000000 OPS in 1.454886 seconds, throughput 1374678.153477
+18771	[1728357916]	2000000 OPS in 1.446130 seconds, throughput 1383001.528217
+18771	[1728357917]	2000000 OPS in 1.451901 seconds, throughput 1377504.389073
+18771	[1728357917]	2000000 OPS in 1.463000 seconds, throughput 1367053.998633
+18771	[1728357917]	2000000 OPS in 1.459862 seconds, throughput 1369992.506141
+18771	[1728357917]	2000000 OPS in 1.451434 seconds, throughput 1377947.602164
+18771	[1728357918]	2000000 OPS in 1.449366 seconds, throughput 1379913.700197
+18771	[1728357919]	2000000 OPS in 1.457937 seconds, throughput 1371801.387851
+18771	[1728357919]	2000000 OPS in 1.451145 seconds, throughput 1378222.024677
+18771	[1728357919]	2000000 OPS in 1.444332 seconds, throughput 1384723.179989
+18771	[1728357919]	2000000 OPS in 1.447904 seconds, throughput 1381307.047981
+18771	[1728357920]	2000000 OPS in 1.454055 seconds, throughput 1375463.789196
+18771	[1728357920]	2000000 OPS in 1.450809 seconds, throughput 1378541.213902
+18771	[1728357920]	2000000 OPS in 1.450225 seconds, throughput 1379096.347119
+18771	[1728357921]	2000000 OPS in 1.454085 seconds, throughput 1375435.411272
+18771	[1728357921]	2000000 OPS in 1.463345 seconds, throughput 1366731.700317
+18771	[1728357922]	2000000 OPS in 1.453074 seconds, throughput 1376392.392955
+18771	[1728357922]	2000000 OPS in 1.446616 seconds, throughput 1382536.899910
+18771	[1728357922]	2000000 OPS in 1.447993 seconds, throughput 1381222.146792
+18771	[1728357923]	2000000 OPS in 1.460913 seconds, throughput 1369006.915538
+18771	[1728357923]	2000000 OPS in 1.453025 seconds, throughput 1376438.808692
+18771	[1728357923]	2000000 OPS in 1.447499 seconds, throughput 1381693.527940
+18771	[1728357924]	2000000 OPS in 1.451567 seconds, throughput 1377821.347551
+18771	[1728357924]	2000000 OPS in 1.458997 seconds, throughput 1370804.737775
+18771	[1728357924]	2000000 OPS in 1.458505 seconds, throughput 1371267.153695
+18771	[1728357924]	2000000 OPS in 1.450846 seconds, throughput 1378506.057845
+18771	[1728357925]	2000000 OPS in 1.452814 seconds, throughput 1376638.716312
+18771	[1728357926]	2000000 OPS in 1.459725 seconds, throughput 1370121.084451
+18771	[1728357926]	2000000 OPS in 1.454947 seconds, throughput 1374620.518823
+18771	[1728357926]	2000000 OPS in 1.446855 seconds, throughput 1382308.524351
+18771	[1728357927]	2000000 OPS in 1.447613 seconds, throughput 1381584.719120
+18771	[1728357927]	2000000 OPS in 1.459736 seconds, throughput 1370110.759754
+18771	[1728357927]	2000000 OPS in 1.451993 seconds, throughput 1377417.108760
+18771	[1728357927]	2000000 OPS in 1.448575 seconds, throughput 1380667.207428
+18771	[1728357928]	2000000 OPS in 1.447610 seconds, throughput 1381587.582291
+18771	[1728357929]	2000000 OPS in 1.457457 seconds, throughput 1372253.177967
+18771	[1728357929]	2000000 OPS in 1.451487 seconds, throughput 1377897.287403
+18771	[1728357929]	2000000 OPS in 1.449056 seconds, throughput 1380208.908420
+18771	[1728357930]	2000000 OPS in 1.448235 seconds, throughput 1380991.344637
+18771	[1728357930]	2000000 OPS in 1.462737 seconds, throughput 1367299.794837
+18771	[1728357930]	2000000 OPS in 1.445417 seconds, throughput 1383683.739710
+18771	[1728357930]	2000000 OPS in 1.452016 seconds, throughput 1377395.290410
+18771	[1728357931]	2000000 OPS in 1.448737 seconds, throughput 1380512.819097
+18771	[1728357932]	2000000 OPS in 1.447692 seconds, throughput 1381509.326569
+18771	[1728357932]	2000000 OPS in 1.458795 seconds, throughput 1370994.553724
+18771	[1728357932]	2000000 OPS in 1.455010 seconds, throughput 1374560.999581
+18771	[1728357932]	2000000 OPS in 1.454624 seconds, throughput 1374925.754009
+18771	[1728357933]	2000000 OPS in 1.451056 seconds, throughput 1378306.557431
+18771	[1728357933]	2000000 OPS in 1.464408 seconds, throughput 1365739.602624
+18771	[1728357933]	2000000 OPS in 1.455632 seconds, throughput 1373973.641690
+18771	[1728357934]	2000000 OPS in 1.451195 seconds, throughput 1378174.538914
+18771	[1728357935]	2000000 OPS in 1.448626 seconds, throughput 1380618.599970
+18771	[1728357935]	2000000 OPS in 1.447846 seconds, throughput 1381362.382463
+18771	[1728357935]	2000000 OPS in 1.455534 seconds, throughput 1374066.150293
+18771	[1728357935]	2000000 OPS in 1.447495 seconds, throughput 1381697.346105
+18771	[1728357936]	2000000 OPS in 1.448156 seconds, throughput 1381066.680661
+18771	[1728357936]	2000000 OPS in 1.455330 seconds, throughput 1374258.759182
+18771	[1728357936]	2000000 OPS in 1.457098 seconds, throughput 1372591.273888
+18771	[1728357937]	2000000 OPS in 1.451278 seconds, throughput 1378095.719773
+18771	[1728357937]	2000000 OPS in 1.447562 seconds, throughput 1381633.394632
+18771	[1728357938]	2000000 OPS in 1.452363 seconds, throughput 1377066.201769
+18771	[1728357938]	2000000 OPS in 1.461398 seconds, throughput 1368552.577737
+18771	[1728357938]	2000000 OPS in 1.448732 seconds, throughput 1380517.583652
+18771	[1728357939]	2000000 OPS in 1.453356 seconds, throughput 1376125.326486
+18771	[1728357939]	2000000 OPS in 1.451528 seconds, throughput 1377858.367183
+18771	[1728357939]	2000000 OPS in 1.459705 seconds, throughput 1370139.857026
+18771	[1728357940]	2000000 OPS in 1.455506 seconds, throughput 1374092.583610
+18771	[1728357940]	2000000 OPS in 1.455349 seconds, throughput 1374240.817838
+18771	[1728357940]	2000000 OPS in 1.458034 seconds, throughput 1371710.124730
+18771	[1728357940]	2000000 OPS in 1.466849 seconds, throughput 1363466.859915
+18771	[1728357941]	2000000 OPS in 1.450459 seconds, throughput 1378873.859930
+18771	[1728357942]	2000000 OPS in 1.447533 seconds, throughput 1381661.074393
+18771	[1728357942]	2000000 OPS in 1.451517 seconds, throughput 1377868.808977
+18771	[1728357942]	2000000 OPS in 1.462108 seconds, throughput 1367888.008273
+18771	[1728357943]	2000000 OPS in 1.447825 seconds, throughput 1381382.418455
+18771	[1728357943]	2000000 OPS in 1.449272 seconds, throughput 1380003.201607
+18771	[1728357943]	2000000 OPS in 1.448200 seconds, throughput 1381024.720342
+18771	[1728357943]	2000000 OPS in 1.464060 seconds, throughput 1366064.232340
+18771	[1728357944]	2000000 OPS in 1.452866 seconds, throughput 1376589.444587
+18771	[1728357945]	2000000 OPS in 1.445280 seconds, throughput 1383814.900919
+18771	[1728357945]	2000000 OPS in 1.453082 seconds, throughput 1376384.815172
+18771	[1728357945]	2000000 OPS in 1.459182 seconds, throughput 1370630.942542
+18771	[1728357946]	2000000 OPS in 1.452412 seconds, throughput 1377019.743709
+18771	[1728357946]	2000000 OPS in 1.450453 seconds, throughput 1378879.563833
+18771	[1728357946]	2000000 OPS in 1.453653 seconds, throughput 1375844.166386
+18771	[1728357946]	2000000 OPS in 1.460539 seconds, throughput 1369357.476931
+18771	[1728357947]	2000000 OPS in 1.452254 seconds, throughput 1377169.558493
+18771	[1728357948]	2000000 OPS in 1.449818 seconds, throughput 1379483.493790
+18771	[1728357948]	2000000 OPS in 1.451856 seconds, throughput 1377547.084559
+18771	[1728357948]	2000000 OPS in 1.462337 seconds, throughput 1367673.798858
+18771	[1728357948]	2000000 OPS in 1.452983 seconds, throughput 1376478.596102
+18771	[1728357949]	2000000 OPS in 1.449360 seconds, throughput 1379919.412706
+18771	[1728357949]	2000000 OPS in 1.454835 seconds, throughput 1374726.343537
+18771	[1728357949]	2000000 OPS in 1.462448 seconds, throughput 1367569.992232
+18771	[1728357950]	2000000 OPS in 1.448262 seconds, throughput 1380965.598766
+18771	[1728357951]	2000000 OPS in 1.447698 seconds, throughput 1381503.600889
+18771	[1728357951]	2000000 OPS in 1.448491 seconds, throughput 1380747.274232
+18771	[1728357951]	2000000 OPS in 1.454550 seconds, throughput 1374995.703138
+18771	[1728357951]	2000000 OPS in 1.449419 seconds, throughput 1379863.241754
+18771	[1728357952]	2000000 OPS in 1.446921 seconds, throughput 1382245.471591
+18771	[1728357952]	2000000 OPS in 1.452113 seconds, throughput 1377303.281494
+18771	[1728357952]	2000000 OPS in 1.459714 seconds, throughput 1370131.409303
+18771	[1728357953]	2000000 OPS in 1.453078 seconds, throughput 1376388.604053
+18771	[1728357953]	2000000 OPS in 1.448247 seconds, throughput 1380979.901909
+18771	[1728357953]	2000000 OPS in 1.453492 seconds, throughput 1375996.565513
+18771	[1728357954]	2000000 OPS in 1.461148 seconds, throughput 1368786.734814
+18771	[1728357954]	2000000 OPS in 1.453264 seconds, throughput 1376212.443162
+18771	[1728357955]	2000000 OPS in 1.453422 seconds, throughput 1376062.836533
+18771	[1728357955]	2000000 OPS in 1.458766 seconds, throughput 1371021.808844
+18771	[1728357955]	2000000 OPS in 1.463305 seconds, throughput 1366769.060449
+18771	[1728357956]	2000000 OPS in 1.454835 seconds, throughput 1374726.343537
+18771	[1728357956]	2000000 OPS in 1.451393 seconds, throughput 1377986.527426
+18771	[1728357956]	2000000 OPS in 1.457739 seconds, throughput 1371987.715222
+18771	[1728357957]	2000000 OPS in 1.465255 seconds, throughput 1364950.128135
+18771	[1728357957]	2000000 OPS in 1.449255 seconds, throughput 1380019.389272
+18771	[1728357958]	2000000 OPS in 1.446975 seconds, throughput 1382193.887248
+18771	[1728357958]	2000000 OPS in 1.448252 seconds, throughput 1380975.134162
+18771	[1728357958]	2000000 OPS in 1.460495 seconds, throughput 1369398.731252
+18771	[1728357959]	2000000 OPS in 1.451218 seconds, throughput 1378152.696562
+18771	[1728357959]	2000000 OPS in 1.448356 seconds, throughput 1380875.972482
+18771	[1728357959]	2000000 OPS in 1.448171 seconds, throughput 1381052.375721
+18771	[1728357959]	2000000 OPS in 1.461775 seconds, throughput 1368199.620325
+18771	[1728357960]	2000000 OPS in 1.449851 seconds, throughput 1379452.095422
+18771	[1728357961]	2000000 OPS in 1.448517 seconds, throughput 1380722.490658
+18771	[1728357961]	2000000 OPS in 1.452627 seconds, throughput 1376815.934166
+18771	[1728357961]	2000000 OPS in 1.461815 seconds, throughput 1368162.181945
+18771	[1728357962]	2000000 OPS in 1.450017 seconds, throughput 1379294.173792
+18771	[1728357962]	2000000 OPS in 1.447626 seconds, throughput 1381572.312186
+18771	[1728357962]	2000000 OPS in 1.451248 seconds, throughput 1378124.207579
+18771	[1728357962]	2000000 OPS in 1.460412 seconds, throughput 1369476.558670
+18771	[1728357963]	2000000 OPS in 1.452902 seconds, throughput 1376555.335460
+18771	[1728357964]	2000000 OPS in 1.446327 seconds, throughput 1382813.153595
+18771	[1728357964]	2000000 OPS in 1.453630 seconds, throughput 1375865.935623
+18771	[1728357964]	2000000 OPS in 1.460044 seconds, throughput 1369821.731400
+18771	[1728357964]	2000000 OPS in 1.449568 seconds, throughput 1379721.406654
+18771	[1728357965]	2000000 OPS in 1.446472 seconds, throughput 1382674.535007
+18771	[1728357965]	2000000 OPS in 1.451052 seconds, throughput 1378310.356900
+18771	[1728357965]	2000000 OPS in 1.457097 seconds, throughput 1372592.215892
+18771	[1728357966]	2000000 OPS in 1.445986 seconds, throughput 1383139.255843
+18771	[1728357966]	2000000 OPS in 1.446383 seconds, throughput 1382759.614846
+18771	[1728357967]	2000000 OPS in 1.451856 seconds, throughput 1377547.084559
+18771	[1728357967]	2000000 OPS in 1.461913 seconds, throughput 1368070.466574
+18771	[1728357967]	2000000 OPS in 1.450648 seconds, throughput 1378694.211139
+18771	[1728357968]	2000000 OPS in 1.449914 seconds, throughput 1379392.157052
+18771	[1728357968]	2000000 OPS in 1.452016 seconds, throughput 1377395.290410
+18771	[1728357968]	2000000 OPS in 1.459229 seconds, throughput 1370586.796178
+18771	[1728357969]	2000000 OPS in 1.451704 seconds, throughput 1377691.319994
+18771	[1728357969]	2000000 OPS in 1.447777 seconds, throughput 1381428.217191
+18771	[1728357969]	2000000 OPS in 1.449954 seconds, throughput 1379354.103647
+18771	[1728357970]	2000000 OPS in 1.458469 seconds, throughput 1371301.001255
+18771	[1728357970]	2000000 OPS in 1.449156 seconds, throughput 1380113.666162
+18771	[1728357971]	2000000 OPS in 1.447707 seconds, throughput 1381495.012458
+18771	[1728357971]	2000000 OPS in 1.451266 seconds, throughput 1378107.114754
+18771	[1728357971]	2000000 OPS in 1.461743 seconds, throughput 1368229.572504
+18771	[1728357972]	2000000 OPS in 1.447813 seconds, throughput 1381393.867854
+18771	[1728357972]	2000000 OPS in 1.449159 seconds, throughput 1380110.809097
+18771	[1728357972]	2000000 OPS in 1.451259 seconds, throughput 1378113.761913
+18771	[1728357973]	2000000 OPS in 1.459937 seconds, throughput 1369922.126777
+18771	[1728357973]	2000000 OPS in 1.447460 seconds, throughput 1381730.755945
+18771	[1728357974]	2000000 OPS in 1.445203 seconds, throughput 1383888.630179
+18771	[1728357974]	2000000 OPS in 1.449915 seconds, throughput 1379391.205691
+18771	[1728357974]	2000000 OPS in 1.459758 seconds, throughput 1370090.110827
+18771	[1728357975]	2000000 OPS in 1.448167 seconds, throughput 1381056.190343
+18771	[1728357975]	2000000 OPS in 1.447975 seconds, throughput 1381239.316977
+18771	[1728357975]	2000000 OPS in 1.454527 seconds, throughput 1375017.445534
+18771	[1728357976]	2000000 OPS in 1.460135 seconds, throughput 1369736.359994
+18771	[1728357976]	2000000 OPS in 1.450676 seconds, throughput 1378667.600484
+18771	[1728357977]	2000000 OPS in 1.451559 seconds, throughput 1377828.941159
+18771	[1728357977]	2000000 OPS in 1.454346 seconds, throughput 1375188.572733
+18771	[1728357977]	2000000 OPS in 1.461028 seconds, throughput 1368899.158675
+18771	[1728357977]	2000000 OPS in 1.450999 seconds, throughput 1378360.701834
+18771	[1728357978]	2000000 OPS in 1.447107 seconds, throughput 1382067.808393
+18771	[1728357978]	2000000 OPS in 1.452059 seconds, throughput 1377354.501436
+18771	[1728357978]	2000000 OPS in 1.458364 seconds, throughput 1371399.732851
+18771	[1728357979]	2000000 OPS in 1.451515 seconds, throughput 1377870.707502
+18771	[1728357979]	2000000 OPS in 1.447431 seconds, throughput 1381758.439608
+18771	[1728357980]	2000000 OPS in 1.451637 seconds, throughput 1377754.907046
+18771	[1728357980]	2000000 OPS in 1.460513 seconds, throughput 1369381.854184
+18771	[1728357980]	2000000 OPS in 1.448939 seconds, throughput 1380320.358552
+18771	[1728357981]	2000000 OPS in 1.444946 seconds, throughput 1384134.770434
+18771	[1728357981]	2000000 OPS in 1.452904 seconds, throughput 1376553.440558
+18771	[1728357981]	2000000 OPS in 1.458178 seconds, throughput 1371574.663724
+18771	[1728357982]	2000000 OPS in 1.449751 seconds, throughput 1379547.246389
+18771	[1728357982]	2000000 OPS in 1.446717 seconds, throughput 1382440.380531
+18771	[1728357983]	2000000 OPS in 1.449593 seconds, throughput 1379697.611674
+18771	[1728357983]	2000000 OPS in 1.464679 seconds, throughput 1365486.908736
+18771	[1728357983]	2000000 OPS in 1.449706 seconds, throughput 1379590.068607
+18771	[1728357984]	2000000 OPS in 1.453574 seconds, throughput 1375918.941863
+18771	[1728357984]	2000000 OPS in 1.454433 seconds, throughput 1375106.312907
+18771	[1728357984]	2000000 OPS in 1.461150 seconds, throughput 1368784.861239
+18771	[1728357985]	2000000 OPS in 1.449629 seconds, throughput 1379663.348346
+18771	[1728357985]	2000000 OPS in 1.447721 seconds, throughput 1381481.652888
+18771	[1728357985]	2000000 OPS in 1.453061 seconds, throughput 1376404.707029
+18771	[1728357986]	2000000 OPS in 1.458247 seconds, throughput 1371509.764807
+18771	[1728357986]	2000000 OPS in 1.455037 seconds, throughput 1374535.492912
+18771	[1728357987]	2000000 OPS in 1.447069 seconds, throughput 1382104.101463
+18771	[1728357987]	2000000 OPS in 1.453581 seconds, throughput 1375912.315860
+18771	[1728357987]	2000000 OPS in 1.457163 seconds, throughput 1372530.046398
+18771	[1728357988]	2000000 OPS in 1.455000 seconds, throughput 1374570.446735
+18771	[1728357988]	2000000 OPS in 1.447185 seconds, throughput 1381993.318062
+18771	[1728357988]	2000000 OPS in 1.450656 seconds, throughput 1378686.607990
+18771	[1728357989]	2000000 OPS in 1.456228 seconds, throughput 1373411.306471
+18771	[1728357989]	2000000 OPS in 1.447987 seconds, throughput 1381227.870140
+18771	[1728357990]	2000000 OPS in 1.447333 seconds, throughput 1381851.999505
+18771	[1728357990]	2000000 OPS in 1.452362 seconds, throughput 1377067.149925
+18771	[1728357990]	2000000 OPS in 1.461275 seconds, throughput 1368667.773006
+18771	[1728357991]	2000000 OPS in 1.451635 seconds, throughput 1377756.805258
+18771	[1728357991]	2000000 OPS in 1.447955 seconds, throughput 1381258.395461
+18771	[1728357991]	2000000 OPS in 1.455837 seconds, throughput 1373780.169071
+18771	[1728357992]	2000000 OPS in 1.459725 seconds, throughput 1370121.084451
+18771	[1728357992]	2000000 OPS in 1.451129 seconds, throughput 1378237.220812
+18771	[1728357993]	2000000 OPS in 1.448644 seconds, throughput 1380601.445214
+18771	[1728357993]	2000000 OPS in 1.456315 seconds, throughput 1373329.259123
+18771	[1728357993]	2000000 OPS in 1.462095 seconds, throughput 1367900.170646
+18771	[1728357993]	2000000 OPS in 1.449708 seconds, throughput 1379588.165341
+18771	[1728357994]	2000000 OPS in 1.447644 seconds, throughput 1381555.133721
+18771	[1728357994]	2000000 OPS in 1.451431 seconds, throughput 1377950.450280
+18771	[1728357994]	2000000 OPS in 1.456945 seconds, throughput 1372735.415544
+18771	[1728357995]	2000000 OPS in 1.448898 seconds, throughput 1380359.417985
+18771	[1728357995]	2000000 OPS in 1.448692 seconds, throughput 1380555.701281
+18771	[1728357996]	2000000 OPS in 1.449178 seconds, throughput 1380092.714629
+18771	[1728357996]	2000000 OPS in 1.457345 seconds, throughput 1372358.638483
+18771	[1728357996]	2000000 OPS in 1.445594 seconds, throughput 1383514.320065
+18771	[1728357997]	2000000 OPS in 1.447307 seconds, throughput 1381876.823646
+18771	[1728357997]	2000000 OPS in 1.449409 seconds, throughput 1379872.761933
+18771	[1728357997]	2000000 OPS in 1.457228 seconds, throughput 1372468.824371
+18771	[1728357998]	2000000 OPS in 1.452396 seconds, throughput 1377034.913343
+18771	[1728357998]	2000000 OPS in 1.449981 seconds, throughput 1379328.418786
+18771	[1728357999]	2000000 OPS in 1.456277 seconds, throughput 1373365.094690
+18771	[1728357999]	2000000 OPS in 1.458768 seconds, throughput 1371019.929146
+18771	[1728357999]	2000000 OPS in 1.452290 seconds, throughput 1377135.420612
+18771	[1728358000]	2000000 OPS in 1.448105 seconds, throughput 1381115.319676
+18771	[1728358000]	2000000 OPS in 1.459877 seconds, throughput 1369978.429690
+18771	[1728358000]	2000000 OPS in 1.462234 seconds, throughput 1367770.138022
+18771	[1728358001]	2000000 OPS in 1.450354 seconds, throughput 1378973.685045
+18771	[1728358001]	2000000 OPS in 1.445625 seconds, throughput 1383484.651967
+18771	[1728358001]	2000000 OPS in 1.455143 seconds, throughput 1374435.364772
+18771	[1728358002]	2000000 OPS in 1.459994 seconds, throughput 1369868.643296
+18771	[1728358002]	2000000 OPS in 1.450991 seconds, throughput 1378368.301388
+18771	[1728358003]	2000000 OPS in 1.446904 seconds, throughput 1382261.711903
+18771	[1728358003]	2000000 OPS in 1.451710 seconds, throughput 1377685.625917
+18771	[1728358003]	2000000 OPS in 1.459247 seconds, throughput 1370569.889813
+18771	[1728358004]	2000000 OPS in 1.445527 seconds, throughput 1383578.445785
+18771	[1728358004]	2000000 OPS in 1.447195 seconds, throughput 1381983.768601
+18771	[1728358004]	2000000 OPS in 1.448740 seconds, throughput 1380509.960379
+18771	[1728358005]	2000000 OPS in 1.458365 seconds, throughput 1371398.792483
+18771	[1728358005]	2000000 OPS in 1.450199 seconds, throughput 1379121.072349
+18771	[1728358006]	2000000 OPS in 1.450052 seconds, throughput 1379260.881679
+18771	[1728358006]	2000000 OPS in 1.454015 seconds, throughput 1375501.628250
+18771	[1728358006]	2000000 OPS in 1.460946 seconds, throughput 1368975.992268
+18771	[1728358006]	2000000 OPS in 1.451335 seconds, throughput 1378041.596186
+18771	[1728358007]	2000000 OPS in 1.446736 seconds, throughput 1382422.224926
+18771	[1728358007]	2000000 OPS in 1.453910 seconds, throughput 1375600.965672
+18771	[1728358008]	2000000 OPS in 1.462178 seconds, throughput 1367822.522292
+18771	[1728358008]	2000000 OPS in 1.449942 seconds, throughput 1379365.519448
+18771	[1728358008]	2000000 OPS in 1.450253 seconds, throughput 1379069.720938
+18771	[1728358009]	2000000 OPS in 1.451221 seconds, throughput 1378149.847611
+18771	[1728358009]	2000000 OPS in 1.457490 seconds, throughput 1372222.107870
+18771	[1728358009]	2000000 OPS in 1.449690 seconds, throughput 1379605.294925
+18771	[1728358010]	2000000 OPS in 1.449457 seconds, throughput 1379827.066274
+18771	[1728358010]	2000000 OPS in 1.451116 seconds, throughput 1378249.567919
+18771	[1728358011]	2000000 OPS in 1.459129 seconds, throughput 1370680.728023
+18771	[1728358011]	2000000 OPS in 1.448427 seconds, throughput 1380808.283745
+18771	[1728358011]	2000000 OPS in 1.451543 seconds, throughput 1377844.128627
+18771	[1728358012]	2000000 OPS in 1.454978 seconds, throughput 1374591.230933
+18771	[1728358012]	2000000 OPS in 1.456537 seconds, throughput 1373119.941340
+18771	[1728358012]	2000000 OPS in 1.447555 seconds, throughput 1381640.075852
+18771	[1728358013]	2000000 OPS in 1.448988 seconds, throughput 1380273.680665
+18771	[1728358013]	2000000 OPS in 1.449117 seconds, throughput 1380150.809079
+18771	[1728358013]	2000000 OPS in 1.458213 seconds, throughput 1371541.743216
+18771	[1728358014]	2000000 OPS in 1.448828 seconds, throughput 1380426.109932
+18771	[1728358014]	2000000 OPS in 1.447468 seconds, throughput 1381723.119268
+18771	[1728358014]	2000000 OPS in 1.451804 seconds, throughput 1377596.424862
+18771	[1728358015]	2000000 OPS in 1.458333 seconds, throughput 1371428.884898
+18771	[1728358015]	2000000 OPS in 1.450734 seconds, throughput 1378612.481682
+18771	[1728358016]	2000000 OPS in 1.448342 seconds, throughput 1380889.320340
+18771	[1728358016]	2000000 OPS in 1.451786 seconds, throughput 1377613.505021
+18771	[1728358016]	2000000 OPS in 1.461392 seconds, throughput 1368558.196569
+18771	[1728358017]	2000000 OPS in 1.446827 seconds, throughput 1382335.275745
+18771	[1728358017]	2000000 OPS in 1.447978 seconds, throughput 1381236.455250
+18771	[1728358017]	2000000 OPS in 1.453236 seconds, throughput 1376238.959123
+18771	[1728358018]	2000000 OPS in 1.461069 seconds, throughput 1368860.745112
+18771	[1728358018]	2000000 OPS in 1.452335 seconds, throughput 1377092.750639
+18771	[1728358019]	2000000 OPS in 1.450980 seconds, throughput 1378378.750913
+18771	[1728358019]	2000000 OPS in 1.451284 seconds, throughput 1378090.022353
+18771	[1728358019]	2000000 OPS in 1.459668 seconds, throughput 1370174.587646
+18771	[1728358020]	2000000 OPS in 1.452620 seconds, throughput 1376822.568876
+18771	[1728358020]	2000000 OPS in 1.449768 seconds, throughput 1379531.069799
+18771	[1728358020]	2000000 OPS in 1.450889 seconds, throughput 1378465.203058
+18771	[1728358021]	2000000 OPS in 1.458547 seconds, throughput 1371227.666986
+18771	[1728358021]	2000000 OPS in 1.452372 seconds, throughput 1377057.668421
+18771	[1728358021]	2000000 OPS in 1.449483 seconds, throughput 1379802.315722
+18771	[1728358022]	2000000 OPS in 1.451834 seconds, throughput 1377567.958871
+18771	[1728358022]	2000000 OPS in 1.460123 seconds, throughput 1369747.617153
+18771	[1728358022]	2000000 OPS in 1.447684 seconds, throughput 1381516.960884
+18771	[1728358023]	2000000 OPS in 1.447792 seconds, throughput 1381413.904760
+18771	[1728358023]	2000000 OPS in 1.450823 seconds, throughput 1378527.911399
+18771	[1728358024]	2000000 OPS in 1.455217 seconds, throughput 1374365.472641
+18771	[1728358024]	2000000 OPS in 1.448852 seconds, throughput 1380403.243395
+18771	[1728358024]	2000000 OPS in 1.449226 seconds, throughput 1380047.004401
+18771	[1728358025]	2000000 OPS in 1.449346 seconds, throughput 1379932.742078
+18771	[1728358025]	2000000 OPS in 1.457946 seconds, throughput 1371792.919628
+18771	[1728358025]	2000000 OPS in 1.449371 seconds, throughput 1379908.939809
+18771	[1728358026]	2000000 OPS in 1.450541 seconds, throughput 1378795.911319
+18771	[1728358026]	2000000 OPS in 1.455479 seconds, throughput 1374118.073844
+18771	[1728358027]	2000000 OPS in 1.461678 seconds, throughput 1368290.416904
+18771	[1728358027]	2000000 OPS in 1.453677 seconds, throughput 1375821.451395
+18771	[1728358027]	2000000 OPS in 1.451611 seconds, throughput 1377779.584200
+18771	[1728358028]	2000000 OPS in 1.453951 seconds, throughput 1375562.175066
+18771	[1728358028]	2000000 OPS in 1.458410 seconds, throughput 1371356.477259
+18771	[1728358028]	2000000 OPS in 1.452184 seconds, throughput 1377235.942553
+18771	[1728358029]	2000000 OPS in 1.451164 seconds, throughput 1378203.979702
+18771	[1728358029]	2000000 OPS in 1.457496 seconds, throughput 1372216.458913
+18771	[1728358030]	2000000 OPS in 1.466111 seconds, throughput 1364153.191675
+18771	[1728358030]	2000000 OPS in 1.454487 seconds, throughput 1375055.260033
+18771	[1728358030]	2000000 OPS in 1.446337 seconds, throughput 1382803.592800
+18771	[1728358030]	2000000 OPS in 1.455001 seconds, throughput 1374569.502014
+18771	[1728358031]	2000000 OPS in 1.457091 seconds, throughput 1372597.867944
+18771	[1728358031]	2000000 OPS in 1.451958 seconds, throughput 1377450.311924
+18771	[1728358032]	2000000 OPS in 1.450952 seconds, throughput 1378405.350418
+18771	[1728358032]	2000000 OPS in 1.448556 seconds, throughput 1380685.316964
+18771	[1728358032]	2000000 OPS in 1.457959 seconds, throughput 1371780.687934
+18771	[1728358033]	2000000 OPS in 1.450298 seconds, throughput 1379026.931017
+18771	[1728358033]	2000000 OPS in 1.445977 seconds, throughput 1383147.864731
+18771	[1728358033]	2000000 OPS in 1.455243 seconds, throughput 1374340.917634
+18771	[1728358034]	2000000 OPS in 1.459505 seconds, throughput 1370327.611074
+18771	[1728358034]	2000000 OPS in 1.450124 seconds, throughput 1379192.400098
+18771	[1728358035]	2000000 OPS in 1.451161 seconds, throughput 1378206.828877
+18771	[1728358035]	2000000 OPS in 1.453643 seconds, throughput 1375853.631187
+18771	[1728358035]	2000000 OPS in 1.459494 seconds, throughput 1370337.939039
+18771	[1728358035]	2000000 OPS in 1.453449 seconds, throughput 1376037.274098
+18771	[1728358036]	2000000 OPS in 1.448211 seconds, throughput 1381014.230661
+18771	[1728358036]	2000000 OPS in 1.452070 seconds, throughput 1377344.067435
+18771	[1728358037]	2000000 OPS in 1.461034 seconds, throughput 1368893.537043
+18771	[1728358037]	2000000 OPS in 1.455683 seconds, throughput 1373925.504385
+18771	[1728358037]	2000000 OPS in 1.448998 seconds, throughput 1380264.154954
+18771	[1728358038]	2000000 OPS in 1.454690 seconds, throughput 1374863.372952
+18771	[1728358038]	2000000 OPS in 1.459378 seconds, throughput 1370446.861608
+18771	[1728358038]	2000000 OPS in 1.447584 seconds, throughput 1381612.396932
+18771	[1728358039]	2000000 OPS in 1.447125 seconds, throughput 1382050.617604
+18771	[1728358039]	2000000 OPS in 1.451335 seconds, throughput 1378041.596186
+18771	[1728358040]	2000000 OPS in 1.457590 seconds, throughput 1372127.964654
+18771	[1728358040]	2000000 OPS in 1.446693 seconds, throughput 1382463.314608
+18771	[1728358040]	2000000 OPS in 1.446889 seconds, throughput 1382276.041908
+18771	[1728358041]	2000000 OPS in 1.452682 seconds, throughput 1376763.806532
+18771	[1728358041]	2000000 OPS in 1.459625 seconds, throughput 1370214.952471
+18771	[1728358041]	2000000 OPS in 1.454988 seconds, throughput 1374581.783492
+18771	[1728358042]	2000000 OPS in 1.451259 seconds, throughput 1378113.761913
+18771	[1728358042]	2000000 OPS in 1.450828 seconds, throughput 1378523.160568
+18771	[1728358043]	2000000 OPS in 1.458361 seconds, throughput 1371402.553963
+18771	[1728358043]	2000000 OPS in 1.454435 seconds, throughput 1375104.421992
+18771	[1728358043]	2000000 OPS in 1.447970 seconds, throughput 1381244.086549
+18771	[1728358044]	2000000 OPS in 1.452522 seconds, throughput 1376915.461521
+18771	[1728358044]	2000000 OPS in 1.463145 seconds, throughput 1366918.521404
+18771	[1728358044]	2000000 OPS in 1.450324 seconds, throughput 1379002.209162
+18771	[1728358045]	2000000 OPS in 1.452439 seconds, throughput 1376994.145709
+18771	[1728358045]	2000000 OPS in 1.449759 seconds, throughput 1379539.633829
+18771	[1728358046]	2000000 OPS in 1.459566 seconds, throughput 1370270.340636
+18771	[1728358046]	2000000 OPS in 1.454077 seconds, throughput 1375442.978604
+18771	[1728358046]	2000000 OPS in 1.451866 seconds, throughput 1377537.596445
+18771	[1728358046]	2000000 OPS in 1.453426 seconds, throughput 1376059.049446
+18771	[1728358047]	2000000 OPS in 1.459550 seconds, throughput 1370285.361927
+18771	[1728358047]	2000000 OPS in 1.449568 seconds, throughput 1379721.406654
+18771	[1728358048]	2000000 OPS in 1.446601 seconds, throughput 1382551.235621
+18771	[1728358048]	2000000 OPS in 1.451765 seconds, throughput 1377633.432408
+18771	[1728358048]	2000000 OPS in 1.461073 seconds, throughput 1368856.997563
+18771	[1728358049]	2000000 OPS in 1.454041 seconds, throughput 1375477.032628
+18771	[1728358049]	2000000 OPS in 1.450232 seconds, throughput 1379089.690477
+18771	[1728358049]	2000000 OPS in 1.451660 seconds, throughput 1377733.077993
+18771	[1728358050]	2000000 OPS in 1.459607 seconds, throughput 1370231.850080
+18771	[1728358050]	2000000 OPS in 1.449655 seconds, throughput 1379638.603668
+18771	[1728358050]	2000000 OPS in 1.453510 seconds, throughput 1375979.525425
+18771	[1728358051]	2000000 OPS in 1.451840 seconds, throughput 1377562.265814
+18771	[1728358051]	2000000 OPS in 1.461699 seconds, throughput 1368270.758891
+18771	[1728358051]	2000000 OPS in 1.449769 seconds, throughput 1379530.118246
+18771	[1728358052]	2000000 OPS in 1.455213 seconds, throughput 1374369.250412
+18771	[1728358052]	2000000 OPS in 1.452258 seconds, throughput 1377165.765312
+18771	[1728358053]	2000000 OPS in 1.458776 seconds, throughput 1371012.410404
+18771	[1728358053]	2000000 OPS in 1.448411 seconds, throughput 1380823.536966
+18771	[1728358053]	2000000 OPS in 1.450052 seconds, throughput 1379260.881679
+18771	[1728358054]	2000000 OPS in 1.449854 seconds, throughput 1379449.241096
+18771	[1728358054]	2000000 OPS in 1.460042 seconds, throughput 1369823.607814
+18771	[1728358054]	2000000 OPS in 1.448186 seconds, throughput 1381038.071077
+18771	[1728358055]	2000000 OPS in 1.450871 seconds, throughput 1378482.304767
+18771	[1728358055]	2000000 OPS in 1.451092 seconds, throughput 1378272.363158
+18771	[1728358056]	2000000 OPS in 1.457735 seconds, throughput 1371991.479933
+18771	[1728358056]	2000000 OPS in 1.449209 seconds, throughput 1380063.193094
+18771	[1728358056]	2000000 OPS in 1.450127 seconds, throughput 1379189.546847
+18771	[1728358057]	2000000 OPS in 1.453880 seconds, throughput 1375629.350428
+18771	[1728358057]	2000000 OPS in 1.459969 seconds, throughput 1369892.100449
+18771	[1728358057]	2000000 OPS in 1.452361 seconds, throughput 1377068.098083
+18771	[1728358058]	2000000 OPS in 1.449531 seconds, throughput 1379756.624729
+18771	[1728358058]	2000000 OPS in 1.450434 seconds, throughput 1378897.626504
+18771	[1728358059]	2000000 OPS in 1.448378 seconds, throughput 1380854.997798
+18771	[1728358059]	2000000 OPS in 1.461558 seconds, throughput 1368402.759247
+18771	[1728358059]	2000000 OPS in 1.449841 seconds, throughput 1379461.609928
+18771	[1728358060]	2000000 OPS in 1.454685 seconds, throughput 1374868.098592
+18771	[1728358060]	2000000 OPS in 1.449417 seconds, throughput 1379865.145779
+18771	[1728358060]	2000000 OPS in 1.455896 seconds, throughput 1373724.496805
+18771	[1728358061]	2000000 OPS in 1.447908 seconds, throughput 1381303.231973
+18771	[1728358061]	2000000 OPS in 1.450928 seconds, throughput 1378428.150811
+18771	[1728358062]	2000000 OPS in 1.451589 seconds, throughput 1377800.465559
+18771	[1728358062]	2000000 OPS in 1.459259 seconds, throughput 1370558.619135
+18771	[1728358062]	2000000 OPS in 1.448986 seconds, throughput 1380275.585823
+18771	[1728358062]	2000000 OPS in 1.452705 seconds, throughput 1376742.008873
+18771	[1728358063]	2000000 OPS in 1.448184 seconds, throughput 1381039.978345
+18771	[1728358063]	2000000 OPS in 1.460144 seconds, throughput 1369727.917247
+18771	[1728358064]	2000000 OPS in 1.450975 seconds, throughput 1378383.500749
+18771	[1728358064]	2000000 OPS in 1.450445 seconds, throughput 1378887.169110
+18771	[1728358064]	2000000 OPS in 1.452679 seconds, throughput 1376766.649755
+18771	[1728358065]	2000000 OPS in 1.457552 seconds, throughput 1372163.737554
+18771	[1728358065]	2000000 OPS in 1.448316 seconds, throughput 1380914.109904
+18771	[1728358065]	2000000 OPS in 1.452393 seconds, throughput 1377037.757687
+18771	[1728358066]	2000000 OPS in 1.454820 seconds, throughput 1374740.517727
+18771	[1728358066]	2000000 OPS in 1.460558 seconds, throughput 1369339.663334
+18771	[1728358066]	2000000 OPS in 1.448689 seconds, throughput 1380558.560188
+18771	[1728358067]	2000000 OPS in 1.451441 seconds, throughput 1377940.956608
+18771	[1728358067]	2000000 OPS in 1.453938 seconds, throughput 1375574.474290
+18771	[1728358067]	2000000 OPS in 1.458898 seconds, throughput 1370897.759816
+18771	[1728358068]	2000000 OPS in 1.446953 seconds, throughput 1382214.902626
+18771	[1728358068]	2000000 OPS in 1.449559 seconds, throughput 1379729.973047
+18771	[1728358069]	2000000 OPS in 1.448927 seconds, throughput 1380331.790352
+18771	[1728358069]	2000000 OPS in 1.456735 seconds, throughput 1372933.306332
+18771	[1728358069]	2000000 OPS in 1.449394 seconds, throughput 1379887.042447
+18771	[1728358070]	2000000 OPS in 1.450238 seconds, throughput 1379083.984836
+18771	[1728358070]	2000000 OPS in 1.449994 seconds, throughput 1379316.052342
+18771	[1728358070]	2000000 OPS in 1.461696 seconds, throughput 1368273.567144
+18771	[1728358071]	2000000 OPS in 1.450239 seconds, throughput 1379083.033900
+18771	[1728358071]	2000000 OPS in 1.453412 seconds, throughput 1376072.304343
+18771	[1728358072]	2000000 OPS in 1.452179 seconds, throughput 1377240.684516
+18771	[1728358072]	2000000 OPS in 1.455793 seconds, throughput 1373821.690309
+18771	[1728358072]	2000000 OPS in 1.446723 seconds, throughput 1382434.647130
+18771	[1728358073]	2000000 OPS in 1.451449 seconds, throughput 1377933.361765
+18771	[1728358073]	2000000 OPS in 1.449141 seconds, throughput 1380127.951662
+18771	[1728358073]	2000000 OPS in 1.461947 seconds, throughput 1368038.649828
+18771	[1728358074]	2000000 OPS in 1.448257 seconds, throughput 1380970.366447
+18771	[1728358074]	2000000 OPS in 1.454788 seconds, throughput 1374770.756976
+18771	[1728358075]	2000000 OPS in 1.449884 seconds, throughput 1379420.698483
+18771	[1728358075]	2000000 OPS in 1.458828 seconds, throughput 1370963.540596
+18771	[1728358075]	2000000 OPS in 1.448161 seconds, throughput 1381061.912315
+18771	[1728358075]	2000000 OPS in 1.452296 seconds, throughput 1377129.731129
+18771	[1728358076]	2000000 OPS in 1.451143 seconds, throughput 1378223.924176
+18771	[1728358076]	2000000 OPS in 1.461823 seconds, throughput 1368154.694515
+18771	[1728358077]	2000000 OPS in 1.444249 seconds, throughput 1384802.759081
+18771	[1728358077]	2000000 OPS in 1.453332 seconds, throughput 1376148.051512
+18771	[1728358078]	2000000 OPS in 1.448771 seconds, throughput 1380480.420991
+18771	[1728358078]	2000000 OPS in 1.458372 seconds, throughput 1371392.209944
+18771	[1728358078]	2000000 OPS in 1.452455 seconds, throughput 1376978.976973
+18771	[1728358078]	2000000 OPS in 1.454932 seconds, throughput 1374634.690831
+18771	[1728358079]	2000000 OPS in 1.451777 seconds, throughput 1377622.045259
+18771	[1728358079]	2000000 OPS in 1.459214 seconds, throughput 1370600.885134
+18771	[1728358079]	2000000 OPS in 1.448260 seconds, throughput 1380967.505835
+18771	[1728358080]	2000000 OPS in 1.452656 seconds, throughput 1376788.448194
+18771	[1728358080]	2000000 OPS in 1.450183 seconds, throughput 1379136.288317
+18771	[1728358081]	2000000 OPS in 1.458053 seconds, throughput 1371692.249870
+18771	[1728358081]	2000000 OPS in 1.450246 seconds, throughput 1379076.377387
+18771	[1728358081]	2000000 OPS in 1.450018 seconds, throughput 1379293.222567
+18771	[1728358082]	2000000 OPS in 1.450810 seconds, throughput 1378540.263715
+18771	[1728358082]	2000000 OPS in 1.457274 seconds, throughput 1372425.501313
+18771	[1728358082]	2000000 OPS in 1.451201 seconds, throughput 1378168.840843
+18771	[1728358083]	2000000 OPS in 1.453801 seconds, throughput 1375704.102556
+18771	[1728358083]	2000000 OPS in 1.451416 seconds, throughput 1377964.691033
+18771	[1728358084]	2000000 OPS in 1.459942 seconds, throughput 1369917.435076
+18771	[1728358084]	2000000 OPS in 1.448810 seconds, throughput 1380443.260331
+18771	[1728358084]	2000000 OPS in 1.451330 seconds, throughput 1378046.343699
+18771	[1728358085]	2000000 OPS in 1.448223 seconds, throughput 1381002.787554
+18771	[1728358085]	2000000 OPS in 1.457876 seconds, throughput 1371858.786344
+18771	[1728358085]	2000000 OPS in 1.446450 seconds, throughput 1382695.565004
+18771	[1728358086]	2000000 OPS in 1.451325 seconds, throughput 1378051.091244
+18771	[1728358086]	2000000 OPS in 1.451311 seconds, throughput 1378064.384546
+18771	[1728358086]	2000000 OPS in 1.459432 seconds, throughput 1370396.154120
+18771	[1728358087]	2000000 OPS in 1.449137 seconds, throughput 1380131.761179
+18771	[1728358087]	2000000 OPS in 1.454725 seconds, throughput 1374830.294386
+18771	[1728358088]	2000000 OPS in 1.452735 seconds, throughput 1376713.578182
+18771	[1728358088]	2000000 OPS in 1.458369 seconds, throughput 1371395.031024
+18771	[1728358088]	2000000 OPS in 1.449074 seconds, throughput 1380191.763844
+18771	[1728358089]	2000000 OPS in 1.454381 seconds, throughput 1375155.478516
+18771	[1728358089]	2000000 OPS in 1.448693 seconds, throughput 1380554.748315
+18771	[1728358089]	2000000 OPS in 1.457147 seconds, throughput 1372545.117274
+18771	[1728358090]	2000000 OPS in 1.456417 seconds, throughput 1373233.078164
+18771	[1728358091]	2000000 OPS in 1.429135 seconds, throughput 1399447.917796
+18771	[1728358092]	2000000 OPS in 1.349930 seconds, throughput 1481558.303023
+18771	[1728358093]	2000000 OPS in 1.290135 seconds, throughput 1550225.364012
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     193808 ms       743400 ms            4 CompactionCPUUsage=1.25045 CompactionThroughput=1.1292G Lat_Get_Avg=568.792 Lat_Get_P50=559.061 Lat_Get_P95=1071.4 Lat_Get_P99=1.29805k Lat_Put_Avg=978.804 Lat_Put_P50=811.498 Lat_Put_P95=1.27482k Lat_Put_P99=1.72283k items_per_second=5.15976M/s
+3954.22user 160.65system 14:32.76elapsed 471%CPU (0avgtext+0avgdata 252416maxresident)k
+322224inputs+34232outputs (1659major+3828356minor)pagefaults 0swaps

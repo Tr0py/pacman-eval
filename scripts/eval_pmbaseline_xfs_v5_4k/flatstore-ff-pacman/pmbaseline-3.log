@@ -1,0 +1,2368 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 2
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target fastfair
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/fastfair.dir/db/index/FAST_FAIR/ff_btree.cpp.o
+[ 68%] Linking CXX static library libfastfair.a
+[ 68%] Built target fastfair
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-08T01:04:59-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2964.36 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.16, 4.13, 4.34
+[1728367499]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728367499]	Setup starts!
+[1728367499]	Setup starts!
+[1728367499]	Setup starts!
+Using MADVISE_RANDOM
+Using MADV_NOHUGEPAGE
+DB index type: FastFair
+Using MADVISE_RANDOM
+Using MADVISE_NOHUGEPAGE
+[1728367499]	Initializing log segments...
+Log: pool_start 0x7efb8b400000 total segments: 2028  cleaners: 2
+[1728367499]Initialized 2026 free log segments...
+[1728367499]	DB init finished in 0.106181 seconds
+[1728367499]	DB init finished in 0.106232 seconds
+[1728367499]	DB init finished in 0.106036 seconds
+[1728367499]	DB init finished in 0.106292 seconds
+[1728367558]	DB load finished in 58.931171 seconds
+[1728367558]	DB load finished in 58.954467 seconds
+[1728367558]	DB load finished in 58.966596 seconds
+[1728367558]	DB load finished in 59.070393 seconds
+[1728367558]	DB warmup finished in 0.000017 seconds
+[1728367558]	DB warmup finished in 0.115973 seconds
+[1728367558]	DB warmup finished in 0.103850 seconds
+[1728367558]	DB warmup finished in 0.139267 seconds
+[1728367558]	ETC init!
+[1728367558]	ETC starts!
+[1728367558]	ETC init!
+[1728367558]	ETC init!
+[1728367558]	ETC starts!
+[1728367558]	ETC starts!
+[1728367558]	ETC init!
+[1728367558]	ETC starts!
+61224	[1728367570]	2000000 OPS in 11.152004 seconds, throughput 179339.964369
+61224	[1728367570]	2000000 OPS in 11.225092 seconds, throughput 178172.259078
+61224	[1728367570]	2000000 OPS in 11.317310 seconds, throughput 176720.439751
+61224	[1728367570]	2000000 OPS in 11.318366 seconds, throughput 176703.951790
+61224	[1728367581]	2000000 OPS in 11.227874 seconds, throughput 178128.112232
+61224	[1728367581]	2000000 OPS in 11.345523 seconds, throughput 176280.987664
+61224	[1728367581]	2000000 OPS in 11.274931 seconds, throughput 177384.677565
+61224	[1728367581]	2000000 OPS in 11.481466 seconds, throughput 174193.783268
+61224	[1728367592]	2000000 OPS in 11.463530 seconds, throughput 174466.329307
+61224	[1728367592]	2000000 OPS in 11.500479 seconds, throughput 173905.799924
+61224	[1728367593]	2000000 OPS in 11.363932 seconds, throughput 175995.421303
+61224	[1728367593]	2000000 OPS in 11.584001 seconds, throughput 172651.918797
+61224	[1728367604]	2000000 OPS in 11.313058 seconds, throughput 176786.859928
+61224	[1728367604]	2000000 OPS in 11.445402 seconds, throughput 174742.660852
+61224	[1728367604]	2000000 OPS in 11.310818 seconds, throughput 176821.870885
+61224	[1728367604]	2000000 OPS in 11.355179 seconds, throughput 176131.085208
+61224	[1728367613]	2000000 OPS in 9.334118 seconds, throughput 214267.700494
+61224	[1728367613]	2000000 OPS in 9.487940 seconds, throughput 210793.913115
+61224	[1728367613]	2000000 OPS in 9.365422 seconds, throughput 213551.508944
+61224	[1728367613]	2000000 OPS in 9.607214 seconds, throughput 208176.897069
+61224	[1728367616]	2000000 OPS in 2.537485 seconds, throughput 788181.999105
+61224	[1728367616]	2000000 OPS in 2.559759 seconds, throughput 781323.554288
+61224	[1728367616]	2000000 OPS in 2.550623 seconds, throughput 784122.153686
+61224	[1728367616]	2000000 OPS in 2.632329 seconds, throughput 759783.446522
+61224	[1728367618]	2000000 OPS in 2.548818 seconds, throughput 784677.446565
+61224	[1728367618]	2000000 OPS in 2.574910 seconds, throughput 776726.176837
+61224	[1728367618]	2000000 OPS in 2.564040 seconds, throughput 780019.032464
+61224	[1728367619]	2000000 OPS in 2.663233 seconds, throughput 750966.963837
+61224	[1728367621]	2000000 OPS in 2.612345 seconds, throughput 765595.662135
+61224	[1728367621]	2000000 OPS in 2.638084 seconds, throughput 758125.973244
+61224	[1728367621]	2000000 OPS in 2.630464 seconds, throughput 760322.133281
+61224	[1728367621]	2000000 OPS in 2.801457 seconds, throughput 713914.223920
+61224	[1728367624]	2000000 OPS in 2.612074 seconds, throughput 765675.091900
+61224	[1728367624]	2000000 OPS in 2.623983 seconds, throughput 762200.059985
+61224	[1728367624]	2000000 OPS in 2.637666 seconds, throughput 758246.116074
+61224	[1728367624]	2000000 OPS in 2.757822 seconds, throughput 725209.966416
+61224	[1728367626]	2000000 OPS in 2.604695 seconds, throughput 767844.219765
+61224	[1728367626]	2000000 OPS in 2.621829 seconds, throughput 762826.256022
+61224	[1728367626]	2000000 OPS in 2.629933 seconds, throughput 760475.647098
+61224	[1728367627]	2000000 OPS in 2.755578 seconds, throughput 725800.539850
+61224	[1728367629]	2000000 OPS in 2.602401 seconds, throughput 768521.069582
+61224	[1728367629]	2000000 OPS in 2.612491 seconds, throughput 765552.876546
+61224	[1728367629]	2000000 OPS in 2.622794 seconds, throughput 762545.590695
+61224	[1728367630]	2000000 OPS in 2.739657 seconds, throughput 730018.392813
+61224	[1728367631]	2000000 OPS in 2.596355 seconds, throughput 770310.685557
+61224	[1728367632]	2000000 OPS in 2.608437 seconds, throughput 766742.689204
+61224	[1728367632]	2000000 OPS in 2.615950 seconds, throughput 764540.606663
+61224	[1728367632]	2000000 OPS in 2.738488 seconds, throughput 730330.021530
+61224	[1728367634]	2000000 OPS in 2.593923 seconds, throughput 771032.910383
+61224	[1728367634]	2000000 OPS in 2.610647 seconds, throughput 766093.615874
+61224	[1728367634]	2000000 OPS in 2.619389 seconds, throughput 763536.840080
+61224	[1728367635]	2000000 OPS in 2.729911 seconds, throughput 732624.616700
+61224	[1728367637]	2000000 OPS in 2.594974 seconds, throughput 770720.631498
+61224	[1728367637]	2000000 OPS in 2.604722 seconds, throughput 767836.260453
+61224	[1728367637]	2000000 OPS in 2.616572 seconds, throughput 764358.863429
+61224	[1728367638]	2000000 OPS in 2.692406 seconds, throughput 742830.018950
+61224	[1728367639]	2000000 OPS in 2.582672 seconds, throughput 774391.792686
+61224	[1728367639]	2000000 OPS in 2.595662 seconds, throughput 770516.346119
+61224	[1728367639]	2000000 OPS in 2.608081 seconds, throughput 766847.348683
+61224	[1728367641]	2000000 OPS in 2.675758 seconds, throughput 747451.750121
+61224	[1728367642]	2000000 OPS in 2.587208 seconds, throughput 773034.096988
+61224	[1728367642]	2000000 OPS in 2.599428 seconds, throughput 769400.037239
+61224	[1728367642]	2000000 OPS in 2.613948 seconds, throughput 765126.161653
+61224	[1728367643]	2000000 OPS in 2.678242 seconds, throughput 746758.508006
+61224	[1728367644]	2000000 OPS in 2.589460 seconds, throughput 772361.805164
+61224	[1728367645]	2000000 OPS in 2.599245 seconds, throughput 769454.206895
+61224	[1728367645]	2000000 OPS in 2.616304 seconds, throughput 764437.160208
+61224	[1728367646]	2000000 OPS in 2.681212 seconds, throughput 745931.317628
+61224	[1728367647]	2000000 OPS in 2.590444 seconds, throughput 772068.417615
+61224	[1728367647]	2000000 OPS in 2.602704 seconds, throughput 768431.600366
+61224	[1728367647]	2000000 OPS in 2.620717 seconds, throughput 763149.931870
+61224	[1728367649]	2000000 OPS in 2.680482 seconds, throughput 746134.463876
+61224	[1728367650]	2000000 OPS in 2.601392 seconds, throughput 768819.155283
+61224	[1728367650]	2000000 OPS in 2.614978 seconds, throughput 764824.790113
+61224	[1728367650]	2000000 OPS in 2.630396 seconds, throughput 760341.788841
+61224	[1728367651]	2000000 OPS in 2.696811 seconds, throughput 741616.672433
+61224	[1728367652]	2000000 OPS in 2.595469 seconds, throughput 770573.641989
+61224	[1728367652]	2000000 OPS in 2.603538 seconds, throughput 768185.446112
+61224	[1728367653]	2000000 OPS in 2.621074 seconds, throughput 763045.988019
+61224	[1728367654]	2000000 OPS in 2.685185 seconds, throughput 744827.637574
+61224	[1728367655]	2000000 OPS in 2.597164 seconds, throughput 770070.738698
+61224	[1728367655]	2000000 OPS in 2.608951 seconds, throughput 766591.630123
+61224	[1728367655]	2000000 OPS in 2.626349 seconds, throughput 761513.416534
+61224	[1728367657]	2000000 OPS in 2.691317 seconds, throughput 743130.593683
+61224	[1728367657]	2000000 OPS in 2.597211 seconds, throughput 770056.803240
+61224	[1728367658]	2000000 OPS in 2.615471 seconds, throughput 764680.625402
+61224	[1728367658]	2000000 OPS in 2.625558 seconds, throughput 761742.837142
+61224	[1728367659]	2000000 OPS in 2.694879 seconds, throughput 742148.348776
+61224	[1728367660]	2000000 OPS in 2.602077 seconds, throughput 768616.762686
+61224	[1728367660]	2000000 OPS in 2.621139 seconds, throughput 763027.065715
+61224	[1728367660]	2000000 OPS in 2.633165 seconds, throughput 759542.223902
+61224	[1728367662]	2000000 OPS in 2.697153 seconds, throughput 741522.635164
+61224	[1728367663]	2000000 OPS in 2.604712 seconds, throughput 767839.208327
+61224	[1728367663]	2000000 OPS in 2.624315 seconds, throughput 762103.634663
+61224	[1728367663]	2000000 OPS in 2.630887 seconds, throughput 760199.886958
+61224	[1728367665]	2000000 OPS in 2.701604 seconds, throughput 740300.947141
+61224	[1728367665]	2000000 OPS in 2.612887 seconds, throughput 765436.852034
+61224	[1728367665]	2000000 OPS in 2.628008 seconds, throughput 761032.690920
+61224	[1728367666]	2000000 OPS in 2.636244 seconds, throughput 758655.116901
+61224	[1728367667]	2000000 OPS in 2.714836 seconds, throughput 736692.750501
+61224	[1728367668]	2000000 OPS in 2.614692 seconds, throughput 764908.448108
+61224	[1728367668]	2000000 OPS in 2.630220 seconds, throughput 760392.666773
+61224	[1728367668]	2000000 OPS in 2.638394 seconds, throughput 758036.896688
+61224	[1728367670]	2000000 OPS in 2.722675 seconds, throughput 734571.698789
+61224	[1728367670]	2000000 OPS in 2.627203 seconds, throughput 761265.878579
+61224	[1728367671]	2000000 OPS in 2.636117 seconds, throughput 758691.666569
+61224	[1728367671]	2000000 OPS in 2.647467 seconds, throughput 755439.066851
+61224	[1728367673]	2000000 OPS in 2.727559 seconds, throughput 733256.365857
+61224	[1728367673]	2000000 OPS in 2.628628 seconds, throughput 760853.190334
+61224	[1728367673]	2000000 OPS in 2.646708 seconds, throughput 755655.705125
+61224	[1728367674]	2000000 OPS in 2.652088 seconds, throughput 754122.789289
+61224	[1728367676]	2000000 OPS in 2.630494 seconds, throughput 760313.462034
+61224	[1728367676]	2000000 OPS in 2.738105 seconds, throughput 730432.178459
+61224	[1728367676]	2000000 OPS in 2.644795 seconds, throughput 756202.276547
+61224	[1728367676]	2000000 OPS in 2.655917 seconds, throughput 753035.580555
+61224	[1728367678]	2000000 OPS in 2.635643 seconds, throughput 758828.111394
+61224	[1728367678]	2000000 OPS in 2.738765 seconds, throughput 730256.155603
+61224	[1728367679]	2000000 OPS in 2.645510 seconds, throughput 755997.898326
+61224	[1728367679]	2000000 OPS in 2.658088 seconds, throughput 752420.536867
+61224	[1728367681]	2000000 OPS in 2.630907 seconds, throughput 760194.107964
+61224	[1728367681]	2000000 OPS in 2.735537 seconds, throughput 731117.875576
+61224	[1728367681]	2000000 OPS in 2.643087 seconds, throughput 756690.945096
+61224	[1728367682]	2000000 OPS in 2.655450 seconds, throughput 753168.012954
+61224	[1728367684]	2000000 OPS in 2.630066 seconds, throughput 760437.190550
+61224	[1728367684]	2000000 OPS in 2.731663 seconds, throughput 732154.735046
+61224	[1728367684]	2000000 OPS in 2.642610 seconds, throughput 756827.530358
+61224	[1728367684]	2000000 OPS in 2.656369 seconds, throughput 752907.446217
+61224	[1728367686]	2000000 OPS in 2.633820 seconds, throughput 759353.334700
+61224	[1728367687]	2000000 OPS in 2.736798 seconds, throughput 730781.007586
+61224	[1728367687]	2000000 OPS in 2.650619 seconds, throughput 754540.731806
+61224	[1728367687]	2000000 OPS in 2.667815 seconds, throughput 749677.170269
+61224	[1728367689]	2000000 OPS in 2.646927 seconds, throughput 755593.184096
+61224	[1728367689]	2000000 OPS in 2.651056 seconds, throughput 754416.353332
+61224	[1728367689]	2000000 OPS in 2.734285 seconds, throughput 731452.646670
+61224	[1728367690]	2000000 OPS in 2.657870 seconds, throughput 752482.250825
+61224	[1728367692]	2000000 OPS in 2.669199 seconds, throughput 749288.456949
+61224	[1728367692]	2000000 OPS in 2.672311 seconds, throughput 748415.884229
+61224	[1728367692]	2000000 OPS in 2.847166 seconds, throughput 702452.895265
+61224	[1728367692]	2000000 OPS in 2.682477 seconds, throughput 745579.552033
+61224	[1728367694]	2000000 OPS in 2.680643 seconds, throughput 746089.650879
+61224	[1728367695]	2000000 OPS in 2.679220 seconds, throughput 746485.917543
+61224	[1728367695]	2000000 OPS in 2.681021 seconds, throughput 745984.458906
+61224	[1728367695]	2000000 OPS in 2.690300 seconds, throughput 743411.515444
+61224	[1728367697]	2000000 OPS in 2.684800 seconds, throughput 744934.445769
+61224	[1728367697]	2000000 OPS in 2.680501 seconds, throughput 746129.175106
+61224	[1728367698]	2000000 OPS in 2.688874 seconds, throughput 743805.771487
+61224	[1728367698]	2000000 OPS in 2.693472 seconds, throughput 742536.027848
+61224	[1728367700]	2000000 OPS in 2.686287 seconds, throughput 744522.085689
+61224	[1728367700]	2000000 OPS in 2.683276 seconds, throughput 745357.540559
+61224	[1728367700]	2000000 OPS in 2.686660 seconds, throughput 744418.720642
+61224	[1728367700]	2000000 OPS in 2.692202 seconds, throughput 742886.306451
+61224	[1728367702]	2000000 OPS in 2.679359 seconds, throughput 746447.191287
+61224	[1728367703]	2000000 OPS in 2.674814 seconds, throughput 747715.542090
+61224	[1728367703]	2000000 OPS in 2.681292 seconds, throughput 745909.061751
+61224	[1728367703]	2000000 OPS in 2.688508 seconds, throughput 743907.029475
+61224	[1728367705]	2000000 OPS in 2.691144 seconds, throughput 743178.365781
+61224	[1728367705]	2000000 OPS in 2.685095 seconds, throughput 744852.602981
+61224	[1728367706]	2000000 OPS in 2.687464 seconds, throughput 744196.015277
+61224	[1728367706]	2000000 OPS in 2.691378 seconds, throughput 743113.750651
+61224	[1728367708]	2000000 OPS in 2.681977 seconds, throughput 745718.550159
+61224	[1728367708]	2000000 OPS in 2.678605 seconds, throughput 746657.308562
+61224	[1728367708]	2000000 OPS in 2.681549 seconds, throughput 745837.573731
+61224	[1728367708]	2000000 OPS in 2.687223 seconds, throughput 744262.757501
+61224	[1728367710]	2000000 OPS in 2.678700 seconds, throughput 746630.828387
+61224	[1728367711]	2000000 OPS in 2.680224 seconds, throughput 746206.287236
+61224	[1728367711]	2000000 OPS in 2.675462 seconds, throughput 747534.444518
+61224	[1728367711]	2000000 OPS in 2.684686 seconds, throughput 744966.077970
+61224	[1728367713]	2000000 OPS in 2.676721 seconds, throughput 747182.840498
+61224	[1728367713]	2000000 OPS in 2.678869 seconds, throughput 746583.726192
+61224	[1728367714]	2000000 OPS in 2.677397 seconds, throughput 746994.188759
+61224	[1728367714]	2000000 OPS in 2.688198 seconds, throughput 743992.816005
+61224	[1728367716]	2000000 OPS in 2.677465 seconds, throughput 746975.217230
+61224	[1728367716]	2000000 OPS in 2.677440 seconds, throughput 746982.191945
+61224	[1728367716]	2000000 OPS in 2.678049 seconds, throughput 746812.324943
+61224	[1728367716]	2000000 OPS in 2.687574 seconds, throughput 744165.556000
+61224	[1728367718]	2000000 OPS in 2.678525 seconds, throughput 746679.609113
+61224	[1728367719]	2000000 OPS in 2.677904 seconds, throughput 746852.762459
+61224	[1728367719]	2000000 OPS in 2.682486 seconds, throughput 745577.050542
+61224	[1728367719]	2000000 OPS in 2.687510 seconds, throughput 744183.277458
+61224	[1728367721]	2000000 OPS in 2.676304 seconds, throughput 747299.260473
+61224	[1728367721]	2000000 OPS in 2.679582 seconds, throughput 746385.070507
+61224	[1728367722]	2000000 OPS in 2.682328 seconds, throughput 745620.968055
+61224	[1728367722]	2000000 OPS in 2.690333 seconds, throughput 743402.396655
+61224	[1728367724]	2000000 OPS in 2.676244 seconds, throughput 747316.014534
+61224	[1728367724]	2000000 OPS in 2.677231 seconds, throughput 747040.505657
+61224	[1728367724]	2000000 OPS in 2.681021 seconds, throughput 745984.458906
+61224	[1728367725]	2000000 OPS in 2.694527 seconds, throughput 742245.299453
+61224	[1728367726]	2000000 OPS in 2.684168 seconds, throughput 745109.844093
+61224	[1728367727]	2000000 OPS in 2.683610 seconds, throughput 745264.773943
+61224	[1728367727]	2000000 OPS in 2.685201 seconds, throughput 744823.199455
+61224	[1728367727]	2000000 OPS in 2.698502 seconds, throughput 741151.942819
+61224	[1728367729]	2000000 OPS in 2.688087 seconds, throughput 744023.537929
+61224	[1728367729]	2000000 OPS in 2.686754 seconds, throughput 744392.676069
+61224	[1728367730]	2000000 OPS in 2.691363 seconds, throughput 743117.892310
+61224	[1728367730]	2000000 OPS in 2.700855 seconds, throughput 740506.247096
+61224	[1728367732]	2000000 OPS in 2.684834 seconds, throughput 744925.012124
+61224	[1728367732]	2000000 OPS in 2.687156 seconds, throughput 744281.314520
+61224	[1728367732]	2000000 OPS in 2.693395 seconds, throughput 742557.255805
+61224	[1728367733]	2000000 OPS in 2.698529 seconds, throughput 741144.527259
+61224	[1728367734]	2000000 OPS in 2.689243 seconds, throughput 743703.711416
+61224	[1728367735]	2000000 OPS in 2.686137 seconds, throughput 744563.661496
+61224	[1728367735]	2000000 OPS in 2.695261 seconds, throughput 742043.163909
+61224	[1728367735]	2000000 OPS in 2.703266 seconds, throughput 739845.801338
+61224	[1728367737]	2000000 OPS in 2.689134 seconds, throughput 743733.856327
+61224	[1728367738]	2000000 OPS in 2.684658 seconds, throughput 744973.847693
+61224	[1728367738]	2000000 OPS in 2.695650 seconds, throughput 741936.082207
+61224	[1728367738]	2000000 OPS in 2.701973 seconds, throughput 740199.846557
+61224	[1728367740]	2000000 OPS in 2.694978 seconds, throughput 742121.085961
+61224	[1728367740]	2000000 OPS in 2.685117 seconds, throughput 744846.500171
+61224	[1728367741]	2000000 OPS in 2.690251 seconds, throughput 743425.055878
+61224	[1728367741]	2000000 OPS in 2.699756 seconds, throughput 740807.687806
+61224	[1728367743]	2000000 OPS in 2.698150 seconds, throughput 741248.633323
+61224	[1728367743]	2000000 OPS in 2.686866 seconds, throughput 744361.646617
+61224	[1728367743]	2000000 OPS in 2.695856 seconds, throughput 741879.388217
+61224	[1728367743]	2000000 OPS in 2.704876 seconds, throughput 739405.429306
+61224	[1728367745]	2000000 OPS in 2.692665 seconds, throughput 742758.568184
+61224	[1728367746]	2000000 OPS in 2.685138 seconds, throughput 744840.674855
+61224	[1728367746]	2000000 OPS in 2.690785 seconds, throughput 743277.519386
+61224	[1728367746]	2000000 OPS in 2.704397 seconds, throughput 739536.392031
+61224	[1728367748]	2000000 OPS in 2.710619 seconds, throughput 737838.847879
+61224	[1728367748]	2000000 OPS in 2.697606 seconds, throughput 741398.113735
+61224	[1728367749]	2000000 OPS in 2.702914 seconds, throughput 739942.151323
+61224	[1728367749]	2000000 OPS in 2.708452 seconds, throughput 738429.183903
+61224	[1728367751]	2000000 OPS in 2.695517 seconds, throughput 741972.690211
+61224	[1728367751]	2000000 OPS in 2.687070 seconds, throughput 744305.135333
+61224	[1728367751]	2000000 OPS in 2.691349 seconds, throughput 743121.757899
+61224	[1728367752]	2000000 OPS in 2.706136 seconds, throughput 739061.155833
+61224	[1728367753]	2000000 OPS in 2.700496 seconds, throughput 740604.688916
+61224	[1728367754]	2000000 OPS in 2.689738 seconds, throughput 743566.845544
+61224	[1728367754]	2000000 OPS in 2.695790 seconds, throughput 741897.551367
+61224	[1728367754]	2000000 OPS in 2.703960 seconds, throughput 739655.912070
+61224	[1728367756]	2000000 OPS in 2.694970 seconds, throughput 742123.288942
+61224	[1728367756]	2000000 OPS in 2.685164 seconds, throughput 744833.462686
+61224	[1728367757]	2000000 OPS in 2.689217 seconds, throughput 743710.901723
+61224	[1728367757]	2000000 OPS in 2.705314 seconds, throughput 739285.716926
+61224	[1728367759]	2000000 OPS in 2.702037 seconds, throughput 740182.314306
+61224	[1728367759]	2000000 OPS in 2.685933 seconds, throughput 744620.212045
+61224	[1728367759]	2000000 OPS in 2.697236 seconds, throughput 741499.816850
+61224	[1728367760]	2000000 OPS in 2.700309 seconds, throughput 740655.976779
+61224	[1728367761]	2000000 OPS in 2.696615 seconds, throughput 741670.575889
+61224	[1728367762]	2000000 OPS in 2.686773 seconds, throughput 744387.411962
+61224	[1728367762]	2000000 OPS in 2.696046 seconds, throughput 741827.105324
+61224	[1728367762]	2000000 OPS in 2.706457 seconds, throughput 738973.499302
+61224	[1728367764]	2000000 OPS in 2.699825 seconds, throughput 740788.754827
+61224	[1728367764]	2000000 OPS in 2.688527 seconds, throughput 743901.772234
+61224	[1728367765]	2000000 OPS in 2.699971 seconds, throughput 740748.696930
+61224	[1728367765]	2000000 OPS in 2.698618 seconds, throughput 741120.084428
+61224	[1728367767]	2000000 OPS in 2.697498 seconds, throughput 741427.797166
+61224	[1728367767]	2000000 OPS in 2.686497 seconds, throughput 744463.887360
+61224	[1728367768]	2000000 OPS in 2.697167 seconds, throughput 741518.786193
+61224	[1728367768]	2000000 OPS in 2.699493 seconds, throughput 740879.861515
+61224	[1728367769]	2000000 OPS in 2.699261 seconds, throughput 740943.539732
+61224	[1728367770]	2000000 OPS in 2.692564 seconds, throughput 742786.429589
+61224	[1728367770]	2000000 OPS in 2.698239 seconds, throughput 741224.183625
+61224	[1728367770]	2000000 OPS in 2.699204 seconds, throughput 740959.186486
+61224	[1728367772]	2000000 OPS in 2.702093 seconds, throughput 740166.974268
+61224	[1728367772]	2000000 OPS in 2.694803 seconds, throughput 742169.279164
+61224	[1728367773]	2000000 OPS in 2.698842 seconds, throughput 741058.572529
+61224	[1728367773]	2000000 OPS in 2.706712 seconds, throughput 738903.880428
+61224	[1728367775]	2000000 OPS in 2.705386 seconds, throughput 739266.041888
+61224	[1728367775]	2000000 OPS in 2.695665 seconds, throughput 741931.953711
+61224	[1728367776]	2000000 OPS in 2.696575 seconds, throughput 741681.577557
+61224	[1728367776]	2000000 OPS in 2.706224 seconds, throughput 739037.123313
+61224	[1728367778]	2000000 OPS in 2.699579 seconds, throughput 740856.259439
+61224	[1728367778]	2000000 OPS in 2.691304 seconds, throughput 743134.183281
+61224	[1728367778]	2000000 OPS in 2.694795 seconds, throughput 742171.482432
+61224	[1728367779]	2000000 OPS in 2.704374 seconds, throughput 739542.681597
+61224	[1728367780]	2000000 OPS in 2.700509 seconds, throughput 740601.123714
+61224	[1728367781]	2000000 OPS in 2.690557 seconds, throughput 743340.505330
+61224	[1728367781]	2000000 OPS in 2.697238 seconds, throughput 741499.267028
+61224	[1728367781]	2000000 OPS in 2.702103 seconds, throughput 740164.235042
+61224	[1728367783]	2000000 OPS in 2.699082 seconds, throughput 740992.678251
+61224	[1728367783]	2000000 OPS in 2.687262 seconds, throughput 744251.956080
+61224	[1728367784]	2000000 OPS in 2.695373 seconds, throughput 742012.330019
+61224	[1728367784]	2000000 OPS in 2.702628 seconds, throughput 740020.454165
+61224	[1728367786]	2000000 OPS in 2.693917 seconds, throughput 742413.370568
+61224	[1728367786]	2000000 OPS in 2.687091 seconds, throughput 744299.318482
+61224	[1728367786]	2000000 OPS in 2.694882 seconds, throughput 742147.522600
+61224	[1728367787]	2000000 OPS in 2.703515 seconds, throughput 739777.659824
+61224	[1728367788]	2000000 OPS in 2.698181 seconds, throughput 741240.116953
+61224	[1728367789]	2000000 OPS in 2.692604 seconds, throughput 742775.395119
+61224	[1728367789]	2000000 OPS in 2.695351 seconds, throughput 742018.386474
+61224	[1728367789]	2000000 OPS in 2.703102 seconds, throughput 739890.688550
+61224	[1728367791]	2000000 OPS in 2.695155 seconds, throughput 742072.348344
+61224	[1728367791]	2000000 OPS in 2.688425 seconds, throughput 743929.996187
+61224	[1728367792]	2000000 OPS in 2.698540 seconds, throughput 741141.506148
+61224	[1728367792]	2000000 OPS in 2.701671 seconds, throughput 740282.588072
+61224	[1728367794]	2000000 OPS in 2.697821 seconds, throughput 741339.028794
+61224	[1728367794]	2000000 OPS in 2.694204 seconds, throughput 742334.285006
+61224	[1728367794]	2000000 OPS in 2.696307 seconds, throughput 741755.297153
+61224	[1728367795]	2000000 OPS in 2.702484 seconds, throughput 740059.885646
+61224	[1728367796]	2000000 OPS in 2.697244 seconds, throughput 741497.617568
+61224	[1728367797]	2000000 OPS in 2.691161 seconds, throughput 743173.671140
+61224	[1728367797]	2000000 OPS in 2.693229 seconds, throughput 742603.024102
+61224	[1728367798]	2000000 OPS in 2.701800 seconds, throughput 740247.242579
+61224	[1728367799]	2000000 OPS in 2.703205 seconds, throughput 739862.496555
+61224	[1728367799]	2000000 OPS in 2.694473 seconds, throughput 742260.174810
+61224	[1728367800]	2000000 OPS in 2.702655 seconds, throughput 740013.061231
+61224	[1728367800]	2000000 OPS in 2.700932 seconds, throughput 740485.136242
+61224	[1728367802]	2000000 OPS in 2.702136 seconds, throughput 740155.195741
+61224	[1728367802]	2000000 OPS in 2.699060 seconds, throughput 740998.718072
+61224	[1728367803]	2000000 OPS in 2.711455 seconds, throughput 737611.356264
+61224	[1728367803]	2000000 OPS in 2.710954 seconds, throughput 737747.671115
+61224	[1728367805]	2000000 OPS in 2.701779 seconds, throughput 740252.996267
+61224	[1728367805]	2000000 OPS in 2.701219 seconds, throughput 740406.460935
+61224	[1728367805]	2000000 OPS in 2.697848 seconds, throughput 741331.609490
+61224	[1728367806]	2000000 OPS in 2.718092 seconds, throughput 735810.266908
+61224	[1728367807]	2000000 OPS in 2.697411 seconds, throughput 741451.710548
+61224	[1728367808]	2000000 OPS in 2.715593 seconds, throughput 736487.389679
+61224	[1728367808]	2000000 OPS in 2.698737 seconds, throughput 741087.404960
+61224	[1728367808]	2000000 OPS in 2.726438 seconds, throughput 733557.850940
+61224	[1728367810]	2000000 OPS in 2.682223 seconds, throughput 745650.156605
+61224	[1728367810]	2000000 OPS in 2.710157 seconds, throughput 737964.627142
+61224	[1728367811]	2000000 OPS in 2.684385 seconds, throughput 745049.610991
+61224	[1728367811]	2000000 OPS in 2.722528 seconds, throughput 734611.361205
+61224	[1728367813]	2000000 OPS in 2.686598 seconds, throughput 744435.899975
+61224	[1728367813]	2000000 OPS in 2.710560 seconds, throughput 737854.908211
+61224	[1728367813]	2000000 OPS in 2.688318 seconds, throughput 743959.605969
+61224	[1728367814]	2000000 OPS in 2.720542 seconds, throughput 735147.628671
+61224	[1728367815]	2000000 OPS in 2.686536 seconds, throughput 744453.080100
+61224	[1728367816]	2000000 OPS in 2.704395 seconds, throughput 739536.938946
+61224	[1728367816]	2000000 OPS in 2.687805 seconds, throughput 744101.599632
+61224	[1728367817]	2000000 OPS in 2.720737 seconds, throughput 735094.939349
+61224	[1728367818]	2000000 OPS in 2.687150 seconds, throughput 744282.976388
+61224	[1728367818]	2000000 OPS in 2.705061 seconds, throughput 739354.861129
+61224	[1728367819]	2000000 OPS in 2.687773 seconds, throughput 744110.458733
+61224	[1728367819]	2000000 OPS in 2.719273 seconds, throughput 735490.699168
+61224	[1728367821]	2000000 OPS in 2.696076 seconds, throughput 741818.850804
+61224	[1728367821]	2000000 OPS in 2.710037 seconds, throughput 737997.304096
+61224	[1728367821]	2000000 OPS in 2.687928 seconds, throughput 744067.549428
+61224	[1728367822]	2000000 OPS in 2.720298 seconds, throughput 735213.568513
+61224	[1728367823]	2000000 OPS in 2.689847 seconds, throughput 743536.714170
+61224	[1728367824]	2000000 OPS in 2.707549 seconds, throughput 738675.458874
+61224	[1728367824]	2000000 OPS in 2.691132 seconds, throughput 743181.679680
+61224	[1728367825]	2000000 OPS in 2.721633 seconds, throughput 734852.935719
+61224	[1728367826]	2000000 OPS in 2.698289 seconds, throughput 741210.448547
+61224	[1728367826]	2000000 OPS in 2.708875 seconds, throughput 738313.875686
+61224	[1728367827]	2000000 OPS in 2.694110 seconds, throughput 742360.185739
+61224	[1728367827]	2000000 OPS in 2.718071 seconds, throughput 735815.951828
+61224	[1728367829]	2000000 OPS in 2.697043 seconds, throughput 741552.878467
+61224	[1728367829]	2000000 OPS in 2.711736 seconds, throughput 737534.922279
+61224	[1728367829]	2000000 OPS in 2.693884 seconds, throughput 742422.465110
+61224	[1728367830]	2000000 OPS in 2.729013 seconds, throughput 732865.691735
+61224	[1728367832]	2000000 OPS in 2.695474 seconds, throughput 741984.526655
+61224	[1728367832]	2000000 OPS in 2.713434 seconds, throughput 737073.391135
+61224	[1728367832]	2000000 OPS in 2.692474 seconds, throughput 742811.258345
+61224	[1728367833]	2000000 OPS in 2.719155 seconds, throughput 735522.616401
+61224	[1728367834]	2000000 OPS in 2.695483 seconds, throughput 741982.049228
+61224	[1728367835]	2000000 OPS in 2.714867 seconds, throughput 736684.338496
+61224	[1728367835]	2000000 OPS in 2.694360 seconds, throughput 742291.304800
+61224	[1728367836]	2000000 OPS in 2.722289 seconds, throughput 734675.855502
+61224	[1728367837]	2000000 OPS in 2.697084 seconds, throughput 741541.605675
+61224	[1728367837]	2000000 OPS in 2.712402 seconds, throughput 737353.828820
+61224	[1728367838]	2000000 OPS in 2.693200 seconds, throughput 742611.020348
+61224	[1728367838]	2000000 OPS in 2.719473 seconds, throughput 735436.608490
+61224	[1728367840]	2000000 OPS in 2.692233 seconds, throughput 742877.752409
+61224	[1728367840]	2000000 OPS in 2.709205 seconds, throughput 738223.943925
+61224	[1728367840]	2000000 OPS in 2.692996 seconds, throughput 742667.274664
+61224	[1728367841]	2000000 OPS in 2.719438 seconds, throughput 735446.073784
+61224	[1728367842]	2000000 OPS in 2.697332 seconds, throughput 741473.426334
+61224	[1728367843]	2000000 OPS in 2.709622 seconds, throughput 738110.334209
+61224	[1728367843]	2000000 OPS in 2.693451 seconds, throughput 742541.817171
+61224	[1728367844]	2000000 OPS in 2.720242 seconds, throughput 735228.703917
+61224	[1728367845]	2000000 OPS in 2.689505 seconds, throughput 743631.263002
+61224	[1728367845]	2000000 OPS in 2.703370 seconds, throughput 739817.339099
+61224	[1728367846]	2000000 OPS in 2.697140 seconds, throughput 741526.209244
+61224	[1728367846]	2000000 OPS in 2.721609 seconds, throughput 734859.415882
+61224	[1728367848]	2000000 OPS in 2.692076 seconds, throughput 742921.076522
+61224	[1728367848]	2000000 OPS in 2.706843 seconds, throughput 738868.120537
+61224	[1728367848]	2000000 OPS in 2.689150 seconds, throughput 743729.431233
+61224	[1728367849]	2000000 OPS in 2.720774 seconds, throughput 735084.942741
+61224	[1728367850]	2000000 OPS in 2.697201 seconds, throughput 741509.438859
+61224	[1728367851]	2000000 OPS in 2.715521 seconds, throughput 736506.917089
+61224	[1728367851]	2000000 OPS in 2.700596 seconds, throughput 740577.265167
+61224	[1728367852]	2000000 OPS in 2.714266 seconds, throughput 736847.457103
+61224	[1728367853]	2000000 OPS in 2.694128 seconds, throughput 742355.225884
+61224	[1728367854]	2000000 OPS in 2.715989 seconds, throughput 736380.007430
+61224	[1728367854]	2000000 OPS in 2.703307 seconds, throughput 739834.580386
+61224	[1728367855]	2000000 OPS in 2.720928 seconds, throughput 735043.338155
+61224	[1728367856]	2000000 OPS in 2.697391 seconds, throughput 741457.208095
+61224	[1728367856]	2000000 OPS in 2.710041 seconds, throughput 737996.214817
+61224	[1728367856]	2000000 OPS in 2.708965 seconds, throughput 738289.346669
+61224	[1728367857]	2000000 OPS in 2.721477 seconds, throughput 734895.058823
+61224	[1728367858]	2000000 OPS in 2.690680 seconds, throughput 743306.524745
+61224	[1728367859]	2000000 OPS in 2.713273 seconds, throughput 737117.127543
+61224	[1728367859]	2000000 OPS in 2.703951 seconds, throughput 739658.373987
+61224	[1728367860]	2000000 OPS in 2.720788 seconds, throughput 735081.160311
+61224	[1728367861]	2000000 OPS in 2.692311 seconds, throughput 742856.230205
+61224	[1728367862]	2000000 OPS in 2.713277 seconds, throughput 737116.040861
+61224	[1728367862]	2000000 OPS in 2.703879 seconds, throughput 739678.069914
+61224	[1728367863]	2000000 OPS in 2.721252 seconds, throughput 734955.821806
+61224	[1728367864]	2000000 OPS in 2.690436 seconds, throughput 743373.936418
+61224	[1728367864]	2000000 OPS in 2.715247 seconds, throughput 736581.239202
+61224	[1728367865]	2000000 OPS in 2.703876 seconds, throughput 739678.890600
+61224	[1728367866]	2000000 OPS in 2.731608 seconds, throughput 732169.476733
+61224	[1728367867]	2000000 OPS in 2.704461 seconds, throughput 739518.891195
+61224	[1728367867]	2000000 OPS in 2.724282 seconds, throughput 734138.389491
+61224	[1728367867]	2000000 OPS in 2.714867 seconds, throughput 736684.338496
+61224	[1728367868]	2000000 OPS in 2.732110 seconds, throughput 732034.947348
+61224	[1728367869]	2000000 OPS in 2.697123 seconds, throughput 741530.883093
+61224	[1728367870]	2000000 OPS in 2.709286 seconds, throughput 738201.873113
+61224	[1728367870]	2000000 OPS in 2.706318 seconds, throughput 739011.453939
+61224	[1728367871]	2000000 OPS in 2.720609 seconds, throughput 735129.524309
+61224	[1728367872]	2000000 OPS in 2.691410 seconds, throughput 743104.915267
+61224	[1728367873]	2000000 OPS in 2.711062 seconds, throughput 737718.281618
+61224	[1728367873]	2000000 OPS in 2.704958 seconds, throughput 739383.014450
+61224	[1728367874]	2000000 OPS in 2.721317 seconds, throughput 734938.267023
+61224	[1728367875]	2000000 OPS in 2.690030 seconds, throughput 743486.132125
+61224	[1728367875]	2000000 OPS in 2.713663 seconds, throughput 737011.191146
+61224	[1728367875]	2000000 OPS in 2.703390 seconds, throughput 739811.865843
+61224	[1728367876]	2000000 OPS in 2.722981 seconds, throughput 734489.149943
+61224	[1728367877]	2000000 OPS in 2.688776 seconds, throughput 743832.881579
+61224	[1728367878]	2000000 OPS in 2.712843 seconds, throughput 737233.964516
+61224	[1728367878]	2000000 OPS in 2.704845 seconds, throughput 739413.903569
+61224	[1728367879]	2000000 OPS in 2.727610 seconds, throughput 733242.655658
+61224	[1728367880]	2000000 OPS in 2.694188 seconds, throughput 742338.693514
+61224	[1728367881]	2000000 OPS in 2.712306 seconds, throughput 737379.926896
+61224	[1728367881]	2000000 OPS in 2.699955 seconds, throughput 740753.086626
+61224	[1728367882]	2000000 OPS in 2.720068 seconds, throughput 735275.735754
+61224	[1728367883]	2000000 OPS in 2.693098 seconds, throughput 742639.146440
+61224	[1728367883]	2000000 OPS in 2.710583 seconds, throughput 737848.647321
+61224	[1728367884]	2000000 OPS in 2.700646 seconds, throughput 740563.554053
+61224	[1728367885]	2000000 OPS in 2.726178 seconds, throughput 733627.811537
+61224	[1728367885]	2000000 OPS in 2.688050 seconds, throughput 744033.779134
+61224	[1728367886]	2000000 OPS in 2.709587 seconds, throughput 738119.868452
+61224	[1728367886]	2000000 OPS in 2.708244 seconds, throughput 738485.897135
+61224	[1728367887]	2000000 OPS in 2.722089 seconds, throughput 734729.834329
+61224	[1728367888]	2000000 OPS in 2.692445 seconds, throughput 742819.259075
+61224	[1728367889]	2000000 OPS in 2.710859 seconds, throughput 737773.524923
+61224	[1728367889]	2000000 OPS in 2.705546 seconds, throughput 739222.323331
+61224	[1728367890]	2000000 OPS in 2.723030 seconds, throughput 734475.933060
+61224	[1728367891]	2000000 OPS in 2.690797 seconds, throughput 743274.204632
+61224	[1728367892]	2000000 OPS in 2.706706 seconds, throughput 738905.518368
+61224	[1728367892]	2000000 OPS in 2.704993 seconds, throughput 739373.447547
+61224	[1728367893]	2000000 OPS in 2.727284 seconds, throughput 733330.302235
+61224	[1728367893]	2000000 OPS in 2.694172 seconds, throughput 742343.102074
+61224	[1728367894]	2000000 OPS in 2.705846 seconds, throughput 739140.364973
+61224	[1728367894]	2000000 OPS in 2.702620 seconds, throughput 740022.644693
+61224	[1728367895]	2000000 OPS in 2.723701 seconds, throughput 734294.990529
+61224	[1728367896]	2000000 OPS in 2.695549 seconds, throughput 741963.881940
+61224	[1728367897]	2000000 OPS in 2.711972 seconds, throughput 737470.740848
+61224	[1728367897]	2000000 OPS in 2.709126 seconds, throughput 738245.471049
+61224	[1728367898]	2000000 OPS in 2.720684 seconds, throughput 735109.259289
+61224	[1728367899]	2000000 OPS in 2.691273 seconds, throughput 743142.743230
+61224	[1728367900]	2000000 OPS in 2.708650 seconds, throughput 738375.205361
+61224	[1728367900]	2000000 OPS in 2.703922 seconds, throughput 739666.306942
+61224	[1728367901]	2000000 OPS in 2.718510 seconds, throughput 735697.128206
+61224	[1728367902]	2000000 OPS in 2.694444 seconds, throughput 742268.163673
+61224	[1728367902]	2000000 OPS in 2.712944 seconds, throughput 737206.518085
+61224	[1728367902]	2000000 OPS in 2.709058 seconds, throughput 738264.001730
+61224	[1728367904]	2000000 OPS in 2.719853 seconds, throughput 735333.858117
+61224	[1728367904]	2000000 OPS in 2.695874 seconds, throughput 741874.434784
+61224	[1728367905]	2000000 OPS in 2.710453 seconds, throughput 737884.036358
+61224	[1728367905]	2000000 OPS in 2.710307 seconds, throughput 737923.785018
+61224	[1728367906]	2000000 OPS in 2.722251 seconds, throughput 734686.110869
+61224	[1728367907]	2000000 OPS in 2.688744 seconds, throughput 743841.734282
+61224	[1728367908]	2000000 OPS in 2.711563 seconds, throughput 737581.977627
+61224	[1728367908]	2000000 OPS in 2.705124 seconds, throughput 739337.642193
+61224	[1728367909]	2000000 OPS in 2.719799 seconds, throughput 735348.457735
+61224	[1728367910]	2000000 OPS in 2.692481 seconds, throughput 742809.327160
+61224	[1728367911]	2000000 OPS in 2.716852 seconds, throughput 736146.098499
+61224	[1728367911]	2000000 OPS in 2.711891 seconds, throughput 737492.767962
+61224	[1728367912]	2000000 OPS in 2.725188 seconds, throughput 733894.322153
+61224	[1728367912]	2000000 OPS in 2.691474 seconds, throughput 743087.245130
+61224	[1728367913]	2000000 OPS in 2.710315 seconds, throughput 737921.606898
+61224	[1728367913]	2000000 OPS in 2.701543 seconds, throughput 740317.662906
+61224	[1728367915]	2000000 OPS in 2.722219 seconds, throughput 734694.747190
+61224	[1728367915]	2000000 OPS in 2.690602 seconds, throughput 743328.073048
+61224	[1728367916]	2000000 OPS in 2.711706 seconds, throughput 737543.081735
+61224	[1728367916]	2000000 OPS in 2.705892 seconds, throughput 739127.799631
+61224	[1728367917]	2000000 OPS in 2.726265 seconds, throughput 733604.400159
+61224	[1728367918]	2000000 OPS in 2.693602 seconds, throughput 742500.191194
+61224	[1728367919]	2000000 OPS in 2.709962 seconds, throughput 738017.728662
+61224	[1728367919]	2000000 OPS in 2.704149 seconds, throughput 739604.215596
+61224	[1728367920]	2000000 OPS in 2.723625 seconds, throughput 734315.480288
+61224	[1728367920]	2000000 OPS in 2.695414 seconds, throughput 742001.043253
+61224	[1728367921]	2000000 OPS in 2.705358 seconds, throughput 739273.693167
+61224	[1728367921]	2000000 OPS in 2.716067 seconds, throughput 736358.860072
+61224	[1728367923]	2000000 OPS in 2.720094 seconds, throughput 735268.707626
+61224	[1728367923]	2000000 OPS in 2.691053 seconds, throughput 743203.496921
+61224	[1728367924]	2000000 OPS in 2.700953 seconds, throughput 740479.378945
+61224	[1728367924]	2000000 OPS in 2.716296 seconds, throughput 736296.780616
+61224	[1728367925]	2000000 OPS in 2.720371 seconds, throughput 735193.839370
+61224	[1728367926]	2000000 OPS in 2.691731 seconds, throughput 743016.296948
+61224	[1728367927]	2000000 OPS in 2.718459 seconds, throughput 735710.930347
+61224	[1728367927]	2000000 OPS in 2.722162 seconds, throughput 734710.131138
+61224	[1728367928]	2000000 OPS in 2.731973 seconds, throughput 732071.656638
+61224	[1728367928]	2000000 OPS in 2.704262 seconds, throughput 739573.310574
+61224	[1728367930]	2000000 OPS in 2.703214 seconds, throughput 739860.033279
+61224	[1728367930]	2000000 OPS in 2.714236 seconds, throughput 736855.601355
+61224	[1728367931]	2000000 OPS in 2.724324 seconds, throughput 734127.071523
+61224	[1728367931]	2000000 OPS in 2.696727 seconds, throughput 741639.772954
+61224	[1728367932]	2000000 OPS in 2.702295 seconds, throughput 740111.645842
+61224	[1728367932]	2000000 OPS in 2.709372 seconds, throughput 738178.441351
+61224	[1728367934]	2000000 OPS in 2.725433 seconds, throughput 733828.349477
+61224	[1728367934]	2000000 OPS in 2.693899 seconds, throughput 742418.331199
+61224	[1728367935]	2000000 OPS in 2.704054 seconds, throughput 739630.199693
+61224	[1728367935]	2000000 OPS in 2.712804 seconds, throughput 737244.563190
+61224	[1728367936]	2000000 OPS in 2.726472 seconds, throughput 733548.703233
+61224	[1728367937]	2000000 OPS in 2.691454 seconds, throughput 743092.766958
+61224	[1728367938]	2000000 OPS in 2.702970 seconds, throughput 739926.821237
+61224	[1728367938]	2000000 OPS in 2.713753 seconds, throughput 736986.748610
+61224	[1728367939]	2000000 OPS in 2.729285 seconds, throughput 732792.654486
+61224	[1728367939]	2000000 OPS in 2.687435 seconds, throughput 744204.045865
+61224	[1728367940]	2000000 OPS in 2.702019 seconds, throughput 740187.245167
+61224	[1728367940]	2000000 OPS in 2.711153 seconds, throughput 737693.520063
+61224	[1728367942]	2000000 OPS in 2.730326 seconds, throughput 732513.260321
+61224	[1728367942]	2000000 OPS in 2.692744 seconds, throughput 742736.777057
+61224	[1728367943]	2000000 OPS in 2.712905 seconds, throughput 737217.115970
+61224	[1728367943]	2000000 OPS in 2.718307 seconds, throughput 735752.069211
+61224	[1728367945]	2000000 OPS in 2.732251 seconds, throughput 731997.170099
+61224	[1728367945]	2000000 OPS in 2.693267 seconds, throughput 742592.546524
+61224	[1728367946]	2000000 OPS in 2.708764 seconds, throughput 738344.130386
+61224	[1728367946]	2000000 OPS in 2.717141 seconds, throughput 736067.800677
+61224	[1728367947]	2000000 OPS in 2.727938 seconds, throughput 733154.492514
+61224	[1728367947]	2000000 OPS in 2.695070 seconds, throughput 742095.752615
+61224	[1728367948]	2000000 OPS in 2.709602 seconds, throughput 738115.782318
+61224	[1728367949]	2000000 OPS in 2.714246 seconds, throughput 736852.886584
+61224	[1728367950]	2000000 OPS in 2.725636 seconds, throughput 733773.695387
+61224	[1728367950]	2000000 OPS in 2.691670 seconds, throughput 743033.135563
+61224	[1728367951]	2000000 OPS in 2.703233 seconds, throughput 739854.833083
+61224	[1728367951]	2000000 OPS in 2.711816 seconds, throughput 737513.164610
+61224	[1728367953]	2000000 OPS in 2.691047 seconds, throughput 743205.153979
+61224	[1728367953]	2000000 OPS in 2.722500 seconds, throughput 734618.916437
+61224	[1728367954]	2000000 OPS in 2.704073 seconds, throughput 739625.002727
+61224	[1728367954]	2000000 OPS in 2.707055 seconds, throughput 738810.256903
+61224	[1728367955]	2000000 OPS in 2.693786 seconds, throughput 742449.474457
+61224	[1728367955]	2000000 OPS in 2.724985 seconds, throughput 733948.994215
+61224	[1728367957]	2000000 OPS in 2.711614 seconds, throughput 737568.105195
+61224	[1728367957]	2000000 OPS in 2.712130 seconds, throughput 737427.778167
+61224	[1728367958]	2000000 OPS in 2.692553 seconds, throughput 742789.464126
+61224	[1728367958]	2000000 OPS in 2.727764 seconds, throughput 733201.259346
+61224	[1728367959]	2000000 OPS in 2.710914 seconds, throughput 737758.556708
+61224	[1728367959]	2000000 OPS in 2.712987 seconds, throughput 737194.833591
+61224	[1728367961]	2000000 OPS in 2.690664 seconds, throughput 743310.944808
+61224	[1728367961]	2000000 OPS in 2.724115 seconds, throughput 734183.395341
+61224	[1728367962]	2000000 OPS in 2.706266 seconds, throughput 739025.653798
+61224	[1728367962]	2000000 OPS in 2.708582 seconds, throughput 738393.742556
+61224	[1728367963]	2000000 OPS in 2.694532 seconds, throughput 742243.922136
+61224	[1728367964]	2000000 OPS in 2.724253 seconds, throughput 734146.204482
+61224	[1728367965]	2000000 OPS in 2.707826 seconds, throughput 738599.895267
+61224	[1728367965]	2000000 OPS in 2.711142 seconds, throughput 737696.513130
+61224	[1728367966]	2000000 OPS in 2.696467 seconds, throughput 741711.283691
+61224	[1728367966]	2000000 OPS in 2.725879 seconds, throughput 733708.282723
+61224	[1728367967]	2000000 OPS in 2.713382 seconds, throughput 737087.516612
+61224	[1728367968]	2000000 OPS in 2.714533 seconds, throughput 736774.981185
+61224	[1728367969]	2000000 OPS in 2.697409 seconds, throughput 741452.260299
+61224	[1728367969]	2000000 OPS in 2.725341 seconds, throughput 733853.121499
+61224	[1728367970]	2000000 OPS in 2.708414 seconds, throughput 738439.544324
+61224	[1728367970]	2000000 OPS in 2.711156 seconds, throughput 737692.703777
+61224	[1728367972]	2000000 OPS in 2.691979 seconds, throughput 742947.846176
+61224	[1728367972]	2000000 OPS in 2.724066 seconds, throughput 734196.601698
+61224	[1728367973]	2000000 OPS in 2.709287 seconds, throughput 738201.600643
+61224	[1728367973]	2000000 OPS in 2.716483 seconds, throughput 736246.094675
+61224	[1728367974]	2000000 OPS in 2.693645 seconds, throughput 742488.338293
+61224	[1728367975]	2000000 OPS in 2.726908 seconds, throughput 733431.417562
+61224	[1728367976]	2000000 OPS in 2.708956 seconds, throughput 738291.799498
+61224	[1728367976]	2000000 OPS in 2.710975 seconds, throughput 737741.956307
+61224	[1728367977]	2000000 OPS in 2.692228 seconds, throughput 742879.132079
+61224	[1728367977]	2000000 OPS in 2.723452 seconds, throughput 734362.125714
+61224	[1728367978]	2000000 OPS in 2.705405 seconds, throughput 739260.850039
+61224	[1728367978]	2000000 OPS in 2.711928 seconds, throughput 737482.706031
+61224	[1728367980]	2000000 OPS in 2.701223 seconds, throughput 740405.364533
+61224	[1728367980]	2000000 OPS in 2.730349 seconds, throughput 732507.089753
+61224	[1728367981]	2000000 OPS in 2.707141 seconds, throughput 738786.786503
+61224	[1728367981]	2000000 OPS in 2.717273 seconds, throughput 736032.043891
+61224	[1728367982]	2000000 OPS in 2.695200 seconds, throughput 742059.958445
+61224	[1728367983]	2000000 OPS in 2.727971 seconds, throughput 733145.623616
+61224	[1728367984]	2000000 OPS in 2.706370 seconds, throughput 738997.254625
+61224	[1728367984]	2000000 OPS in 2.714392 seconds, throughput 736813.253207
+61224	[1728367985]	2000000 OPS in 2.695586 seconds, throughput 741953.697638
+61224	[1728367985]	2000000 OPS in 2.722849 seconds, throughput 734524.756973
+61224	[1728367986]	2000000 OPS in 2.704667 seconds, throughput 739462.566002
+61224	[1728367987]	2000000 OPS in 2.708831 seconds, throughput 738325.868244
+61224	[1728367988]	2000000 OPS in 2.707152 seconds, throughput 738783.784582
+61224	[1728367988]	2000000 OPS in 2.732754 seconds, throughput 731862.436209
+61224	[1728367989]	2000000 OPS in 2.720585 seconds, throughput 735136.009351
+61224	[1728367989]	2000000 OPS in 2.723066 seconds, throughput 734466.223000
+61224	[1728367990]	2000000 OPS in 2.692767 seconds, throughput 742730.433045
+61224	[1728367991]	2000000 OPS in 2.724540 seconds, throughput 734068.870341
+61224	[1728367992]	2000000 OPS in 2.704539 seconds, throughput 739497.563171
+61224	[1728367992]	2000000 OPS in 2.714495 seconds, throughput 736785.295239
+61224	[1728367993]	2000000 OPS in 2.694406 seconds, throughput 742278.632099
+61224	[1728367994]	2000000 OPS in 2.723717 seconds, throughput 734290.677042
+61224	[1728367994]	2000000 OPS in 2.707858 seconds, throughput 738591.166893
+61224	[1728367995]	2000000 OPS in 2.716180 seconds, throughput 736328.225670
+61224	[1728367996]	2000000 OPS in 2.688965 seconds, throughput 743780.599599
+61224	[1728367996]	2000000 OPS in 2.721502 seconds, throughput 734888.308001
+61224	[1728367997]	2000000 OPS in 2.703721 seconds, throughput 739721.295208
+61224	[1728367997]	2000000 OPS in 2.712016 seconds, throughput 737458.776054
+61224	[1728367999]	2000000 OPS in 2.691536 seconds, throughput 743070.127986
+61224	[1728367999]	2000000 OPS in 2.717601 seconds, throughput 735943.208734
+61224	[1728368000]	2000000 OPS in 2.708640 seconds, throughput 738377.931360
+61224	[1728368000]	2000000 OPS in 2.711841 seconds, throughput 737506.365602
+61224	[1728368001]	2000000 OPS in 2.697124 seconds, throughput 741530.608159
+61224	[1728368002]	2000000 OPS in 2.723180 seconds, throughput 734435.476171
+61224	[1728368003]	2000000 OPS in 2.710908 seconds, throughput 737760.189575
+61224	[1728368003]	2000000 OPS in 2.710886 seconds, throughput 737766.176815
+61224	[1728368004]	2000000 OPS in 2.695047 seconds, throughput 742102.085789
+61224	[1728368004]	2000000 OPS in 2.722590 seconds, throughput 734594.632317
+61224	[1728368005]	2000000 OPS in 2.710687 seconds, throughput 737820.338534
+61224	[1728368006]	2000000 OPS in 2.717597 seconds, throughput 735944.291961
+61224	[1728368007]	2000000 OPS in 2.692012 seconds, throughput 742938.738757
+61224	[1728368007]	2000000 OPS in 2.730012 seconds, throughput 732597.512392
+61224	[1728368008]	2000000 OPS in 2.711269 seconds, throughput 737661.958293
+61224	[1728368008]	2000000 OPS in 2.719952 seconds, throughput 735307.093655
+61224	[1728368009]	2000000 OPS in 2.696803 seconds, throughput 741618.872420
+61224	[1728368010]	2000000 OPS in 2.727494 seconds, throughput 733273.840382
+61224	[1728368011]	2000000 OPS in 2.713587 seconds, throughput 737031.832773
+61224	[1728368011]	2000000 OPS in 2.719121 seconds, throughput 735531.813406
+61224	[1728368012]	2000000 OPS in 2.700602 seconds, throughput 740575.619806
+61224	[1728368013]	2000000 OPS in 2.725736 seconds, throughput 733746.775183
+61224	[1728368013]	2000000 OPS in 2.706872 seconds, throughput 738860.204694
+61224	[1728368014]	2000000 OPS in 2.717939 seconds, throughput 735851.687621
+61224	[1728368015]	2000000 OPS in 2.697714 seconds, throughput 741368.432680
+61224	[1728368015]	2000000 OPS in 2.727306 seconds, throughput 733324.386776
+61224	[1728368016]	2000000 OPS in 2.703018 seconds, throughput 739913.681670
+61224	[1728368016]	2000000 OPS in 2.720732 seconds, throughput 735096.290263
+61224	[1728368017]	2000000 OPS in 2.696438 seconds, throughput 741719.260743
+61224	[1728368018]	2000000 OPS in 2.721739 seconds, throughput 734824.316365
+61224	[1728368019]	2000000 OPS in 2.709877 seconds, throughput 738040.877870
+61224	[1728368019]	2000000 OPS in 2.714860 seconds, throughput 736686.237964
+61224	[1728368020]	2000000 OPS in 2.698331 seconds, throughput 741198.911475
+61224	[1728368021]	2000000 OPS in 2.727081 seconds, throughput 733384.890291
+61224	[1728368022]	2000000 OPS in 2.708461 seconds, throughput 738426.730162
+61224	[1728368022]	2000000 OPS in 2.718147 seconds, throughput 735795.378248
+61224	[1728368023]	2000000 OPS in 2.698727 seconds, throughput 741090.151023
+61224	[1728368024]	2000000 OPS in 2.725855 seconds, throughput 733714.742714
+61224	[1728368024]	2000000 OPS in 2.703124 seconds, throughput 739884.666778
+61224	[1728368025]	2000000 OPS in 2.711838 seconds, throughput 737507.181476
+61224	[1728368025]	2000000 OPS in 2.695607 seconds, throughput 741947.917482
+61224	[1728368026]	2000000 OPS in 2.720976 seconds, throughput 735030.371455
+61224	[1728368027]	2000000 OPS in 2.703933 seconds, throughput 739663.297870
+61224	[1728368027]	2000000 OPS in 2.714426 seconds, throughput 736804.024129
+61224	[1728368028]	2000000 OPS in 2.693091 seconds, throughput 742641.076740
+61224	[1728368029]	2000000 OPS in 2.723406 seconds, throughput 734374.529541
+61224	[1728368030]	2000000 OPS in 2.708758 seconds, throughput 738345.765845
+61224	[1728368030]	2000000 OPS in 2.713198 seconds, throughput 737137.503418
+61224	[1728368031]	2000000 OPS in 2.699022 seconds, throughput 741009.150722
+61224	[1728368032]	2000000 OPS in 2.724765 seconds, throughput 734008.253923
+61224	[1728368032]	2000000 OPS in 2.702508 seconds, throughput 740053.313441
+61224	[1728368033]	2000000 OPS in 2.719780 seconds, throughput 735353.594776
+61224	[1728368034]	2000000 OPS in 2.700263 seconds, throughput 740668.594133
+61224	[1728368034]	2000000 OPS in 2.729262 seconds, throughput 732798.829867
+61224	[1728368035]	2000000 OPS in 2.703073 seconds, throughput 739898.626489
+61224	[1728368035]	2000000 OPS in 2.716366 seconds, throughput 736277.806452
+61224	[1728368036]	2000000 OPS in 2.694355 seconds, throughput 742292.682293
+61224	[1728368037]	2000000 OPS in 2.725783 seconds, throughput 733734.123369
+61224	[1728368038]	2000000 OPS in 2.704530 seconds, throughput 739500.024034
+61224	[1728368038]	2000000 OPS in 2.713944 seconds, throughput 736934.881486
+61224	[1728368039]	2000000 OPS in 2.697307 seconds, throughput 741480.298683
+61224	[1728368040]	2000000 OPS in 2.732209 seconds, throughput 732008.422489
+61224	[1728368041]	2000000 OPS in 2.711662 seconds, throughput 737555.049265
+61224	[1728368041]	2000000 OPS in 2.720814 seconds, throughput 735074.135902
+61224	[1728368042]	2000000 OPS in 2.697505 seconds, throughput 741425.873168
+61224	[1728368043]	2000000 OPS in 2.727306 seconds, throughput 733324.386776
+61224	[1728368043]	2000000 OPS in 2.711117 seconds, throughput 737703.315644
+61224	[1728368044]	2000000 OPS in 2.716786 seconds, throughput 736163.981999
+61224	[1728368044]	2000000 OPS in 2.696542 seconds, throughput 741690.654179
+61224	[1728368045]	2000000 OPS in 2.731283 seconds, throughput 732256.598822
+61224	[1728368046]	2000000 OPS in 2.709362 seconds, throughput 738181.165898
+61224	[1728368046]	2000000 OPS in 2.713976 seconds, throughput 736926.192420
+61224	[1728368047]	2000000 OPS in 2.703000 seconds, throughput 739918.608953
+61224	[1728368048]	2000000 OPS in 2.735263 seconds, throughput 731191.113981
+61224	[1728368049]	2000000 OPS in 2.718219 seconds, throughput 735775.888551
+61224	[1728368049]	2000000 OPS in 2.724688 seconds, throughput 734028.997082
+61224	[1728368050]	2000000 OPS in 2.695722 seconds, throughput 741916.265846
+61224	[1728368051]	2000000 OPS in 2.728716 seconds, throughput 732945.458597
+61224	[1728368051]	2000000 OPS in 2.711858 seconds, throughput 737501.742348
+61224	[1728368052]	2000000 OPS in 2.713861 seconds, throughput 736957.419706
+61224	[1728368052]	2000000 OPS in 2.696330 seconds, throughput 741748.969896
+61224	[1728368054]	2000000 OPS in 2.727066 seconds, throughput 733388.924214
+61224	[1728368054]	2000000 OPS in 2.709828 seconds, throughput 738054.223368
+61224	[1728368054]	2000000 OPS in 2.715312 seconds, throughput 736563.606687
+61224	[1728368055]	2000000 OPS in 2.701935 seconds, throughput 740210.256723
+61224	[1728368056]	2000000 OPS in 2.729456 seconds, throughput 732746.745139
+61224	[1728368057]	2000000 OPS in 2.707159 seconds, throughput 738781.874282
+61224	[1728368057]	2000000 OPS in 2.720993 seconds, throughput 735025.779192
+61224	[1728368058]	2000000 OPS in 2.698704 seconds, throughput 741096.467045
+61224	[1728368059]	2000000 OPS in 2.730525 seconds, throughput 732459.874932
+61224	[1728368059]	2000000 OPS in 2.713208 seconds, throughput 737134.786570
+61224	[1728368060]	2000000 OPS in 2.718412 seconds, throughput 735723.650425
+61224	[1728368061]	2000000 OPS in 2.696165 seconds, throughput 741794.363476
+61224	[1728368062]	2000000 OPS in 2.720492 seconds, throughput 735161.139970
+61224	[1728368062]	2000000 OPS in 2.720139 seconds, throughput 735256.543875
+61224	[1728368063]	2000000 OPS in 2.720121 seconds, throughput 735261.409327
+61224	[1728368063]	2000000 OPS in 2.698667 seconds, throughput 741106.627828
+61224	[1728368064]	2000000 OPS in 2.731184 seconds, throughput 732283.141670
+61224	[1728368065]	2000000 OPS in 2.700844 seconds, throughput 740509.263030
+61224	[1728368065]	2000000 OPS in 2.716711 seconds, throughput 736184.305213
+61224	[1728368066]	2000000 OPS in 2.695626 seconds, throughput 741942.687895
+61224	[1728368067]	2000000 OPS in 2.729349 seconds, throughput 732775.471367
+61224	[1728368068]	2000000 OPS in 2.711674 seconds, throughput 737551.785355
+61224	[1728368068]	2000000 OPS in 2.721566 seconds, throughput 734871.026461
+61224	[1728368069]	2000000 OPS in 2.694504 seconds, throughput 742251.635180
+61224	[1728368070]	2000000 OPS in 2.729861 seconds, throughput 732638.035416
+61224	[1728368070]	2000000 OPS in 2.708072 seconds, throughput 738532.801196
+61224	[1728368071]	2000000 OPS in 2.719870 seconds, throughput 735329.262060
+61224	[1728368071]	2000000 OPS in 2.696213 seconds, throughput 741781.157498
+61224	[1728368073]	2000000 OPS in 2.732582 seconds, throughput 731908.502654
+61224	[1728368073]	2000000 OPS in 2.701737 seconds, throughput 740264.503910
+61224	[1728368073]	2000000 OPS in 2.720110 seconds, throughput 735264.382690
+61224	[1728368074]	2000000 OPS in 2.697194 seconds, throughput 741511.363291
+61224	[1728368075]	2000000 OPS in 2.726104 seconds, throughput 733647.725839
+61224	[1728368076]	2000000 OPS in 2.707233 seconds, throughput 738761.680284
+61224	[1728368076]	2000000 OPS in 2.718959 seconds, throughput 735575.637588
+61224	[1728368077]	2000000 OPS in 2.699935 seconds, throughput 740758.573818
+61224	[1728368078]	2000000 OPS in 2.724460 seconds, throughput 734090.425259
+61224	[1728368078]	2000000 OPS in 2.711800 seconds, throughput 737517.516041
+61224	[1728368079]	2000000 OPS in 2.723387 seconds, throughput 734379.652984
+61224	[1728368079]	2000000 OPS in 2.700552 seconds, throughput 740589.331366
+61224	[1728368081]	2000000 OPS in 2.725063 seconds, throughput 733927.986252
+61224	[1728368081]	2000000 OPS in 2.708324 seconds, throughput 738464.083322
+61224	[1728368082]	2000000 OPS in 2.717476 seconds, throughput 735977.061067
+61224	[1728368082]	2000000 OPS in 2.694471 seconds, throughput 742260.725760
+61224	[1728368084]	2000000 OPS in 2.723062 seconds, throughput 734467.301883
+61224	[1728368084]	2000000 OPS in 2.707541 seconds, throughput 738677.641447
+61224	[1728368084]	2000000 OPS in 2.717175 seconds, throughput 736058.590264
+61224	[1728368085]	2000000 OPS in 2.697329 seconds, throughput 741474.251009
+61224	[1728368086]	2000000 OPS in 2.729210 seconds, throughput 732812.791980
+61224	[1728368087]	2000000 OPS in 2.708893 seconds, throughput 738308.969753
+61224	[1728368087]	2000000 OPS in 2.719087 seconds, throughput 735541.010641
+61224	[1728368088]	2000000 OPS in 2.697040 seconds, throughput 741553.703319
+61224	[1728368089]	2000000 OPS in 2.727677 seconds, throughput 733224.645000
+61224	[1728368089]	2000000 OPS in 2.705212 seconds, throughput 739313.591689
+61224	[1728368090]	2000000 OPS in 2.715516 seconds, throughput 736508.273197
+61224	[1728368090]	2000000 OPS in 2.692857 seconds, throughput 742705.609693
+61224	[1728368092]	2000000 OPS in 2.725044 seconds, throughput 733933.103465
+61224	[1728368092]	2000000 OPS in 2.707478 seconds, throughput 738694.829653
+61224	[1728368092]	2000000 OPS in 2.715961 seconds, throughput 736387.599086
+61224	[1728368093]	2000000 OPS in 2.695230 seconds, throughput 742051.698742
+61224	[1728368094]	2000000 OPS in 2.723350 seconds, throughput 734389.630418
+61224	[1728368095]	2000000 OPS in 2.701782 seconds, throughput 740252.174306
+61224	[1728368095]	2000000 OPS in 2.709777 seconds, throughput 738068.114092
+61224	[1728368096]	2000000 OPS in 2.691579 seconds, throughput 743058.256882
+61224	[1728368097]	2000000 OPS in 2.726871 seconds, throughput 733441.369247
+61224	[1728368097]	2000000 OPS in 2.709300 seconds, throughput 738198.058539
+61224	[1728368098]	2000000 OPS in 2.708262 seconds, throughput 738480.988915
+61224	[1728368098]	2000000 OPS in 2.697066 seconds, throughput 741546.554663
+61224	[1728368100]	2000000 OPS in 2.727074 seconds, throughput 733386.772783
+61224	[1728368100]	2000000 OPS in 2.710090 seconds, throughput 737982.871418
+61224	[1728368101]	2000000 OPS in 2.711874 seconds, throughput 737497.391103
+61224	[1728368101]	2000000 OPS in 2.698036 seconds, throughput 741279.953270
+61224	[1728368103]	2000000 OPS in 2.726255 seconds, throughput 733607.091046
+61224	[1728368103]	2000000 OPS in 2.708575 seconds, throughput 738395.650850
+61224	[1728368103]	2000000 OPS in 2.719682 seconds, throughput 735380.092231
+61224	[1728368104]	2000000 OPS in 2.695758 seconds, throughput 741906.358063
+61224	[1728368105]	2000000 OPS in 2.724836 seconds, throughput 733989.128153
+61224	[1728368106]	2000000 OPS in 2.702347 seconds, throughput 740097.404219
+61224	[1728368106]	2000000 OPS in 2.716541 seconds, throughput 736230.375319
+61224	[1728368106]	2000000 OPS in 2.693432 seconds, throughput 742547.055207
+61224	[1728368108]	2000000 OPS in 2.733561 seconds, throughput 731646.376284
+61224	[1728368108]	2000000 OPS in 2.717297 seconds, throughput 736025.543030
+61224	[1728368109]	2000000 OPS in 2.726531 seconds, throughput 733532.829812
+61224	[1728368109]	2000000 OPS in 2.711398 seconds, throughput 737626.862600
+61224	[1728368111]	2000000 OPS in 2.726556 seconds, throughput 733526.103993
+61224	[1728368111]	2000000 OPS in 2.706642 seconds, throughput 738922.990185
+61224	[1728368111]	2000000 OPS in 2.714376 seconds, throughput 736817.596383
+61224	[1728368112]	2000000 OPS in 2.699010 seconds, throughput 741012.445304
+61224	[1728368114]	2000000 OPS in 2.728490 seconds, throughput 733006.168247
+61224	[1728368114]	2000000 OPS in 2.704000 seconds, throughput 739644.970414
+61224	[1728368114]	2000000 OPS in 2.723930 seconds, throughput 734233.258564
+61224	[1728368115]	2000000 OPS in 2.709410 seconds, throughput 738168.088255
+61224	[1728368116]	2000000 OPS in 2.749289 seconds, throughput 727460.808958
+61224	[1728368116]	2000000 OPS in 2.723782 seconds, throughput 734273.154019
+61224	[1728368117]	2000000 OPS in 2.731557 seconds, throughput 732183.146828
+61224	[1728368117]	2000000 OPS in 2.704291 seconds, throughput 739565.379613
+61224	[1728368119]	2000000 OPS in 2.731527 seconds, throughput 732191.188299
+61224	[1728368119]	2000000 OPS in 2.713039 seconds, throughput 737180.704000
+61224	[1728368120]	2000000 OPS in 2.722452 seconds, throughput 734631.868624
+61224	[1728368120]	2000000 OPS in 2.703259 seconds, throughput 739847.717144
+61224	[1728368122]	2000000 OPS in 2.730878 seconds, throughput 732365.195369
+61224	[1728368122]	2000000 OPS in 2.705833 seconds, throughput 739143.916125
+61224	[1728368122]	2000000 OPS in 2.722875 seconds, throughput 734517.743194
+61224	[1728368123]	2000000 OPS in 2.692733 seconds, throughput 742739.811188
+61224	[1728368125]	2000000 OPS in 2.701334 seconds, throughput 740374.940677
+61224	[1728368125]	2000000 OPS in 2.728326 seconds, throughput 733050.229335
+61224	[1728368125]	2000000 OPS in 2.717877 seconds, throughput 735868.473812
+61224	[1728368125]	2000000 OPS in 2.699903 seconds, throughput 740767.353494
+61224	[1728368127]	2000000 OPS in 2.707288 seconds, throughput 738746.671946
+61224	[1728368127]	2000000 OPS in 2.730034 seconds, throughput 732591.608749
+61224	[1728368128]	2000000 OPS in 2.718716 seconds, throughput 735641.383653
+61224	[1728368128]	2000000 OPS in 2.698129 seconds, throughput 741254.402588
+61224	[1728368130]	2000000 OPS in 2.706461 seconds, throughput 738972.407140
+61224	[1728368130]	2000000 OPS in 2.725618 seconds, throughput 733778.541234
+61224	[1728368131]	2000000 OPS in 2.715229 seconds, throughput 736586.122202
+61224	[1728368131]	2000000 OPS in 2.696039 seconds, throughput 741829.031405
+61224	[1728368133]	2000000 OPS in 2.703934 seconds, throughput 739663.024319
+61224	[1728368133]	2000000 OPS in 2.728684 seconds, throughput 732954.054042
+61224	[1728368133]	2000000 OPS in 2.716870 seconds, throughput 736141.221332
+61224	[1728368133]	2000000 OPS in 2.697750 seconds, throughput 741358.539524
+61224	[1728368135]	2000000 OPS in 2.705571 seconds, throughput 739215.492774
+61224	[1728368135]	2000000 OPS in 2.723278 seconds, throughput 734409.046744
+61224	[1728368136]	2000000 OPS in 2.716084 seconds, throughput 736354.251194
+61224	[1728368136]	2000000 OPS in 2.695186 seconds, throughput 742063.813036
+61224	[1728368138]	2000000 OPS in 2.709280 seconds, throughput 738203.507943
+61224	[1728368138]	2000000 OPS in 2.724737 seconds, throughput 734015.796754
+61224	[1728368139]	2000000 OPS in 2.723006 seconds, throughput 734482.406576
+61224	[1728368139]	2000000 OPS in 2.702253 seconds, throughput 740123.149091
+61224	[1728368141]	2000000 OPS in 2.719068 seconds, throughput 735546.150372
+61224	[1728368141]	2000000 OPS in 2.728322 seconds, throughput 733051.304062
+61224	[1728368141]	2000000 OPS in 2.723616 seconds, throughput 734317.906783
+61224	[1728368141]	2000000 OPS in 2.699792 seconds, throughput 740797.809609
+61224	[1728368143]	2000000 OPS in 2.712281 seconds, throughput 737386.723573
+61224	[1728368144]	2000000 OPS in 2.727035 seconds, throughput 733397.261128
+61224	[1728368144]	2000000 OPS in 2.717690 seconds, throughput 735919.107772
+61224	[1728368144]	2000000 OPS in 2.695200 seconds, throughput 742059.958445
+61224	[1728368146]	2000000 OPS in 2.704445 seconds, throughput 739523.266326
+61224	[1728368146]	2000000 OPS in 2.718682 seconds, throughput 735650.583628
+61224	[1728368147]	2000000 OPS in 2.713750 seconds, throughput 736987.563335
+61224	[1728368147]	2000000 OPS in 2.693374 seconds, throughput 742563.045459
+61224	[1728368149]	2000000 OPS in 2.711716 seconds, throughput 737540.361896
+61224	[1728368149]	2000000 OPS in 2.728736 seconds, throughput 732940.086546
+61224	[1728368150]	2000000 OPS in 2.720275 seconds, throughput 735219.784764
+61224	[1728368150]	2000000 OPS in 2.699813 seconds, throughput 740792.047449
+61224	[1728368152]	2000000 OPS in 2.715885 seconds, throughput 736408.205797
+61224	[1728368152]	2000000 OPS in 2.726908 seconds, throughput 733431.417562
+61224	[1728368152]	2000000 OPS in 2.693470 seconds, throughput 742536.579208
+61224	[1728368152]	2000000 OPS in 2.717976 seconds, throughput 735841.670419
+61224	[1728368154]	2000000 OPS in 2.710113 seconds, throughput 737976.608355
+61224	[1728368154]	2000000 OPS in 2.725683 seconds, throughput 733761.042645
+61224	[1728368155]	2000000 OPS in 2.699304 seconds, throughput 740931.736477
+61224	[1728368155]	2000000 OPS in 2.716876 seconds, throughput 736139.595624
+61224	[1728368157]	2000000 OPS in 2.709926 seconds, throughput 738027.532855
+61224	[1728368157]	2000000 OPS in 2.729274 seconds, throughput 732795.607916
+61224	[1728368158]	2000000 OPS in 2.699368 seconds, throughput 740914.169539
+61224	[1728368158]	2000000 OPS in 2.719053 seconds, throughput 735550.208106
+61224	[1728368160]	2000000 OPS in 2.710926 seconds, throughput 737755.290997
+61224	[1728368160]	2000000 OPS in 2.726304 seconds, throughput 733593.905889
+61224	[1728368160]	2000000 OPS in 2.695486 seconds, throughput 741981.223423
+61224	[1728368160]	2000000 OPS in 2.714442 seconds, throughput 736799.681113
+61224	[1728368162]	2000000 OPS in 2.708282 seconds, throughput 738475.535413
+61224	[1728368163]	2000000 OPS in 2.722813 seconds, throughput 734534.468581
+61224	[1728368163]	2000000 OPS in 2.694520 seconds, throughput 742247.227707
+61224	[1728368163]	2000000 OPS in 2.716932 seconds, throughput 736124.422694
+61224	[1728368165]	2000000 OPS in 2.709691 seconds, throughput 738091.538851
+61224	[1728368165]	2000000 OPS in 2.719579 seconds, throughput 735407.943656
+61224	[1728368166]	2000000 OPS in 2.692263 seconds, throughput 742869.474490
+61224	[1728368166]	2000000 OPS in 2.718569 seconds, throughput 735681.161670
+61224	[1728368168]	2000000 OPS in 2.723168 seconds, throughput 734438.712558
+61224	[1728368168]	2000000 OPS in 2.734651 seconds, throughput 731354.750570
+61224	[1728368168]	2000000 OPS in 2.708282 seconds, throughput 738475.535413
+61224	[1728368169]	2000000 OPS in 2.723549 seconds, throughput 734335.971191
+61224	[1728368171]	2000000 OPS in 2.708573 seconds, throughput 738396.196078
+61224	[1728368171]	2000000 OPS in 2.725992 seconds, throughput 733677.868460
+61224	[1728368171]	2000000 OPS in 2.694980 seconds, throughput 742120.535217
+61224	[1728368171]	2000000 OPS in 2.716066 seconds, throughput 736359.131185
+61224	[1728368173]	2000000 OPS in 2.707367 seconds, throughput 738725.115583
+61224	[1728368174]	2000000 OPS in 2.728662 seconds, throughput 732959.963528
+61224	[1728368174]	2000000 OPS in 2.695212 seconds, throughput 742056.654541
+61224	[1728368174]	2000000 OPS in 2.715368 seconds, throughput 736548.416274
+61224	[1728368176]	2000000 OPS in 2.712337 seconds, throughput 737371.499191
+61224	[1728368176]	2000000 OPS in 2.730546 seconds, throughput 732454.241752
+61224	[1728368177]	2000000 OPS in 2.697342 seconds, throughput 741470.677430
+61224	[1728368177]	2000000 OPS in 2.713318 seconds, throughput 737104.902558
+61224	[1728368179]	2000000 OPS in 2.712196 seconds, throughput 737409.833213
+61224	[1728368179]	2000000 OPS in 2.729336 seconds, throughput 732778.961623
+61224	[1728368179]	2000000 OPS in 2.693807 seconds, throughput 742443.686574
+61224	[1728368179]	2000000 OPS in 2.715943 seconds, throughput 736392.479518
+61224	[1728368181]	2000000 OPS in 2.710948 seconds, throughput 737749.303934
+61224	[1728368182]	2000000 OPS in 2.728652 seconds, throughput 732962.649689
+61224	[1728368182]	2000000 OPS in 2.694302 seconds, throughput 742307.284039
+61224	[1728368182]	2000000 OPS in 2.717030 seconds, throughput 736097.871573
+61224	[1728368184]	2000000 OPS in 2.709573 seconds, throughput 738123.682219
+61224	[1728368185]	2000000 OPS in 2.729814 seconds, throughput 732650.649458
+61224	[1728368185]	2000000 OPS in 2.694279 seconds, throughput 742313.620824
+61224	[1728368185]	2000000 OPS in 2.714272 seconds, throughput 736845.828274
+61224	[1728368187]	2000000 OPS in 2.711147 seconds, throughput 737695.152642
+61224	[1728368187]	2000000 OPS in 2.727876 seconds, throughput 733171.155874
+61224	[1728368187]	2000000 OPS in 2.696117 seconds, throughput 741807.569924
+61224	[1728368188]	2000000 OPS in 2.715790 seconds, throughput 736433.965807
+61224	[1728368190]	2000000 OPS in 2.717424 seconds, throughput 735991.144555
+61224	[1728368190]	2000000 OPS in 2.730353 seconds, throughput 732506.016621
+61224	[1728368190]	2000000 OPS in 2.698704 seconds, throughput 741096.467045
+61224	[1728368190]	2000000 OPS in 2.716953 seconds, throughput 736118.733007
+61224	[1728368192]	2000000 OPS in 2.707178 seconds, throughput 738776.689231
+61224	[1728368193]	2000000 OPS in 2.722780 seconds, throughput 734543.371113
+61224	[1728368193]	2000000 OPS in 2.691926 seconds, throughput 742962.473708
+61224	[1728368193]	2000000 OPS in 2.707620 seconds, throughput 738656.089111
+61224	[1728368195]	2000000 OPS in 2.712757 seconds, throughput 737257.336356
+61224	[1728368195]	2000000 OPS in 2.729253 seconds, throughput 732801.246348
+61224	[1728368195]	2000000 OPS in 2.698879 seconds, throughput 741048.413063
+61224	[1728368196]	2000000 OPS in 2.712090 seconds, throughput 737438.654322
+61224	[1728368198]	2000000 OPS in 2.712222 seconds, throughput 737402.764228
+61224	[1728368198]	2000000 OPS in 2.696559 seconds, throughput 741685.978315
+61224	[1728368198]	2000000 OPS in 2.723290 seconds, throughput 734405.810619
+61224	[1728368198]	2000000 OPS in 2.712392 seconds, throughput 737356.547284
+61224	[1728368200]	2000000 OPS in 2.705719 seconds, throughput 739175.058460
+61224	[1728368201]	2000000 OPS in 2.696864 seconds, throughput 741602.097844
+61224	[1728368201]	2000000 OPS in 2.727274 seconds, throughput 733332.991111
+61224	[1728368201]	2000000 OPS in 2.717858 seconds, throughput 735873.618121
+61224	[1728368203]	2000000 OPS in 2.710311 seconds, throughput 737922.695956
+61224	[1728368204]	2000000 OPS in 2.697959 seconds, throughput 741301.109468
+61224	[1728368204]	2000000 OPS in 2.727825 seconds, throughput 733184.863398
+61224	[1728368204]	2000000 OPS in 2.717340 seconds, throughput 736013.895942
+61224	[1728368206]	2000000 OPS in 2.716227 seconds, throughput 736315.484678
+61224	[1728368206]	2000000 OPS in 2.701560 seconds, throughput 740313.004338
+61224	[1728368206]	2000000 OPS in 2.729583 seconds, throughput 732712.652445
+61224	[1728368207]	2000000 OPS in 2.713976 seconds, throughput 736926.192420
+61224	[1728368209]	2000000 OPS in 2.712694 seconds, throughput 737274.458527
+61224	[1728368209]	2000000 OPS in 2.702087 seconds, throughput 740168.617813
+61224	[1728368209]	2000000 OPS in 2.730752 seconds, throughput 732398.987532
+61224	[1728368209]	2000000 OPS in 2.715602 seconds, throughput 736484.948825
+61224	[1728368211]	2000000 OPS in 2.710651 seconds, throughput 737830.137484
+61224	[1728368212]	2000000 OPS in 2.699951 seconds, throughput 740754.184057
+61224	[1728368212]	2000000 OPS in 2.729596 seconds, throughput 732709.162821
+61224	[1728368212]	2000000 OPS in 2.713345 seconds, throughput 737097.567762
+61224	[1728368214]	2000000 OPS in 2.714413 seconds, throughput 736807.552867
+61224	[1728368214]	2000000 OPS in 2.699498 seconds, throughput 740878.489260
+61224	[1728368215]	2000000 OPS in 2.730476 seconds, throughput 732473.019356
+61224	[1728368215]	2000000 OPS in 2.716376 seconds, throughput 736275.095937
+61224	[1728368217]	2000000 OPS in 2.708424 seconds, throughput 738436.817869
+61224	[1728368217]	2000000 OPS in 2.703569 seconds, throughput 739762.883803
+61224	[1728368217]	2000000 OPS in 2.726900 seconds, throughput 733433.569254
+61224	[1728368217]	2000000 OPS in 2.714040 seconds, throughput 736908.814903
+61224	[1728368219]	2000000 OPS in 2.711641 seconds, throughput 737560.761177
+61224	[1728368220]	2000000 OPS in 2.697635 seconds, throughput 741390.143589
+61224	[1728368220]	2000000 OPS in 2.723027 seconds, throughput 734476.742243
+61224	[1728368220]	2000000 OPS in 2.716399 seconds, throughput 736268.861828
+61224	[1728368222]	2000000 OPS in 2.712118 seconds, throughput 737431.040980
+61224	[1728368222]	2000000 OPS in 2.696838 seconds, throughput 741609.247571
+61224	[1728368223]	2000000 OPS in 2.720700 seconds, throughput 735104.936230
+61224	[1728368223]	2000000 OPS in 2.713568 seconds, throughput 737036.993361
+61224	[1728368225]	2000000 OPS in 2.713263 seconds, throughput 737119.844261
+61224	[1728368225]	2000000 OPS in 2.698205 seconds, throughput 741233.523769
+61224	[1728368225]	2000000 OPS in 2.721172 seconds, throughput 734977.428843
+61224	[1728368226]	2000000 OPS in 2.717366 seconds, throughput 736006.853696
+61224	[1728368228]	2000000 OPS in 2.718975 seconds, throughput 735571.309041
+61224	[1728368228]	2000000 OPS in 2.706836 seconds, throughput 738870.031284
+61224	[1728368228]	2000000 OPS in 2.730731 seconds, throughput 732404.619862
+61224	[1728368228]	2000000 OPS in 2.725436 seconds, throughput 733827.541722
+61224	[1728368230]	2000000 OPS in 2.711208 seconds, throughput 737678.555094
+61224	[1728368231]	2000000 OPS in 2.691411 seconds, throughput 743104.639165
+61224	[1728368231]	2000000 OPS in 2.724701 seconds, throughput 734025.494908
+61224	[1728368231]	2000000 OPS in 2.717078 seconds, throughput 736084.867641
+61224	[1728368233]	2000000 OPS in 2.705284 seconds, throughput 739293.915168
+61224	[1728368233]	2000000 OPS in 2.693467 seconds, throughput 742537.406250
+61224	[1728368234]	2000000 OPS in 2.722387 seconds, throughput 734649.408773
+61224	[1728368234]	2000000 OPS in 2.714701 seconds, throughput 736729.385667
+61224	[1728368236]	2000000 OPS in 2.711404 seconds, throughput 737625.230323
+61224	[1728368236]	2000000 OPS in 2.699105 seconds, throughput 740986.363998
+61224	[1728368236]	2000000 OPS in 2.727197 seconds, throughput 733353.696121
+61224	[1728368236]	2000000 OPS in 2.718100 seconds, throughput 735808.101247
+61224	[1728368238]	2000000 OPS in 2.709685 seconds, throughput 738093.173192
+61224	[1728368239]	2000000 OPS in 2.697780 seconds, throughput 741350.295428
+61224	[1728368239]	2000000 OPS in 2.722320 seconds, throughput 734667.489494
+61224	[1728368239]	2000000 OPS in 2.717333 seconds, throughput 736015.791955
+61224	[1728368241]	2000000 OPS in 2.707662 seconds, throughput 738644.631420
+61224	[1728368241]	2000000 OPS in 2.701550 seconds, throughput 740315.744665
+61224	[1728368242]	2000000 OPS in 2.727883 seconds, throughput 733169.274489
+61224	[1728368242]	2000000 OPS in 2.721388 seconds, throughput 734919.092757
+61224	[1728368244]	2000000 OPS in 2.711660 seconds, throughput 737555.593253
+61224	[1728368244]	2000000 OPS in 2.699182 seconds, throughput 740965.225761
+61224	[1728368244]	2000000 OPS in 2.732356 seconds, throughput 731969.040637
+61224	[1728368245]	2000000 OPS in 2.723206 seconds, throughput 734428.464097
+61224	[1728368246]	2000000 OPS in 2.709535 seconds, throughput 738134.034069
+61224	[1728368247]	2000000 OPS in 2.703684 seconds, throughput 739731.418317
+61224	[1728368247]	2000000 OPS in 2.728960 seconds, throughput 732879.924953
+61224	[1728368247]	2000000 OPS in 2.717635 seconds, throughput 735934.001439
+61224	[1728368249]	2000000 OPS in 2.706319 seconds, throughput 739011.180870
+61224	[1728368249]	2000000 OPS in 2.698835 seconds, throughput 741060.494621
+61224	[1728368250]	2000000 OPS in 2.726856 seconds, throughput 733445.403791
+61224	[1728368250]	2000000 OPS in 2.716578 seconds, throughput 736220.347805
+61224	[1728368252]	2000000 OPS in 2.704283 seconds, throughput 739567.567448
+61224	[1728368252]	2000000 OPS in 2.695325 seconds, throughput 742025.544229
+61224	[1728368253]	2000000 OPS in 2.728455 seconds, throughput 733015.571083
+61224	[1728368253]	2000000 OPS in 2.720157 seconds, throughput 735251.678488
+61224	[1728368255]	2000000 OPS in 2.705287 seconds, throughput 739293.095335
+61224	[1728368255]	2000000 OPS in 2.698470 seconds, throughput 741160.731822
+61224	[1728368255]	2000000 OPS in 2.728711 seconds, throughput 732946.801622
+61224	[1728368256]	2000000 OPS in 2.718778 seconds, throughput 735624.607820
+61224	[1728368257]	2000000 OPS in 2.706134 seconds, throughput 739061.702044
+61224	[1728368257]	2000000 OPS in 2.698797 seconds, throughput 741070.929010
+61224	[1728368258]	2000000 OPS in 2.725971 seconds, throughput 733683.520478
+61224	[1728368258]	2000000 OPS in 2.712739 seconds, throughput 737262.228323
+61224	[1728368260]	2000000 OPS in 2.711720 seconds, throughput 737539.273966
+61224	[1728368260]	2000000 OPS in 2.700116 seconds, throughput 740708.917691
+61224	[1728368261]	2000000 OPS in 2.732743 seconds, throughput 731865.382145
+61224	[1728368261]	2000000 OPS in 2.717203 seconds, throughput 736051.005390
+61224	[1728368263]	2000000 OPS in 2.708713 seconds, throughput 738358.032025
+61224	[1728368263]	2000000 OPS in 2.694030 seconds, throughput 742382.230339
+61224	[1728368264]	2000000 OPS in 2.726897 seconds, throughput 733434.376143
+61224	[1728368264]	2000000 OPS in 2.714326 seconds, throughput 736831.169137
+61224	[1728368265]	2000000 OPS in 2.710106 seconds, throughput 737978.514494
+61224	[1728368266]	2000000 OPS in 2.703203 seconds, throughput 739863.043952
+61224	[1728368266]	2000000 OPS in 2.721102 seconds, throughput 734996.336043
+61224	[1728368266]	2000000 OPS in 2.714004 seconds, throughput 736918.589656
+61224	[1728368268]	2000000 OPS in 2.709444 seconds, throughput 738158.825205
+61224	[1728368268]	2000000 OPS in 2.697857 seconds, throughput 741329.136422
+61224	[1728368269]	2000000 OPS in 2.726063 seconds, throughput 733658.759904
+61224	[1728368269]	2000000 OPS in 2.720838 seconds, throughput 735067.651951
+61224	[1728368271]	2000000 OPS in 2.705592 seconds, throughput 739209.755203
+61224	[1728368271]	2000000 OPS in 2.699475 seconds, throughput 740884.801674
+61224	[1728368272]	2000000 OPS in 2.723875 seconds, throughput 734248.084071
+61224	[1728368272]	2000000 OPS in 2.716174 seconds, throughput 736329.852211
+61224	[1728368274]	2000000 OPS in 2.708741 seconds, throughput 738350.399688
+61224	[1728368274]	2000000 OPS in 2.698809 seconds, throughput 741067.633908
+61224	[1728368274]	2000000 OPS in 2.725116 seconds, throughput 733913.712297
+61224	[1728368275]	2000000 OPS in 2.714961 seconds, throughput 736658.832300
+61224	[1728368276]	2000000 OPS in 2.714301 seconds, throughput 736837.955702
+61224	[1728368276]	2000000 OPS in 2.698555 seconds, throughput 741137.386490
+61224	[1728368277]	2000000 OPS in 2.732590 seconds, throughput 731906.359900
+61224	[1728368277]	2000000 OPS in 2.720765 seconds, throughput 735087.374323
+61224	[1728368279]	2000000 OPS in 2.707200 seconds, throughput 738770.685579
+61224	[1728368279]	2000000 OPS in 2.698638 seconds, throughput 741114.591879
+61224	[1728368280]	2000000 OPS in 2.726467 seconds, throughput 733550.048469
+61224	[1728368280]	2000000 OPS in 2.717662 seconds, throughput 735926.689927
+61224	[1728368282]	2000000 OPS in 2.709779 seconds, throughput 738067.569348
+61224	[1728368282]	2000000 OPS in 2.693424 seconds, throughput 742549.260718
+61224	[1728368283]	2000000 OPS in 2.720022 seconds, throughput 735288.170463
+61224	[1728368283]	2000000 OPS in 2.714693 seconds, throughput 736731.556754
+61224	[1728368284]	2000000 OPS in 2.716143 seconds, throughput 736338.256123
+61224	[1728368284]	2000000 OPS in 2.699214 seconds, throughput 740956.441394
+61224	[1728368285]	2000000 OPS in 2.726880 seconds, throughput 733438.948542
+61224	[1728368285]	2000000 OPS in 2.720115 seconds, throughput 735263.031159
+61224	[1728368287]	2000000 OPS in 2.719571 seconds, throughput 735410.106962
+61224	[1728368287]	2000000 OPS in 2.706677 seconds, throughput 738913.435183
+61224	[1728368288]	2000000 OPS in 2.735563 seconds, throughput 731110.926709
+61224	[1728368288]	2000000 OPS in 2.724113 seconds, throughput 734183.934367
+61224	[1728368290]	2000000 OPS in 2.707145 seconds, throughput 738785.694893
+61224	[1728368290]	2000000 OPS in 2.701557 seconds, throughput 740313.826434
+61224	[1728368291]	2000000 OPS in 2.717008 seconds, throughput 736103.831862
+61224	[1728368291]	2000000 OPS in 2.726121 seconds, throughput 733643.150836
+61224	[1728368293]	2000000 OPS in 2.713729 seconds, throughput 736993.266461
+61224	[1728368293]	2000000 OPS in 2.707247 seconds, throughput 738757.859922
+61224	[1728368294]	2000000 OPS in 2.719144 seconds, throughput 735525.591877
+61224	[1728368294]	2000000 OPS in 2.730357 seconds, throughput 732504.943493
+61224	[1728368295]	2000000 OPS in 2.710175 seconds, throughput 737959.725848
+61224	[1728368295]	2000000 OPS in 2.697602 seconds, throughput 741399.213079
+61224	[1728368296]	2000000 OPS in 2.714692 seconds, throughput 736731.828141
+61224	[1728368296]	2000000 OPS in 2.728009 seconds, throughput 733135.411210
+61224	[1728368298]	2000000 OPS in 2.712704 seconds, throughput 737271.740669
+61224	[1728368298]	2000000 OPS in 2.699922 seconds, throughput 740762.140536
+61224	[1728368299]	2000000 OPS in 2.715274 seconds, throughput 736573.914824
+61224	[1728368299]	2000000 OPS in 2.723589 seconds, throughput 734325.186363
+61224	[1728368301]	2000000 OPS in 2.711063 seconds, throughput 737718.009504
+61224	[1728368301]	2000000 OPS in 2.701940 seconds, throughput 740208.886948
+61224	[1728368302]	2000000 OPS in 2.721457 seconds, throughput 734900.459570
+61224	[1728368302]	2000000 OPS in 2.733470 seconds, throughput 731670.733536
+61224	[1728368303]	2000000 OPS in 2.697510 seconds, throughput 741424.498890
+61224	[1728368303]	2000000 OPS in 2.705807 seconds, throughput 739151.018532
+61224	[1728368304]	2000000 OPS in 2.716024 seconds, throughput 736370.518081
+61224	[1728368304]	2000000 OPS in 2.722877 seconds, throughput 734517.203678
+61224	[1728368306]	2000000 OPS in 2.700129 seconds, throughput 740705.351485
+61224	[1728368306]	2000000 OPS in 2.703059 seconds, throughput 739902.458659
+61224	[1728368307]	2000000 OPS in 2.718109 seconds, throughput 735805.664894
+61224	[1728368307]	2000000 OPS in 2.719922 seconds, throughput 735315.203892
+61224	[1728368309]	2000000 OPS in 2.697218 seconds, throughput 741504.765280
+61224	[1728368309]	2000000 OPS in 2.705938 seconds, throughput 739115.234717
+61224	[1728368310]	2000000 OPS in 2.718350 seconds, throughput 735740.430776
+61224	[1728368310]	2000000 OPS in 2.724272 seconds, throughput 734141.084297
+61224	[1728368311]	2000000 OPS in 2.698049 seconds, throughput 741276.381563
+61224	[1728368312]	2000000 OPS in 2.702607 seconds, throughput 740026.204328
+61224	[1728368313]	2000000 OPS in 2.723481 seconds, throughput 734354.306125
+61224	[1728368313]	2000000 OPS in 2.727631 seconds, throughput 733237.010431
+61224	[1728368314]	2000000 OPS in 2.701224 seconds, throughput 740405.090433
+61224	[1728368314]	2000000 OPS in 2.708473 seconds, throughput 738423.458532
+61224	[1728368315]	2000000 OPS in 2.723851 seconds, throughput 734254.553571
+61224	[1728368315]	2000000 OPS in 2.725796 seconds, throughput 733730.624009
+61224	[1728368317]	2000000 OPS in 2.698044 seconds, throughput 741277.755292
+61224	[1728368317]	2000000 OPS in 2.703874 seconds, throughput 739679.437725
+61224	[1728368318]	2000000 OPS in 2.725973 seconds, throughput 733682.982187
+61224	[1728368318]	2000000 OPS in 2.731007 seconds, throughput 732330.601862
+61224	[1728368320]	2000000 OPS in 2.695260 seconds, throughput 742043.439223
+61224	[1728368320]	2000000 OPS in 2.702555 seconds, throughput 740040.443210
+61224	[1728368321]	2000000 OPS in 2.715873 seconds, throughput 736411.459593
+61224	[1728368321]	2000000 OPS in 2.725459 seconds, throughput 733821.348991
+61224	[1728368322]	2000000 OPS in 2.694362 seconds, throughput 742290.753804
+61224	[1728368322]	2000000 OPS in 2.705707 seconds, throughput 739178.336753
+61224	[1728368323]	2000000 OPS in 2.722283 seconds, throughput 734677.474752
+61224	[1728368324]	2000000 OPS in 2.735438 seconds, throughput 731144.335935
+61224	[1728368325]	2000000 OPS in 2.698110 seconds, throughput 741259.622476
+61224	[1728368325]	2000000 OPS in 2.709399 seconds, throughput 738171.085174
+61224	[1728368326]	2000000 OPS in 2.719639 seconds, throughput 735391.719269
+61224	[1728368326]	2000000 OPS in 2.728814 seconds, throughput 732919.136299
+61224	[1728368328]	2000000 OPS in 2.693527 seconds, throughput 742520.865764
+61224	[1728368328]	2000000 OPS in 2.703647 seconds, throughput 739741.541703
+61224	[1728368329]	2000000 OPS in 2.712590 seconds, throughput 737302.725440
+61224	[1728368329]	2000000 OPS in 2.723273 seconds, throughput 734410.395138
+61224	[1728368330]	2000000 OPS in 2.697333 seconds, throughput 741473.151443
+61224	[1728368330]	2000000 OPS in 2.707722 seconds, throughput 738628.263906
+61224	[1728368332]	2000000 OPS in 2.719777 seconds, throughput 735354.405894
+61224	[1728368332]	2000000 OPS in 2.730606 seconds, throughput 732438.147430
+61224	[1728368333]	2000000 OPS in 2.700287 seconds, throughput 740662.011112
+61224	[1728368333]	2000000 OPS in 2.710477 seconds, throughput 737877.502742
+61224	[1728368334]	2000000 OPS in 2.721948 seconds, throughput 734767.894170
+61224	[1728368335]	2000000 OPS in 2.733787 seconds, throughput 731585.891659
+61224	[1728368336]	2000000 OPS in 2.699942 seconds, throughput 740756.653291
+61224	[1728368336]	2000000 OPS in 2.711760 seconds, throughput 737528.394843
+61224	[1728368337]	2000000 OPS in 2.722769 seconds, throughput 734546.338672
+61224	[1728368337]	2000000 OPS in 2.735063 seconds, throughput 731244.581935
+61224	[1728368338]	2000000 OPS in 2.701845 seconds, throughput 740234.913550
+61224	[1728368339]	2000000 OPS in 2.714035 seconds, throughput 736910.172492
+61224	[1728368340]	2000000 OPS in 2.726103 seconds, throughput 733647.994958
+61224	[1728368340]	2000000 OPS in 2.729728 seconds, throughput 732673.731595
+61224	[1728368341]	2000000 OPS in 2.700612 seconds, throughput 740572.877555
+61224	[1728368341]	2000000 OPS in 2.711863 seconds, throughput 737500.382578
+61224	[1728368343]	2000000 OPS in 2.722111 seconds, throughput 734723.896270
+61224	[1728368343]	2000000 OPS in 2.729272 seconds, throughput 732796.144906
+61224	[1728368344]	2000000 OPS in 2.697479 seconds, throughput 741433.019497
+61224	[1728368344]	2000000 OPS in 2.707455 seconds, throughput 738701.104912
+61224	[1728368345]	2000000 OPS in 2.721669 seconds, throughput 734843.215689
+61224	[1728368345]	2000000 OPS in 2.727896 seconds, throughput 733165.780514
+61224	[1728368347]	2000000 OPS in 2.700109 seconds, throughput 740710.837970
+61224	[1728368347]	2000000 OPS in 2.719134 seconds, throughput 735528.296877
+61224	[1728368348]	2000000 OPS in 2.729993 seconds, throughput 732602.611069
+61224	[1728368348]	2000000 OPS in 2.733071 seconds, throughput 731777.549870
+61224	[1728368349]	2000000 OPS in 2.708285 seconds, throughput 738474.717395
+61224	[1728368349]	2000000 OPS in 2.713147 seconds, throughput 737151.359657
+61224	[1728368351]	2000000 OPS in 2.724018 seconds, throughput 734209.538997
+61224	[1728368351]	2000000 OPS in 2.733412 seconds, throughput 731686.258786
+61224	[1728368352]	2000000 OPS in 2.697334 seconds, throughput 741472.876551
+61224	[1728368352]	2000000 OPS in 2.704044 seconds, throughput 739632.934967
+61224	[1728368353]	2000000 OPS in 2.717147 seconds, throughput 736066.175293
+61224	[1728368354]	2000000 OPS in 2.725151 seconds, throughput 733904.286405
+61224	[1728368355]	2000000 OPS in 2.699823 seconds, throughput 740789.303595
+61224	[1728368355]	2000000 OPS in 2.707118 seconds, throughput 738793.063324
+61224	[1728368356]	2000000 OPS in 2.717425 seconds, throughput 735990.873713
+61224	[1728368356]	2000000 OPS in 2.727889 seconds, throughput 733167.661881
+61224	[1728368357]	2000000 OPS in 2.695766 seconds, throughput 741904.156370
+61224	[1728368358]	2000000 OPS in 2.708516 seconds, throughput 738411.735430
+61224	[1728368359]	2000000 OPS in 2.720668 seconds, throughput 735113.582400
+61224	[1728368359]	2000000 OPS in 2.732309 seconds, throughput 731981.631653
+61224	[1728368360]	2000000 OPS in 2.698545 seconds, throughput 741140.132923
+61224	[1728368360]	2000000 OPS in 2.709365 seconds, throughput 738180.348532
+61224	[1728368362]	2000000 OPS in 2.717206 seconds, throughput 736050.192735
+61224	[1728368362]	2000000 OPS in 2.730953 seconds, throughput 732345.082468
+61224	[1728368363]	2000000 OPS in 2.700228 seconds, throughput 740678.194582
+61224	[1728368363]	2000000 OPS in 2.711366 seconds, throughput 737635.568197
+61224	[1728368364]	2000000 OPS in 2.724402 seconds, throughput 734106.053365
+61224	[1728368365]	2000000 OPS in 2.732231 seconds, throughput 732002.528337
+61224	[1728368365]	2000000 OPS in 2.695163 seconds, throughput 742070.145665
+61224	[1728368366]	2000000 OPS in 2.707027 seconds, throughput 738817.898750
+61224	[1728368367]	2000000 OPS in 2.719343 seconds, throughput 735471.766526
+61224	[1728368367]	2000000 OPS in 2.728789 seconds, throughput 732925.850991
+61224	[1728368368]	2000000 OPS in 2.694959 seconds, throughput 742126.318063
+61224	[1728368368]	2000000 OPS in 2.706368 seconds, throughput 738997.800743
+61224	[1728368370]	2000000 OPS in 2.718618 seconds, throughput 735667.901853
+61224	[1728368370]	2000000 OPS in 2.731404 seconds, throughput 732224.160175
+61224	[1728368371]	2000000 OPS in 2.701612 seconds, throughput 740298.754966
+61224	[1728368371]	2000000 OPS in 2.713266 seconds, throughput 737119.029244
+61224	[1728368372]	2000000 OPS in 2.722554 seconds, throughput 734604.345772
+61224	[1728368373]	2000000 OPS in 2.732330 seconds, throughput 731976.005827
+61224	[1728368374]	2000000 OPS in 2.696272 seconds, throughput 741764.925794
+61224	[1728368374]	2000000 OPS in 2.703845 seconds, throughput 739687.371133
+61224	[1728368375]	2000000 OPS in 2.723464 seconds, throughput 734358.890002
+61224	[1728368375]	2000000 OPS in 2.733886 seconds, throughput 731559.399331
+61224	[1728368376]	2000000 OPS in 2.700707 seconds, throughput 740546.827183
+61224	[1728368377]	2000000 OPS in 2.710023 seconds, throughput 738001.116596
+61224	[1728368378]	2000000 OPS in 2.718493 seconds, throughput 735701.728862
+61224	[1728368378]	2000000 OPS in 2.728049 seconds, throughput 733124.661617
+61224	[1728368379]	2000000 OPS in 2.695630 seconds, throughput 741941.586939
+61224	[1728368379]	2000000 OPS in 2.709327 seconds, throughput 738190.701971
+61224	[1728368381]	2000000 OPS in 2.716499 seconds, throughput 736241.758234
+61224	[1728368381]	2000000 OPS in 2.722058 seconds, throughput 734738.201758
+61224	[1728368382]	2000000 OPS in 2.695695 seconds, throughput 741923.696857
+61224	[1728368382]	2000000 OPS in 2.708249 seconds, throughput 738484.533734
+61224	[1728368383]	2000000 OPS in 2.725997 seconds, throughput 733676.522755
+61224	[1728368384]	2000000 OPS in 2.729154 seconds, throughput 732827.828697
+61224	[1728368384]	2000000 OPS in 2.697708 seconds, throughput 741370.081566
+61224	[1728368385]	2000000 OPS in 2.708045 seconds, throughput 738540.164584
+61224	[1728368386]	2000000 OPS in 2.719944 seconds, throughput 735309.256367
+61224	[1728368386]	2000000 OPS in 2.734080 seconds, throughput 731507.490637
+61224	[1728368387]	2000000 OPS in 2.696855 seconds, throughput 741604.572734
+61224	[1728368387]	2000000 OPS in 2.711547 seconds, throughput 737586.329870
+61224	[1728368389]	2000000 OPS in 2.720144 seconds, throughput 735255.192372
+61224	[1728368389]	2000000 OPS in 2.730892 seconds, throughput 732361.440877
+61224	[1728368390]	2000000 OPS in 2.700236 seconds, throughput 740676.000172
+61224	[1728368390]	2000000 OPS in 2.707778 seconds, throughput 738612.988214
+61224	[1728368392]	2000000 OPS in 2.721514 seconds, throughput 734885.067650
+61224	[1728368392]	2000000 OPS in 2.727728 seconds, throughput 733210.935988
+61224	[1728368392]	2000000 OPS in 2.700447 seconds, throughput 740618.127295
+61224	[1728368393]	2000000 OPS in 2.715382 seconds, throughput 736544.618768
+61224	[1728368394]	2000000 OPS in 2.719259 seconds, throughput 735494.485814
+61224	[1728368395]	2000000 OPS in 2.731413 seconds, throughput 732221.747498
+61224	[1728368395]	2000000 OPS in 2.693786 seconds, throughput 742449.474457
+61224	[1728368395]	2000000 OPS in 2.710386 seconds, throughput 737902.276650
+61224	[1728368397]	2000000 OPS in 2.717291 seconds, throughput 736027.168235
+61224	[1728368397]	2000000 OPS in 2.728845 seconds, throughput 732910.810251
+61224	[1728368398]	2000000 OPS in 2.697786 seconds, throughput 741348.646631
+61224	[1728368398]	2000000 OPS in 2.706909 seconds, throughput 738850.105415
+61224	[1728368400]	2000000 OPS in 2.718272 seconds, throughput 735761.542627
+61224	[1728368400]	2000000 OPS in 2.725368 seconds, throughput 733845.851276
+61224	[1728368401]	2000000 OPS in 2.697122 seconds, throughput 741531.158027
+61224	[1728368401]	2000000 OPS in 2.706601 seconds, throughput 738934.183502
+61224	[1728368402]	2000000 OPS in 2.719480 seconds, throughput 735434.715460
+61224	[1728368403]	2000000 OPS in 2.732331 seconds, throughput 731975.737932
+61224	[1728368403]	2000000 OPS in 2.698180 seconds, throughput 741240.391671
+61224	[1728368404]	2000000 OPS in 2.709374 seconds, throughput 738177.896444
+61224	[1728368405]	2000000 OPS in 2.718860 seconds, throughput 735602.421603
+61224	[1728368405]	2000000 OPS in 2.729493 seconds, throughput 732736.812294
+61224	[1728368406]	2000000 OPS in 2.700466 seconds, throughput 740612.916437
+61224	[1728368406]	2000000 OPS in 2.707901 seconds, throughput 738579.438465
+61224	[1728368408]	2000000 OPS in 2.733915 seconds, throughput 731551.639316
+61224	[1728368408]	2000000 OPS in 2.742664 seconds, throughput 729218.015769
+61224	[1728368409]	2000000 OPS in 2.713440 seconds, throughput 737071.761307
+61224	[1728368409]	2000000 OPS in 2.713873 seconds, throughput 736954.161083
+61224	[1728368411]	2000000 OPS in 2.723553 seconds, throughput 734334.892693
+61224	[1728368411]	2000000 OPS in 2.731881 seconds, throughput 732096.310198
+61224	[1728368411]	2000000 OPS in 2.697622 seconds, throughput 741393.716392
+61224	[1728368412]	2000000 OPS in 2.708295 seconds, throughput 738471.990680
+61224	[1728368413]	2000000 OPS in 2.718705 seconds, throughput 735644.360091
+61224	[1728368414]	2000000 OPS in 2.731520 seconds, throughput 732193.064667
+61224	[1728368414]	2000000 OPS in 2.701417 seconds, throughput 740352.192942
+61224	[1728368414]	2000000 OPS in 2.706131 seconds, throughput 739062.521364
+61224	[1728368416]	2000000 OPS in 2.726818 seconds, throughput 733455.624835
+61224	[1728368416]	2000000 OPS in 2.726676 seconds, throughput 733493.821782
+61224	[1728368417]	2000000 OPS in 2.699805 seconds, throughput 740794.242547
+61224	[1728368417]	2000000 OPS in 2.701846 seconds, throughput 740234.639576
+61224	[1728368419]	2000000 OPS in 2.719127 seconds, throughput 735530.190388
+61224	[1728368419]	2000000 OPS in 2.727679 seconds, throughput 733224.107382
+61224	[1728368419]	2000000 OPS in 2.689006 seconds, throughput 743769.258975
+61224	[1728368420]	2000000 OPS in 2.704659 seconds, throughput 739464.753228
+61224	[1728368421]	2000000 OPS in 2.716501 seconds, throughput 736241.216182
+61224	[1728368422]	2000000 OPS in 2.727501 seconds, throughput 733271.958470
+61224	[1728368422]	2000000 OPS in 2.698973 seconds, throughput 741022.603783
+61224	[1728368423]	2000000 OPS in 2.707884 seconds, throughput 738584.075241
+61224	[1728368424]	2000000 OPS in 2.720397 seconds, throughput 735186.812807
+61224	[1728368425]	2000000 OPS in 2.727811 seconds, throughput 733188.626338
+61224	[1728368425]	2000000 OPS in 2.696507 seconds, throughput 741700.281141
+61224	[1728368425]	2000000 OPS in 2.706106 seconds, throughput 739069.349094
+61224	[1728368427]	2000000 OPS in 2.719227 seconds, throughput 735503.141150
+61224	[1728368427]	2000000 OPS in 2.732954 seconds, throughput 731808.877866
+61224	[1728368428]	2000000 OPS in 2.693374 seconds, throughput 742563.045459
+61224	[1728368428]	2000000 OPS in 2.709007 seconds, throughput 738277.900352
+61224	[1728368430]	2000000 OPS in 2.719741 seconds, throughput 735364.139453
+61224	[1728368430]	2000000 OPS in 2.735211 seconds, throughput 731205.014896
+61224	[1728368430]	2000000 OPS in 2.698161 seconds, throughput 741245.611363
+61224	[1728368431]	2000000 OPS in 2.709321 seconds, throughput 738192.336752
+61224	[1728368432]	2000000 OPS in 2.725230 seconds, throughput 733883.011709
+61224	[1728368433]	2000000 OPS in 2.732928 seconds, throughput 731815.840007
+61224	[1728368433]	2000000 OPS in 2.693734 seconds, throughput 742463.806746
+61224	[1728368433]	2000000 OPS in 2.709553 seconds, throughput 738129.130524
+61224	[1728368435]	2000000 OPS in 2.717361 seconds, throughput 736008.207964
+61224	[1728368436]	2000000 OPS in 2.724322 seconds, throughput 734127.610466
+61224	[1728368436]	2000000 OPS in 2.696936 seconds, throughput 741582.299320
+61224	[1728368436]	2000000 OPS in 2.711200 seconds, throughput 737680.731779
+61224	[1728368438]	2000000 OPS in 2.712942 seconds, throughput 737207.061559
+61224	[1728368438]	2000000 OPS in 2.730800 seconds, throughput 732386.113959
+61224	[1728368438]	2000000 OPS in 2.701742 seconds, throughput 740263.133934
+61224	[1728368439]	2000000 OPS in 2.708989 seconds, throughput 738282.805873
+61224	[1728368440]	2000000 OPS in 2.716603 seconds, throughput 736213.572613
+61224	[1728368441]	2000000 OPS in 2.726640 seconds, throughput 733503.506147
+61224	[1728368441]	2000000 OPS in 2.690626 seconds, throughput 743321.442668
+61224	[1728368442]	2000000 OPS in 2.708123 seconds, throughput 738518.892975
+61224	[1728368443]	2000000 OPS in 2.726292 seconds, throughput 733597.134863
+61224	[1728368444]	2000000 OPS in 2.701588 seconds, throughput 740305.331531
+61224	[1728368444]	2000000 OPS in 2.732499 seconds, throughput 731930.734467
+61224	[1728368444]	2000000 OPS in 2.712128 seconds, throughput 737428.321967
+61224	[1728368446]	2000000 OPS in 2.718241 seconds, throughput 735769.933571
+61224	[1728368446]	2000000 OPS in 2.700468 seconds, throughput 740612.367930
+61224	[1728368446]	2000000 OPS in 2.728990 seconds, throughput 732871.868347
+61224	[1728368447]	2000000 OPS in 2.704627 seconds, throughput 739473.502261
+61224	[1728368449]	2000000 OPS in 2.724308 seconds, throughput 734131.383089
+61224	[1728368449]	2000000 OPS in 2.704144 seconds, throughput 739605.583135
+61224	[1728368449]	2000000 OPS in 2.728178 seconds, throughput 733089.996327
+61224	[1728368450]	2000000 OPS in 2.709063 seconds, throughput 738262.639149
+61224	[1728368451]	2000000 OPS in 2.717573 seconds, throughput 735950.791386
+61224	[1728368452]	2000000 OPS in 2.699158 seconds, throughput 740971.814173
+61224	[1728368452]	2000000 OPS in 2.727956 seconds, throughput 733149.654906
+61224	[1728368452]	2000000 OPS in 2.707093 seconds, throughput 738799.886077
+61224	[1728368454]	2000000 OPS in 2.722196 seconds, throughput 734700.954670
+61224	[1728368455]	2000000 OPS in 2.704060 seconds, throughput 739628.558538
+61224	[1728368455]	2000000 OPS in 2.733673 seconds, throughput 731616.400352
+61224	[1728368455]	2000000 OPS in 2.704901 seconds, throughput 739398.595364
+61224	[1728368457]	2000000 OPS in 2.720679 seconds, throughput 735110.610256
+61224	[1728368457]	2000000 OPS in 2.696293 seconds, throughput 741759.148579
+61224	[1728368457]	2000000 OPS in 2.724012 seconds, throughput 734211.156192
+61224	[1728368458]	2000000 OPS in 2.705490 seconds, throughput 739237.624238
+61224	[1728368460]	2000000 OPS in 2.718088 seconds, throughput 735811.349743
+61224	[1728368460]	2000000 OPS in 2.698487 seconds, throughput 741156.062638
+61224	[1728368460]	2000000 OPS in 2.727038 seconds, throughput 733396.454322
+61224	[1728368460]	2000000 OPS in 2.711964 seconds, throughput 737472.916307
+61224	[1728368462]	2000000 OPS in 2.719460 seconds, throughput 735440.124142
+61224	[1728368463]	2000000 OPS in 2.697597 seconds, throughput 741400.587263
+61224	[1728368463]	2000000 OPS in 2.726992 seconds, throughput 733408.825548
+61224	[1728368463]	2000000 OPS in 2.706366 seconds, throughput 738998.346861
+61224	[1728368465]	2000000 OPS in 2.719926 seconds, throughput 735314.122517
+61224	[1728368465]	2000000 OPS in 2.695638 seconds, throughput 741939.385036
+61224	[1728368466]	2000000 OPS in 2.728439 seconds, throughput 733019.869603
+61224	[1728368466]	2000000 OPS in 2.707495 seconds, throughput 738690.191487
+61224	[1728368468]	2000000 OPS in 2.728283 seconds, throughput 733061.782814
+61224	[1728368468]	2000000 OPS in 2.706617 seconds, throughput 738929.815338
+61224	[1728368468]	2000000 OPS in 2.734882 seconds, throughput 731292.977174
+61224	[1728368469]	2000000 OPS in 2.720097 seconds, throughput 735267.896696
+61224	[1728368470]	2000000 OPS in 2.719760 seconds, throughput 735359.002265
+61224	[1728368471]	2000000 OPS in 2.702357 seconds, throughput 740094.665509
+61224	[1728368471]	2000000 OPS in 2.730925 seconds, throughput 732352.591155
+61224	[1728368471]	2000000 OPS in 2.705916 seconds, throughput 739121.243971
+61224	[1728368473]	2000000 OPS in 2.724926 seconds, throughput 733964.885652
+61224	[1728368473]	2000000 OPS in 2.697378 seconds, throughput 741460.781544
+61224	[1728368474]	2000000 OPS in 2.731689 seconds, throughput 732147.766455
+61224	[1728368474]	2000000 OPS in 2.707922 seconds, throughput 738573.710764
+61224	[1728368476]	2000000 OPS in 2.716856 seconds, throughput 736145.014679
+61224	[1728368476]	2000000 OPS in 2.698834 seconds, throughput 741060.769206
+61224	[1728368476]	2000000 OPS in 2.726623 seconds, throughput 733508.079408
+61224	[1728368477]	2000000 OPS in 2.705884 seconds, throughput 739129.984877
+61224	[1728368479]	2000000 OPS in 2.718063 seconds, throughput 735818.117534
+61224	[1728368479]	2000000 OPS in 2.694750 seconds, throughput 742183.876055
+61224	[1728368479]	2000000 OPS in 2.731482 seconds, throughput 732203.250836
+61224	[1728368479]	2000000 OPS in 2.704271 seconds, throughput 739570.849223
+61224	[1728368481]	2000000 OPS in 2.719041 seconds, throughput 735553.454325
+61224	[1728368481]	2000000 OPS in 2.695222 seconds, throughput 742053.901311
+61224	[1728368482]	2000000 OPS in 2.726787 seconds, throughput 733463.963265
+61224	[1728368482]	2000000 OPS in 2.706411 seconds, throughput 738986.059397
+61224	[1728368484]	2000000 OPS in 2.717192 seconds, throughput 736053.985143
+61224	[1728368484]	2000000 OPS in 2.698364 seconds, throughput 741189.846885
+61224	[1728368485]	2000000 OPS in 2.727831 seconds, throughput 733183.250722
+61224	[1728368485]	2000000 OPS in 2.705898 seconds, throughput 739126.160705
+61224	[1728368487]	2000000 OPS in 2.719076 seconds, throughput 735543.986266
+61224	[1728368487]	2000000 OPS in 2.700034 seconds, throughput 740731.413012
+61224	[1728368487]	2000000 OPS in 2.729082 seconds, throughput 732847.162526
+61224	[1728368488]	2000000 OPS in 2.710595 seconds, throughput 737845.380811
+61224	[1728368489]	2000000 OPS in 2.723176 seconds, throughput 734436.554964
+61224	[1728368490]	2000000 OPS in 2.694782 seconds, throughput 742175.062769
+61224	[1728368490]	2000000 OPS in 2.729027 seconds, throughput 732861.932110
+61224	[1728368490]	2000000 OPS in 2.710853 seconds, throughput 737775.157856
+61224	[1728368492]	2000000 OPS in 2.715875 seconds, throughput 736410.917292
+61224	[1728368492]	2000000 OPS in 2.698009 seconds, throughput 741287.371540
+61224	[1728368493]	2000000 OPS in 2.721514 seconds, throughput 734885.067650
+61224	[1728368493]	2000000 OPS in 2.705495 seconds, throughput 739236.258060
+61224	[1728368495]	2000000 OPS in 2.717766 seconds, throughput 735898.528424
+61224	[1728368495]	2000000 OPS in 2.696244 seconds, throughput 741772.628887
+61224	[1728368496]	2000000 OPS in 2.728693 seconds, throughput 732951.636553
+61224	[1728368496]	2000000 OPS in 2.704467 seconds, throughput 739517.250534
+61224	[1728368498]	2000000 OPS in 2.721067 seconds, throughput 735005.790008
+61224	[1728368498]	2000000 OPS in 2.698521 seconds, throughput 741146.724446
+61224	[1728368498]	2000000 OPS in 2.728495 seconds, throughput 733004.825004
+61224	[1728368498]	2000000 OPS in 2.707038 seconds, throughput 738814.896577
+61224	[1728368500]	2000000 OPS in 2.722494 seconds, throughput 734620.535436
+61224	[1728368500]	2000000 OPS in 2.699708 seconds, throughput 740820.859145
+61224	[1728368501]	2000000 OPS in 2.727308 seconds, throughput 733323.849012
+61224	[1728368501]	2000000 OPS in 2.704829 seconds, throughput 739418.277459
+61224	[1728368503]	2000000 OPS in 2.719086 seconds, throughput 735541.281151
+61224	[1728368503]	2000000 OPS in 2.698078 seconds, throughput 741268.414034
+61224	[1728368504]	2000000 OPS in 2.735200 seconds, throughput 731207.955543
+61224	[1728368504]	2000000 OPS in 2.712529 seconds, throughput 737319.306079
+61224	[1728368506]	2000000 OPS in 2.722726 seconds, throughput 734557.939359
+61224	[1728368506]	2000000 OPS in 2.705959 seconds, throughput 739109.498703
+61224	[1728368506]	2000000 OPS in 2.736935 seconds, throughput 730744.427617
+61224	[1728368507]	2000000 OPS in 2.715060 seconds, throughput 736631.971301
+61224	[1728368508]	2000000 OPS in 2.721877 seconds, throughput 734787.060547
+61224	[1728368508]	2000000 OPS in 2.704611 seconds, throughput 739477.876855
+61224	[1728368509]	2000000 OPS in 2.728347 seconds, throughput 733044.587070
+61224	[1728368509]	2000000 OPS in 2.707142 seconds, throughput 738786.513600
+61224	[1728368511]	2000000 OPS in 2.697276 seconds, throughput 741488.820573
+61224	[1728368511]	2000000 OPS in 2.716566 seconds, throughput 736223.599942
+61224	[1728368512]	2000000 OPS in 2.705458 seconds, throughput 739246.367898
+61224	[1728368512]	2000000 OPS in 2.728285 seconds, throughput 733061.245434
+61224	[1728368514]	2000000 OPS in 2.695322 seconds, throughput 742026.370133
+61224	[1728368514]	2000000 OPS in 2.715491 seconds, throughput 736515.053815
+61224	[1728368515]	2000000 OPS in 2.707222 seconds, throughput 738764.682025
+61224	[1728368515]	2000000 OPS in 2.731578 seconds, throughput 732177.517904
+61224	[1728368517]	2000000 OPS in 2.700005 seconds, throughput 740739.369001
+61224	[1728368517]	2000000 OPS in 2.719177 seconds, throughput 735516.665520
+61224	[1728368517]	2000000 OPS in 2.706653 seconds, throughput 738919.987158
+61224	[1728368517]	2000000 OPS in 2.729279 seconds, throughput 732794.265445
+61224	[1728368519]	2000000 OPS in 2.698902 seconds, throughput 741042.097861
+61224	[1728368519]	2000000 OPS in 2.713546 seconds, throughput 737042.968868
+61224	[1728368520]	2000000 OPS in 2.713122 seconds, throughput 737158.152121
+61224	[1728368520]	2000000 OPS in 2.729350 seconds, throughput 732775.202887
+61224	[1728368522]	2000000 OPS in 2.699127 seconds, throughput 740980.324379
+61224	[1728368522]	2000000 OPS in 2.716283 seconds, throughput 736300.304497
+61224	[1728368523]	2000000 OPS in 2.717077 seconds, throughput 736085.138551
+61224	[1728368523]	2000000 OPS in 2.737111 seconds, throughput 730697.439746
+61224	[1728368525]	2000000 OPS in 2.699557 seconds, throughput 740862.297036
+61224	[1728368525]	2000000 OPS in 2.719404 seconds, throughput 735455.268875
+61224	[1728368525]	2000000 OPS in 2.708349 seconds, throughput 738457.266770
+61224	[1728368526]	2000000 OPS in 2.730200 seconds, throughput 732547.066149
+61224	[1728368527]	2000000 OPS in 2.710824 seconds, throughput 737783.050467
+61224	[1728368528]	2000000 OPS in 2.725183 seconds, throughput 733895.668658
+61224	[1728368528]	2000000 OPS in 2.716103 seconds, throughput 736349.100163
+61224	[1728368528]	2000000 OPS in 2.731720 seconds, throughput 732139.457924
+61224	[1728368530]	2000000 OPS in 2.699122 seconds, throughput 740981.697011
+61224	[1728368530]	2000000 OPS in 2.720045 seconds, throughput 735281.953056
+61224	[1728368531]	2000000 OPS in 2.713743 seconds, throughput 736989.464367
+61224	[1728368531]	2000000 OPS in 2.735943 seconds, throughput 731009.381409
+61224	[1728368533]	2000000 OPS in 2.699943 seconds, throughput 740756.378931
+61224	[1728368533]	2000000 OPS in 2.721880 seconds, throughput 734786.250680
+61224	[1728368534]	2000000 OPS in 2.706910 seconds, throughput 738849.832466
+61224	[1728368534]	2000000 OPS in 2.728479 seconds, throughput 733009.123398
+61224	[1728368535]	2000000 OPS in 2.693563 seconds, throughput 742510.941827
+61224	[1728368536]	2000000 OPS in 2.713296 seconds, throughput 737110.879167
+61224	[1728368536]	2000000 OPS in 2.709126 seconds, throughput 738245.471049
+61224	[1728368537]	2000000 OPS in 2.729269 seconds, throughput 732796.950392
+61224	[1728368538]	2000000 OPS in 2.697408 seconds, throughput 741452.535175
+61224	[1728368538]	2000000 OPS in 2.718218 seconds, throughput 735776.159234
+61224	[1728368539]	2000000 OPS in 2.709988 seconds, throughput 738010.648018
+61224	[1728368539]	2000000 OPS in 2.731625 seconds, throughput 732164.920148
+61224	[1728368541]	2000000 OPS in 2.702054 seconds, throughput 740177.657441
+61224	[1728368541]	2000000 OPS in 2.720257 seconds, throughput 735224.649730
+61224	[1728368542]	2000000 OPS in 2.707363 seconds, throughput 738726.207014
+61224	[1728368542]	2000000 OPS in 2.727254 seconds, throughput 733338.368923
+61224	[1728368544]	2000000 OPS in 2.697459 seconds, throughput 741438.516767
+61224	[1728368544]	2000000 OPS in 2.717157 seconds, throughput 736063.466336
+61224	[1728368544]	2000000 OPS in 2.708456 seconds, throughput 738428.093349
+61224	[1728368545]	2000000 OPS in 2.730797 seconds, throughput 732386.918544
+61224	[1728368546]	2000000 OPS in 2.700816 seconds, throughput 740516.940066
+61224	[1728368547]	2000000 OPS in 2.719168 seconds, throughput 735519.099960
+61224	[1728368547]	2000000 OPS in 2.713687 seconds, throughput 737004.672978
+61224	[1728368547]	2000000 OPS in 2.732860 seconds, throughput 731834.049311
+61224	[1728368549]	2000000 OPS in 2.697101 seconds, throughput 741536.931691
+61224	[1728368549]	2000000 OPS in 2.725264 seconds, throughput 733873.855891
+61224	[1728368550]	2000000 OPS in 2.710326 seconds, throughput 737918.612005
+61224	[1728368550]	2000000 OPS in 2.729492 seconds, throughput 732737.080746
+61224	[1728368552]	2000000 OPS in 2.699108 seconds, throughput 740985.540408
+61224	[1728368552]	2000000 OPS in 2.719871 seconds, throughput 735328.991706
+61224	[1728368553]	2000000 OPS in 2.710741 seconds, throughput 737805.640598
+61224	[1728368553]	2000000 OPS in 2.727765 seconds, throughput 733200.990555
+61224	[1728368554]	2000000 OPS in 2.700879 seconds, throughput 740499.666960
+61224	[1728368555]	2000000 OPS in 2.719474 seconds, throughput 735436.338057
+61224	[1728368555]	2000000 OPS in 2.712097 seconds, throughput 737436.750972
+61224	[1728368556]	2000000 OPS in 2.730417 seconds, throughput 732488.846942
+61224	[1728368557]	2000000 OPS in 2.700257 seconds, throughput 740670.239907
+61224	[1728368557]	2000000 OPS in 2.719707 seconds, throughput 735373.332495
+61224	[1728368558]	2000000 OPS in 2.708876 seconds, throughput 738313.603133
+61224	[1728368558]	2000000 OPS in 2.728187 seconds, throughput 733087.577941
+61224	[1728368560]	2000000 OPS in 2.695457 seconds, throughput 741989.206283
+61224	[1728368560]	2000000 OPS in 2.711466 seconds, throughput 737608.363889
+61224	[1728368561]	2000000 OPS in 2.710882 seconds, throughput 737767.265414
+61224	[1728368561]	2000000 OPS in 2.727191 seconds, throughput 733355.309547
+61224	[1728368562]	2000000 OPS in 2.696153 seconds, throughput 741797.665043
+61224	[1728368563]	2000000 OPS in 2.720034 seconds, throughput 735284.926585
+61224	[1728368563]	2000000 OPS in 2.707403 seconds, throughput 738715.292847
+61224	[1728368564]	2000000 OPS in 2.728926 seconds, throughput 732889.055988
+61224	[1728368565]	2000000 OPS in 2.697928 seconds, throughput 741309.627240
+61224	[1728368566]	2000000 OPS in 2.722352 seconds, throughput 734658.853815
+61224	[1728368566]	2000000 OPS in 2.718454 seconds, throughput 735712.283526
+61224	[1728368567]	2000000 OPS in 2.732566 seconds, throughput 731912.788200
+61224	[1728368568]	2000000 OPS in 2.704124 seconds, throughput 739611.053339
+61224	[1728368568]	2000000 OPS in 2.716638 seconds, throughput 736204.087552
+61224	[1728368569]	2000000 OPS in 2.712532 seconds, throughput 737318.490621
+61224	[1728368569]	2000000 OPS in 2.727843 seconds, throughput 733180.025390
+61224	[1728368571]	2000000 OPS in 2.699499 seconds, throughput 740878.214809
+61224	[1728368571]	2000000 OPS in 2.719819 seconds, throughput 735343.050402
+61224	[1728368572]	2000000 OPS in 2.714093 seconds, throughput 736894.424767
+61224	[1728368572]	2000000 OPS in 2.730909 seconds, throughput 732356.881903
+61224	[1728368573]	2000000 OPS in 2.701273 seconds, throughput 740391.659784
+61224	[1728368574]	2000000 OPS in 2.719882 seconds, throughput 735326.017820
+61224	[1728368574]	2000000 OPS in 2.706252 seconds, throughput 739029.476930
+61224	[1728368575]	2000000 OPS in 2.730466 seconds, throughput 732475.701950
+61224	[1728368576]	2000000 OPS in 2.698323 seconds, throughput 741201.108985
+61224	[1728368576]	2000000 OPS in 2.719690 seconds, throughput 735377.929102
+61224	[1728368577]	2000000 OPS in 2.713090 seconds, throughput 737166.846658
+61224	[1728368577]	2000000 OPS in 2.729510 seconds, throughput 732732.248645
+61224	[1728368579]	2000000 OPS in 2.700316 seconds, throughput 740654.056784
+61224	[1728368579]	2000000 OPS in 2.721238 seconds, throughput 734959.602945
+61224	[1728368580]	2000000 OPS in 2.711755 seconds, throughput 737529.754716
+61224	[1728368580]	2000000 OPS in 2.729524 seconds, throughput 732728.490389
+61224	[1728368581]	2000000 OPS in 2.696539 seconds, throughput 741691.479337
+61224	[1728368582]	2000000 OPS in 2.719661 seconds, throughput 735385.770506
+61224	[1728368582]	2000000 OPS in 2.708348 seconds, throughput 738457.539430
+61224	[1728368583]	2000000 OPS in 2.731434 seconds, throughput 732216.117981
+61224	[1728368584]	2000000 OPS in 2.696636 seconds, throughput 741664.800144
+61224	[1728368585]	2000000 OPS in 2.717613 seconds, throughput 735939.959074
+61224	[1728368585]	2000000 OPS in 2.709830 seconds, throughput 738053.678644
+61224	[1728368586]	2000000 OPS in 2.728947 seconds, throughput 732883.416204
+61224	[1728368587]	2000000 OPS in 2.704734 seconds, throughput 739444.248492
+61224	[1728368587]	2000000 OPS in 2.725903 seconds, throughput 733701.822845
+61224	[1728368588]	2000000 OPS in 2.714546 seconds, throughput 736771.452759
+61224	[1728368588]	2000000 OPS in 2.738069 seconds, throughput 730441.782146
+61224	[1728368589]	2000000 OPS in 2.697002 seconds, throughput 741564.151602
+61224	[1728368590]	2000000 OPS in 2.719771 seconds, throughput 735356.028136
+61224	[1728368591]	2000000 OPS in 2.714690 seconds, throughput 736732.370915
+61224	[1728368591]	2000000 OPS in 2.732503 seconds, throughput 731929.663023
+61224	[1728368592]	2000000 OPS in 2.699378 seconds, throughput 740911.424780
+61224	[1728368593]	2000000 OPS in 2.720953 seconds, throughput 735036.584608
+61224	[1728368593]	2000000 OPS in 2.710108 seconds, throughput 737977.969882
+61224	[1728368594]	2000000 OPS in 2.731548 seconds, throughput 732185.559251
+61224	[1728368595]	2000000 OPS in 2.697168 seconds, throughput 741518.511268
+61224	[1728368596]	2000000 OPS in 2.724264 seconds, throughput 734143.240156
+61224	[1728368596]	2000000 OPS in 2.707399 seconds, throughput 738716.384249
+61224	[1728368597]	2000000 OPS in 2.729585 seconds, throughput 732712.115578
+61224	[1728368598]	2000000 OPS in 2.698018 seconds, throughput 741284.898766
+61224	[1728368598]	2000000 OPS in 2.721383 seconds, throughput 734920.443025
+61224	[1728368599]	2000000 OPS in 2.708189 seconds, throughput 738500.894878
+61224	[1728368599]	2000000 OPS in 2.727740 seconds, throughput 733207.710412
+61224	[1728368600]	2000000 OPS in 2.696297 seconds, throughput 741758.048168
+61224	[1728368601]	2000000 OPS in 2.716871 seconds, throughput 736140.950380
+61224	[1728368601]	2000000 OPS in 2.713714 seconds, throughput 736997.340177
+61224	[1728368602]	2000000 OPS in 2.728401 seconds, throughput 733030.078790
+61224	[1728368603]	2000000 OPS in 2.694140 seconds, throughput 742351.919351
+61224	[1728368604]	2000000 OPS in 2.717976 seconds, throughput 735841.670419
+61224	[1728368604]	2000000 OPS in 2.709937 seconds, throughput 738024.537102
+61224	[1728368605]	2000000 OPS in 2.731703 seconds, throughput 732144.014192
+61224	[1728368606]	2000000 OPS in 2.702603 seconds, throughput 740027.299607
+61224	[1728368606]	2000000 OPS in 2.722038 seconds, throughput 734743.600200
+61224	[1728368607]	2000000 OPS in 2.708235 seconds, throughput 738488.351269
+61224	[1728368608]	2000000 OPS in 2.728064 seconds, throughput 733120.630601
+61224	[1728368608]	2000000 OPS in 2.698873 seconds, throughput 741050.060525
+61224	[1728368609]	2000000 OPS in 2.719380 seconds, throughput 735461.759666
+61224	[1728368610]	2000000 OPS in 2.704134 seconds, throughput 739608.318227
+61224	[1728368610]	2000000 OPS in 2.733661 seconds, throughput 731619.611942
+61224	[1728368611]	2000000 OPS in 2.695383 seconds, throughput 742009.577118
+61224	[1728368612]	2000000 OPS in 2.721582 seconds, throughput 734866.706202
+61224	[1728368612]	2000000 OPS in 2.711320 seconds, throughput 737648.082853
+61224	[1728368613]	2000000 OPS in 2.736640 seconds, throughput 730823.199252
+61224	[1728368614]	2000000 OPS in 2.702976 seconds, throughput 739925.178766
+61224	[1728368615]	2000000 OPS in 2.719267 seconds, throughput 735492.322012
+61224	[1728368615]	2000000 OPS in 2.709591 seconds, throughput 738118.778812
+61224	[1728368616]	2000000 OPS in 2.731238 seconds, throughput 732268.663514
+61224	[1728368616]	2000000 OPS in 2.696540 seconds, throughput 741691.204284
+61224	[1728368617]	2000000 OPS in 2.718778 seconds, throughput 735624.607820
+61224	[1728368618]	2000000 OPS in 2.710674 seconds, throughput 737823.877014
+61224	[1728368618]	2000000 OPS in 2.729868 seconds, throughput 732636.156767
+61224	[1728368619]	2000000 OPS in 2.699202 seconds, throughput 740959.735507
+61224	[1728368620]	2000000 OPS in 2.721075 seconds, throughput 735003.629080
+61224	[1728368620]	2000000 OPS in 2.703520 seconds, throughput 739776.291649
+61224	[1728368621]	2000000 OPS in 2.724805 seconds, throughput 733997.478719
+61224	[1728368622]	2000000 OPS in 2.694236 seconds, throughput 742325.468148
+61224	[1728368623]	2000000 OPS in 2.715289 seconds, throughput 736569.845788
+61224	[1728368623]	2000000 OPS in 2.712160 seconds, throughput 737419.621261
+61224	[1728368624]	2000000 OPS in 2.730743 seconds, throughput 732401.401377
+61224	[1728368625]	2000000 OPS in 2.698042 seconds, throughput 741278.304785
+61224	[1728368625]	2000000 OPS in 2.715845 seconds, throughput 736419.051897
+61224	[1728368626]	2000000 OPS in 2.712528 seconds, throughput 737319.577899
+61224	[1728368627]	2000000 OPS in 2.729175 seconds, throughput 732822.189856
+61224	[1728368627]	2000000 OPS in 2.698388 seconds, throughput 741183.254595
+61224	[1728368628]	2000000 OPS in 2.723607 seconds, throughput 734320.333293
+61224	[1728368628]	2000000 OPS in 2.708068 seconds, throughput 738533.892059
+61224	[1728368629]	2000000 OPS in 2.728976 seconds, throughput 732875.628074
+61224	[1728368630]	2000000 OPS in 2.706745 seconds, throughput 738894.871885
+61224	[1728368631]	2000000 OPS in 2.723363 seconds, throughput 734386.124802
+61224	[1728368631]	2000000 OPS in 2.715449 seconds, throughput 736526.445534
+61224	[1728368632]	2000000 OPS in 2.726728 seconds, throughput 733479.833705
+61224	[1728368633]	2000000 OPS in 2.712318 seconds, throughput 737376.664536
+61224	[1728368634]	2000000 OPS in 2.719312 seconds, throughput 735480.150862
+61224	[1728368634]	2000000 OPS in 2.715289 seconds, throughput 736569.845788
+61224	[1728368635]	2000000 OPS in 2.729265 seconds, throughput 732798.024377
+61224	[1728368635]	2000000 OPS in 2.710092 seconds, throughput 737982.326799
+61224	[1728368636]	2000000 OPS in 2.722369 seconds, throughput 734654.266192
+61224	[1728368637]	2000000 OPS in 2.710065 seconds, throughput 737989.679214
+61224	[1728368638]	2000000 OPS in 2.724964 seconds, throughput 733954.650410
+61224	[1728368638]	2000000 OPS in 2.708692 seconds, throughput 738363.756381
+61224	[1728368639]	2000000 OPS in 2.721628 seconds, throughput 734854.285744
+61224	[1728368639]	2000000 OPS in 2.707633 seconds, throughput 738652.542645
+61224	[1728368640]	2000000 OPS in 2.732785 seconds, throughput 731854.134153
+61224	[1728368641]	2000000 OPS in 2.716679 seconds, throughput 736192.976793
+61224	[1728368642]	2000000 OPS in 2.718458 seconds, throughput 735711.200982
+61224	[1728368642]	2000000 OPS in 2.705859 seconds, throughput 739136.813855
+61224	[1728368643]	2000000 OPS in 2.731813 seconds, throughput 732114.533462
+61224	[1728368643]	2000000 OPS in 2.707101 seconds, throughput 738797.702782
+61224	[1728368644]	2000000 OPS in 2.720655 seconds, throughput 735117.094964
+61224	[1728368645]	2000000 OPS in 2.704400 seconds, throughput 739535.571661
+61224	[1728368646]	2000000 OPS in 2.726542 seconds, throughput 733529.870437
+61224	[1728368646]	2000000 OPS in 2.710767 seconds, throughput 737798.564023
+61224	[1728368647]	2000000 OPS in 2.726974 seconds, throughput 733413.666577
+61224	[1728368647]	2000000 OPS in 2.713390 seconds, throughput 737085.343426
+61224	[1728368648]	2000000 OPS in 2.737588 seconds, throughput 730570.122312
+61224	[1728368649]	2000000 OPS in 2.720293 seconds, throughput 735214.919863
+61224	[1728368650]	2000000 OPS in 2.718103 seconds, throughput 735807.289128
+61224	[1728368650]	2000000 OPS in 2.712657 seconds, throughput 737284.514776
+61224	[1728368651]	2000000 OPS in 2.725301 seconds, throughput 733863.892465
+61224	[1728368652]	2000000 OPS in 2.710025 seconds, throughput 738000.571950
+61224	[1728368653]	2000000 OPS in 2.715688 seconds, throughput 736461.625931
+61224	[1728368653]	2000000 OPS in 2.708698 seconds, throughput 738362.120842
+61224	[1728368654]	2000000 OPS in 2.725280 seconds, throughput 733869.547349
+61224	[1728368654]	2000000 OPS in 2.708960 seconds, throughput 738290.709350
+61224	[1728368655]	2000000 OPS in 2.719309 seconds, throughput 735480.962259
+61224	[1728368656]	2000000 OPS in 2.708545 seconds, throughput 738403.829362
+61224	[1728368657]	2000000 OPS in 2.725372 seconds, throughput 733844.774218
+61224	[1728368657]	2000000 OPS in 2.705215 seconds, throughput 739312.771813
+61224	[1728368658]	2000000 OPS in 2.713534 seconds, throughput 737046.228276
+61224	[1728368658]	2000000 OPS in 2.708391 seconds, throughput 738445.815246
+61224	[1728368659]	2000000 OPS in 2.729058 seconds, throughput 732853.607362
+61224	[1728368660]	2000000 OPS in 2.709760 seconds, throughput 738072.744450
+61224	[1728368661]	2000000 OPS in 2.721228 seconds, throughput 734962.303783
+61224	[1728368661]	2000000 OPS in 2.711112 seconds, throughput 737704.676162
+61224	[1728368662]	2000000 OPS in 2.723745 seconds, throughput 734283.128560
+61224	[1728368662]	2000000 OPS in 2.708593 seconds, throughput 738390.743829
+61224	[1728368664]	2000000 OPS in 2.720452 seconds, throughput 735171.949367
+61224	[1728368664]	2000000 OPS in 2.708821 seconds, throughput 738328.593879
+61224	[1728368665]	2000000 OPS in 2.730298 seconds, throughput 732520.772458
+61224	[1728368665]	2000000 OPS in 2.705021 seconds, throughput 739365.794203
+61224	[1728368666]	2000000 OPS in 2.717235 seconds, throughput 736042.337155
+61224	[1728368666]	2000000 OPS in 2.710143 seconds, throughput 737968.439304
+61224	[1728368668]	2000000 OPS in 2.729169 seconds, throughput 732823.800945
+61224	[1728368668]	2000000 OPS in 2.706490 seconds, throughput 738964.489061
+61224	[1728368669]	2000000 OPS in 2.722602 seconds, throughput 734591.394556
+61224	[1728368669]	2000000 OPS in 2.707607 seconds, throughput 738659.635612
+61224	[1728368670]	2000000 OPS in 2.729636 seconds, throughput 732698.425724
+61224	[1728368671]	2000000 OPS in 2.706576 seconds, throughput 738941.008861
+61224	[1728368672]	2000000 OPS in 2.719301 seconds, throughput 735483.125995
+61224	[1728368672]	2000000 OPS in 2.707820 seconds, throughput 738601.531860
+61224	[1728368673]	2000000 OPS in 2.727625 seconds, throughput 733238.623344
+61224	[1728368673]	2000000 OPS in 2.699340 seconds, throughput 740921.854972
+61224	[1728368674]	2000000 OPS in 2.720795 seconds, throughput 735079.269111
+61224	[1728368675]	2000000 OPS in 2.710186 seconds, throughput 737956.730645
+61224	[1728368676]	2000000 OPS in 2.726205 seconds, throughput 733620.545777
+61224	[1728368676]	2000000 OPS in 2.698158 seconds, throughput 741246.435531
+61224	[1728368677]	2000000 OPS in 2.718309 seconds, throughput 735751.527880
+61224	[1728368677]	2000000 OPS in 2.708428 seconds, throughput 738435.727293
+61224	[1728368678]	2000000 OPS in 2.723505 seconds, throughput 734347.834867
+61224	[1728368679]	2000000 OPS in 2.699056 seconds, throughput 740999.816232
+61224	[1728368680]	2000000 OPS in 2.718863 seconds, throughput 735601.609938
+61224	[1728368680]	2000000 OPS in 2.712091 seconds, throughput 737438.382414
+61224	[1728368681]	2000000 OPS in 2.726763 seconds, throughput 733470.418955
+61224	[1728368681]	2000000 OPS in 2.700740 seconds, throughput 740537.778535
+61224	[1728368683]	2000000 OPS in 2.714536 seconds, throughput 736774.166929
+61224	[1728368683]	2000000 OPS in 2.708855 seconds, throughput 738319.326800
+61224	[1728368684]	2000000 OPS in 2.722916 seconds, throughput 734506.683276
+61224	[1728368684]	2000000 OPS in 2.696747 seconds, throughput 741634.272700
+61224	[1728368685]	2000000 OPS in 2.722264 seconds, throughput 734682.602422
+61224	[1728368685]	2000000 OPS in 2.708603 seconds, throughput 738388.017735
+61224	[1728368687]	2000000 OPS in 2.730187 seconds, throughput 732550.554229
+61224	[1728368687]	2000000 OPS in 2.696782 seconds, throughput 741624.647450
+61224	[1728368688]	2000000 OPS in 2.716964 seconds, throughput 736115.752730
+61224	[1728368688]	2000000 OPS in 2.704200 seconds, throughput 739590.266992
+61224	[1728368689]	2000000 OPS in 2.724885 seconds, throughput 733975.929259
+61224	[1728368689]	2000000 OPS in 2.695088 seconds, throughput 742090.796293
+61224	[1728368691]	2000000 OPS in 2.717108 seconds, throughput 736076.740417
+61224	[1728368691]	2000000 OPS in 2.706313 seconds, throughput 739012.819286
+61224	[1728368692]	2000000 OPS in 2.727519 seconds, throughput 733267.119312
+61224	[1728368692]	2000000 OPS in 2.695652 seconds, throughput 741935.531738
+61224	[1728368693]	2000000 OPS in 2.722571 seconds, throughput 734599.758831
+61224	[1728368694]	2000000 OPS in 2.712667 seconds, throughput 737281.796844
+61224	[1728368695]	2000000 OPS in 2.730225 seconds, throughput 732540.358395
+61224	[1728368695]	2000000 OPS in 2.700577 seconds, throughput 740582.475523
+61224	[1728368696]	2000000 OPS in 2.720974 seconds, throughput 735030.911725
+61224	[1728368696]	2000000 OPS in 2.712338 seconds, throughput 737371.227332
+61224	[1728368698]	2000000 OPS in 2.724284 seconds, throughput 734137.850532
+61224	[1728368698]	2000000 OPS in 2.695647 seconds, throughput 741936.907911
+61224	[1728368699]	2000000 OPS in 2.718119 seconds, throughput 735802.957854
+61224	[1728368699]	2000000 OPS in 2.705641 seconds, throughput 739196.367885
+61224	[1728368700]	2000000 OPS in 2.704807 seconds, throughput 739424.291641
+61224	[1728368700]	2000000 OPS in 2.734383 seconds, throughput 731426.431484
+61224	[1728368702]	2000000 OPS in 2.724765 seconds, throughput 734008.253923
+61224	[1728368702]	2000000 OPS in 2.709325 seconds, throughput 738191.246897
+61224	[1728368703]	2000000 OPS in 2.698425 seconds, throughput 741173.091711
+61224	[1728368703]	2000000 OPS in 2.730282 seconds, throughput 732525.065176
+61224	[1728368704]	2000000 OPS in 2.723916 seconds, throughput 734237.032273
+61224	[1728368704]	2000000 OPS in 2.714086 seconds, throughput 736896.325319
+61224	[1728368706]	2000000 OPS in 2.698576 seconds, throughput 741131.619046
+61224	[1728368706]	2000000 OPS in 2.723690 seconds, throughput 734297.956082
+61224	[1728368707]	2000000 OPS in 2.724879 seconds, throughput 733977.545425
+61224	[1728368707]	2000000 OPS in 2.713796 seconds, throughput 736975.071081
+61224	[1728368708]	2000000 OPS in 2.709174 seconds, throughput 738232.391127
+61224	[1728368708]	2000000 OPS in 2.736362 seconds, throughput 730897.447048
+61224	[1728368710]	2000000 OPS in 2.715348 seconds, throughput 736553.841349
+61224	[1728368710]	2000000 OPS in 2.705906 seconds, throughput 739123.975482
+61224	[1728368711]	2000000 OPS in 2.693518 seconds, throughput 742523.346790
+61224	[1728368711]	2000000 OPS in 2.724598 seconds, throughput 734053.243818
+61224	[1728368712]	2000000 OPS in 2.722190 seconds, throughput 734702.574030
+61224	[1728368712]	2000000 OPS in 2.709773 seconds, throughput 738069.203583
+61224	[1728368714]	2000000 OPS in 2.701533 seconds, throughput 740320.403267
+61224	[1728368714]	2000000 OPS in 2.725550 seconds, throughput 733796.848343
+61224	[1728368715]	2000000 OPS in 2.718668 seconds, throughput 735654.371920
+61224	[1728368715]	2000000 OPS in 2.705908 seconds, throughput 739123.429178
+61224	[1728368716]	2000000 OPS in 2.702506 seconds, throughput 740053.861120
+61224	[1728368717]	2000000 OPS in 2.731497 seconds, throughput 732199.229946
+61224	[1728368718]	2000000 OPS in 2.706421 seconds, throughput 738983.328906
+61224	[1728368718]	2000000 OPS in 2.718253 seconds, throughput 735766.685441
+61224	[1728368719]	2000000 OPS in 2.697211 seconds, throughput 741506.689688
+61224	[1728368719]	2000000 OPS in 2.727617 seconds, throughput 733240.773906
+61224	[1728368721]	2000000 OPS in 2.705900 seconds, throughput 739125.614398
+61224	[1728368721]	2000000 OPS in 2.717530 seconds, throughput 735962.436477
+61224	[1728368722]	2000000 OPS in 2.695835 seconds, throughput 741885.167304
+61224	[1728368722]	2000000 OPS in 2.729298 seconds, throughput 732789.164100
+61224	[1728368723]	2000000 OPS in 2.705745 seconds, throughput 739167.955591
+61224	[1728368723]	2000000 OPS in 2.717944 seconds, throughput 735850.333929
+61224	[1728368725]	2000000 OPS in 2.695848 seconds, throughput 741881.589763
+61224	[1728368725]	2000000 OPS in 2.724512 seconds, throughput 734076.414418
+61224	[1728368726]	2000000 OPS in 2.707652 seconds, throughput 738647.359410
+61224	[1728368726]	2000000 OPS in 2.719038 seconds, throughput 735554.265884
+61224	[1728368727]	2000000 OPS in 2.697780 seconds, throughput 741350.295428
+61224	[1728368728]	2000000 OPS in 2.730526 seconds, throughput 732459.606684
+61224	[1728368729]	2000000 OPS in 2.712866 seconds, throughput 737227.714159
+61224	[1728368729]	2000000 OPS in 2.726186 seconds, throughput 733625.658704
+61224	[1728368730]	2000000 OPS in 2.703669 seconds, throughput 739735.522359
+61224	[1728368730]	2000000 OPS in 2.731495 seconds, throughput 732199.766062
+61224	[1728368731]	2000000 OPS in 2.702153 seconds, throughput 740150.539218
+61224	[1728368731]	2000000 OPS in 2.717245 seconds, throughput 736039.628374
+61224	[1728368733]	2000000 OPS in 2.698352 seconds, throughput 741193.143074
+61224	[1728368733]	2000000 OPS in 2.728930 seconds, throughput 732887.981736
+61224	[1728368734]	2000000 OPS in 2.702789 seconds, throughput 739976.372554
+61224	[1728368734]	2000000 OPS in 2.712233 seconds, throughput 737399.773545
+61224	[1728368735]	2000000 OPS in 2.698294 seconds, throughput 741209.075067
+61224	[1728368736]	2000000 OPS in 2.731915 seconds, throughput 732087.198906
+61224	[1728368737]	2000000 OPS in 2.715238 seconds, throughput 736583.680694
+61224	[1728368737]	2000000 OPS in 2.724797 seconds, throughput 733999.633734
+61224	[1728368738]	2000000 OPS in 2.702917 seconds, throughput 739941.330052
+61224	[1728368738]	2000000 OPS in 2.725668 seconds, throughput 733765.080707
+61224	[1728368740]	2000000 OPS in 2.705247 seconds, throughput 739304.026582
+61224	[1728368740]	2000000 OPS in 2.713722 seconds, throughput 736995.167523
+61224	[1728368741]	2000000 OPS in 2.698956 seconds, throughput 741027.271286
+61224	[1728368741]	2000000 OPS in 2.728311 seconds, throughput 733054.259577
+61224	[1728368742]	2000000 OPS in 2.713322 seconds, throughput 737103.815913
+61224	[1728368742]	2000000 OPS in 2.720981 seconds, throughput 735029.020783
+61224	[1728368743]	2000000 OPS in 2.701781 seconds, throughput 740252.448292
+61224	[1728368744]	2000000 OPS in 2.730245 seconds, throughput 732534.992281
+61224	[1728368745]	2000000 OPS in 2.713547 seconds, throughput 737042.697252
+61224	[1728368745]	2000000 OPS in 2.717541 seconds, throughput 735959.457465
+61224	[1728368746]	2000000 OPS in 2.700053 seconds, throughput 740726.200560
+61224	[1728368747]	2000000 OPS in 2.729645 seconds, throughput 732696.009921
+61224	[1728368748]	2000000 OPS in 2.706056 seconds, throughput 739083.004934
+61224	[1728368748]	2000000 OPS in 2.716765 seconds, throughput 736169.672386
+61224	[1728368749]	2000000 OPS in 2.702462 seconds, throughput 740065.910270
+61224	[1728368749]	2000000 OPS in 2.728804 seconds, throughput 732921.822161
+61224	[1728368750]	2000000 OPS in 2.709301 seconds, throughput 738197.786071
+61224	[1728368751]	2000000 OPS in 2.720518 seconds, throughput 735154.114033
+61224	[1728368752]	2000000 OPS in 2.700126 seconds, throughput 740706.174453
+61224	[1728368752]	2000000 OPS in 2.734042 seconds, throughput 731517.657739
+61224	[1728368753]	2000000 OPS in 2.706670 seconds, throughput 738915.346163
+61224	[1728368753]	2000000 OPS in 2.716459 seconds, throughput 736252.599432
+61224	[1728368754]	2000000 OPS in 2.702859 seconds, throughput 739957.208275
+61224	[1728368755]	2000000 OPS in 2.728013 seconds, throughput 733134.336237
+61224	[1728368756]	2000000 OPS in 2.710617 seconds, throughput 737839.392286
+61224	[1728368756]	2000000 OPS in 2.715450 seconds, throughput 736526.174299
+61224	[1728368757]	2000000 OPS in 2.700005 seconds, throughput 740739.369001
+61224	[1728368758]	2000000 OPS in 2.730299 seconds, throughput 732520.504165
+61224	[1728368759]	2000000 OPS in 2.707703 seconds, throughput 738633.446874
+61224	[1728368759]	2000000 OPS in 2.721329 seconds, throughput 734935.026232
+61224	[1728368760]	2000000 OPS in 2.698701 seconds, throughput 741097.290882
+61224	[1728368760]	2000000 OPS in 2.724456 seconds, throughput 734091.503038
+61224	[1728368761]	2000000 OPS in 2.709708 seconds, throughput 738086.908257
+61224	[1728368761]	2000000 OPS in 2.721918 seconds, throughput 734775.992517
+61224	[1728368762]	2000000 OPS in 2.701549 seconds, throughput 740316.018699
+61224	[1728368763]	2000000 OPS in 2.729149 seconds, throughput 732829.171291
+61224	[1728368764]	2000000 OPS in 2.711017 seconds, throughput 737730.526957
+61224	[1728368764]	2000000 OPS in 2.717709 seconds, throughput 735913.962827
+61224	[1728368765]	2000000 OPS in 2.699599 seconds, throughput 740850.770800
+61224	[1728368766]	2000000 OPS in 2.731856 seconds, throughput 732103.009822
+61224	[1728368767]	2000000 OPS in 2.712551 seconds, throughput 737313.326090
+61224	[1728368767]	2000000 OPS in 2.727177 seconds, throughput 733359.074237
+61224	[1728368768]	2000000 OPS in 2.713301 seconds, throughput 737109.520838
+61224	[1728368769]	2000000 OPS in 2.737868 seconds, throughput 730495.407375
+61224	[1728368769]	2000000 OPS in 2.720418 seconds, throughput 735181.137605
+61224	[1728368770]	2000000 OPS in 2.723754 seconds, throughput 734280.702295
+61224	[1728368770]	2000000 OPS in 2.697166 seconds, throughput 741519.061118
+61224	[1728368771]	2000000 OPS in 2.725570 seconds, throughput 733791.463804
+61224	[1728368772]	2000000 OPS in 2.705344 seconds, throughput 739277.518866
+61224	[1728368772]	2000000 OPS in 2.718416 seconds, throughput 735722.567848
+61224	[1728368773]	2000000 OPS in 2.694132 seconds, throughput 742354.123703
+61224	[1728368774]	2000000 OPS in 2.724240 seconds, throughput 734149.707808
+61224	[1728368775]	2000000 OPS in 2.707675 seconds, throughput 738641.085064
+61224	[1728368775]	2000000 OPS in 2.717566 seconds, throughput 735952.687074
+61224	[1728368776]	2000000 OPS in 2.696107 seconds, throughput 741810.321326
+61224	[1728368777]	2000000 OPS in 2.731397 seconds, throughput 732226.036713
+61224	[1728368777]	2000000 OPS in 2.710472 seconds, throughput 737878.863903
+61224	[1728368778]	2000000 OPS in 2.722392 seconds, throughput 734648.059501
+61224	[1728368779]	2000000 OPS in 2.698454 seconds, throughput 741165.126402
+61224	[1728368779]	2000000 OPS in 2.730429 seconds, throughput 732485.627716
+61224	[1728368780]	2000000 OPS in 2.706328 seconds, throughput 739008.723259
+61224	[1728368780]	2000000 OPS in 2.722677 seconds, throughput 734571.159194
+61224	[1728368781]	2000000 OPS in 2.697275 seconds, throughput 741489.095476
+61224	[1728368782]	2000000 OPS in 2.725529 seconds, throughput 733802.502193
+61224	[1728368783]	2000000 OPS in 2.709487 seconds, throughput 738147.110505
+61224	[1728368783]	2000000 OPS in 2.716474 seconds, throughput 736248.533945
+61224	[1728368784]	2000000 OPS in 2.695672 seconds, throughput 741930.027095
+61224	[1728368785]	2000000 OPS in 2.730518 seconds, throughput 732461.752678
+61224	[1728368786]	2000000 OPS in 2.712227 seconds, throughput 737401.404823
+61224	[1728368786]	2000000 OPS in 2.722137 seconds, throughput 734716.878688
+61224	[1728368787]	2000000 OPS in 2.696019 seconds, throughput 741834.534549
+61224	[1728368788]	2000000 OPS in 2.731680 seconds, throughput 732150.178645
+61224	[1728368788]	2000000 OPS in 2.710345 seconds, throughput 737913.439064
+61224	[1728368789]	2000000 OPS in 2.719887 seconds, throughput 735324.666061
+61224	[1728368789]	2000000 OPS in 2.695427 seconds, throughput 741997.464595
+61224	[1728368790]	2000000 OPS in 2.729339 seconds, throughput 732778.156176
+61224	[1728368791]	2000000 OPS in 2.708662 seconds, throughput 738371.934187
+61224	[1728368791]	2000000 OPS in 2.716828 seconds, throughput 736152.601490
+61224	[1728368792]	2000000 OPS in 2.696605 seconds, throughput 741673.326275
+61224	[1728368793]	2000000 OPS in 2.726762 seconds, throughput 733470.687944
+61224	[1728368794]	2000000 OPS in 2.715436 seconds, throughput 736529.971614
+61224	[1728368794]	2000000 OPS in 2.724131 seconds, throughput 734179.083165
+61224	[1728368795]	2000000 OPS in 2.696080 seconds, throughput 741817.750215
+61224	[1728368796]	2000000 OPS in 2.731696 seconds, throughput 732145.890319
+61224	[1728368796]	2000000 OPS in 2.707198 seconds, throughput 738771.231362
+61224	[1728368797]	2000000 OPS in 2.720666 seconds, throughput 735114.122792
+61224	[1728368797]	2000000 OPS in 2.689097 seconds, throughput 743744.089559
+61224	[1728368799]	2000000 OPS in 2.729153 seconds, throughput 732828.097216
+61224	[1728368799]	2000000 OPS in 2.709266 seconds, throughput 738207.322574
+61224	[1728368799]	2000000 OPS in 2.721751 seconds, throughput 734821.076579
+61224	[1728368800]	2000000 OPS in 2.699899 seconds, throughput 740768.450968
+61224	[1728368801]	2000000 OPS in 2.730159 seconds, throughput 732558.067131
+61224	[1728368802]	2000000 OPS in 2.709694 seconds, throughput 738090.721683
+61224	[1728368802]	2000000 OPS in 2.720998 seconds, throughput 735024.428537
+61224	[1728368803]	2000000 OPS in 2.698657 seconds, throughput 741109.374033
+61224	[1728368804]	2000000 OPS in 2.726008 seconds, throughput 733673.562220
+61224	[1728368805]	2000000 OPS in 2.705080 seconds, throughput 739349.668032
+61224	[1728368805]	2000000 OPS in 2.714285 seconds, throughput 736842.299169
+61224	[1728368806]	2000000 OPS in 2.694806 seconds, throughput 742168.452942
+61224	[1728368807]	2000000 OPS in 2.728970 seconds, throughput 732877.239398
+61224	[1728368807]	2000000 OPS in 2.709269 seconds, throughput 738206.505150
+61224	[1728368808]	2000000 OPS in 2.715999 seconds, throughput 736377.296162
+61224	[1728368808]	2000000 OPS in 2.697613 seconds, throughput 741396.189891
+61224	[1728368809]	2000000 OPS in 2.725920 seconds, throughput 733697.247168
+61224	[1728368810]	2000000 OPS in 2.708451 seconds, throughput 738429.456542
+61224	[1728368810]	2000000 OPS in 2.720047 seconds, throughput 735281.412417
+61224	[1728368811]	2000000 OPS in 2.697739 seconds, throughput 741361.562405
+61224	[1728368812]	2000000 OPS in 2.733641 seconds, throughput 731624.964653
+61224	[1728368813]	2000000 OPS in 2.710809 seconds, throughput 737787.132919
+61224	[1728368813]	2000000 OPS in 2.716323 seconds, throughput 736289.461894
+61224	[1728368814]	2000000 OPS in 2.695457 seconds, throughput 741989.206283
+61224	[1728368815]	2000000 OPS in 2.727376 seconds, throughput 733305.565496
+61224	[1728368815]	2000000 OPS in 2.711758 seconds, throughput 737528.938792
+61224	[1728368816]	2000000 OPS in 2.715959 seconds, throughput 736388.141353
+61224	[1728368816]	2000000 OPS in 2.694951 seconds, throughput 742128.521075
+61224	[1728368818]	2000000 OPS in 2.728101 seconds, throughput 733110.687618
+61224	[1728368818]	2000000 OPS in 2.709612 seconds, throughput 738113.058253
+61224	[1728368819]	2000000 OPS in 2.719104 seconds, throughput 735536.411995
+61224	[1728368819]	2000000 OPS in 2.697297 seconds, throughput 741483.047658
+61224	[1728368820]	2000000 OPS in 2.728831 seconds, throughput 732914.570378
+61224	[1728368821]	2000000 OPS in 2.713393 seconds, throughput 737084.528485
+61224	[1728368821]	2000000 OPS in 2.718422 seconds, throughput 735720.943989
+61224	[1728368822]	2000000 OPS in 2.699279 seconds, throughput 740938.598789
+61224	[1728368823]	2000000 OPS in 2.729134 seconds, throughput 732833.199103
+61224	[1728368824]	2000000 OPS in 2.710156 seconds, throughput 737964.899438
+61224	[1728368824]	2000000 OPS in 2.717020 seconds, throughput 736100.580783
+61224	[1728368824]	2000000 OPS in 2.701542 seconds, throughput 740317.936941
+61224	[1728368826]	2000000 OPS in 2.727846 seconds, throughput 733179.219061
+61224	[1728368826]	2000000 OPS in 2.708841 seconds, throughput 738323.142628
+61224	[1728368827]	2000000 OPS in 2.717018 seconds, throughput 736101.122628
+61224	[1728368827]	2000000 OPS in 2.705927 seconds, throughput 739118.239332
+61224	[1728368829]	2000000 OPS in 2.735550 seconds, throughput 731114.401126
+61224	[1728368829]	2000000 OPS in 2.712189 seconds, throughput 737411.736424
+61224	[1728368829]	2000000 OPS in 2.725286 seconds, throughput 733867.931659
+61224	[1728368830]	2000000 OPS in 2.690455 seconds, throughput 743368.686709
+61224	[1728368831]	2000000 OPS in 2.724753 seconds, throughput 734011.486546
+61224	[1728368832]	2000000 OPS in 2.713115 seconds, throughput 737160.054034
+61224	[1728368832]	2000000 OPS in 2.720222 seconds, throughput 735234.109569
+61224	[1728368833]	2000000 OPS in 2.703756 seconds, throughput 739711.719549
+61224	[1728368834]	2000000 OPS in 2.724872 seconds, throughput 733979.430960
+61224	[1728368834]	2000000 OPS in 2.714312 seconds, throughput 736834.969598
+61224	[1728368835]	2000000 OPS in 2.718855 seconds, throughput 735603.774383
+61224	[1728368835]	2000000 OPS in 2.695822 seconds, throughput 741888.744880
+61224	[1728368837]	2000000 OPS in 2.728637 seconds, throughput 732966.678968
+61224	[1728368837]	2000000 OPS in 2.710585 seconds, throughput 737848.102900
+61224	[1728368838]	2000000 OPS in 2.721551 seconds, throughput 734875.076749
+61224	[1728368838]	2000000 OPS in 2.696433 seconds, throughput 741720.636114
+61224	[1728368839]	2000000 OPS in 2.728448 seconds, throughput 733017.451679
+61224	[1728368840]	2000000 OPS in 2.712975 seconds, throughput 737198.094343
+61224	[1728368840]	2000000 OPS in 2.718018 seconds, throughput 735830.299873
+61224	[1728368841]	2000000 OPS in 2.701893 seconds, throughput 740221.763038
+61224	[1728368842]	2000000 OPS in 2.728772 seconds, throughput 732930.417052
+61224	[1728368843]	2000000 OPS in 2.713521 seconds, throughput 737049.759335
+61224	[1728368843]	2000000 OPS in 2.720111 seconds, throughput 735264.112384
+61224	[1728368843]	2000000 OPS in 2.697765 seconds, throughput 741354.417453
+61224	[1728368845]	2000000 OPS in 2.733420 seconds, throughput 731684.117333
+61224	[1728368845]	2000000 OPS in 2.715800 seconds, throughput 736431.254142
+61224	[1728368846]	2000000 OPS in 2.722172 seconds, throughput 734707.432153
+61224	[1728368846]	2000000 OPS in 2.701592 seconds, throughput 740304.235429
+61224	[1728368848]	2000000 OPS in 2.728244 seconds, throughput 733072.261865
+61224	[1728368848]	2000000 OPS in 2.713852 seconds, throughput 736959.863692
+61224	[1728368848]	2000000 OPS in 2.719683 seconds, throughput 735379.821840
+61224	[1728368849]	2000000 OPS in 2.699100 seconds, throughput 740987.736653
+61224	[1728368850]	2000000 OPS in 2.720007 seconds, throughput 735292.225351
+61224	[1728368851]	2000000 OPS in 2.707209 seconds, throughput 738768.229568
+61224	[1728368851]	2000000 OPS in 2.715523 seconds, throughput 736506.374647
+61224	[1728368851]	2000000 OPS in 2.690780 seconds, throughput 743278.900542
+61224	[1728368853]	2000000 OPS in 2.729098 seconds, throughput 732842.866031
+61224	[1728368853]	2000000 OPS in 2.709937 seconds, throughput 738024.537102
+61224	[1728368854]	2000000 OPS in 2.721527 seconds, throughput 734881.557302
+61224	[1728368854]	2000000 OPS in 2.700176 seconds, throughput 740692.458566
+61224	[1728368856]	2000000 OPS in 2.726190 seconds, throughput 733624.582293
+61224	[1728368856]	2000000 OPS in 2.707354 seconds, throughput 738728.662746
+61224	[1728368857]	2000000 OPS in 2.714432 seconds, throughput 736802.395492
+61224	[1728368857]	2000000 OPS in 2.698711 seconds, throughput 741094.544766
+61224	[1728368859]	2000000 OPS in 2.726483 seconds, throughput 733545.743729
+61224	[1728368859]	2000000 OPS in 2.711136 seconds, throughput 737698.145722
+61224	[1728368859]	2000000 OPS in 2.719453 seconds, throughput 735442.017200
+61224	[1728368859]	2000000 OPS in 2.699322 seconds, throughput 740926.795692
+61224	[1728368861]	2000000 OPS in 2.729716 seconds, throughput 732676.952474
+61224	[1728368862]	2000000 OPS in 2.706263 seconds, throughput 739026.473037
+61224	[1728368862]	2000000 OPS in 2.717822 seconds, throughput 735883.365430
+61224	[1728368862]	2000000 OPS in 2.695703 seconds, throughput 741921.495061
+61224	[1728368864]	2000000 OPS in 2.725058 seconds, throughput 733929.332880
+61224	[1728368864]	2000000 OPS in 2.706957 seconds, throughput 738837.004060
+61224	[1728368865]	2000000 OPS in 2.720689 seconds, throughput 735107.908328
+61224	[1728368865]	2000000 OPS in 2.699069 seconds, throughput 740996.247225
+61224	[1728368867]	2000000 OPS in 2.731518 seconds, throughput 732193.600774
+61224	[1728368867]	2000000 OPS in 2.707405 seconds, throughput 738714.747147
+61224	[1728368867]	2000000 OPS in 2.716588 seconds, throughput 736217.637713
+61224	[1728368868]	2000000 OPS in 2.696469 seconds, throughput 741710.733556
+61224	[1728368869]	2000000 OPS in 2.730358 seconds, throughput 732504.675211
+61224	[1728368870]	2000000 OPS in 2.706550 seconds, throughput 738948.107369
+61224	[1728368870]	2000000 OPS in 2.716696 seconds, throughput 736188.369991
+61224	[1728368870]	2000000 OPS in 2.695526 seconds, throughput 741970.212864
+61224	[1728368872]	2000000 OPS in 2.729361 seconds, throughput 732772.249622
+61224	[1728368872]	2000000 OPS in 2.709989 seconds, throughput 738010.375688
+61224	[1728368873]	2000000 OPS in 2.719028 seconds, throughput 735556.971094
+61224	[1728368873]	2000000 OPS in 2.695724 seconds, throughput 741915.715407
+61224	[1728368875]	2000000 OPS in 2.727912 seconds, throughput 733161.480282
+61224	[1728368875]	2000000 OPS in 2.710860 seconds, throughput 737773.252768
+61224	[1728368876]	2000000 OPS in 2.718515 seconds, throughput 735695.775083
+61224	[1728368876]	2000000 OPS in 2.699209 seconds, throughput 740957.813937
+61224	[1728368878]	2000000 OPS in 2.727047 seconds, throughput 733394.033913
+61224	[1728368878]	2000000 OPS in 2.714600 seconds, throughput 736756.796581
+61224	[1728368878]	2000000 OPS in 2.719578 seconds, throughput 735408.214069
+61224	[1728368878]	2000000 OPS in 2.696836 seconds, throughput 741609.797555
+61224	[1728368880]	2000000 OPS in 2.724710 seconds, throughput 734023.070345
+61224	[1728368880]	2000000 OPS in 2.711101 seconds, throughput 737707.669320
+61224	[1728368881]	2000000 OPS in 2.715238 seconds, throughput 736583.680694
+61224	[1728368881]	2000000 OPS in 2.699042 seconds, throughput 741003.659817
+61224	[1728368883]	2000000 OPS in 2.730147 seconds, throughput 732561.286993
+61224	[1728368883]	2000000 OPS in 2.716439 seconds, throughput 736258.020151
+61224	[1728368884]	2000000 OPS in 2.719917 seconds, throughput 735316.555615
+61224	[1728368884]	2000000 OPS in 2.697523 seconds, throughput 741420.925790
+61224	[1728368886]	2000000 OPS in 2.727018 seconds, throughput 733401.833065
+61224	[1728368886]	2000000 OPS in 2.713500 seconds, throughput 737055.463424
+61224	[1728368886]	2000000 OPS in 2.697856 seconds, throughput 741329.411207
+61224	[1728368886]	2000000 OPS in 2.715759 seconds, throughput 736442.372096
+61224	[1728368889]	2000000 OPS in 2.734724 seconds, throughput 731335.227979
+61224	[1728368889]	2000000 OPS in 2.718208 seconds, throughput 735778.866076
+61224	[1728368889]	2000000 OPS in 2.701709 seconds, throughput 740272.175871
+61224	[1728368889]	2000000 OPS in 2.727241 seconds, throughput 733341.864544
+61224	[1728368891]	2000000 OPS in 2.726608 seconds, throughput 733512.114686
+61224	[1728368891]	2000000 OPS in 2.710009 seconds, throughput 738004.929135
+61224	[1728368892]	2000000 OPS in 2.696659 seconds, throughput 741658.474431
+61224	[1728368892]	2000000 OPS in 2.718782 seconds, throughput 735623.525535
+61224	[1728368894]	2000000 OPS in 2.727857 seconds, throughput 733176.262539
+61224	[1728368894]	2000000 OPS in 2.708591 seconds, throughput 738391.289050
+61224	[1728368895]	2000000 OPS in 2.697648 seconds, throughput 741386.570820
+61224	[1728368895]	2000000 OPS in 2.719092 seconds, throughput 735539.658092
+61224	[1728368897]	2000000 OPS in 2.724785 seconds, throughput 734002.866281
+61224	[1728368897]	2000000 OPS in 2.707246 seconds, throughput 738758.132804
+61224	[1728368897]	2000000 OPS in 2.699215 seconds, throughput 740956.166886
+61224	[1728368897]	2000000 OPS in 2.715733 seconds, throughput 736449.422679
+61224	[1728368899]	2000000 OPS in 2.710240 seconds, throughput 737942.027274
+61224	[1728368899]	2000000 OPS in 2.732627 seconds, throughput 731896.449826
+61224	[1728368900]	2000000 OPS in 2.700911 seconds, throughput 740490.893628
+61224	[1728368900]	2000000 OPS in 2.725389 seconds, throughput 733840.196757
+61224	[1728368902]	2000000 OPS in 2.711807 seconds, throughput 737515.612284
+61224	[1728368902]	2000000 OPS in 2.732633 seconds, throughput 731894.842813
+61224	[1728368903]	2000000 OPS in 2.700597 seconds, throughput 740576.990939
+61224	[1728368903]	2000000 OPS in 2.723338 seconds, throughput 734392.866401
+61224	[1728368905]	2000000 OPS in 2.711373 seconds, throughput 737633.663830
+61224	[1728368905]	2000000 OPS in 2.727516 seconds, throughput 733267.925834
+61224	[1728368905]	2000000 OPS in 2.698481 seconds, throughput 741157.710579
+61224	[1728368906]	2000000 OPS in 2.720578 seconds, throughput 735137.900843
+61224	[1728368908]	2000000 OPS in 2.710605 seconds, throughput 737842.658742
+61224	[1728368908]	2000000 OPS in 2.724530 seconds, throughput 734071.564637
+61224	[1728368908]	2000000 OPS in 2.694745 seconds, throughput 742185.253150
+61224	[1728368908]	2000000 OPS in 2.716772 seconds, throughput 736167.775581
+61224	[1728368910]	2000000 OPS in 2.708503 seconds, throughput 738415.279584
+61224	[1728368910]	2000000 OPS in 2.725963 seconds, throughput 733685.673650
+61224	[1728368911]	2000000 OPS in 2.696106 seconds, throughput 741810.596468
+61224	[1728368911]	2000000 OPS in 2.716945 seconds, throughput 736120.900497
+61224	[1728368913]	2000000 OPS in 2.709791 seconds, throughput 738064.300900
+61224	[1728368913]	2000000 OPS in 2.725643 seconds, throughput 733771.810908
+61224	[1728368913]	2000000 OPS in 2.697633 seconds, throughput 741390.693248
+61224	[1728368914]	2000000 OPS in 2.719406 seconds, throughput 735454.727981
+61224	[1728368916]	2000000 OPS in 2.712372 seconds, throughput 737361.984271
+61224	[1728368916]	2000000 OPS in 2.728575 seconds, throughput 732983.333791
+61224	[1728368916]	2000000 OPS in 2.701743 seconds, throughput 740262.859939
+61224	[1728368916]	2000000 OPS in 2.718660 seconds, throughput 735656.536676
+61224	[1728368918]	2000000 OPS in 2.710250 seconds, throughput 737939.304492
+61224	[1728368919]	2000000 OPS in 2.728308 seconds, throughput 733055.065630
+61224	[1728368919]	2000000 OPS in 2.697749 seconds, throughput 741358.814330
+61224	[1728368919]	2000000 OPS in 2.720805 seconds, throughput 735076.567413
+61224	[1728368921]	2000000 OPS in 2.711052 seconds, throughput 737721.002769
+61224	[1728368921]	2000000 OPS in 2.726547 seconds, throughput 733528.525274
+61224	[1728368922]	2000000 OPS in 2.702037 seconds, throughput 740182.314306
+61224	[1728368922]	2000000 OPS in 2.716740 seconds, throughput 736176.446771
+61224	[1728368924]	2000000 OPS in 2.709095 seconds, throughput 738253.918744
+61224	[1728368924]	2000000 OPS in 2.724425 seconds, throughput 734099.855933
+61224	[1728368924]	2000000 OPS in 2.696649 seconds, throughput 741661.224727
+61224	[1728368925]	2000000 OPS in 2.716951 seconds, throughput 736119.274878
+61224	[1728368927]	2000000 OPS in 2.713788 seconds, throughput 736977.243617
+61224	[1728368927]	2000000 OPS in 2.730767 seconds, throughput 732394.964492
+61224	[1728368927]	2000000 OPS in 2.695662 seconds, throughput 741932.779406
+61224	[1728368927]	2000000 OPS in 2.720502 seconds, throughput 735158.437671
+61224	[1728368929]	2000000 OPS in 2.708192 seconds, throughput 738500.076804
+61224	[1728368929]	2000000 OPS in 2.729952 seconds, throughput 732613.613719
+61224	[1728368930]	2000000 OPS in 2.694674 seconds, throughput 742204.808448
+61224	[1728368930]	2000000 OPS in 2.718107 seconds, throughput 735806.206305
+61224	[1728368932]	2000000 OPS in 2.707612 seconds, throughput 738658.271569
+61224	[1728368932]	2000000 OPS in 2.726654 seconds, throughput 733499.739974
+61224	[1728368932]	2000000 OPS in 2.694208 seconds, throughput 742333.182887
+61224	[1728368933]	2000000 OPS in 2.716630 seconds, throughput 736206.255545
+61224	[1728368935]	2000000 OPS in 2.709700 seconds, throughput 738089.087353
+61224	[1728368935]	2000000 OPS in 2.731552 seconds, throughput 732184.487061
+61224	[1728368935]	2000000 OPS in 2.701244 seconds, throughput 740399.608477
+61224	[1728368935]	2000000 OPS in 2.720602 seconds, throughput 735131.415768
+61224	[1728368937]	2000000 OPS in 2.706376 seconds, throughput 738995.616278
+61224	[1728368938]	2000000 OPS in 2.732743 seconds, throughput 731865.382145
+61224	[1728368938]	2000000 OPS in 2.698058 seconds, throughput 741273.908863
+61224	[1728368938]	2000000 OPS in 2.710791 seconds, throughput 737792.031920
+61224	[1728368940]	2000000 OPS in 2.707594 seconds, throughput 738663.182146
+61224	[1728368940]	2000000 OPS in 2.734615 seconds, throughput 731364.378532
+61224	[1728368940]	2000000 OPS in 2.700121 seconds, throughput 740707.546069
+61224	[1728368941]	2000000 OPS in 2.722367 seconds, throughput 734654.805910
+61224	[1728368943]	2000000 OPS in 2.708081 seconds, throughput 738530.346766
+61224	[1728368943]	2000000 OPS in 2.696552 seconds, throughput 741687.903664
+61224	[1728368943]	2000000 OPS in 2.729398 seconds, throughput 732762.316086
+61224	[1728368944]	2000000 OPS in 2.719277 seconds, throughput 735489.617277
+61224	[1728368946]	2000000 OPS in 2.709658 seconds, throughput 738100.527816
+61224	[1728368946]	2000000 OPS in 2.729623 seconds, throughput 732701.915246
+61224	[1728368946]	2000000 OPS in 2.706641 seconds, throughput 738923.263189
+61224	[1728368948]	2000000 OPS in 2.680001 seconds, throughput 746268.378258
+61224	[1728368949]	2000000 OPS in 2.648212 seconds, throughput 755226.545307
+61224	[1728368949]	2000000 OPS in 2.636984 seconds, throughput 758442.220355
+61224	[1728368951]	2000000 OPS in 2.676103 seconds, throughput 747355.389535
+61224	[1728368951]	2000000 OPS in 2.653091 seconds, throughput 753837.693468
+61224	[1728368952]	2000000 OPS in 2.639888 seconds, throughput 757607.898517
+61224	[1728368954]	2000000 OPS in 2.655194 seconds, throughput 753240.629498
+61224	[1728368956]	2000000 OPS in 2.442437 seconds, throughput 818854.283652
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     348652 ms      1369023 ms            4 CompactionCPUUsage=0.270954 CompactionThroughput=2.49994G Lat_Get_Avg=1080.3 Lat_Get_P50=1039.05 Lat_Get_P95=1.80912k Lat_Get_P99=3.82413k Lat_Put_Avg=1.70314k Lat_Put_P50=1.59375k Lat_Put_P95=2.70882k Lat_Put_P99=2.87706k items_per_second=2.86819M/s
+5999.96user 159.68system 24:42.40elapsed 415%CPU (0avgtext+0avgdata 271856maxresident)k
+324704inputs+34416outputs (1623major+4203737minor)pagefaults 0swaps

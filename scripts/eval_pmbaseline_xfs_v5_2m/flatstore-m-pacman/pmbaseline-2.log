@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 54%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T20:42:13-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.63, 4.25, 4.78
+[1728265333]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728265333]	Setup starts!
+[1728265333]	Setup starts!
+[1728265333]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7ef83ec00000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728265333]	Initializing log segments...
+Log: pool_start 0x7ef83ec00000 total segments: 2028  cleaners: 2
+[1728265333]Initialized 2026 free log segments...
+[1728265333]	DB init finished in 0.425854 seconds
+[1728265333]	DB init finished in 0.425912 seconds
+[1728265333]	DB init finished in 0.425734 seconds
+[1728265333]	DB init finished in 0.425953 seconds
+[1728265338]	DB load finished in 4.247639 seconds
+[1728265338]	DB load finished in 4.453089 seconds
+[1728265338]	DB load finished in 4.583282 seconds
+[1728265338]	DB load finished in 4.990614 seconds
+[1728265338]	DB warmup finished in 0.000024 seconds
+[1728265338]	DB warmup finished in 0.537578 seconds
+[1728265338]	DB warmup finished in 0.743036 seconds
+[1728265338]	DB warmup finished in 0.407379 seconds
+[1728265338]	ETC init!
+[1728265338]	ETC init!
+[1728265338]	ETC init!
+[1728265338]	ETC starts!
+[1728265338]	ETC starts!
+[1728265338]	ETC starts!
+[1728265338]	ETC init!
+[1728265338]	ETC starts!
+193042	[1728265341]	2000000 OPS in 2.423732 seconds, throughput 825173.740331
+193042	[1728265341]	2000000 OPS in 2.452750 seconds, throughput 815411.273061
+193042	[1728265341]	2000000 OPS in 2.569876 seconds, throughput 778247.666424
+193042	[1728265341]	2000000 OPS in 2.595160 seconds, throughput 770665.392500
+193042	[1728265343]	2000000 OPS in 2.383125 seconds, throughput 839234.198794
+193042	[1728265343]	2000000 OPS in 2.425674 seconds, throughput 824513.104399
+193042	[1728265343]	2000000 OPS in 2.381677 seconds, throughput 839744.432180
+193042	[1728265343]	2000000 OPS in 2.373617 seconds, throughput 842595.920066
+193042	[1728265346]	2000000 OPS in 2.412819 seconds, throughput 828905.939484
+193042	[1728265346]	2000000 OPS in 2.407386 seconds, throughput 830776.618291
+193042	[1728265346]	2000000 OPS in 2.394935 seconds, throughput 835095.733287
+193042	[1728265346]	2000000 OPS in 2.657055 seconds, throughput 752713.060136
+193042	[1728265348]	2000000 OPS in 2.413168 seconds, throughput 828786.060481
+193042	[1728265348]	2000000 OPS in 2.550857 seconds, throughput 784050.223121
+193042	[1728265348]	2000000 OPS in 2.425672 seconds, throughput 824513.784221
+193042	[1728265348]	2000000 OPS in 2.813185 seconds, throughput 710937.958222
+193042	[1728265350]	2000000 OPS in 2.386463 seconds, throughput 838060.342859
+193042	[1728265350]	2000000 OPS in 2.379008 seconds, throughput 840686.538255
+193042	[1728265351]	2000000 OPS in 2.516143 seconds, throughput 794867.382339
+193042	[1728265351]	2000000 OPS in 2.462863 seconds, throughput 812063.033957
+193042	[1728265352]	2000000 OPS in 1.973033 seconds, throughput 1013667.789642
+193042	[1728265353]	2000000 OPS in 2.346170 seconds, throughput 852453.147044
+193042	[1728265353]	2000000 OPS in 1.963901 seconds, throughput 1018381.272783
+193042	[1728265353]	2000000 OPS in 2.008835 seconds, throughput 995601.928481
+193042	[1728265354]	2000000 OPS in 1.992441 seconds, throughput 1003793.838814
+193042	[1728265355]	2000000 OPS in 1.995635 seconds, throughput 1002187.273725
+193042	[1728265355]	2000000 OPS in 2.006337 seconds, throughput 996841.507683
+193042	[1728265355]	2000000 OPS in 2.222008 seconds, throughput 900086.768364
+193042	[1728265356]	2000000 OPS in 2.012667 seconds, throughput 993706.360764
+193042	[1728265357]	2000000 OPS in 2.027415 seconds, throughput 986477.854805
+193042	[1728265357]	2000000 OPS in 2.015374 seconds, throughput 992371.639209
+193042	[1728265357]	2000000 OPS in 2.187899 seconds, throughput 914118.978984
+193042	[1728265358]	2000000 OPS in 2.012908 seconds, throughput 993587.387004
+193042	[1728265359]	2000000 OPS in 2.027877 seconds, throughput 986253.111012
+193042	[1728265359]	2000000 OPS in 2.065859 seconds, throughput 968120.283136
+193042	[1728265359]	2000000 OPS in 2.112320 seconds, throughput 946826.238449
+193042	[1728265360]	2000000 OPS in 2.022893 seconds, throughput 988683.039587
+193042	[1728265361]	2000000 OPS in 2.028093 seconds, throughput 986148.071119
+193042	[1728265361]	2000000 OPS in 2.049228 seconds, throughput 975977.294864
+193042	[1728265361]	2000000 OPS in 2.039400 seconds, throughput 980680.592331
+193042	[1728265362]	2000000 OPS in 2.015272 seconds, throughput 992421.866626
+193042	[1728265363]	2000000 OPS in 2.021901 seconds, throughput 989168.114561
+193042	[1728265363]	2000000 OPS in 2.052510 seconds, throughput 974416.689809
+193042	[1728265363]	2000000 OPS in 2.094542 seconds, throughput 954862.685971
+193042	[1728265364]	2000000 OPS in 2.004886 seconds, throughput 997562.953704
+193042	[1728265365]	2000000 OPS in 2.009397 seconds, throughput 995323.472664
+193042	[1728265365]	2000000 OPS in 2.030216 seconds, throughput 985116.854561
+193042	[1728265365]	2000000 OPS in 2.037840 seconds, throughput 981431.319436
+193042	[1728265366]	2000000 OPS in 2.005431 seconds, throughput 997291.853971
+193042	[1728265367]	2000000 OPS in 2.007116 seconds, throughput 996454.614482
+193042	[1728265367]	2000000 OPS in 2.035542 seconds, throughput 982539.294203
+193042	[1728265367]	2000000 OPS in 2.033261 seconds, throughput 983641.549216
+193042	[1728265368]	2000000 OPS in 2.007987 seconds, throughput 996022.384607
+193042	[1728265369]	2000000 OPS in 2.005014 seconds, throughput 997499.269332
+193042	[1728265369]	2000000 OPS in 2.031724 seconds, throughput 984385.674432
+193042	[1728265369]	2000000 OPS in 2.026397 seconds, throughput 986973.431169
+193042	[1728265371]	2000000 OPS in 2.012100 seconds, throughput 993986.382387
+193042	[1728265371]	2000000 OPS in 2.028448 seconds, throughput 985975.484706
+193042	[1728265371]	2000000 OPS in 2.031859 seconds, throughput 984320.270255
+193042	[1728265372]	2000000 OPS in 2.032746 seconds, throughput 983890.756642
+193042	[1728265373]	2000000 OPS in 2.012021 seconds, throughput 994025.410272
+193042	[1728265373]	2000000 OPS in 2.034711 seconds, throughput 982940.574853
+193042	[1728265373]	2000000 OPS in 2.026842 seconds, throughput 986756.737822
+193042	[1728265374]	2000000 OPS in 2.029032 seconds, throughput 985691.699293
+193042	[1728265375]	2000000 OPS in 2.011052 seconds, throughput 994504.368858
+193042	[1728265375]	2000000 OPS in 2.026509 seconds, throughput 986918.883657
+193042	[1728265375]	2000000 OPS in 2.022110 seconds, throughput 989065.876733
+193042	[1728265376]	2000000 OPS in 2.020240 seconds, throughput 989981.388350
+193042	[1728265377]	2000000 OPS in 2.005540 seconds, throughput 997237.651705
+193042	[1728265377]	2000000 OPS in 2.027688 seconds, throughput 986345.039276
+193042	[1728265377]	2000000 OPS in 2.012035 seconds, throughput 994018.493714
+193042	[1728265378]	2000000 OPS in 2.010045 seconds, throughput 995002.599444
+193042	[1728265379]	2000000 OPS in 2.002254 seconds, throughput 998874.268699
+193042	[1728265379]	2000000 OPS in 2.022992 seconds, throughput 988634.655995
+193042	[1728265379]	2000000 OPS in 2.013087 seconds, throughput 993499.039038
+193042	[1728265380]	2000000 OPS in 2.012280 seconds, throughput 993897.469537
+193042	[1728265381]	2000000 OPS in 2.004203 seconds, throughput 997902.907041
+193042	[1728265381]	2000000 OPS in 2.028379 seconds, throughput 986009.024941
+193042	[1728265381]	2000000 OPS in 2.013301 seconds, throughput 993393.436948
+193042	[1728265382]	2000000 OPS in 2.011152 seconds, throughput 994454.919370
+193042	[1728265383]	2000000 OPS in 2.002751 seconds, throughput 998626.389401
+193042	[1728265383]	2000000 OPS in 2.026683 seconds, throughput 986834.152159
+193042	[1728265383]	2000000 OPS in 2.014861 seconds, throughput 992624.305101
+193042	[1728265384]	2000000 OPS in 2.008714 seconds, throughput 995661.901097
+193042	[1728265385]	2000000 OPS in 2.007984 seconds, throughput 996023.872700
+193042	[1728265385]	2000000 OPS in 2.027751 seconds, throughput 986314.394617
+193042	[1728265385]	2000000 OPS in 2.020328 seconds, throughput 989938.267450
+193042	[1728265386]	2000000 OPS in 2.018625 seconds, throughput 990773.422503
+193042	[1728265387]	2000000 OPS in 2.003652 seconds, throughput 998177.328199
+193042	[1728265387]	2000000 OPS in 2.022072 seconds, throughput 989084.463857
+193042	[1728265387]	2000000 OPS in 2.012682 seconds, throughput 993698.954927
+193042	[1728265388]	2000000 OPS in 2.015175 seconds, throughput 992469.636632
+193042	[1728265389]	2000000 OPS in 2.002607 seconds, throughput 998698.196900
+193042	[1728265389]	2000000 OPS in 2.028845 seconds, throughput 985782.551156
+193042	[1728265389]	2000000 OPS in 2.013760 seconds, throughput 993167.010965
+193042	[1728265390]	2000000 OPS in 2.017881 seconds, throughput 991138.724236
+193042	[1728265391]	2000000 OPS in 2.007544 seconds, throughput 996242.174518
+193042	[1728265391]	2000000 OPS in 2.026648 seconds, throughput 986851.194682
+193042	[1728265391]	2000000 OPS in 2.018969 seconds, throughput 990604.610571
+193042	[1728265392]	2000000 OPS in 2.018018 seconds, throughput 991071.437420
+193042	[1728265393]	2000000 OPS in 2.006563 seconds, throughput 996729.233022
+193042	[1728265393]	2000000 OPS in 2.030342 seconds, throughput 985055.719677
+193042	[1728265393]	2000000 OPS in 2.019747 seconds, throughput 990223.032885
+193042	[1728265394]	2000000 OPS in 2.016270 seconds, throughput 991930.644209
+193042	[1728265395]	2000000 OPS in 2.009918 seconds, throughput 995065.470333
+193042	[1728265395]	2000000 OPS in 2.030500 seconds, throughput 984979.069195
+193042	[1728265395]	2000000 OPS in 2.026655 seconds, throughput 986847.786130
+193042	[1728265396]	2000000 OPS in 2.018589 seconds, throughput 990791.092194
+193042	[1728265397]	2000000 OPS in 2.007333 seconds, throughput 996346.894113
+193042	[1728265397]	2000000 OPS in 2.028347 seconds, throughput 986024.580607
+193042	[1728265397]	2000000 OPS in 2.022128 seconds, throughput 989057.072549
+193042	[1728265398]	2000000 OPS in 2.019814 seconds, throughput 990190.185829
+193042	[1728265399]	2000000 OPS in 2.009303 seconds, throughput 995370.036276
+193042	[1728265399]	2000000 OPS in 2.029856 seconds, throughput 985291.567481
+193042	[1728265400]	2000000 OPS in 2.028186 seconds, throughput 986102.852500
+193042	[1728265400]	2000000 OPS in 2.021272 seconds, throughput 989475.933966
+193042	[1728265401]	2000000 OPS in 2.007008 seconds, throughput 996508.235144
+193042	[1728265401]	2000000 OPS in 2.039210 seconds, throughput 980771.965614
+193042	[1728265402]	2000000 OPS in 2.035923 seconds, throughput 982355.423069
+193042	[1728265402]	2000000 OPS in 2.028312 seconds, throughput 986041.595179
+193042	[1728265403]	2000000 OPS in 2.013445 seconds, throughput 993322.390232
+193042	[1728265403]	2000000 OPS in 2.031750 seconds, throughput 984373.077396
+193042	[1728265404]	2000000 OPS in 2.025063 seconds, throughput 987623.594920
+193042	[1728265404]	2000000 OPS in 2.025968 seconds, throughput 987182.423414
+193042	[1728265405]	2000000 OPS in 2.007089 seconds, throughput 996468.019106
+193042	[1728265405]	2000000 OPS in 2.022869 seconds, throughput 988694.769656
+193042	[1728265406]	2000000 OPS in 2.077461 seconds, throughput 962713.620135
+193042	[1728265406]	2000000 OPS in 2.025007 seconds, throughput 987650.906886
+193042	[1728265407]	2000000 OPS in 2.003444 seconds, throughput 998280.960187
+193042	[1728265407]	2000000 OPS in 2.028922 seconds, throughput 985745.139537
+193042	[1728265408]	2000000 OPS in 2.165346 seconds, throughput 923639.917131
+193042	[1728265408]	2000000 OPS in 2.024963 seconds, throughput 987672.367347
+193042	[1728265409]	2000000 OPS in 2.010282 seconds, throughput 994885.294700
+193042	[1728265410]	2000000 OPS in 2.032527 seconds, throughput 983996.768555
+193042	[1728265410]	2000000 OPS in 2.024787 seconds, throughput 987758.218519
+193042	[1728265410]	2000000 OPS in 2.022025 seconds, throughput 989107.454161
+193042	[1728265411]	2000000 OPS in 2.009613 seconds, throughput 995216.491932
+193042	[1728265412]	2000000 OPS in 2.030619 seconds, throughput 984921.346644
+193042	[1728265412]	2000000 OPS in 2.027009 seconds, throughput 986675.441500
+193042	[1728265412]	2000000 OPS in 2.022656 seconds, throughput 988798.886217
+193042	[1728265413]	2000000 OPS in 2.010091 seconds, throughput 994979.829271
+193042	[1728265414]	2000000 OPS in 2.029037 seconds, throughput 985689.270329
+193042	[1728265414]	2000000 OPS in 2.023468 seconds, throughput 988402.089877
+193042	[1728265414]	2000000 OPS in 2.071176 seconds, throughput 965634.982252
+193042	[1728265415]	2000000 OPS in 2.006692 seconds, throughput 996665.158380
+193042	[1728265416]	2000000 OPS in 2.029445 seconds, throughput 985491.107175
+193042	[1728265416]	2000000 OPS in 2.079609 seconds, throughput 961719.246262
+193042	[1728265416]	2000000 OPS in 2.023504 seconds, throughput 988384.505294
+193042	[1728265417]	2000000 OPS in 2.009928 seconds, throughput 995060.519581
+193042	[1728265418]	2000000 OPS in 2.032904 seconds, throughput 983814.287345
+193042	[1728265418]	2000000 OPS in 2.028343 seconds, throughput 986026.525100
+193042	[1728265418]	2000000 OPS in 2.026240 seconds, throughput 987049.905243
+193042	[1728265419]	2000000 OPS in 2.012029 seconds, throughput 994021.457941
+193042	[1728265420]	2000000 OPS in 2.036365 seconds, throughput 982142.199458
+193042	[1728265420]	2000000 OPS in 2.025369 seconds, throughput 987474.381212
+193042	[1728265420]	2000000 OPS in 2.029351 seconds, throughput 985536.755347
+193042	[1728265421]	2000000 OPS in 2.013756 seconds, throughput 993168.983730
+193042	[1728265422]	2000000 OPS in 2.035915 seconds, throughput 982359.283172
+193042	[1728265422]	2000000 OPS in 2.031653 seconds, throughput 984420.075672
+193042	[1728265422]	2000000 OPS in 2.031193 seconds, throughput 984643.015213
+193042	[1728265423]	2000000 OPS in 2.011586 seconds, throughput 994240.365562
+193042	[1728265424]	2000000 OPS in 2.028203 seconds, throughput 986094.587179
+193042	[1728265424]	2000000 OPS in 2.024279 seconds, throughput 988006.099950
+193042	[1728265424]	2000000 OPS in 2.024023 seconds, throughput 988131.063728
+193042	[1728265425]	2000000 OPS in 2.010215 seconds, throughput 994918.453996
+193042	[1728265426]	2000000 OPS in 2.034094 seconds, throughput 983238.729380
+193042	[1728265426]	2000000 OPS in 2.028137 seconds, throughput 986126.676847
+193042	[1728265426]	2000000 OPS in 2.028420 seconds, throughput 985989.094961
+193042	[1728265427]	2000000 OPS in 2.010550 seconds, throughput 994752.679615
+193042	[1728265428]	2000000 OPS in 2.032756 seconds, throughput 983885.916460
+193042	[1728265428]	2000000 OPS in 2.024110 seconds, throughput 988088.592023
+193042	[1728265428]	2000000 OPS in 2.029604 seconds, throughput 985413.903402
+193042	[1728265429]	2000000 OPS in 2.008968 seconds, throughput 995536.016502
+193042	[1728265430]	2000000 OPS in 2.032558 seconds, throughput 983981.760914
+193042	[1728265430]	2000000 OPS in 2.020976 seconds, throughput 989620.856457
+193042	[1728265430]	2000000 OPS in 2.024150 seconds, throughput 988069.066028
+193042	[1728265431]	2000000 OPS in 2.010359 seconds, throughput 994847.188985
+193042	[1728265432]	2000000 OPS in 2.029812 seconds, throughput 985312.925532
+193042	[1728265432]	2000000 OPS in 2.021875 seconds, throughput 989180.834621
+193042	[1728265432]	2000000 OPS in 2.021671 seconds, throughput 989280.649522
+193042	[1728265433]	2000000 OPS in 2.009522 seconds, throughput 995261.559714
+193042	[1728265434]	2000000 OPS in 2.030603 seconds, throughput 984929.107265
+193042	[1728265434]	2000000 OPS in 2.021943 seconds, throughput 989147.567464
+193042	[1728265434]	2000000 OPS in 2.023846 seconds, throughput 988217.482951
+193042	[1728265435]	2000000 OPS in 2.010672 seconds, throughput 994692.321771
+193042	[1728265436]	2000000 OPS in 2.030688 seconds, throughput 984887.880364
+193042	[1728265436]	2000000 OPS in 2.024890 seconds, throughput 987707.974260
+193042	[1728265436]	2000000 OPS in 2.024133 seconds, throughput 988077.364481
+193042	[1728265437]	2000000 OPS in 2.013438 seconds, throughput 993325.843656
+193042	[1728265438]	2000000 OPS in 2.030358 seconds, throughput 985047.957060
+193042	[1728265438]	2000000 OPS in 2.022924 seconds, throughput 988667.888660
+193042	[1728265438]	2000000 OPS in 2.023878 seconds, throughput 988201.858017
+193042	[1728265439]	2000000 OPS in 2.009522 seconds, throughput 995261.559714
+193042	[1728265440]	2000000 OPS in 2.031312 seconds, throughput 984585.332042
+193042	[1728265440]	2000000 OPS in 2.026438 seconds, throughput 986953.462183
+193042	[1728265440]	2000000 OPS in 2.022901 seconds, throughput 988679.129626
+193042	[1728265441]	2000000 OPS in 2.013994 seconds, throughput 993051.617830
+193042	[1728265442]	2000000 OPS in 2.032190 seconds, throughput 984159.945674
+193042	[1728265442]	2000000 OPS in 2.026371 seconds, throughput 986986.094846
+193042	[1728265442]	2000000 OPS in 2.023525 seconds, throughput 988374.247909
+193042	[1728265443]	2000000 OPS in 2.008892 seconds, throughput 995573.679421
+193042	[1728265444]	2000000 OPS in 2.032359 seconds, throughput 984078.108248
+193042	[1728265444]	2000000 OPS in 2.025699 seconds, throughput 987313.514989
+193042	[1728265444]	2000000 OPS in 2.020475 seconds, throughput 989866.244324
+193042	[1728265445]	2000000 OPS in 2.015389 seconds, throughput 992364.253253
+193042	[1728265446]	2000000 OPS in 2.031335 seconds, throughput 984574.183973
+193042	[1728265446]	2000000 OPS in 2.027845 seconds, throughput 986268.674381
+193042	[1728265446]	2000000 OPS in 2.029473 seconds, throughput 985477.510664
+193042	[1728265447]	2000000 OPS in 2.011910 seconds, throughput 994080.252099
+193042	[1728265448]	2000000 OPS in 2.033043 seconds, throughput 983747.023550
+193042	[1728265448]	2000000 OPS in 2.024375 seconds, throughput 987959.246681
+193042	[1728265448]	2000000 OPS in 2.021707 seconds, throughput 989263.033664
+193042	[1728265449]	2000000 OPS in 2.011732 seconds, throughput 994168.209284
+193042	[1728265450]	2000000 OPS in 2.036144 seconds, throughput 982248.799692
+193042	[1728265450]	2000000 OPS in 2.029937 seconds, throughput 985252.251671
+193042	[1728265450]	2000000 OPS in 2.030584 seconds, throughput 984938.323162
+193042	[1728265451]	2000000 OPS in 2.020378 seconds, throughput 989913.768612
+193042	[1728265452]	2000000 OPS in 2.032633 seconds, throughput 983945.454000
+193042	[1728265452]	2000000 OPS in 2.023027 seconds, throughput 988617.551817
+193042	[1728265452]	2000000 OPS in 2.026353 seconds, throughput 986994.862198
+193042	[1728265453]	2000000 OPS in 2.014508 seconds, throughput 992798.241556
+193042	[1728265454]	2000000 OPS in 2.035482 seconds, throughput 982568.256560
+193042	[1728265454]	2000000 OPS in 2.024938 seconds, throughput 987684.561206
+193042	[1728265454]	2000000 OPS in 2.027878 seconds, throughput 986252.624665
+193042	[1728265455]	2000000 OPS in 2.013035 seconds, throughput 993524.702750
+193042	[1728265456]	2000000 OPS in 2.033800 seconds, throughput 983380.863408
+193042	[1728265456]	2000000 OPS in 2.022799 seconds, throughput 988728.983947
+193042	[1728265457]	2000000 OPS in 2.025480 seconds, throughput 987420.265814
+193042	[1728265457]	2000000 OPS in 2.013580 seconds, throughput 993255.793164
+193042	[1728265458]	2000000 OPS in 2.033565 seconds, throughput 983494.503495
+193042	[1728265458]	2000000 OPS in 2.027076 seconds, throughput 986642.829376
+193042	[1728265459]	2000000 OPS in 2.029866 seconds, throughput 985286.713507
+193042	[1728265459]	2000000 OPS in 2.013073 seconds, throughput 993505.948368
+193042	[1728265460]	2000000 OPS in 2.031532 seconds, throughput 984478.708679
+193042	[1728265461]	2000000 OPS in 2.026034 seconds, throughput 987150.265000
+193042	[1728265461]	2000000 OPS in 2.029524 seconds, throughput 985452.746555
+193042	[1728265461]	2000000 OPS in 2.016437 seconds, throughput 991848.493159
+193042	[1728265462]	2000000 OPS in 2.035050 seconds, throughput 982776.835950
+193042	[1728265463]	2000000 OPS in 2.023611 seconds, throughput 988332.243697
+193042	[1728265463]	2000000 OPS in 2.025666 seconds, throughput 987329.599253
+193042	[1728265463]	2000000 OPS in 2.015995 seconds, throughput 992065.952545
+193042	[1728265464]	2000000 OPS in 2.037245 seconds, throughput 981717.957339
+193042	[1728265465]	2000000 OPS in 2.024434 seconds, throughput 987930.453648
+193042	[1728265465]	2000000 OPS in 2.030112 seconds, throughput 985167.320818
+193042	[1728265465]	2000000 OPS in 2.012208 seconds, throughput 993933.032768
+193042	[1728265466]	2000000 OPS in 2.037743 seconds, throughput 981478.037221
+193042	[1728265467]	2000000 OPS in 2.028045 seconds, throughput 986171.411384
+193042	[1728265467]	2000000 OPS in 2.029840 seconds, throughput 985299.333938
+193042	[1728265467]	2000000 OPS in 2.013483 seconds, throughput 993303.643487
+193042	[1728265468]	2000000 OPS in 2.036609 seconds, throughput 982024.531955
+193042	[1728265469]	2000000 OPS in 2.027557 seconds, throughput 986408.766807
+193042	[1728265469]	2000000 OPS in 2.027013 seconds, throughput 986673.494447
+193042	[1728265469]	2000000 OPS in 2.011778 seconds, throughput 994145.477284
+193042	[1728265471]	2000000 OPS in 2.032020 seconds, throughput 984242.281080
+193042	[1728265471]	2000000 OPS in 2.027840 seconds, throughput 986271.106202
+193042	[1728265471]	2000000 OPS in 2.024969 seconds, throughput 987669.440866
+193042	[1728265471]	2000000 OPS in 2.013016 seconds, throughput 993534.080206
+193042	[1728265473]	2000000 OPS in 2.033961 seconds, throughput 983303.023018
+193042	[1728265473]	2000000 OPS in 2.032081 seconds, throughput 984212.735614
+193042	[1728265473]	2000000 OPS in 2.030244 seconds, throughput 985103.268376
+193042	[1728265473]	2000000 OPS in 2.016355 seconds, throughput 991888.829100
+193042	[1728265475]	2000000 OPS in 2.034952 seconds, throughput 982824.164894
+193042	[1728265475]	2000000 OPS in 2.024040 seconds, throughput 988122.764372
+193042	[1728265475]	2000000 OPS in 2.027776 seconds, throughput 986302.234566
+193042	[1728265475]	2000000 OPS in 2.014637 seconds, throughput 992734.671308
+193042	[1728265477]	2000000 OPS in 2.036344 seconds, throughput 982152.327897
+193042	[1728265477]	2000000 OPS in 2.022756 seconds, throughput 988750.002472
+193042	[1728265477]	2000000 OPS in 2.027718 seconds, throughput 986330.446344
+193042	[1728265477]	2000000 OPS in 2.011593 seconds, throughput 994236.905776
+193042	[1728265479]	2000000 OPS in 2.035094 seconds, throughput 982755.587703
+193042	[1728265479]	2000000 OPS in 2.025584 seconds, throughput 987369.568480
+193042	[1728265479]	2000000 OPS in 2.050894 seconds, throughput 975184.480524
+193042	[1728265479]	2000000 OPS in 2.012431 seconds, throughput 993822.893804
+193042	[1728265481]	2000000 OPS in 2.043774 seconds, throughput 978581.780569
+193042	[1728265481]	2000000 OPS in 2.029480 seconds, throughput 985474.111595
+193042	[1728265481]	2000000 OPS in 2.042764 seconds, throughput 979065.618936
+193042	[1728265481]	2000000 OPS in 2.016505 seconds, throughput 991815.046330
+193042	[1728265483]	2000000 OPS in 2.033150 seconds, throughput 983695.251211
+193042	[1728265483]	2000000 OPS in 2.026191 seconds, throughput 987073.775375
+193042	[1728265483]	2000000 OPS in 2.034075 seconds, throughput 983247.913671
+193042	[1728265483]	2000000 OPS in 2.009597 seconds, throughput 995224.415642
+193042	[1728265485]	2000000 OPS in 2.035147 seconds, throughput 982729.994443
+193042	[1728265485]	2000000 OPS in 2.021389 seconds, throughput 989418.662118
+193042	[1728265485]	2000000 OPS in 2.032889 seconds, throughput 983821.546577
+193042	[1728265485]	2000000 OPS in 2.012712 seconds, throughput 993684.143583
+193042	[1728265487]	2000000 OPS in 2.033386 seconds, throughput 983581.081015
+193042	[1728265487]	2000000 OPS in 2.024011 seconds, throughput 988136.922181
+193042	[1728265487]	2000000 OPS in 2.030433 seconds, throughput 985011.571423
+193042	[1728265487]	2000000 OPS in 2.009637 seconds, throughput 995204.606603
+193042	[1728265489]	2000000 OPS in 2.034387 seconds, throughput 983097.119673
+193042	[1728265489]	2000000 OPS in 2.026618 seconds, throughput 986865.803028
+193042	[1728265489]	2000000 OPS in 2.032251 seconds, throughput 984130.405152
+193042	[1728265489]	2000000 OPS in 2.011922 seconds, throughput 994074.322961
+193042	[1728265491]	2000000 OPS in 2.036737 seconds, throughput 981962.816014
+193042	[1728265491]	2000000 OPS in 2.028795 seconds, throughput 985806.845936
+193042	[1728265491]	2000000 OPS in 2.036995 seconds, throughput 981838.443393
+193042	[1728265491]	2000000 OPS in 2.014394 seconds, throughput 992854.426691
+193042	[1728265493]	2000000 OPS in 2.036750 seconds, throughput 981956.548423
+193042	[1728265493]	2000000 OPS in 2.023963 seconds, throughput 988160.356686
+193042	[1728265493]	2000000 OPS in 2.034037 seconds, throughput 983266.282767
+193042	[1728265493]	2000000 OPS in 2.011292 seconds, throughput 994385.698347
+193042	[1728265495]	2000000 OPS in 2.038155 seconds, throughput 981279.637712
+193042	[1728265495]	2000000 OPS in 2.025208 seconds, throughput 987552.883457
+193042	[1728265495]	2000000 OPS in 2.039573 seconds, throughput 980597.409360
+193042	[1728265495]	2000000 OPS in 2.017670 seconds, throughput 991242.373629
+193042	[1728265497]	2000000 OPS in 2.035549 seconds, throughput 982535.915372
+193042	[1728265497]	2000000 OPS in 2.029002 seconds, throughput 985706.273330
+193042	[1728265497]	2000000 OPS in 2.041768 seconds, throughput 979543.219406
+193042	[1728265497]	2000000 OPS in 2.012770 seconds, throughput 993655.509571
+193042	[1728265499]	2000000 OPS in 2.030167 seconds, throughput 985140.631288
+193042	[1728265499]	2000000 OPS in 2.010950 seconds, throughput 994554.812402
+193042	[1728265499]	2000000 OPS in 2.041789 seconds, throughput 979533.144708
+193042	[1728265499]	2000000 OPS in 2.346531 seconds, throughput 852322.002138
+193042	[1728265501]	2000000 OPS in 2.030996 seconds, throughput 984738.522380
+193042	[1728265501]	2000000 OPS in 2.016401 seconds, throughput 991866.201217
+193042	[1728265501]	2000000 OPS in 2.040244 seconds, throughput 980274.908295
+193042	[1728265501]	2000000 OPS in 2.026634 seconds, throughput 986858.011856
+193042	[1728265503]	2000000 OPS in 2.034870 seconds, throughput 982863.770167
+193042	[1728265503]	2000000 OPS in 2.010872 seconds, throughput 994593.390330
+193042	[1728265503]	2000000 OPS in 2.035558 seconds, throughput 982531.571196
+193042	[1728265503]	2000000 OPS in 2.029755 seconds, throughput 985340.595294
+193042	[1728265505]	2000000 OPS in 2.034979 seconds, throughput 982811.124832
+193042	[1728265505]	2000000 OPS in 2.014594 seconds, throughput 992755.860486
+193042	[1728265505]	2000000 OPS in 2.037222 seconds, throughput 981729.040821
+193042	[1728265505]	2000000 OPS in 2.029414 seconds, throughput 985506.160892
+193042	[1728265507]	2000000 OPS in 2.038867 seconds, throughput 980936.961558
+193042	[1728265507]	2000000 OPS in 2.015952 seconds, throughput 992087.113185
+193042	[1728265507]	2000000 OPS in 2.037437 seconds, throughput 981625.444124
+193042	[1728265507]	2000000 OPS in 2.026343 seconds, throughput 986999.733017
+193042	[1728265509]	2000000 OPS in 2.034836 seconds, throughput 982880.192802
+193042	[1728265509]	2000000 OPS in 2.012367 seconds, throughput 993854.500695
+193042	[1728265509]	2000000 OPS in 2.039892 seconds, throughput 980444.062725
+193042	[1728265509]	2000000 OPS in 2.028931 seconds, throughput 985740.766936
+193042	[1728265511]	2000000 OPS in 2.035103 seconds, throughput 982751.241583
+193042	[1728265511]	2000000 OPS in 2.017137 seconds, throughput 991504.295444
+193042	[1728265511]	2000000 OPS in 2.037660 seconds, throughput 981518.015763
+193042	[1728265512]	2000000 OPS in 2.029343 seconds, throughput 985540.640493
+193042	[1728265513]	2000000 OPS in 2.034735 seconds, throughput 982928.980924
+193042	[1728265513]	2000000 OPS in 2.012981 seconds, throughput 993551.354931
+193042	[1728265513]	2000000 OPS in 2.039783 seconds, throughput 980496.454770
+193042	[1728265514]	2000000 OPS in 2.028418 seconds, throughput 985990.067136
+193042	[1728265515]	2000000 OPS in 2.034639 seconds, throughput 982975.358282
+193042	[1728265515]	2000000 OPS in 2.014917 seconds, throughput 992596.717383
+193042	[1728265516]	2000000 OPS in 2.036600 seconds, throughput 982028.871649
+193042	[1728265516]	2000000 OPS in 2.029520 seconds, throughput 985454.688793
+193042	[1728265517]	2000000 OPS in 2.034306 seconds, throughput 983136.263669
+193042	[1728265517]	2000000 OPS in 2.013958 seconds, throughput 993069.368875
+193042	[1728265518]	2000000 OPS in 2.033444 seconds, throughput 983553.026294
+193042	[1728265518]	2000000 OPS in 2.026873 seconds, throughput 986741.645875
+193042	[1728265519]	2000000 OPS in 2.017681 seconds, throughput 991236.969571
+193042	[1728265519]	2000000 OPS in 2.042025 seconds, throughput 979419.938541
+193042	[1728265520]	2000000 OPS in 2.034974 seconds, throughput 982813.539632
+193042	[1728265520]	2000000 OPS in 2.025931 seconds, throughput 987200.452533
+193042	[1728265521]	2000000 OPS in 2.014073 seconds, throughput 993012.666373
+193042	[1728265521]	2000000 OPS in 2.038144 seconds, throughput 981284.933744
+193042	[1728265522]	2000000 OPS in 2.035823 seconds, throughput 982403.676548
+193042	[1728265522]	2000000 OPS in 2.030351 seconds, throughput 985051.353190
+193042	[1728265523]	2000000 OPS in 2.009211 seconds, throughput 995415.613393
+193042	[1728265523]	2000000 OPS in 2.033531 seconds, throughput 983510.947214
+193042	[1728265524]	2000000 OPS in 2.037825 seconds, throughput 981438.543545
+193042	[1728265524]	2000000 OPS in 2.026025 seconds, throughput 987154.650115
+193042	[1728265525]	2000000 OPS in 2.014200 seconds, throughput 992950.054612
+193042	[1728265525]	2000000 OPS in 2.036960 seconds, throughput 981855.313801
+193042	[1728265526]	2000000 OPS in 2.036722 seconds, throughput 981970.047950
+193042	[1728265526]	2000000 OPS in 2.028093 seconds, throughput 986148.071119
+193042	[1728265527]	2000000 OPS in 2.013242 seconds, throughput 993422.549301
+193042	[1728265528]	2000000 OPS in 2.037970 seconds, throughput 981368.714947
+193042	[1728265528]	2000000 OPS in 2.037514 seconds, throughput 981588.347368
+193042	[1728265528]	2000000 OPS in 2.028164 seconds, throughput 986113.549003
+193042	[1728265529]	2000000 OPS in 2.012293 seconds, throughput 993891.048669
+193042	[1728265530]	2000000 OPS in 2.033531 seconds, throughput 983510.947214
+193042	[1728265530]	2000000 OPS in 2.036890 seconds, throughput 981889.056356
+193042	[1728265530]	2000000 OPS in 2.029026 seconds, throughput 985694.614066
+193042	[1728265531]	2000000 OPS in 2.012347 seconds, throughput 993864.378261
+193042	[1728265532]	2000000 OPS in 2.035554 seconds, throughput 982533.501936
+193042	[1728265532]	2000000 OPS in 2.023601 seconds, throughput 988337.127724
+193042	[1728265532]	2000000 OPS in 2.035196 seconds, throughput 982706.333935
+193042	[1728265533]	2000000 OPS in 2.012343 seconds, throughput 993866.353798
+193042	[1728265534]	2000000 OPS in 2.034198 seconds, throughput 983188.460514
+193042	[1728265534]	2000000 OPS in 2.025999 seconds, throughput 987167.318444
+193042	[1728265534]	2000000 OPS in 2.038976 seconds, throughput 980884.522427
+193042	[1728265535]	2000000 OPS in 2.013771 seconds, throughput 993161.585900
+193042	[1728265536]	2000000 OPS in 2.035765 seconds, throughput 982431.665737
+193042	[1728265536]	2000000 OPS in 2.029325 seconds, throughput 985549.382184
+193042	[1728265536]	2000000 OPS in 2.038930 seconds, throughput 980906.652018
+193042	[1728265537]	2000000 OPS in 2.013940 seconds, throughput 993078.244635
+193042	[1728265538]	2000000 OPS in 2.037950 seconds, throughput 981378.345887
+193042	[1728265538]	2000000 OPS in 2.028492 seconds, throughput 985954.097921
+193042	[1728265538]	2000000 OPS in 2.038953 seconds, throughput 980895.587098
+193042	[1728265539]	2000000 OPS in 2.018834 seconds, throughput 990670.852581
+193042	[1728265540]	2000000 OPS in 2.046006 seconds, throughput 977514.239939
+193042	[1728265540]	2000000 OPS in 2.033135 seconds, throughput 983702.508687
+193042	[1728265540]	2000000 OPS in 2.043977 seconds, throughput 978484.591559
+193042	[1728265541]	2000000 OPS in 2.018655 seconds, throughput 990758.698242
+193042	[1728265542]	2000000 OPS in 2.039246 seconds, throughput 980754.651474
+193042	[1728265542]	2000000 OPS in 2.062096 seconds, throughput 969886.949977
+193042	[1728265542]	2000000 OPS in 2.037271 seconds, throughput 981705.428487
+193042	[1728265544]	2000000 OPS in 2.010765 seconds, throughput 994646.316203
+193042	[1728265544]	2000000 OPS in 2.037491 seconds, throughput 981599.427924
+193042	[1728265544]	2000000 OPS in 2.025106 seconds, throughput 987602.624258
+193042	[1728265544]	2000000 OPS in 2.036027 seconds, throughput 982305.244479
+193042	[1728265546]	2000000 OPS in 2.012434 seconds, throughput 993821.412280
+193042	[1728265546]	2000000 OPS in 2.041047 seconds, throughput 979889.243119
+193042	[1728265546]	2000000 OPS in 2.027927 seconds, throughput 986228.794232
+193042	[1728265546]	2000000 OPS in 2.035622 seconds, throughput 982500.680382
+193042	[1728265548]	2000000 OPS in 2.015727 seconds, throughput 992197.852189
+193042	[1728265548]	2000000 OPS in 2.037246 seconds, throughput 981717.475455
+193042	[1728265548]	2000000 OPS in 2.029011 seconds, throughput 985701.901074
+193042	[1728265548]	2000000 OPS in 2.036960 seconds, throughput 981855.313801
+193042	[1728265550]	2000000 OPS in 2.012205 seconds, throughput 993934.514625
+193042	[1728265550]	2000000 OPS in 2.033612 seconds, throughput 983471.773377
+193042	[1728265550]	2000000 OPS in 2.030003 seconds, throughput 985220.218886
+193042	[1728265550]	2000000 OPS in 2.037216 seconds, throughput 981731.932206
+193042	[1728265552]	2000000 OPS in 2.015714 seconds, throughput 992204.251198
+193042	[1728265552]	2000000 OPS in 2.038616 seconds, throughput 981057.737210
+193042	[1728265552]	2000000 OPS in 2.029575 seconds, throughput 985427.983691
+193042	[1728265552]	2000000 OPS in 2.034054 seconds, throughput 983258.064928
+193042	[1728265554]	2000000 OPS in 2.013167 seconds, throughput 993459.558993
+193042	[1728265554]	2000000 OPS in 2.035240 seconds, throughput 982685.088736
+193042	[1728265554]	2000000 OPS in 2.026957 seconds, throughput 986700.753889
+193042	[1728265554]	2000000 OPS in 2.034412 seconds, throughput 983085.038822
+193042	[1728265556]	2000000 OPS in 2.015886 seconds, throughput 992119.594064
+193042	[1728265556]	2000000 OPS in 2.039010 seconds, throughput 980868.166414
+193042	[1728265556]	2000000 OPS in 2.027276 seconds, throughput 986545.492572
+193042	[1728265556]	2000000 OPS in 2.039399 seconds, throughput 980681.073199
+193042	[1728265558]	2000000 OPS in 2.013968 seconds, throughput 993064.437965
+193042	[1728265558]	2000000 OPS in 2.034401 seconds, throughput 983090.354360
+193042	[1728265558]	2000000 OPS in 2.026953 seconds, throughput 986702.701049
+193042	[1728265558]	2000000 OPS in 2.037505 seconds, throughput 981592.683208
+193042	[1728265560]	2000000 OPS in 2.010540 seconds, throughput 994757.627304
+193042	[1728265560]	2000000 OPS in 2.036992 seconds, throughput 981839.889406
+193042	[1728265560]	2000000 OPS in 2.033079 seconds, throughput 983729.604211
+193042	[1728265560]	2000000 OPS in 2.037309 seconds, throughput 981687.117664
+193042	[1728265562]	2000000 OPS in 2.014216 seconds, throughput 992942.167076
+193042	[1728265562]	2000000 OPS in 2.034072 seconds, throughput 983249.363838
+193042	[1728265562]	2000000 OPS in 2.028013 seconds, throughput 986186.972174
+193042	[1728265562]	2000000 OPS in 2.036977 seconds, throughput 981847.119531
+193042	[1728265564]	2000000 OPS in 2.015397 seconds, throughput 992360.314122
+193042	[1728265564]	2000000 OPS in 2.034591 seconds, throughput 982998.548603
+193042	[1728265564]	2000000 OPS in 2.026991 seconds, throughput 986684.203334
+193042	[1728265564]	2000000 OPS in 2.034559 seconds, throughput 983014.009424
+193042	[1728265566]	2000000 OPS in 2.016210 seconds, throughput 991960.162880
+193042	[1728265566]	2000000 OPS in 2.035894 seconds, throughput 982369.416089
+193042	[1728265566]	2000000 OPS in 2.028821 seconds, throughput 985794.212501
+193042	[1728265566]	2000000 OPS in 2.037017 seconds, throughput 981827.839434
+193042	[1728265568]	2000000 OPS in 2.012790 seconds, throughput 993645.636157
+193042	[1728265568]	2000000 OPS in 2.034535 seconds, throughput 983025.605359
+193042	[1728265568]	2000000 OPS in 2.026850 seconds, throughput 986752.843082
+193042	[1728265568]	2000000 OPS in 2.041527 seconds, throughput 979658.853397
+193042	[1728265570]	2000000 OPS in 2.020128 seconds, throughput 990036.274929
+193042	[1728265570]	2000000 OPS in 2.041120 seconds, throughput 979854.197695
+193042	[1728265570]	2000000 OPS in 2.031278 seconds, throughput 984601.812258
+193042	[1728265571]	2000000 OPS in 2.046920 seconds, throughput 977077.755848
+193042	[1728265572]	2000000 OPS in 2.014947 seconds, throughput 992581.938880
+193042	[1728265572]	2000000 OPS in 2.038032 seconds, throughput 981338.860234
+193042	[1728265572]	2000000 OPS in 2.029143 seconds, throughput 985637.779102
+193042	[1728265573]	2000000 OPS in 2.037204 seconds, throughput 981737.715025
+193042	[1728265574]	2000000 OPS in 2.013712 seconds, throughput 993190.684666
+193042	[1728265574]	2000000 OPS in 2.032900 seconds, throughput 983816.223130
+193042	[1728265574]	2000000 OPS in 2.029985 seconds, throughput 985228.954894
+193042	[1728265575]	2000000 OPS in 2.034958 seconds, throughput 982821.267073
+193042	[1728265576]	2000000 OPS in 2.014958 seconds, throughput 992576.520205
+193042	[1728265576]	2000000 OPS in 2.035229 seconds, throughput 982690.399950
+193042	[1728265576]	2000000 OPS in 2.027202 seconds, throughput 986581.504951
+193042	[1728265577]	2000000 OPS in 2.039341 seconds, throughput 980708.964317
+193042	[1728265578]	2000000 OPS in 2.017511 seconds, throughput 991320.493420
+193042	[1728265578]	2000000 OPS in 2.037154 seconds, throughput 981761.810840
+193042	[1728265578]	2000000 OPS in 2.029091 seconds, throughput 985663.038277
+193042	[1728265579]	2000000 OPS in 2.039046 seconds, throughput 980850.848877
+193042	[1728265580]	2000000 OPS in 2.019567 seconds, throughput 990311.289499
+193042	[1728265580]	2000000 OPS in 2.036892 seconds, throughput 981888.092250
+193042	[1728265581]	2000000 OPS in 2.027214 seconds, throughput 986575.664927
+193042	[1728265581]	2000000 OPS in 2.036032 seconds, throughput 982302.832176
+193042	[1728265582]	2000000 OPS in 2.015428 seconds, throughput 992345.050282
+193042	[1728265582]	2000000 OPS in 2.038684 seconds, throughput 981025.014176
+193042	[1728265583]	2000000 OPS in 2.026784 seconds, throughput 986784.975607
+193042	[1728265583]	2000000 OPS in 2.038713 seconds, throughput 981011.059428
+193042	[1728265584]	2000000 OPS in 2.011374 seconds, throughput 994345.159080
+193042	[1728265585]	2000000 OPS in 2.037240 seconds, throughput 981720.366771
+193042	[1728265585]	2000000 OPS in 2.031519 seconds, throughput 984485.008508
+193042	[1728265585]	2000000 OPS in 2.039892 seconds, throughput 980444.062725
+193042	[1728265586]	2000000 OPS in 2.015454 seconds, throughput 992332.248714
+193042	[1728265587]	2000000 OPS in 2.038682 seconds, throughput 981025.976587
+193042	[1728265587]	2000000 OPS in 2.030132 seconds, throughput 985157.615367
+193042	[1728265587]	2000000 OPS in 2.039308 seconds, throughput 980724.834110
+193042	[1728265588]	2000000 OPS in 2.013499 seconds, throughput 993295.750333
+193042	[1728265589]	2000000 OPS in 2.035555 seconds, throughput 982533.019250
+193042	[1728265589]	2000000 OPS in 2.030895 seconds, throughput 984787.495168
+193042	[1728265589]	2000000 OPS in 2.037946 seconds, throughput 981380.272097
+193042	[1728265590]	2000000 OPS in 2.016512 seconds, throughput 991811.603402
+193042	[1728265591]	2000000 OPS in 2.035524 seconds, throughput 982547.982731
+193042	[1728265591]	2000000 OPS in 2.032014 seconds, throughput 984245.187287
+193042	[1728265591]	2000000 OPS in 2.034213 seconds, throughput 983181.210621
+193042	[1728265592]	2000000 OPS in 2.014479 seconds, throughput 992812.533663
+193042	[1728265593]	2000000 OPS in 2.026283 seconds, throughput 987028.958936
+193042	[1728265593]	2000000 OPS in 2.038107 seconds, throughput 981302.748089
+193042	[1728265593]	2000000 OPS in 2.036521 seconds, throughput 982066.966164
+193042	[1728265594]	2000000 OPS in 2.017158 seconds, throughput 991493.973204
+193042	[1728265595]	2000000 OPS in 2.029497 seconds, throughput 985465.856811
+193042	[1728265595]	2000000 OPS in 2.036530 seconds, throughput 982062.626134
+193042	[1728265595]	2000000 OPS in 2.033337 seconds, throughput 983604.783664
+193042	[1728265596]	2000000 OPS in 2.015751 seconds, throughput 992186.038851
+193042	[1728265597]	2000000 OPS in 2.030427 seconds, throughput 985014.482175
+193042	[1728265597]	2000000 OPS in 2.036073 seconds, throughput 982283.051737
+193042	[1728265597]	2000000 OPS in 2.035666 seconds, throughput 982479.444074
+193042	[1728265598]	2000000 OPS in 2.013804 seconds, throughput 993145.311063
+193042	[1728265599]	2000000 OPS in 2.031601 seconds, throughput 984445.272472
+193042	[1728265599]	2000000 OPS in 2.039989 seconds, throughput 980397.443320
+193042	[1728265599]	2000000 OPS in 2.038643 seconds, throughput 981044.743979
+193042	[1728265600]	2000000 OPS in 2.019021 seconds, throughput 990579.097493
+193042	[1728265601]	2000000 OPS in 2.038379 seconds, throughput 981171.803673
+193042	[1728265601]	2000000 OPS in 2.044967 seconds, throughput 978010.892107
+193042	[1728265601]	2000000 OPS in 2.041639 seconds, throughput 979605.111384
+193042	[1728265602]	2000000 OPS in 2.014648 seconds, throughput 992729.250966
+193042	[1728265603]	2000000 OPS in 2.030311 seconds, throughput 985070.760095
+193042	[1728265603]	2000000 OPS in 2.041269 seconds, throughput 979782.674405
+193042	[1728265603]	2000000 OPS in 2.031777 seconds, throughput 984359.996200
+193042	[1728265604]	2000000 OPS in 2.012646 seconds, throughput 993716.729122
+193042	[1728265605]	2000000 OPS in 2.029117 seconds, throughput 985650.408527
+193042	[1728265605]	2000000 OPS in 2.037387 seconds, throughput 981649.534428
+193042	[1728265605]	2000000 OPS in 2.033658 seconds, throughput 983449.527895
+193042	[1728265606]	2000000 OPS in 2.016979 seconds, throughput 991581.964909
+193042	[1728265607]	2000000 OPS in 2.026740 seconds, throughput 986806.398453
+193042	[1728265607]	2000000 OPS in 2.037368 seconds, throughput 981658.689054
+193042	[1728265607]	2000000 OPS in 2.041261 seconds, throughput 979786.514316
+193042	[1728265608]	2000000 OPS in 2.019515 seconds, throughput 990336.788783
+193042	[1728265609]	2000000 OPS in 2.031290 seconds, throughput 984595.995648
+193042	[1728265609]	2000000 OPS in 2.038799 seconds, throughput 980969.678718
+193042	[1728265609]	2000000 OPS in 2.037913 seconds, throughput 981396.163624
+193042	[1728265610]	2000000 OPS in 2.015150 seconds, throughput 992481.949235
+193042	[1728265611]	2000000 OPS in 2.027996 seconds, throughput 986195.239044
+193042	[1728265611]	2000000 OPS in 2.036386 seconds, throughput 982132.071228
+193042	[1728265611]	2000000 OPS in 2.037664 seconds, throughput 981516.089012
+193042	[1728265612]	2000000 OPS in 2.016660 seconds, throughput 991738.815666
+193042	[1728265613]	2000000 OPS in 2.029591 seconds, throughput 985420.215206
+193042	[1728265613]	2000000 OPS in 2.038329 seconds, throughput 981195.871716
+193042	[1728265613]	2000000 OPS in 2.035251 seconds, throughput 982679.777580
+193042	[1728265614]	2000000 OPS in 2.014845 seconds, throughput 992632.187588
+193042	[1728265615]	2000000 OPS in 2.026784 seconds, throughput 986784.975607
+193042	[1728265615]	2000000 OPS in 2.036641 seconds, throughput 982009.102242
+193042	[1728265615]	2000000 OPS in 2.038483 seconds, throughput 981121.745926
+193042	[1728265616]	2000000 OPS in 2.017960 seconds, throughput 991099.922694
+193042	[1728265617]	2000000 OPS in 2.026154 seconds, throughput 987091.800525
+193042	[1728265617]	2000000 OPS in 2.037447 seconds, throughput 981620.626205
+193042	[1728265617]	2000000 OPS in 2.038745 seconds, throughput 980995.661547
+193042	[1728265618]	2000000 OPS in 2.014438 seconds, throughput 992832.740447
+193042	[1728265619]	2000000 OPS in 2.026881 seconds, throughput 986737.751254
+193042	[1728265619]	2000000 OPS in 2.041942 seconds, throughput 979459.749591
+193042	[1728265619]	2000000 OPS in 2.038486 seconds, throughput 981120.302028
+193042	[1728265620]	2000000 OPS in 2.018920 seconds, throughput 990628.652943
+193042	[1728265621]	2000000 OPS in 2.030760 seconds, throughput 984852.961453
+193042	[1728265621]	2000000 OPS in 2.041518 seconds, throughput 979663.172208
+193042	[1728265621]	2000000 OPS in 2.038289 seconds, throughput 981215.127001
+193042	[1728265622]	2000000 OPS in 2.012397 seconds, throughput 993839.684714
+193042	[1728265623]	2000000 OPS in 2.026596 seconds, throughput 986876.516089
+193042	[1728265623]	2000000 OPS in 2.039458 seconds, throughput 980652.702826
+193042	[1728265623]	2000000 OPS in 2.036393 seconds, throughput 982128.695198
+193042	[1728265624]	2000000 OPS in 2.017957 seconds, throughput 991101.396115
+193042	[1728265625]	2000000 OPS in 2.027695 seconds, throughput 986341.634220
+193042	[1728265625]	2000000 OPS in 2.039034 seconds, throughput 980856.621322
+193042	[1728265626]	2000000 OPS in 2.039685 seconds, throughput 980543.564325
+193042	[1728265626]	2000000 OPS in 2.012178 seconds, throughput 993947.851532
+193042	[1728265627]	2000000 OPS in 2.030219 seconds, throughput 985115.398881
+193042	[1728265627]	2000000 OPS in 2.035752 seconds, throughput 982437.939395
+193042	[1728265628]	2000000 OPS in 2.037102 seconds, throughput 981786.871742
+193042	[1728265628]	2000000 OPS in 2.017655 seconds, throughput 991249.742895
+193042	[1728265629]	2000000 OPS in 2.027320 seconds, throughput 986524.081053
+193042	[1728265629]	2000000 OPS in 2.037592 seconds, throughput 981550.771695
+193042	[1728265630]	2000000 OPS in 2.044787 seconds, throughput 978096.985163
+193042	[1728265630]	2000000 OPS in 2.020709 seconds, throughput 989751.616883
+193042	[1728265631]	2000000 OPS in 2.036653 seconds, throughput 982003.316225
+193042	[1728265631]	2000000 OPS in 2.043943 seconds, throughput 978500.868175
+193042	[1728265632]	2000000 OPS in 2.036822 seconds, throughput 981921.837058
+193042	[1728265632]	2000000 OPS in 2.013759 seconds, throughput 993167.504155
+193042	[1728265633]	2000000 OPS in 2.029844 seconds, throughput 985297.392312
+193042	[1728265633]	2000000 OPS in 2.036691 seconds, throughput 981984.994287
+193042	[1728265634]	2000000 OPS in 2.041331 seconds, throughput 979752.916112
+193042	[1728265634]	2000000 OPS in 2.017164 seconds, throughput 991491.024032
+193042	[1728265635]	2000000 OPS in 2.031771 seconds, throughput 984362.903103
+193042	[1728265636]	2000000 OPS in 2.041604 seconds, throughput 979621.905129
+193042	[1728265636]	2000000 OPS in 2.038603 seconds, throughput 981063.993333
+193042	[1728265636]	2000000 OPS in 2.015887 seconds, throughput 992119.101914
+193042	[1728265637]	2000000 OPS in 2.027581 seconds, throughput 986397.090918
+193042	[1728265638]	2000000 OPS in 2.038722 seconds, throughput 981006.728725
+193042	[1728265638]	2000000 OPS in 2.038398 seconds, throughput 981162.658127
+193042	[1728265638]	2000000 OPS in 2.013322 seconds, throughput 993383.075335
+193042	[1728265639]	2000000 OPS in 2.024830 seconds, throughput 987737.242139
+193042	[1728265640]	2000000 OPS in 2.040222 seconds, throughput 980285.478737
+193042	[1728265640]	2000000 OPS in 2.032218 seconds, throughput 984146.385870
+193042	[1728265640]	2000000 OPS in 2.013875 seconds, throughput 993110.297312
+193042	[1728265641]	2000000 OPS in 2.026625 seconds, throughput 986862.394375
+193042	[1728265642]	2000000 OPS in 2.034713 seconds, throughput 982939.608682
+193042	[1728265642]	2000000 OPS in 2.042262 seconds, throughput 979306.279018
+193042	[1728265642]	2000000 OPS in 2.011788 seconds, throughput 994140.535683
+193042	[1728265644]	2000000 OPS in 2.028149 seconds, throughput 986120.842206
+193042	[1728265644]	2000000 OPS in 2.352557 seconds, throughput 850138.806414
+193042	[1728265644]	2000000 OPS in 2.043934 seconds, throughput 978505.176782
+193042	[1728265644]	2000000 OPS in 2.012233 seconds, throughput 993920.684135
+193042	[1728265646]	2000000 OPS in 2.042747 seconds, throughput 979073.766844
+193042	[1728265646]	2000000 OPS in 2.029765 seconds, throughput 985335.740837
+193042	[1728265646]	2000000 OPS in 2.039423 seconds, throughput 980669.532510
+193042	[1728265646]	2000000 OPS in 2.014974 seconds, throughput 992568.638603
+193042	[1728265648]	2000000 OPS in 2.038717 seconds, throughput 981009.134667
+193042	[1728265648]	2000000 OPS in 2.029592 seconds, throughput 985419.729680
+193042	[1728265648]	2000000 OPS in 2.041940 seconds, throughput 979460.708934
+193042	[1728265648]	2000000 OPS in 2.016799 seconds, throughput 991670.463938
+193042	[1728265650]	2000000 OPS in 2.039983 seconds, throughput 980400.326865
+193042	[1728265650]	2000000 OPS in 2.028522 seconds, throughput 985939.516554
+193042	[1728265650]	2000000 OPS in 2.037547 seconds, throughput 981572.449617
+193042	[1728265650]	2000000 OPS in 2.016762 seconds, throughput 991688.657363
+193042	[1728265652]	2000000 OPS in 2.038556 seconds, throughput 981086.612288
+193042	[1728265652]	2000000 OPS in 2.029777 seconds, throughput 985329.915552
+193042	[1728265652]	2000000 OPS in 2.041709 seconds, throughput 979571.525619
+193042	[1728265652]	2000000 OPS in 2.016669 seconds, throughput 991734.389729
+193042	[1728265654]	2000000 OPS in 2.039590 seconds, throughput 980589.236072
+193042	[1728265654]	2000000 OPS in 2.031214 seconds, throughput 984632.835339
+193042	[1728265654]	2000000 OPS in 2.040302 seconds, throughput 980247.041859
+193042	[1728265654]	2000000 OPS in 2.018840 seconds, throughput 990667.908304
+193042	[1728265656]	2000000 OPS in 2.040670 seconds, throughput 980070.271038
+193042	[1728265656]	2000000 OPS in 2.029424 seconds, throughput 985501.304804
+193042	[1728265656]	2000000 OPS in 2.037102 seconds, throughput 981786.871742
+193042	[1728265656]	2000000 OPS in 2.016931 seconds, throughput 991605.563106
+193042	[1728265658]	2000000 OPS in 2.038042 seconds, throughput 981334.045128
+193042	[1728265658]	2000000 OPS in 2.030205 seconds, throughput 985122.192094
+193042	[1728265658]	2000000 OPS in 2.036608 seconds, throughput 982025.014141
+193042	[1728265658]	2000000 OPS in 2.014496 seconds, throughput 992804.155481
+193042	[1728265660]	2000000 OPS in 2.041587 seconds, throughput 979630.062300
+193042	[1728265660]	2000000 OPS in 2.031980 seconds, throughput 984261.656119
+193042	[1728265660]	2000000 OPS in 2.038216 seconds, throughput 981250.269844
+193042	[1728265660]	2000000 OPS in 2.022565 seconds, throughput 988843.374626
+193042	[1728265662]	2000000 OPS in 2.040226 seconds, throughput 980283.556822
+193042	[1728265662]	2000000 OPS in 2.029125 seconds, throughput 985646.522516
+193042	[1728265662]	2000000 OPS in 2.039142 seconds, throughput 980804.671769
+193042	[1728265662]	2000000 OPS in 2.014489 seconds, throughput 992807.605303
+193042	[1728265664]	2000000 OPS in 2.029754 seconds, throughput 985341.080742
+193042	[1728265664]	2000000 OPS in 2.038512 seconds, throughput 981107.788426
+193042	[1728265664]	2000000 OPS in 2.018886 seconds, throughput 990645.336091
+193042	[1728265665]	2000000 OPS in 2.330505 seconds, throughput 858183.097655
+193042	[1728265666]	2000000 OPS in 2.038697 seconds, throughput 981018.758550
+193042	[1728265666]	2000000 OPS in 2.027741 seconds, throughput 986319.258722
+193042	[1728265666]	2000000 OPS in 2.028137 seconds, throughput 986126.676847
+193042	[1728265667]	2000000 OPS in 2.034570 seconds, throughput 983008.694712
+193042	[1728265668]	2000000 OPS in 2.026539 seconds, throughput 986904.273740
+193042	[1728265668]	2000000 OPS in 2.042554 seconds, throughput 979166.279080
+193042	[1728265668]	2000000 OPS in 2.028991 seconds, throughput 985711.617252
+193042	[1728265669]	2000000 OPS in 2.037658 seconds, throughput 981518.979142
+193042	[1728265670]	2000000 OPS in 2.032246 seconds, throughput 984132.826439
+193042	[1728265670]	2000000 OPS in 2.039157 seconds, throughput 980797.456988
+193042	[1728265670]	2000000 OPS in 2.026605 seconds, throughput 986872.133445
+193042	[1728265671]	2000000 OPS in 2.036400 seconds, throughput 982125.319191
+193042	[1728265672]	2000000 OPS in 2.029630 seconds, throughput 985401.280036
+193042	[1728265672]	2000000 OPS in 2.036813 seconds, throughput 981926.175844
+193042	[1728265672]	2000000 OPS in 2.025940 seconds, throughput 987196.067011
+193042	[1728265673]	2000000 OPS in 2.034581 seconds, throughput 983003.380057
+193042	[1728265674]	2000000 OPS in 2.030252 seconds, throughput 985099.386677
+193042	[1728265674]	2000000 OPS in 2.039022 seconds, throughput 980862.393834
+193042	[1728265674]	2000000 OPS in 2.026179 seconds, throughput 987079.621297
+193042	[1728265675]	2000000 OPS in 2.040162 seconds, throughput 980314.308374
+193042	[1728265676]	2000000 OPS in 2.026002 seconds, throughput 987165.856697
+193042	[1728265676]	2000000 OPS in 2.039378 seconds, throughput 980691.171524
+193042	[1728265676]	2000000 OPS in 2.021991 seconds, throughput 989124.086111
+193042	[1728265677]	2000000 OPS in 2.039936 seconds, throughput 980422.915229
+193042	[1728265678]	2000000 OPS in 2.026685 seconds, throughput 986833.178318
+193042	[1728265678]	2000000 OPS in 2.041798 seconds, throughput 979528.827044
+193042	[1728265678]	2000000 OPS in 2.022433 seconds, throughput 988907.914378
+193042	[1728265679]	2000000 OPS in 2.041107 seconds, throughput 979860.438478
+193042	[1728265680]	2000000 OPS in 2.028545 seconds, throughput 985928.337799
+193042	[1728265680]	2000000 OPS in 2.038378 seconds, throughput 981172.285023
+193042	[1728265680]	2000000 OPS in 2.021875 seconds, throughput 989180.834621
+193042	[1728265681]	2000000 OPS in 2.040267 seconds, throughput 980263.857623
+193042	[1728265682]	2000000 OPS in 2.028869 seconds, throughput 985770.890087
+193042	[1728265682]	2000000 OPS in 2.037778 seconds, throughput 981461.179775
+193042	[1728265682]	2000000 OPS in 2.024677 seconds, throughput 987811.883081
+193042	[1728265683]	2000000 OPS in 2.038571 seconds, throughput 981079.393359
+193042	[1728265684]	2000000 OPS in 2.026997 seconds, throughput 986681.282705
+193042	[1728265684]	2000000 OPS in 2.038739 seconds, throughput 980998.548613
+193042	[1728265685]	2000000 OPS in 2.020020 seconds, throughput 990089.207038
+193042	[1728265685]	2000000 OPS in 2.038940 seconds, throughput 980901.841153
+193042	[1728265686]	2000000 OPS in 2.029063 seconds, throughput 985676.639907
+193042	[1728265686]	2000000 OPS in 2.040430 seconds, throughput 980185.549124
+193042	[1728265687]	2000000 OPS in 2.025594 seconds, throughput 987364.694011
+193042	[1728265687]	2000000 OPS in 2.040702 seconds, throughput 980054.902676
+193042	[1728265688]	2000000 OPS in 2.031054 seconds, throughput 984710.401594
+193042	[1728265689]	2000000 OPS in 2.039584 seconds, throughput 980592.120746
+193042	[1728265689]	2000000 OPS in 2.025456 seconds, throughput 987431.965938
+193042	[1728265689]	2000000 OPS in 2.040013 seconds, throughput 980385.909305
+193042	[1728265690]	2000000 OPS in 2.033101 seconds, throughput 983718.959363
+193042	[1728265691]	2000000 OPS in 2.044621 seconds, throughput 978176.395528
+193042	[1728265691]	2000000 OPS in 2.036851 seconds, throughput 981907.856785
+193042	[1728265691]	2000000 OPS in 2.040478 seconds, throughput 980162.491338
+193042	[1728265692]	2000000 OPS in 2.028883 seconds, throughput 985764.087924
+193042	[1728265693]	2000000 OPS in 2.040036 seconds, throughput 980374.856130
+193042	[1728265693]	2000000 OPS in 2.025969 seconds, throughput 987181.936150
+193042	[1728265693]	2000000 OPS in 2.040839 seconds, throughput 979989.112321
+193042	[1728265694]	2000000 OPS in 2.030397 seconds, throughput 985029.036193
+193042	[1728265695]	2000000 OPS in 2.037992 seconds, throughput 981358.121131
+193042	[1728265695]	2000000 OPS in 2.027368 seconds, throughput 986500.724092
+193042	[1728265695]	2000000 OPS in 2.044769 seconds, throughput 978105.595302
+193042	[1728265697]	2000000 OPS in 2.029319 seconds, throughput 985552.296115
+193042	[1728265697]	2000000 OPS in 2.020459 seconds, throughput 989874.083067
+193042	[1728265697]	2000000 OPS in 2.037383 seconds, throughput 981651.461704
+193042	[1728265697]	2000000 OPS in 2.035279 seconds, throughput 982666.258533
+193042	[1728265699]	2000000 OPS in 2.027134 seconds, throughput 986614.599726
+193042	[1728265699]	2000000 OPS in 2.021768 seconds, throughput 989233.186004
+193042	[1728265699]	2000000 OPS in 2.036862 seconds, throughput 981902.554027
+193042	[1728265699]	2000000 OPS in 2.035585 seconds, throughput 982518.538897
+193042	[1728265701]	2000000 OPS in 2.026797 seconds, throughput 986778.646307
+193042	[1728265701]	2000000 OPS in 2.024338 seconds, throughput 987977.304185
+193042	[1728265701]	2000000 OPS in 2.036753 seconds, throughput 981955.102067
+193042	[1728265701]	2000000 OPS in 2.040121 seconds, throughput 980334.009600
+193042	[1728265703]	2000000 OPS in 2.028387 seconds, throughput 986005.136101
+193042	[1728265703]	2000000 OPS in 2.024141 seconds, throughput 988073.459309
+193042	[1728265703]	2000000 OPS in 2.035665 seconds, throughput 982479.926707
+193042	[1728265703]	2000000 OPS in 2.041730 seconds, throughput 979561.450339
+193042	[1728265705]	2000000 OPS in 2.027973 seconds, throughput 986206.423853
+193042	[1728265705]	2000000 OPS in 2.023950 seconds, throughput 988166.703723
+193042	[1728265705]	2000000 OPS in 2.040980 seconds, throughput 979921.410303
+193042	[1728265706]	2000000 OPS in 2.036996 seconds, throughput 981837.961390
+193042	[1728265707]	2000000 OPS in 2.029379 seconds, throughput 985523.157577
+193042	[1728265707]	2000000 OPS in 2.031003 seconds, throughput 984735.128407
+193042	[1728265707]	2000000 OPS in 2.042254 seconds, throughput 979310.115196
+193042	[1728265708]	2000000 OPS in 2.041353 seconds, throughput 979742.357152
+193042	[1728265709]	2000000 OPS in 2.032791 seconds, throughput 983868.976201
+193042	[1728265709]	2000000 OPS in 2.024495 seconds, throughput 987900.686344
+193042	[1728265709]	2000000 OPS in 2.041188 seconds, throughput 979821.554898
+193042	[1728265710]	2000000 OPS in 2.041877 seconds, throughput 979490.929179
+193042	[1728265711]	2000000 OPS in 2.028170 seconds, throughput 986110.631752
+193042	[1728265711]	2000000 OPS in 2.030546 seconds, throughput 984956.755474
+193042	[1728265711]	2000000 OPS in 2.037387 seconds, throughput 981649.534428
+193042	[1728265712]	2000000 OPS in 2.039596 seconds, throughput 980586.351415
+193042	[1728265713]	2000000 OPS in 2.032059 seconds, throughput 984223.391152
+193042	[1728265713]	2000000 OPS in 2.031205 seconds, throughput 984637.198116
+193042	[1728265713]	2000000 OPS in 2.037541 seconds, throughput 981575.340079
+193042	[1728265714]	2000000 OPS in 2.039555 seconds, throughput 980606.063578
+193042	[1728265715]	2000000 OPS in 2.032088 seconds, throughput 984209.345265
+193042	[1728265715]	2000000 OPS in 2.030554 seconds, throughput 984952.874930
+193042	[1728265715]	2000000 OPS in 2.037931 seconds, throughput 981387.495455
+193042	[1728265716]	2000000 OPS in 2.043314 seconds, throughput 978802.083282
+193042	[1728265717]	2000000 OPS in 2.025236 seconds, throughput 987539.229996
+193042	[1728265717]	2000000 OPS in 2.025952 seconds, throughput 987190.219709
+193042	[1728265717]	2000000 OPS in 2.037313 seconds, throughput 981685.190248
+193042	[1728265718]	2000000 OPS in 2.039134 seconds, throughput 980808.519695
+193042	[1728265719]	2000000 OPS in 2.029373 seconds, throughput 985526.071353
+193042	[1728265719]	2000000 OPS in 2.026194 seconds, throughput 987072.313905
+193042	[1728265719]	2000000 OPS in 2.037296 seconds, throughput 981693.381816
+193042	[1728265720]	2000000 OPS in 2.044585 seconds, throughput 978193.618754
+193042	[1728265721]	2000000 OPS in 2.031058 seconds, throughput 984708.462289
+193042	[1728265721]	2000000 OPS in 2.032871 seconds, throughput 983830.257798
+193042	[1728265721]	2000000 OPS in 2.039903 seconds, throughput 980438.775765
+193042	[1728265722]	2000000 OPS in 2.040626 seconds, throughput 980091.403324
+193042	[1728265723]	2000000 OPS in 2.030868 seconds, throughput 984800.587729
+193042	[1728265723]	2000000 OPS in 2.023721 seconds, throughput 988278.522583
+193042	[1728265723]	2000000 OPS in 2.039796 seconds, throughput 980490.205883
+193042	[1728265724]	2000000 OPS in 2.039911 seconds, throughput 980434.930740
+193042	[1728265725]	2000000 OPS in 2.029004 seconds, throughput 985705.301715
+193042	[1728265725]	2000000 OPS in 2.023597 seconds, throughput 988339.081349
+193042	[1728265725]	2000000 OPS in 2.038259 seconds, throughput 981229.568961
+193042	[1728265726]	2000000 OPS in 2.039966 seconds, throughput 980408.497004
+193042	[1728265727]	2000000 OPS in 2.029537 seconds, throughput 985446.434335
+193042	[1728265727]	2000000 OPS in 2.026462 seconds, throughput 986941.773396
+193042	[1728265727]	2000000 OPS in 2.035913 seconds, throughput 982360.248203
+193042	[1728265728]	2000000 OPS in 2.044992 seconds, throughput 977998.935937
+193042	[1728265729]	2000000 OPS in 2.032715 seconds, throughput 983905.761506
+193042	[1728265729]	2000000 OPS in 2.027377 seconds, throughput 986496.344784
+193042	[1728265729]	2000000 OPS in 2.037196 seconds, throughput 981741.570276
+193042	[1728265730]	2000000 OPS in 2.044346 seconds, throughput 978307.977221
+193042	[1728265731]	2000000 OPS in 2.016828 seconds, throughput 991656.204694
+193042	[1728265731]	2000000 OPS in 2.029259 seconds, throughput 985581.436377
+193042	[1728265731]	2000000 OPS in 2.430571 seconds, throughput 822851.914221
+193042	[1728265732]	2000000 OPS in 2.048950 seconds, throughput 976109.714732
+193042	[1728265733]	2000000 OPS in 2.022987 seconds, throughput 988637.099497
+193042	[1728265733]	2000000 OPS in 2.033953 seconds, throughput 983306.890572
+193042	[1728265734]	2000000 OPS in 2.132648 seconds, throughput 937801.268658
+193042	[1728265734]	2000000 OPS in 2.039466 seconds, throughput 980648.856122
+193042	[1728265735]	2000000 OPS in 2.027868 seconds, throughput 986257.488160
+193042	[1728265735]	2000000 OPS in 2.038243 seconds, throughput 981237.271513
+193042	[1728265736]	2000000 OPS in 2.028633 seconds, throughput 985885.569248
+193042	[1728265736]	2000000 OPS in 2.040640 seconds, throughput 980084.679316
+193042	[1728265737]	2000000 OPS in 2.024537 seconds, throughput 987880.191866
+193042	[1728265737]	2000000 OPS in 2.034958 seconds, throughput 982821.267073
+193042	[1728265738]	2000000 OPS in 2.025820 seconds, throughput 987254.543839
+193042	[1728265738]	2000000 OPS in 2.039472 seconds, throughput 980645.971114
+193042	[1728265739]	2000000 OPS in 2.024424 seconds, throughput 987935.333705
+193042	[1728265739]	2000000 OPS in 2.034918 seconds, throughput 982840.586205
+193042	[1728265740]	2000000 OPS in 2.029971 seconds, throughput 985235.749673
+193042	[1728265740]	2000000 OPS in 2.035238 seconds, throughput 982686.054407
+193042	[1728265741]	2000000 OPS in 2.023060 seconds, throughput 988601.425563
+193042	[1728265741]	2000000 OPS in 2.033715 seconds, throughput 983421.964238
+193042	[1728265742]	2000000 OPS in 2.097976 seconds, throughput 953299.751761
+193042	[1728265742]	2000000 OPS in 2.040423 seconds, throughput 980188.911809
+193042	[1728265743]	2000000 OPS in 2.018384 seconds, throughput 990891.723280
+193042	[1728265744]	2000000 OPS in 2.027875 seconds, throughput 986254.083708
+193042	[1728265744]	2000000 OPS in 2.397503 seconds, throughput 834201.250217
+193042	[1728265744]	2000000 OPS in 2.041605 seconds, throughput 979621.425300
+193042	[1728265745]	2000000 OPS in 2.022971 seconds, throughput 988644.918785
+193042	[1728265746]	2000000 OPS in 2.036123 seconds, throughput 982258.930330
+193042	[1728265746]	2000000 OPS in 2.026242 seconds, throughput 987048.930977
+193042	[1728265746]	2000000 OPS in 2.035327 seconds, throughput 982643.083888
+193042	[1728265747]	2000000 OPS in 2.023015 seconds, throughput 988623.416040
+193042	[1728265748]	2000000 OPS in 2.038455 seconds, throughput 981135.222509
+193042	[1728265748]	2000000 OPS in 2.027162 seconds, throughput 986600.972197
+193042	[1728265748]	2000000 OPS in 2.037000 seconds, throughput 981836.033382
+193042	[1728265749]	2000000 OPS in 2.030109 seconds, throughput 985168.776652
+193042	[1728265750]	2000000 OPS in 2.044083 seconds, throughput 978433.850289
+193042	[1728265750]	2000000 OPS in 2.032464 seconds, throughput 984027.269364
+193042	[1728265750]	2000000 OPS in 2.049760 seconds, throughput 975723.987199
+193042	[1728265751]	2000000 OPS in 2.036636 seconds, throughput 982011.513103
+193042	[1728265752]	2000000 OPS in 2.038597 seconds, throughput 981066.880801
+193042	[1728265752]	2000000 OPS in 2.027612 seconds, throughput 986382.009970
+193042	[1728265752]	2000000 OPS in 2.039605 seconds, throughput 980582.024461
+193042	[1728265753]	2000000 OPS in 2.031559 seconds, throughput 984465.624675
+193042	[1728265754]	2000000 OPS in 2.038831 seconds, throughput 980954.282135
+193042	[1728265754]	2000000 OPS in 2.033493 seconds, throughput 983529.326140
+193042	[1728265755]	2000000 OPS in 2.042231 seconds, throughput 979321.144376
+193042	[1728265755]	2000000 OPS in 2.028958 seconds, throughput 985727.649365
+193042	[1728265756]	2000000 OPS in 2.036942 seconds, throughput 981863.990236
+193042	[1728265756]	2000000 OPS in 2.030333 seconds, throughput 985060.086203
+193042	[1728265757]	2000000 OPS in 2.040394 seconds, throughput 980202.843176
+193042	[1728265757]	2000000 OPS in 2.028074 seconds, throughput 986157.309842
+193042	[1728265758]	2000000 OPS in 2.035028 seconds, throughput 982787.460418
+193042	[1728265758]	2000000 OPS in 2.028905 seconds, throughput 985753.399001
+193042	[1728265759]	2000000 OPS in 2.039505 seconds, throughput 980630.103873
+193042	[1728265759]	2000000 OPS in 2.022071 seconds, throughput 989084.953001
+193042	[1728265760]	2000000 OPS in 2.037106 seconds, throughput 981784.943935
+193042	[1728265760]	2000000 OPS in 2.030213 seconds, throughput 985118.310246
+193042	[1728265761]	2000000 OPS in 2.041030 seconds, throughput 979897.404742
+193042	[1728265761]	2000000 OPS in 2.024259 seconds, throughput 988015.861607
+193042	[1728265762]	2000000 OPS in 2.036762 seconds, throughput 981950.763025
+193042	[1728265762]	2000000 OPS in 2.031539 seconds, throughput 984475.316497
+193042	[1728265763]	2000000 OPS in 2.040714 seconds, throughput 980049.139664
+193042	[1728265764]	2000000 OPS in 2.025661 seconds, throughput 987332.036308
+193042	[1728265764]	2000000 OPS in 2.036029 seconds, throughput 982304.279556
+193042	[1728265764]	2000000 OPS in 2.028804 seconds, throughput 985802.472787
+193042	[1728265765]	2000000 OPS in 2.038122 seconds, throughput 981295.525979
+193042	[1728265766]	2000000 OPS in 2.025655 seconds, throughput 987334.960790
+193042	[1728265766]	2000000 OPS in 2.039241 seconds, throughput 980757.056179
+193042	[1728265766]	2000000 OPS in 2.032868 seconds, throughput 983831.709683
+193042	[1728265767]	2000000 OPS in 2.038957 seconds, throughput 980893.662789
+193042	[1728265768]	2000000 OPS in 2.026507 seconds, throughput 986919.857666
+193042	[1728265768]	2000000 OPS in 2.040648 seconds, throughput 980080.837067
+193042	[1728265768]	2000000 OPS in 2.030973 seconds, throughput 984749.674171
+193042	[1728265769]	2000000 OPS in 2.042014 seconds, throughput 979425.214519
+193042	[1728265770]	2000000 OPS in 2.026933 seconds, throughput 986712.436968
+193042	[1728265770]	2000000 OPS in 2.037990 seconds, throughput 981359.084196
+193042	[1728265771]	2000000 OPS in 2.319807 seconds, throughput 862140.686704
+193042	[1728265771]	2000000 OPS in 2.045536 seconds, throughput 977738.842044
+193042	[1728265772]	2000000 OPS in 2.023409 seconds, throughput 988430.910409
+193042	[1728265772]	2000000 OPS in 2.035647 seconds, throughput 982488.614185
+193042	[1728265773]	2000000 OPS in 2.062362 seconds, throughput 969761.855581
+193042	[1728265773]	2000000 OPS in 2.043501 seconds, throughput 978712.513476
+193042	[1728265774]	2000000 OPS in 2.025750 seconds, throughput 987288.658522
+193042	[1728265774]	2000000 OPS in 2.037501 seconds, throughput 981594.610260
+193042	[1728265775]	2000000 OPS in 2.025716 seconds, throughput 987305.229361
+193042	[1728265775]	2000000 OPS in 2.035467 seconds, throughput 982575.497417
+193042	[1728265776]	2000000 OPS in 2.025929 seconds, throughput 987201.427098
+193042	[1728265776]	2000000 OPS in 2.040797 seconds, throughput 980009.280688
+193042	[1728265777]	2000000 OPS in 2.026751 seconds, throughput 986801.042654
+193042	[1728265777]	2000000 OPS in 2.042726 seconds, throughput 979083.832095
+193042	[1728265778]	2000000 OPS in 2.026180 seconds, throughput 987079.134134
+193042	[1728265778]	2000000 OPS in 2.040653 seconds, throughput 980078.435677
+193042	[1728265779]	2000000 OPS in 2.028463 seconds, throughput 985968.193652
+193042	[1728265779]	2000000 OPS in 2.037654 seconds, throughput 981520.905905
+193042	[1728265780]	2000000 OPS in 2.027679 seconds, throughput 986349.417240
+193042	[1728265780]	2000000 OPS in 2.041428 seconds, throughput 979706.362409
+193042	[1728265781]	2000000 OPS in 2.030643 seconds, throughput 984909.705940
+193042	[1728265781]	2000000 OPS in 2.041862 seconds, throughput 979498.124751
+193042	[1728265782]	2000000 OPS in 2.022537 seconds, throughput 988857.064172
+193042	[1728265782]	2000000 OPS in 2.031930 seconds, throughput 984285.875990
+193042	[1728265783]	2000000 OPS in 2.043189 seconds, throughput 978861.965291
+193042	[1728265783]	2000000 OPS in 2.429752 seconds, throughput 823129.274099
+193042	[1728265784]	2000000 OPS in 2.017690 seconds, throughput 991232.548112
+193042	[1728265784]	2000000 OPS in 2.025432 seconds, throughput 987443.666339
+193042	[1728265785]	2000000 OPS in 2.039722 seconds, throughput 980525.777532
+193042	[1728265786]	2000000 OPS in 2.324281 seconds, throughput 860481.155248
+193042	[1728265786]	2000000 OPS in 2.016140 seconds, throughput 991994.603549
+193042	[1728265786]	2000000 OPS in 2.028399 seconds, throughput 985999.302898
+193042	[1728265788]	2000000 OPS in 2.462141 seconds, throughput 812301.163906
+193042	[1728265788]	2000000 OPS in 2.011925 seconds, throughput 994072.840687
+193042	[1728265788]	2000000 OPS in 2.423240 seconds, throughput 825341.278619
+193042	[1728265788]	2000000 OPS in 2.026395 seconds, throughput 986974.405286
+193042	[1728265790]	2000000 OPS in 2.019049 seconds, throughput 990565.360227
+193042	[1728265790]	2000000 OPS in 2.423367 seconds, throughput 825298.025433
+193042	[1728265790]	2000000 OPS in 2.035165 seconds, throughput 982721.302695
+193042	[1728265790]	2000000 OPS in 2.033170 seconds, throughput 983685.574743
+193042	[1728265792]	2000000 OPS in 2.027260 seconds, throughput 986553.278810
+193042	[1728265792]	2000000 OPS in 2.043473 seconds, throughput 978725.923954
+193042	[1728265792]	2000000 OPS in 2.027585 seconds, throughput 986395.144963
+193042	[1728265792]	2000000 OPS in 2.038576 seconds, throughput 981076.987073
+193042	[1728265794]	2000000 OPS in 2.025705 seconds, throughput 987310.590634
+193042	[1728265794]	2000000 OPS in 2.038424 seconds, throughput 981150.143444
+193042	[1728265794]	2000000 OPS in 2.027152 seconds, throughput 986605.839128
+193042	[1728265794]	2000000 OPS in 2.037504 seconds, throughput 981593.164970
+193042	[1728265796]	2000000 OPS in 2.026278 seconds, throughput 987031.394508
+193042	[1728265796]	2000000 OPS in 2.041280 seconds, throughput 979777.394576
+193042	[1728265796]	2000000 OPS in 2.028411 seconds, throughput 985993.469765
+193042	[1728265796]	2000000 OPS in 2.037506 seconds, throughput 981592.201446
+193042	[1728265798]	2000000 OPS in 2.025992 seconds, throughput 987170.729203
+193042	[1728265798]	2000000 OPS in 2.037071 seconds, throughput 981801.812504
+193042	[1728265798]	2000000 OPS in 2.028404 seconds, throughput 985996.872418
+193042	[1728265799]	2000000 OPS in 2.042314 seconds, throughput 979281.344592
+193042	[1728265800]	2000000 OPS in 2.025872 seconds, throughput 987229.203030
+193042	[1728265800]	2000000 OPS in 2.040645 seconds, throughput 980082.277907
+193042	[1728265800]	2000000 OPS in 2.027447 seconds, throughput 986462.284834
+193042	[1728265801]	2000000 OPS in 2.036545 seconds, throughput 982055.392834
+193042	[1728265802]	2000000 OPS in 2.025937 seconds, throughput 987197.528847
+193042	[1728265802]	2000000 OPS in 2.029238 seconds, throughput 985591.635875
+193042	[1728265802]	2000000 OPS in 2.232639 seconds, throughput 895800.888545
+193042	[1728265803]	2000000 OPS in 2.033902 seconds, throughput 983331.546948
+193042	[1728265804]	2000000 OPS in 2.013027 seconds, throughput 993528.651131
+193042	[1728265804]	2000000 OPS in 2.034426 seconds, throughput 983078.273675
+193042	[1728265805]	2000000 OPS in 2.025761 seconds, throughput 987283.297487
+193042	[1728265805]	2000000 OPS in 2.543965 seconds, throughput 786174.338090
+193042	[1728265806]	2000000 OPS in 2.020251 seconds, throughput 989975.998032
+193042	[1728265806]	2000000 OPS in 2.030257 seconds, throughput 985096.960631
+193042	[1728265807]	2000000 OPS in 2.037838 seconds, throughput 981432.282645
+193042	[1728265807]	2000000 OPS in 2.039671 seconds, throughput 980550.294631
+193042	[1728265808]	2000000 OPS in 2.031661 seconds, throughput 984416.199356
+193042	[1728265808]	2000000 OPS in 2.026669 seconds, throughput 986840.969098
+193042	[1728265809]	2000000 OPS in 2.038902 seconds, throughput 980920.122693
+193042	[1728265809]	2000000 OPS in 2.038935 seconds, throughput 980904.246580
+193042	[1728265810]	2000000 OPS in 2.032311 seconds, throughput 984101.350630
+193042	[1728265810]	2000000 OPS in 2.034431 seconds, throughput 983075.857574
+193042	[1728265811]	2000000 OPS in 2.043886 seconds, throughput 978528.156658
+193042	[1728265811]	2000000 OPS in 2.042496 seconds, throughput 979194.084101
+193042	[1728265812]	2000000 OPS in 2.026326 seconds, throughput 987008.013518
+193042	[1728265813]	2000000 OPS in 2.029118 seconds, throughput 985649.922774
+193042	[1728265813]	2000000 OPS in 2.034698 seconds, throughput 982946.855012
+193042	[1728265813]	2000000 OPS in 2.043086 seconds, throughput 978911.313572
+193042	[1728265814]	2000000 OPS in 2.023663 seconds, throughput 988306.847533
+193042	[1728265815]	2000000 OPS in 2.027844 seconds, throughput 986269.160744
+193042	[1728265815]	2000000 OPS in 2.040526 seconds, throughput 980139.434636
+193042	[1728265815]	2000000 OPS in 2.038028 seconds, throughput 981340.786289
+193042	[1728265816]	2000000 OPS in 2.027423 seconds, throughput 986473.962266
+193042	[1728265817]	2000000 OPS in 2.031609 seconds, throughput 984441.395958
+193042	[1728265817]	2000000 OPS in 2.041284 seconds, throughput 979775.474652
+193042	[1728265817]	2000000 OPS in 2.042604 seconds, throughput 979142.310502
+193042	[1728265818]	2000000 OPS in 2.023388 seconds, throughput 988441.168970
+193042	[1728265819]	2000000 OPS in 2.027276 seconds, throughput 986545.492572
+193042	[1728265819]	2000000 OPS in 2.036498 seconds, throughput 982078.057528
+193042	[1728265819]	2000000 OPS in 2.038112 seconds, throughput 981300.340707
+193042	[1728265820]	2000000 OPS in 2.025894 seconds, throughput 987218.482310
+193042	[1728265821]	2000000 OPS in 2.027703 seconds, throughput 986337.742756
+193042	[1728265821]	2000000 OPS in 2.036919 seconds, throughput 981875.077016
+193042	[1728265821]	2000000 OPS in 2.036086 seconds, throughput 982276.780057
+193042	[1728265822]	2000000 OPS in 2.024557 seconds, throughput 987870.432890
+193042	[1728265823]	2000000 OPS in 2.024891 seconds, throughput 987707.486477
+193042	[1728265823]	2000000 OPS in 2.036893 seconds, throughput 981887.610198
+193042	[1728265823]	2000000 OPS in 2.039747 seconds, throughput 980513.759795
+193042	[1728265824]	2000000 OPS in 2.023655 seconds, throughput 988310.754551
+193042	[1728265825]	2000000 OPS in 2.029105 seconds, throughput 985656.237602
+193042	[1728265825]	2000000 OPS in 2.038729 seconds, throughput 981003.360427
+193042	[1728265825]	2000000 OPS in 2.038877 seconds, throughput 980932.150395
+193042	[1728265826]	2000000 OPS in 2.024096 seconds, throughput 988095.426304
+193042	[1728265827]	2000000 OPS in 2.031005 seconds, throughput 984734.158705
+193042	[1728265827]	2000000 OPS in 2.036963 seconds, throughput 981853.867743
+193042	[1728265827]	2000000 OPS in 2.041874 seconds, throughput 979492.368285
+193042	[1728265828]	2000000 OPS in 2.025867 seconds, throughput 987231.639589
+193042	[1728265829]	2000000 OPS in 2.028100 seconds, throughput 986144.667423
+193042	[1728265829]	2000000 OPS in 2.038484 seconds, throughput 981121.264626
+193042	[1728265829]	2000000 OPS in 2.038595 seconds, throughput 981067.843294
+193042	[1728265830]	2000000 OPS in 2.026859 seconds, throughput 986748.461536
+193042	[1728265831]	2000000 OPS in 2.028427 seconds, throughput 985985.692362
+193042	[1728265831]	2000000 OPS in 2.038721 seconds, throughput 981007.209912
+193042	[1728265832]	2000000 OPS in 2.041028 seconds, throughput 979898.364942
+193042	[1728265832]	2000000 OPS in 2.026020 seconds, throughput 987157.086307
+193042	[1728265833]	2000000 OPS in 2.027061 seconds, throughput 986650.130410
+193042	[1728265833]	2000000 OPS in 2.034088 seconds, throughput 983241.629664
+193042	[1728265834]	2000000 OPS in 2.035295 seconds, throughput 982658.533530
+193042	[1728265834]	2000000 OPS in 2.025721 seconds, throughput 987302.792438
+193042	[1728265835]	2000000 OPS in 2.031648 seconds, throughput 984422.498386
+193042	[1728265835]	2000000 OPS in 2.037886 seconds, throughput 981409.166165
+193042	[1728265836]	2000000 OPS in 2.040574 seconds, throughput 980116.379019
+193042	[1728265836]	2000000 OPS in 2.024376 seconds, throughput 987958.758650
+193042	[1728265837]	2000000 OPS in 2.031128 seconds, throughput 984674.525682
+193042	[1728265837]	2000000 OPS in 2.038381 seconds, throughput 981170.840976
+193042	[1728265838]	2000000 OPS in 2.039249 seconds, throughput 980753.208657
+193042	[1728265838]	2000000 OPS in 2.026043 seconds, throughput 987145.879925
+193042	[1728265839]	2000000 OPS in 2.035785 seconds, throughput 982422.014112
+193042	[1728265839]	2000000 OPS in 2.040920 seconds, throughput 979950.218529
+193042	[1728265840]	2000000 OPS in 2.048640 seconds, throughput 976257.419556
+193042	[1728265840]	2000000 OPS in 2.031366 seconds, throughput 984559.158714
+193042	[1728265841]	2000000 OPS in 2.035792 seconds, throughput 982418.636089
+193042	[1728265841]	2000000 OPS in 2.043305 seconds, throughput 978806.394542
+193042	[1728265842]	2000000 OPS in 2.042825 seconds, throughput 979036.383440
+193042	[1728265842]	2000000 OPS in 2.022381 seconds, throughput 988933.341443
+193042	[1728265843]	2000000 OPS in 2.026609 seconds, throughput 986870.185615
+193042	[1728265843]	2000000 OPS in 2.034851 seconds, throughput 982872.947454
+193042	[1728265844]	2000000 OPS in 2.039021 seconds, throughput 980862.874880
+193042	[1728265845]	2000000 OPS in 2.023961 seconds, throughput 988161.333148
+193042	[1728265845]	2000000 OPS in 2.027668 seconds, throughput 986354.768138
+193042	[1728265845]	2000000 OPS in 2.045217 seconds, throughput 977891.343559
+193042	[1728265846]	2000000 OPS in 2.044029 seconds, throughput 978459.698957
+193042	[1728265847]	2000000 OPS in 2.026606 seconds, throughput 986871.646487
+193042	[1728265847]	2000000 OPS in 2.031777 seconds, throughput 984359.996200
+193042	[1728265847]	2000000 OPS in 2.038917 seconds, throughput 980912.906214
+193042	[1728265848]	2000000 OPS in 2.044634 seconds, throughput 978170.176178
+193042	[1728265849]	2000000 OPS in 2.025036 seconds, throughput 987636.763001
+193042	[1728265849]	2000000 OPS in 2.027045 seconds, throughput 986657.918300
+193042	[1728265849]	2000000 OPS in 2.039758 seconds, throughput 980508.472083
+193042	[1728265850]	2000000 OPS in 2.040268 seconds, throughput 980263.377164
+193042	[1728265851]	2000000 OPS in 2.024294 seconds, throughput 987998.778834
+193042	[1728265851]	2000000 OPS in 2.027718 seconds, throughput 986330.446344
+193042	[1728265851]	2000000 OPS in 2.036610 seconds, throughput 982024.049769
+193042	[1728265852]	2000000 OPS in 2.039579 seconds, throughput 980594.524654
+193042	[1728265853]	2000000 OPS in 2.025071 seconds, throughput 987619.693334
+193042	[1728265853]	2000000 OPS in 2.028090 seconds, throughput 986149.529853
+193042	[1728265854]	2000000 OPS in 2.040400 seconds, throughput 980199.960792
+193042	[1728265854]	2000000 OPS in 2.039548 seconds, throughput 980609.429148
+193042	[1728265855]	2000000 OPS in 2.025043 seconds, throughput 987633.349020
+193042	[1728265855]	2000000 OPS in 2.037098 seconds, throughput 981788.799557
+193042	[1728265856]	2000000 OPS in 2.034344 seconds, throughput 983117.899431
+193042	[1728265856]	2000000 OPS in 2.045818 seconds, throughput 977604.068397
+193042	[1728265857]	2000000 OPS in 2.024157 seconds, throughput 988065.649058
+193042	[1728265857]	2000000 OPS in 2.030375 seconds, throughput 985039.709413
+193042	[1728265858]	2000000 OPS in 2.042439 seconds, throughput 979221.411264
+193042	[1728265858]	2000000 OPS in 2.036258 seconds, throughput 982193.808447
+193042	[1728265859]	2000000 OPS in 2.026162 seconds, throughput 987087.903139
+193042	[1728265859]	2000000 OPS in 2.029261 seconds, throughput 985580.465007
+193042	[1728265860]	2000000 OPS in 2.040591 seconds, throughput 980108.213748
+193042	[1728265860]	2000000 OPS in 2.041996 seconds, throughput 979433.848058
+193042	[1728265861]	2000000 OPS in 2.023843 seconds, throughput 988218.947814
+193042	[1728265861]	2000000 OPS in 2.031357 seconds, throughput 984563.520839
+193042	[1728265862]	2000000 OPS in 2.040275 seconds, throughput 980260.013969
+193042	[1728265862]	2000000 OPS in 2.034801 seconds, throughput 982897.099028
+193042	[1728265863]	2000000 OPS in 2.028053 seconds, throughput 986167.521263
+193042	[1728265863]	2000000 OPS in 2.026878 seconds, throughput 986739.211734
+193042	[1728265864]	2000000 OPS in 2.039723 seconds, throughput 980525.296817
+193042	[1728265864]	2000000 OPS in 2.043047 seconds, throughput 978930.000142
+193042	[1728265865]	2000000 OPS in 2.026732 seconds, throughput 986810.293616
+193042	[1728265865]	2000000 OPS in 2.028324 seconds, throughput 986035.761545
+193042	[1728265866]	2000000 OPS in 2.036965 seconds, throughput 981852.903707
+193042	[1728265866]	2000000 OPS in 2.036114 seconds, throughput 982263.272096
+193042	[1728265867]	2000000 OPS in 2.024892 seconds, throughput 987706.998694
+193042	[1728265867]	2000000 OPS in 2.024694 seconds, throughput 987803.589086
+193042	[1728265868]	2000000 OPS in 2.038804 seconds, throughput 980967.272970
+193042	[1728265868]	2000000 OPS in 2.039661 seconds, throughput 980555.102049
+193042	[1728265869]	2000000 OPS in 2.025391 seconds, throughput 987463.655166
+193042	[1728265869]	2000000 OPS in 2.027650 seconds, throughput 986363.524277
+193042	[1728265870]	2000000 OPS in 2.048476 seconds, throughput 976335.578254
+193042	[1728265870]	2000000 OPS in 2.042019 seconds, throughput 979422.816340
+193042	[1728265871]	2000000 OPS in 2.033098 seconds, throughput 983720.410920
+193042	[1728265871]	2000000 OPS in 2.036687 seconds, throughput 981986.922880
+193042	[1728265872]	2000000 OPS in 2.041369 seconds, throughput 979734.678052
+193042	[1728265872]	2000000 OPS in 2.039045 seconds, throughput 980851.329912
+193042	[1728265873]	2000000 OPS in 2.023578 seconds, throughput 988348.361170
+193042	[1728265873]	2000000 OPS in 2.031571 seconds, throughput 984459.809674
+193042	[1728265874]	2000000 OPS in 2.039340 seconds, throughput 980709.445213
+193042	[1728265874]	2000000 OPS in 2.037619 seconds, throughput 981537.765402
+193042	[1728265875]	2000000 OPS in 2.024509 seconds, throughput 987893.854757
+193042	[1728265875]	2000000 OPS in 2.029312 seconds, throughput 985555.695723
+193042	[1728265876]	2000000 OPS in 2.039324 seconds, throughput 980717.139601
+193042	[1728265876]	2000000 OPS in 2.040128 seconds, throughput 980330.645920
+193042	[1728265877]	2000000 OPS in 2.025733 seconds, throughput 987296.943872
+193042	[1728265877]	2000000 OPS in 2.030641 seconds, throughput 984910.675989
+193042	[1728265878]	2000000 OPS in 2.041518 seconds, throughput 979663.172208
+193042	[1728265878]	2000000 OPS in 2.039888 seconds, throughput 980445.985270
+193042	[1728265879]	2000000 OPS in 2.026725 seconds, throughput 986813.701908
+193042	[1728265880]	2000000 OPS in 2.031320 seconds, throughput 984581.454424
+193042	[1728265880]	2000000 OPS in 2.039663 seconds, throughput 980554.140561
+193042	[1728265880]	2000000 OPS in 2.040756 seconds, throughput 980028.969656
+193042	[1728265881]	2000000 OPS in 2.022755 seconds, throughput 988750.491285
+193042	[1728265882]	2000000 OPS in 2.032897 seconds, throughput 983817.674973
+193042	[1728265882]	2000000 OPS in 2.036079 seconds, throughput 982280.157106
+193042	[1728265883]	2000000 OPS in 2.041872 seconds, throughput 979493.327691
+193042	[1728265883]	2000000 OPS in 2.026753 seconds, throughput 986800.068879
+193042	[1728265884]	2000000 OPS in 2.025151 seconds, throughput 987580.679169
+193042	[1728265884]	2000000 OPS in 2.041494 seconds, throughput 979674.689223
+193042	[1728265885]	2000000 OPS in 2.042303 seconds, throughput 979286.619077
+193042	[1728265885]	2000000 OPS in 2.025154 seconds, throughput 987579.216198
+193042	[1728265886]	2000000 OPS in 2.025590 seconds, throughput 987366.643793
+193042	[1728265886]	2000000 OPS in 2.039837 seconds, throughput 980470.498378
+193042	[1728265887]	2000000 OPS in 2.042154 seconds, throughput 979358.069959
+193042	[1728265887]	2000000 OPS in 2.025771 seconds, throughput 987278.423869
+193042	[1728265888]	2000000 OPS in 2.027688 seconds, throughput 986345.039276
+193042	[1728265888]	2000000 OPS in 2.039067 seconds, throughput 980840.747263
+193042	[1728265889]	2000000 OPS in 2.037020 seconds, throughput 981826.393457
+193042	[1728265889]	2000000 OPS in 2.026271 seconds, throughput 987034.804328
+193042	[1728265890]	2000000 OPS in 2.025676 seconds, throughput 987324.725178
+193042	[1728265890]	2000000 OPS in 2.038714 seconds, throughput 981010.578237
+193042	[1728265891]	2000000 OPS in 2.038472 seconds, throughput 981127.040254
+193042	[1728265891]	2000000 OPS in 2.023547 seconds, throughput 988363.502306
+193042	[1728265892]	2000000 OPS in 2.029035 seconds, throughput 985690.241913
+193042	[1728265892]	2000000 OPS in 2.041911 seconds, throughput 979474.619609
+193042	[1728265893]	2000000 OPS in 2.040650 seconds, throughput 980079.876510
+193042	[1728265893]	2000000 OPS in 2.023053 seconds, throughput 988604.846240
+193042	[1728265894]	2000000 OPS in 2.030722 seconds, throughput 984871.390569
+193042	[1728265894]	2000000 OPS in 2.036403 seconds, throughput 982123.872338
+193042	[1728265895]	2000000 OPS in 2.040246 seconds, throughput 980273.947357
+193042	[1728265895]	2000000 OPS in 2.026018 seconds, throughput 987158.060787
+193042	[1728265896]	2000000 OPS in 2.026800 seconds, throughput 986777.185711
+193042	[1728265896]	2000000 OPS in 2.034180 seconds, throughput 983197.160527
+193042	[1728265897]	2000000 OPS in 2.041573 seconds, throughput 979636.780071
+193042	[1728265897]	2000000 OPS in 2.024312 seconds, throughput 987989.993637
+193042	[1728265898]	2000000 OPS in 2.026991 seconds, throughput 986684.203334
+193042	[1728265898]	2000000 OPS in 2.038422 seconds, throughput 981151.106101
+193042	[1728265899]	2000000 OPS in 2.040634 seconds, throughput 980087.561023
+193042	[1728265899]	2000000 OPS in 2.025339 seconds, throughput 987489.008013
+193042	[1728265900]	2000000 OPS in 2.036360 seconds, throughput 982144.610973
+193042	[1728265900]	2000000 OPS in 2.042328 seconds, throughput 979274.631695
+193042	[1728265901]	2000000 OPS in 2.046378 seconds, throughput 977336.542907
+193042	[1728265901]	2000000 OPS in 2.034995 seconds, throughput 982803.397551
+193042	[1728265902]	2000000 OPS in 2.027567 seconds, throughput 986403.901819
+193042	[1728265902]	2000000 OPS in 2.042414 seconds, throughput 979233.397343
+193042	[1728265903]	2000000 OPS in 2.041589 seconds, throughput 979629.102625
+193042	[1728265903]	2000000 OPS in 2.023661 seconds, throughput 988307.824285
+193042	[1728265904]	2000000 OPS in 2.029606 seconds, throughput 985412.932362
+193042	[1728265905]	2000000 OPS in 2.037742 seconds, throughput 981478.518870
+193042	[1728265905]	2000000 OPS in 2.039553 seconds, throughput 980607.025167
+193042	[1728265905]	2000000 OPS in 2.025427 seconds, throughput 987446.103957
+193042	[1728265906]	2000000 OPS in 2.032847 seconds, throughput 983841.872999
+193042	[1728265907]	2000000 OPS in 2.036592 seconds, throughput 982032.729187
+193042	[1728265907]	2000000 OPS in 2.038814 seconds, throughput 980962.461509
+193042	[1728265907]	2000000 OPS in 2.025106 seconds, throughput 987602.624258
+193042	[1728265908]	2000000 OPS in 2.030120 seconds, throughput 985163.438614
+193042	[1728265909]	2000000 OPS in 2.042721 seconds, throughput 979086.228614
+193042	[1728265909]	2000000 OPS in 2.041762 seconds, throughput 979546.097929
+193042	[1728265909]	2000000 OPS in 2.029789 seconds, throughput 985324.090336
+193042	[1728265910]	2000000 OPS in 2.031739 seconds, throughput 984378.406872
+193042	[1728265911]	2000000 OPS in 2.042566 seconds, throughput 979160.526514
+193042	[1728265911]	2000000 OPS in 2.039315 seconds, throughput 980721.467748
+193042	[1728265911]	2000000 OPS in 2.026826 seconds, throughput 986764.527394
+193042	[1728265912]	2000000 OPS in 2.029243 seconds, throughput 985589.207404
+193042	[1728265913]	2000000 OPS in 2.039403 seconds, throughput 980679.149732
+193042	[1728265913]	2000000 OPS in 2.047932 seconds, throughput 976594.926003
+193042	[1728265913]	2000000 OPS in 2.025025 seconds, throughput 987642.127875
+193042	[1728265914]	2000000 OPS in 2.154156 seconds, throughput 928437.866153
+193042	[1728265915]	2000000 OPS in 2.029680 seconds, throughput 985377.005242
+193042	[1728265915]	2000000 OPS in 2.047805 seconds, throughput 976655.492100
+193042	[1728265915]	2000000 OPS in 2.015762 seconds, throughput 992180.624498
+193042	[1728265917]	2000000 OPS in 2.529166 seconds, throughput 790774.508277
+193042	[1728265917]	2000000 OPS in 2.030804 seconds, throughput 984831.623337
+193042	[1728265917]	2000000 OPS in 2.054033 seconds, throughput 973694.190892
+193042	[1728265917]	2000000 OPS in 2.016876 seconds, throughput 991632.604087
+193042	[1728265919]	2000000 OPS in 2.087169 seconds, throughput 958235.772954
+193042	[1728265919]	2000000 OPS in 2.037400 seconds, throughput 981643.270835
+193042	[1728265919]	2000000 OPS in 2.037167 seconds, throughput 981755.545814
+193042	[1728265919]	2000000 OPS in 2.024736 seconds, throughput 987783.098636
+193042	[1728265921]	2000000 OPS in 2.026194 seconds, throughput 987072.313905
+193042	[1728265921]	2000000 OPS in 2.036249 seconds, throughput 982198.149637
+193042	[1728265921]	2000000 OPS in 2.041414 seconds, throughput 979713.081227
+193042	[1728265921]	2000000 OPS in 2.020901 seconds, throughput 989657.583424
+193042	[1728265923]	2000000 OPS in 2.027253 seconds, throughput 986556.685327
+193042	[1728265923]	2000000 OPS in 2.040006 seconds, throughput 980389.273365
+193042	[1728265923]	2000000 OPS in 2.040998 seconds, throughput 979912.768165
+193042	[1728265923]	2000000 OPS in 2.023194 seconds, throughput 988535.948604
+193042	[1728265925]	2000000 OPS in 2.027466 seconds, throughput 986453.040396
+193042	[1728265925]	2000000 OPS in 2.040352 seconds, throughput 980223.020342
+193042	[1728265925]	2000000 OPS in 2.039709 seconds, throughput 980532.026872
+193042	[1728265926]	2000000 OPS in 2.025252 seconds, throughput 987531.428188
+193042	[1728265927]	2000000 OPS in 2.033325 seconds, throughput 983610.588568
+193042	[1728265927]	2000000 OPS in 2.037832 seconds, throughput 981435.172281
+193042	[1728265927]	2000000 OPS in 2.042444 seconds, throughput 979219.014083
+193042	[1728265928]	2000000 OPS in 2.027052 seconds, throughput 986654.511083
+193042	[1728265929]	2000000 OPS in 2.027450 seconds, throughput 986460.825174
+193042	[1728265929]	2000000 OPS in 2.038467 seconds, throughput 981129.446785
+193042	[1728265929]	2000000 OPS in 2.039930 seconds, throughput 980425.798924
+193042	[1728265930]	2000000 OPS in 2.024404 seconds, throughput 987945.093963
+193042	[1728265931]	2000000 OPS in 2.030001 seconds, throughput 985221.189546
+193042	[1728265931]	2000000 OPS in 2.050271 seconds, throughput 975480.802294
+193042	[1728265932]	2000000 OPS in 2.043876 seconds, throughput 978532.944269
+193042	[1728265932]	2000000 OPS in 2.031252 seconds, throughput 984614.415149
+193042	[1728265933]	2000000 OPS in 2.022236 seconds, throughput 989004.250740
+193042	[1728265933]	2000000 OPS in 2.039032 seconds, throughput 980857.583402
+193042	[1728265934]	2000000 OPS in 2.035514 seconds, throughput 982552.809757
+193042	[1728265934]	2000000 OPS in 2.024488 seconds, throughput 987904.102173
+193042	[1728265935]	2000000 OPS in 2.029073 seconds, throughput 985671.782139
+193042	[1728265935]	2000000 OPS in 2.039000 seconds, throughput 980872.976949
+193042	[1728265936]	2000000 OPS in 2.039794 seconds, throughput 980491.167245
+193042	[1728265936]	2000000 OPS in 2.025893 seconds, throughput 987218.969610
+193042	[1728265937]	2000000 OPS in 2.025746 seconds, throughput 987290.608003
+193042	[1728265937]	2000000 OPS in 2.040305 seconds, throughput 980245.600535
+193042	[1728265938]	2000000 OPS in 2.037570 seconds, throughput 981561.369671
+193042	[1728265938]	2000000 OPS in 2.025021 seconds, throughput 987644.078753
+193042	[1728265939]	2000000 OPS in 2.026696 seconds, throughput 986827.822229
+193042	[1728265939]	2000000 OPS in 2.039255 seconds, throughput 980750.323035
+193042	[1728265940]	2000000 OPS in 2.041738 seconds, throughput 979557.612191
+193042	[1728265940]	2000000 OPS in 2.023613 seconds, throughput 988331.266897
+193042	[1728265941]	2000000 OPS in 2.028783 seconds, throughput 985812.676861
+193042	[1728265941]	2000000 OPS in 2.035485 seconds, throughput 982566.808402
+193042	[1728265942]	2000000 OPS in 2.023083 seconds, throughput 988590.186364
+193042	[1728265942]	2000000 OPS in 2.038535 seconds, throughput 981096.718967
+193042	[1728265943]	2000000 OPS in 2.025513 seconds, throughput 987404.178596
+193042	[1728265943]	2000000 OPS in 2.037871 seconds, throughput 981416.389948
+193042	[1728265944]	2000000 OPS in 2.025007 seconds, throughput 987650.906886
+193042	[1728265944]	2000000 OPS in 2.038263 seconds, throughput 981227.643341
+193042	[1728265945]	2000000 OPS in 2.028070 seconds, throughput 986159.254858
+193042	[1728265945]	2000000 OPS in 2.035136 seconds, throughput 982735.306142
+193042	[1728265946]	2000000 OPS in 2.024420 seconds, throughput 987937.285741
+193042	[1728265946]	2000000 OPS in 2.045605 seconds, throughput 977705.862080
+193042	[1728265947]	2000000 OPS in 2.027963 seconds, throughput 986211.286892
+193042	[1728265947]	2000000 OPS in 2.040611 seconds, throughput 980098.607721
+193042	[1728265948]	2000000 OPS in 2.027762 seconds, throughput 986309.044158
+193042	[1728265948]	2000000 OPS in 2.047130 seconds, throughput 976977.524632
+193042	[1728265949]	2000000 OPS in 2.029288 seconds, throughput 985567.351702
+193042	[1728265949]	2000000 OPS in 2.041068 seconds, throughput 979879.161302
+193042	[1728265950]	2000000 OPS in 2.027278 seconds, throughput 986544.519301
+193042	[1728265950]	2000000 OPS in 2.041465 seconds, throughput 979688.605977
+193042	[1728265951]	2000000 OPS in 2.027473 seconds, throughput 986449.634594
+193042	[1728265951]	2000000 OPS in 2.038519 seconds, throughput 981104.419434
+193042	[1728265952]	2000000 OPS in 2.026738 seconds, throughput 986807.372241
+193042	[1728265952]	2000000 OPS in 2.042854 seconds, throughput 979022.485209
+193042	[1728265953]	2000000 OPS in 2.027223 seconds, throughput 986571.284955
+193042	[1728265953]	2000000 OPS in 2.038473 seconds, throughput 981126.558949
+193042	[1728265954]	2000000 OPS in 2.025976 seconds, throughput 987178.525313
+193042	[1728265954]	2000000 OPS in 2.041092 seconds, throughput 979867.639479
+193042	[1728265955]	2000000 OPS in 2.027571 seconds, throughput 986401.955838
+193042	[1728265955]	2000000 OPS in 2.039567 seconds, throughput 980600.294082
+193042	[1728265956]	2000000 OPS in 2.027111 seconds, throughput 986625.794049
+193042	[1728265956]	2000000 OPS in 2.041946 seconds, throughput 979457.830912
+193042	[1728265957]	2000000 OPS in 2.029172 seconds, throughput 985623.692817
+193042	[1728265958]	2000000 OPS in 2.037320 seconds, throughput 981681.817289
+193042	[1728265958]	2000000 OPS in 2.023311 seconds, throughput 988478.785515
+193042	[1728265958]	2000000 OPS in 2.042177 seconds, throughput 979347.039948
+193042	[1728265960]	2000000 OPS in 2.030019 seconds, throughput 985212.453677
+193042	[1728265960]	2000000 OPS in 2.326751 seconds, throughput 859567.697618
+193042	[1728265960]	2000000 OPS in 2.027438 seconds, throughput 986466.663839
+193042	[1728265960]	2000000 OPS in 2.043402 seconds, throughput 978759.930743
+193042	[1728265962]	2000000 OPS in 2.039693 seconds, throughput 980539.718477
+193042	[1728265962]	2000000 OPS in 2.033546 seconds, throughput 983503.692565
+193042	[1728265962]	2000000 OPS in 2.021905 seconds, throughput 989166.157658
+193042	[1728265962]	2000000 OPS in 2.038476 seconds, throughput 981125.115037
+193042	[1728265964]	2000000 OPS in 2.037268 seconds, throughput 981706.874108
+193042	[1728265964]	2000000 OPS in 2.030599 seconds, throughput 984931.047440
+193042	[1728265964]	2000000 OPS in 2.024146 seconds, throughput 988071.018593
+193042	[1728265964]	2000000 OPS in 2.041634 seconds, throughput 979607.510455
+193042	[1728265966]	2000000 OPS in 2.042551 seconds, throughput 979167.717232
+193042	[1728265966]	2000000 OPS in 2.029498 seconds, throughput 985465.371240
+193042	[1728265966]	2000000 OPS in 2.023975 seconds, throughput 988154.497956
+193042	[1728265966]	2000000 OPS in 2.038116 seconds, throughput 981298.414811
+193042	[1728265968]	2000000 OPS in 2.040009 seconds, throughput 980387.831622
+193042	[1728265968]	2000000 OPS in 2.035958 seconds, throughput 982338.535471
+193042	[1728265968]	2000000 OPS in 2.029764 seconds, throughput 985336.226280
+193042	[1728265968]	2000000 OPS in 2.041341 seconds, throughput 979748.116557
+193042	[1728265970]	2000000 OPS in 2.032968 seconds, throughput 983783.315822
+193042	[1728265970]	2000000 OPS in 2.043255 seconds, throughput 978830.346677
+193042	[1728265970]	2000000 OPS in 2.025640 seconds, throughput 987342.272072
+193042	[1728265970]	2000000 OPS in 2.039049 seconds, throughput 980849.405777
+193042	[1728265972]	2000000 OPS in 2.032608 seconds, throughput 983957.556007
+193042	[1728265972]	2000000 OPS in 2.038146 seconds, throughput 981283.970824
+193042	[1728265972]	2000000 OPS in 2.026439 seconds, throughput 986952.975145
+193042	[1728265972]	2000000 OPS in 2.040761 seconds, throughput 980026.568520
+193042	[1728265974]	2000000 OPS in 2.031810 seconds, throughput 984344.008544
+193042	[1728265974]	2000000 OPS in 2.037205 seconds, throughput 981737.233121
+193042	[1728265974]	2000000 OPS in 2.025999 seconds, throughput 987167.318444
+193042	[1728265974]	2000000 OPS in 2.041246 seconds, throughput 979793.714231
+193042	[1728265976]	2000000 OPS in 2.035134 seconds, throughput 982736.271911
+193042	[1728265976]	2000000 OPS in 2.036983 seconds, throughput 981844.227468
+193042	[1728265976]	2000000 OPS in 2.029751 seconds, throughput 985342.537090
+193042	[1728265976]	2000000 OPS in 2.040154 seconds, throughput 980318.152453
+193042	[1728265978]	2000000 OPS in 2.026608 seconds, throughput 986870.672572
+193042	[1728265978]	2000000 OPS in 2.037877 seconds, throughput 981413.500422
+193042	[1728265978]	2000000 OPS in 2.024154 seconds, throughput 988067.113471
+193042	[1728265978]	2000000 OPS in 2.036624 seconds, throughput 982017.299217
+193042	[1728265980]	2000000 OPS in 2.027203 seconds, throughput 986581.018280
+193042	[1728265980]	2000000 OPS in 2.037896 seconds, throughput 981404.350369
+193042	[1728265980]	2000000 OPS in 2.026109 seconds, throughput 987113.723891
+193042	[1728265980]	2000000 OPS in 2.033484 seconds, throughput 983533.679144
+193042	[1728265982]	2000000 OPS in 2.026597 seconds, throughput 986876.029127
+193042	[1728265982]	2000000 OPS in 2.039168 seconds, throughput 980792.166217
+193042	[1728265982]	2000000 OPS in 2.024119 seconds, throughput 988084.198607
+193042	[1728265983]	2000000 OPS in 2.035509 seconds, throughput 982555.223288
+193042	[1728265984]	2000000 OPS in 2.027556 seconds, throughput 986409.253308
+193042	[1728265984]	2000000 OPS in 2.037668 seconds, throughput 981514.162268
+193042	[1728265984]	2000000 OPS in 2.029685 seconds, throughput 985374.577829
+193042	[1728265985]	2000000 OPS in 2.040941 seconds, throughput 979940.135457
+193042	[1728265986]	2000000 OPS in 2.030510 seconds, throughput 984974.218300
+193042	[1728265986]	2000000 OPS in 2.042399 seconds, throughput 979240.589131
+193042	[1728265986]	2000000 OPS in 2.029324 seconds, throughput 985549.867838
+193042	[1728265987]	2000000 OPS in 2.036141 seconds, throughput 982250.246913
+193042	[1728265988]	2000000 OPS in 2.029372 seconds, throughput 985526.556984
+193042	[1728265988]	2000000 OPS in 2.041852 seconds, throughput 979502.921857
+193042	[1728265988]	2000000 OPS in 2.026224 seconds, throughput 987057.699445
+193042	[1728265989]	2000000 OPS in 2.039961 seconds, throughput 980410.900012
+193042	[1728265990]	2000000 OPS in 2.033169 seconds, throughput 983686.058562
+193042	[1728265990]	2000000 OPS in 2.045866 seconds, throughput 977581.131902
+193042	[1728265990]	2000000 OPS in 2.036830 seconds, throughput 981917.980391
+193042	[1728265991]	2000000 OPS in 2.044879 seconds, throughput 978052.980152
+193042	[1728265992]	2000000 OPS in 2.030675 seconds, throughput 984894.185431
+193042	[1728265992]	2000000 OPS in 2.043232 seconds, throughput 978841.365053
+193042	[1728265992]	2000000 OPS in 2.030537 seconds, throughput 984961.121122
+193042	[1728265993]	2000000 OPS in 2.041267 seconds, throughput 979783.634380
+193042	[1728265994]	2000000 OPS in 2.040021 seconds, throughput 980382.064694
+193042	[1728265994]	2000000 OPS in 2.186380 seconds, throughput 914754.068369
+193042	[1728265994]	2000000 OPS in 2.026819 seconds, throughput 986767.935371
+193042	[1728265995]	2000000 OPS in 2.042703 seconds, throughput 979094.856178
+193042	[1728265996]	2000000 OPS in 2.036045 seconds, throughput 982296.560243
+193042	[1728265996]	2000000 OPS in 2.027590 seconds, throughput 986392.712531
+193042	[1728265996]	2000000 OPS in 2.170822 seconds, throughput 921309.992252
+193042	[1728265997]	2000000 OPS in 2.040377 seconds, throughput 980211.010024
+193042	[1728265998]	2000000 OPS in 2.036875 seconds, throughput 981896.287205
+193042	[1728265998]	2000000 OPS in 2.028629 seconds, throughput 985887.513192
+193042	[1728265998]	2000000 OPS in 2.026305 seconds, throughput 987018.242565
+193042	[1728265999]	2000000 OPS in 2.036605 seconds, throughput 982026.460703
+193042	[1728266000]	2000000 OPS in 2.034168 seconds, throughput 983202.960621
+193042	[1728266000]	2000000 OPS in 2.027148 seconds, throughput 986607.785914
+193042	[1728266000]	2000000 OPS in 2.029827 seconds, throughput 985305.644274
+193042	[1728266001]	2000000 OPS in 2.036623 seconds, throughput 982017.781396
+193042	[1728266002]	2000000 OPS in 2.036062 seconds, throughput 982288.358606
+193042	[1728266003]	2000000 OPS in 2.024487 seconds, throughput 987904.590150
+193042	[1728266003]	2000000 OPS in 2.031594 seconds, throughput 984448.664448
+193042	[1728266003]	2000000 OPS in 2.038722 seconds, throughput 981006.728725
+193042	[1728266004]	2000000 OPS in 2.035810 seconds, throughput 982409.949848
+193042	[1728266005]	2000000 OPS in 2.025168 seconds, throughput 987572.389056
+193042	[1728266005]	2000000 OPS in 2.021139 seconds, throughput 989541.045915
+193042	[1728266005]	2000000 OPS in 2.029752 seconds, throughput 985342.051640
+193042	[1728266006]	2000000 OPS in 2.035228 seconds, throughput 982690.882791
+193042	[1728266007]	2000000 OPS in 2.024592 seconds, throughput 987853.355145
+193042	[1728266007]	2000000 OPS in 2.025168 seconds, throughput 987572.389056
+193042	[1728266007]	2000000 OPS in 2.036682 seconds, throughput 981989.333632
+193042	[1728266008]	2000000 OPS in 2.039440 seconds, throughput 980661.358020
+193042	[1728266009]	2000000 OPS in 2.029336 seconds, throughput 985544.040021
+193042	[1728266009]	2000000 OPS in 2.029711 seconds, throughput 985361.955471
+193042	[1728266009]	2000000 OPS in 2.037208 seconds, throughput 981735.787411
+193042	[1728266011]	2000000 OPS in 2.037995 seconds, throughput 981356.676537
+193042	[1728266011]	2000000 OPS in 2.026093 seconds, throughput 987121.519101
+193042	[1728266011]	2000000 OPS in 2.028482 seconds, throughput 985958.958472
+193042	[1728266011]	2000000 OPS in 2.042293 seconds, throughput 979291.414111
+193042	[1728266013]	2000000 OPS in 2.037482 seconds, throughput 981603.763861
+193042	[1728266013]	2000000 OPS in 2.030577 seconds, throughput 984941.718536
+193042	[1728266013]	2000000 OPS in 2.033066 seconds, throughput 983735.894457
+193042	[1728266013]	2000000 OPS in 2.041590 seconds, throughput 979628.622789
+193042	[1728266015]	2000000 OPS in 2.039141 seconds, throughput 980805.152758
+193042	[1728266015]	2000000 OPS in 2.024882 seconds, throughput 987711.876544
+193042	[1728266015]	2000000 OPS in 2.033558 seconds, throughput 983497.888922
+193042	[1728266015]	2000000 OPS in 2.040865 seconds, throughput 979976.627557
+193042	[1728266017]	2000000 OPS in 2.035337 seconds, throughput 982638.255974
+193042	[1728266017]	2000000 OPS in 2.025500 seconds, throughput 987410.515922
+193042	[1728266017]	2000000 OPS in 2.033032 seconds, throughput 983752.346249
+193042	[1728266017]	2000000 OPS in 2.039354 seconds, throughput 980702.712722
+193042	[1728266019]	2000000 OPS in 2.036449 seconds, throughput 982101.687791
+193042	[1728266019]	2000000 OPS in 2.025868 seconds, throughput 987231.152276
+193042	[1728266019]	2000000 OPS in 2.025429 seconds, throughput 987445.128908
+193042	[1728266019]	2000000 OPS in 2.043511 seconds, throughput 978707.724108
+193042	[1728266021]	2000000 OPS in 2.046197 seconds, throughput 977422.994951
+193042	[1728266021]	2000000 OPS in 2.029032 seconds, throughput 985691.699293
+193042	[1728266021]	2000000 OPS in 2.037216 seconds, throughput 981731.932206
+193042	[1728266021]	2000000 OPS in 2.047066 seconds, throughput 977008.069110
+193042	[1728266023]	2000000 OPS in 2.039179 seconds, throughput 980786.875502
+193042	[1728266023]	2000000 OPS in 2.026409 seconds, throughput 986967.586504
+193042	[1728266023]	2000000 OPS in 2.031046 seconds, throughput 984714.280228
+193042	[1728266023]	2000000 OPS in 2.039312 seconds, throughput 980722.910472
+193042	[1728266025]	2000000 OPS in 2.036911 seconds, throughput 981878.933346
+193042	[1728266025]	2000000 OPS in 2.025037 seconds, throughput 987636.275288
+193042	[1728266025]	2000000 OPS in 2.032678 seconds, throughput 983923.671137
+193042	[1728266025]	2000000 OPS in 2.038534 seconds, throughput 981097.200243
+193042	[1728266027]	2000000 OPS in 2.026676 seconds, throughput 986837.560616
+193042	[1728266027]	2000000 OPS in 2.042274 seconds, throughput 979300.524807
+193042	[1728266027]	2000000 OPS in 2.033196 seconds, throughput 983672.995619
+193042	[1728266027]	2000000 OPS in 2.040560 seconds, throughput 980123.103462
+193042	[1728266029]	2000000 OPS in 2.026608 seconds, throughput 986870.672572
+193042	[1728266029]	2000000 OPS in 2.039273 seconds, throughput 980741.666270
+193042	[1728266029]	2000000 OPS in 2.029545 seconds, throughput 985442.549931
+193042	[1728266029]	2000000 OPS in 2.041099 seconds, throughput 979864.278999
+193042	[1728266031]	2000000 OPS in 2.026438 seconds, throughput 986953.462183
+193042	[1728266031]	2000000 OPS in 2.040616 seconds, throughput 980096.206244
+193042	[1728266031]	2000000 OPS in 2.032037 seconds, throughput 984234.046919
+193042	[1728266031]	2000000 OPS in 2.042026 seconds, throughput 979419.458910
+193042	[1728266033]	2000000 OPS in 2.026562 seconds, throughput 986893.073096
+193042	[1728266033]	2000000 OPS in 2.040575 seconds, throughput 980115.898705
+193042	[1728266033]	2000000 OPS in 2.033490 seconds, throughput 983530.777137
+193042	[1728266034]	2000000 OPS in 2.047775 seconds, throughput 976669.800149
+193042	[1728266035]	2000000 OPS in 2.030448 seconds, throughput 985004.294619
+193042	[1728266035]	2000000 OPS in 2.040248 seconds, throughput 980272.986421
+193042	[1728266035]	2000000 OPS in 2.034838 seconds, throughput 982879.226749
+193042	[1728266036]	2000000 OPS in 2.036640 seconds, throughput 982009.584414
+193042	[1728266037]	2000000 OPS in 2.024305 seconds, throughput 987993.410084
+193042	[1728266037]	2000000 OPS in 2.037586 seconds, throughput 981553.662029
+193042	[1728266037]	2000000 OPS in 2.027770 seconds, throughput 986305.152951
+193042	[1728266038]	2000000 OPS in 2.036703 seconds, throughput 981979.208554
+193042	[1728266039]	2000000 OPS in 2.021473 seconds, throughput 989377.547956
+193042	[1728266039]	2000000 OPS in 2.038947 seconds, throughput 980898.473575
+193042	[1728266039]	2000000 OPS in 2.032259 seconds, throughput 984126.531116
+193042	[1728266040]	2000000 OPS in 2.039182 seconds, throughput 980785.432590
+193042	[1728266041]	2000000 OPS in 2.021291 seconds, throughput 989466.632959
+193042	[1728266041]	2000000 OPS in 2.031074 seconds, throughput 984700.705144
+193042	[1728266041]	2000000 OPS in 2.039761 seconds, throughput 980507.029990
+193042	[1728266042]	2000000 OPS in 2.039037 seconds, throughput 980855.178204
+193042	[1728266043]	2000000 OPS in 2.024490 seconds, throughput 987903.126219
+193042	[1728266043]	2000000 OPS in 2.029782 seconds, throughput 985327.488371
+193042	[1728266043]	2000000 OPS in 2.037468 seconds, throughput 981610.508729
+193042	[1728266044]	2000000 OPS in 2.037518 seconds, throughput 981586.420341
+193042	[1728266045]	2000000 OPS in 2.028456 seconds, throughput 985971.596130
+193042	[1728266045]	2000000 OPS in 2.029678 seconds, throughput 985377.976211
+193042	[1728266045]	2000000 OPS in 2.037691 seconds, throughput 981503.083637
+193042	[1728266046]	2000000 OPS in 2.043552 seconds, throughput 978688.088192
+193042	[1728266047]	2000000 OPS in 2.018427 seconds, throughput 990870.613602
+193042	[1728266047]	2000000 OPS in 2.028280 seconds, throughput 986057.151873
+193042	[1728266047]	2000000 OPS in 2.322931 seconds, throughput 860981.234484
+193042	[1728266048]	2000000 OPS in 2.040848 seconds, throughput 979984.790636
+193042	[1728266049]	2000000 OPS in 2.022302 seconds, throughput 988971.973523
+193042	[1728266049]	2000000 OPS in 2.036375 seconds, throughput 982137.376466
+193042	[1728266050]	2000000 OPS in 2.030940 seconds, throughput 984765.675008
+193042	[1728266050]	2000000 OPS in 2.043851 seconds, throughput 978544.913499
+193042	[1728266051]	2000000 OPS in 2.032559 seconds, throughput 983981.276804
+193042	[1728266051]	2000000 OPS in 2.042249 seconds, throughput 979312.512823
+193042	[1728266052]	2000000 OPS in 2.033219 seconds, throughput 983661.868200
+193042	[1728266052]	2000000 OPS in 2.041826 seconds, throughput 979515.394554
+193042	[1728266053]	2000000 OPS in 2.024502 seconds, throughput 987897.270539
+193042	[1728266053]	2000000 OPS in 2.035642 seconds, throughput 982491.027401
+193042	[1728266054]	2000000 OPS in 2.029460 seconds, throughput 985483.823283
+193042	[1728266054]	2000000 OPS in 2.039617 seconds, throughput 980576.255248
+193042	[1728266055]	2000000 OPS in 2.027891 seconds, throughput 986246.302193
+193042	[1728266055]	2000000 OPS in 2.039467 seconds, throughput 980648.375286
+193042	[1728266056]	2000000 OPS in 2.026317 seconds, throughput 987012.397369
+193042	[1728266056]	2000000 OPS in 2.040648 seconds, throughput 980080.837067
+193042	[1728266057]	2000000 OPS in 2.020480 seconds, throughput 989863.794742
+193042	[1728266057]	2000000 OPS in 2.034600 seconds, throughput 982994.200334
+193042	[1728266058]	2000000 OPS in 2.029293 seconds, throughput 985564.923350
+193042	[1728266058]	2000000 OPS in 2.037869 seconds, throughput 981417.353127
+193042	[1728266059]	2000000 OPS in 2.022031 seconds, throughput 989104.519169
+193042	[1728266059]	2000000 OPS in 2.035691 seconds, throughput 982467.378399
+193042	[1728266060]	2000000 OPS in 2.025781 seconds, throughput 987273.550300
+193042	[1728266060]	2000000 OPS in 2.037572 seconds, throughput 981560.406209
+193042	[1728266061]	2000000 OPS in 2.025417 seconds, throughput 987450.979230
+193042	[1728266061]	2000000 OPS in 2.039087 seconds, throughput 980831.126872
+193042	[1728266062]	2000000 OPS in 2.088612 seconds, throughput 957573.737966
+193042	[1728266062]	2000000 OPS in 2.044911 seconds, throughput 978037.674989
+193042	[1728266063]	2000000 OPS in 2.017793 seconds, throughput 991181.949784
+193042	[1728266064]	2000000 OPS in 2.032753 seconds, throughput 983887.368510
+193042	[1728266064]	2000000 OPS in 2.051445 seconds, throughput 974922.554590
+193042	[1728266064]	2000000 OPS in 2.527513 seconds, throughput 791291.676838
+193042	[1728266065]	2000000 OPS in 2.020738 seconds, throughput 989737.412767
+193042	[1728266066]	2000000 OPS in 2.035500 seconds, throughput 982559.567674
+193042	[1728266066]	2000000 OPS in 2.047115 seconds, throughput 976984.683323
+193042	[1728266066]	2000000 OPS in 2.161215 seconds, throughput 925405.385397
+193042	[1728266067]	2000000 OPS in 2.025139 seconds, throughput 987586.531097
+193042	[1728266068]	2000000 OPS in 2.038515 seconds, throughput 981106.344569
+193042	[1728266068]	2000000 OPS in 2.036145 seconds, throughput 982248.317286
+193042	[1728266068]	2000000 OPS in 2.024050 seconds, throughput 988117.882463
+193042	[1728266069]	2000000 OPS in 2.025901 seconds, throughput 987215.071220
+193042	[1728266070]	2000000 OPS in 2.037757 seconds, throughput 981471.294173
+193042	[1728266070]	2000000 OPS in 2.035824 seconds, throughput 982403.193989
+193042	[1728266071]	2000000 OPS in 2.030113 seconds, throughput 985166.835541
+193042	[1728266071]	2000000 OPS in 2.025950 seconds, throughput 987191.194255
+193042	[1728266072]	2000000 OPS in 2.039071 seconds, throughput 980838.823170
+193042	[1728266072]	2000000 OPS in 2.041015 seconds, throughput 979904.606287
+193042	[1728266073]	2000000 OPS in 2.029723 seconds, throughput 985356.129876
+193042	[1728266073]	2000000 OPS in 2.021966 seconds, throughput 989136.315843
+193042	[1728266074]	2000000 OPS in 2.039551 seconds, throughput 980607.986758
+193042	[1728266074]	2000000 OPS in 2.039686 seconds, throughput 980543.083592
+193042	[1728266075]	2000000 OPS in 2.028868 seconds, throughput 985771.375959
+193042	[1728266075]	2000000 OPS in 2.028128 seconds, throughput 986131.052872
+193042	[1728266076]	2000000 OPS in 2.036024 seconds, throughput 982306.691866
+193042	[1728266076]	2000000 OPS in 2.034046 seconds, throughput 983261.932129
+193042	[1728266077]	2000000 OPS in 2.027183 seconds, throughput 986590.751797
+193042	[1728266077]	2000000 OPS in 2.027398 seconds, throughput 986486.126552
+193042	[1728266078]	2000000 OPS in 2.037481 seconds, throughput 981604.245635
+193042	[1728266078]	2000000 OPS in 2.036597 seconds, throughput 982030.318222
+193042	[1728266079]	2000000 OPS in 2.030696 seconds, throughput 984884.000362
+193042	[1728266079]	2000000 OPS in 2.022875 seconds, throughput 988691.837113
+193042	[1728266080]	2000000 OPS in 2.039025 seconds, throughput 980860.950699
+193042	[1728266080]	2000000 OPS in 2.042098 seconds, throughput 979384.926678
+193042	[1728266081]	2000000 OPS in 2.036111 seconds, throughput 982264.719360
+193042	[1728266082]	2000000 OPS in 2.035923 seconds, throughput 982355.423069
+193042	[1728266082]	2000000 OPS in 2.039993 seconds, throughput 980395.520965
+193042	[1728266083]	2000000 OPS in 2.042507 seconds, throughput 979188.810614
+193042	[1728266083]	2000000 OPS in 2.030892 seconds, throughput 984788.949880
+193042	[1728266084]	2000000 OPS in 2.029014 seconds, throughput 985700.443664
+193042	[1728266084]	2000000 OPS in 2.039970 seconds, throughput 980406.574606
+193042	[1728266085]	2000000 OPS in 2.046818 seconds, throughput 977126.447002
+193042	[1728266085]	2000000 OPS in 2.033010 seconds, throughput 983762.991820
+193042	[1728266086]	2000000 OPS in 2.026190 seconds, throughput 987074.262532
+193042	[1728266086]	2000000 OPS in 2.037352 seconds, throughput 981666.398345
+193042	[1728266087]	2000000 OPS in 2.040968 seconds, throughput 979927.171813
+193042	[1728266087]	2000000 OPS in 2.038932 seconds, throughput 980905.689842
+193042	[1728266088]	2000000 OPS in 2.027772 seconds, throughput 986304.180154
+193042	[1728266088]	2000000 OPS in 2.038087 seconds, throughput 981312.377735
+193042	[1728266089]	2000000 OPS in 2.038325 seconds, throughput 981197.797211
+193042	[1728266089]	2000000 OPS in 2.028828 seconds, throughput 985790.811247
+193042	[1728266090]	2000000 OPS in 2.024492 seconds, throughput 987902.150268
+193042	[1728266090]	2000000 OPS in 2.039310 seconds, throughput 980723.872290
+193042	[1728266091]	2000000 OPS in 2.042594 seconds, throughput 979147.104123
+193042	[1728266091]	2000000 OPS in 2.029298 seconds, throughput 985562.495011
+193042	[1728266092]	2000000 OPS in 2.029275 seconds, throughput 985573.665472
+193042	[1728266092]	2000000 OPS in 2.038635 seconds, throughput 981048.593789
+193042	[1728266093]	2000000 OPS in 2.036639 seconds, throughput 982010.066585
+193042	[1728266093]	2000000 OPS in 2.028089 seconds, throughput 986150.016099
+193042	[1728266094]	2000000 OPS in 2.025342 seconds, throughput 987487.545313
+193042	[1728266094]	2000000 OPS in 2.036221 seconds, throughput 982211.655807
+193042	[1728266095]	2000000 OPS in 2.040276 seconds, throughput 980259.533514
+193042	[1728266095]	2000000 OPS in 2.034606 seconds, throughput 982991.301510
+193042	[1728266096]	2000000 OPS in 2.023711 seconds, throughput 988283.406079
+193042	[1728266096]	2000000 OPS in 2.039298 seconds, throughput 980729.643240
+193042	[1728266097]	2000000 OPS in 2.037651 seconds, throughput 981522.350982
+193042	[1728266097]	2000000 OPS in 2.027439 seconds, throughput 986466.177281
+193042	[1728266098]	2000000 OPS in 2.021945 seconds, throughput 989146.589052
+193042	[1728266098]	2000000 OPS in 2.034225 seconds, throughput 983175.410783
+193042	[1728266099]	2000000 OPS in 2.039250 seconds, throughput 980752.727719
+193042	[1728266099]	2000000 OPS in 2.022903 seconds, throughput 988678.152141
+193042	[1728266100]	2000000 OPS in 2.023955 seconds, throughput 988164.262545
+193042	[1728266100]	2000000 OPS in 2.036434 seconds, throughput 982108.921772
+193042	[1728266101]	2000000 OPS in 2.039206 seconds, throughput 980773.889445
+193042	[1728266101]	2000000 OPS in 2.027783 seconds, throughput 986298.829806
+193042	[1728266102]	2000000 OPS in 2.023397 seconds, throughput 988436.772418
+193042	[1728266102]	2000000 OPS in 2.035635 seconds, throughput 982494.405922
+193042	[1728266103]	2000000 OPS in 2.036114 seconds, throughput 982263.272096
+193042	[1728266103]	2000000 OPS in 2.031432 seconds, throughput 984527.170981
+193042	[1728266104]	2000000 OPS in 2.024009 seconds, throughput 988137.898596
+193042	[1728266104]	2000000 OPS in 2.035685 seconds, throughput 982470.274134
+193042	[1728266105]	2000000 OPS in 2.038820 seconds, throughput 980959.574656
+193042	[1728266105]	2000000 OPS in 2.027573 seconds, throughput 986400.982850
+193042	[1728266106]	2000000 OPS in 2.025197 seconds, throughput 987558.247420
+193042	[1728266106]	2000000 OPS in 2.036902 seconds, throughput 981883.271753
+193042	[1728266107]	2000000 OPS in 2.041796 seconds, throughput 979529.786521
+193042	[1728266107]	2000000 OPS in 2.029288 seconds, throughput 985567.351702
+193042	[1728266108]	2000000 OPS in 2.023313 seconds, throughput 988477.808426
+193042	[1728266108]	2000000 OPS in 2.037011 seconds, throughput 981830.731400
+193042	[1728266109]	2000000 OPS in 2.040901 seconds, throughput 979959.341487
+193042	[1728266109]	2000000 OPS in 2.029187 seconds, throughput 985616.406965
+193042	[1728266110]	2000000 OPS in 2.033151 seconds, throughput 983694.767383
+193042	[1728266110]	2000000 OPS in 2.040801 seconds, throughput 980007.359855
+193042	[1728266111]	2000000 OPS in 2.043935 seconds, throughput 978504.698046
+193042	[1728266111]	2000000 OPS in 2.032356 seconds, throughput 984079.560864
+193042	[1728266112]	2000000 OPS in 2.023104 seconds, throughput 988579.924710
+193042	[1728266112]	2000000 OPS in 2.040246 seconds, throughput 980273.947357
+193042	[1728266113]	2000000 OPS in 2.034170 seconds, throughput 983201.993934
+193042	[1728266113]	2000000 OPS in 2.025839 seconds, throughput 987245.284546
+193042	[1728266114]	2000000 OPS in 2.026821 seconds, throughput 986766.961661
+193042	[1728266114]	2000000 OPS in 2.041517 seconds, throughput 979663.652078
+193042	[1728266115]	2000000 OPS in 2.038348 seconds, throughput 981186.725721
+193042	[1728266115]	2000000 OPS in 2.031888 seconds, throughput 984306.221603
+193042	[1728266116]	2000000 OPS in 2.027694 seconds, throughput 986342.120655
+193042	[1728266117]	2000000 OPS in 2.041072 seconds, throughput 979877.240979
+193042	[1728266117]	2000000 OPS in 2.039568 seconds, throughput 980599.813294
+193042	[1728266117]	2000000 OPS in 2.028238 seconds, throughput 986077.570778
+193042	[1728266118]	2000000 OPS in 2.022079 seconds, throughput 989081.039860
+193042	[1728266119]	2000000 OPS in 2.038276 seconds, throughput 981221.385131
+193042	[1728266119]	2000000 OPS in 2.038505 seconds, throughput 981111.157441
+193042	[1728266119]	2000000 OPS in 2.029871 seconds, throughput 985284.286538
+193042	[1728266120]	2000000 OPS in 2.023916 seconds, throughput 988183.304050
+193042	[1728266121]	2000000 OPS in 2.044225 seconds, throughput 978365.884382
+193042	[1728266121]	2000000 OPS in 2.030052 seconds, throughput 985196.438318
+193042	[1728266121]	2000000 OPS in 2.041215 seconds, throughput 979808.594391
+193042	[1728266122]	2000000 OPS in 2.025193 seconds, throughput 987560.197966
+193042	[1728266123]	2000000 OPS in 2.038478 seconds, throughput 981124.152431
+193042	[1728266123]	2000000 OPS in 2.029258 seconds, throughput 985581.922062
+193042	[1728266123]	2000000 OPS in 2.037474 seconds, throughput 981607.618060
+193042	[1728266124]	2000000 OPS in 2.024800 seconds, throughput 987751.876729
+193042	[1728266125]	2000000 OPS in 2.039074 seconds, throughput 980837.380105
+193042	[1728266125]	2000000 OPS in 2.028938 seconds, throughput 985737.366051
+193042	[1728266125]	2000000 OPS in 2.040368 seconds, throughput 980215.333705
+193042	[1728266126]	2000000 OPS in 2.026764 seconds, throughput 986794.713149
+193042	[1728266127]	2000000 OPS in 2.035908 seconds, throughput 982362.660788
+193042	[1728266127]	2000000 OPS in 2.026278 seconds, throughput 987031.394508
+193042	[1728266127]	2000000 OPS in 2.040277 seconds, throughput 980259.053060
+193042	[1728266128]	2000000 OPS in 2.025711 seconds, throughput 987307.666296
+193042	[1728266129]	2000000 OPS in 2.038653 seconds, throughput 981039.931759
+193042	[1728266129]	2000000 OPS in 2.030544 seconds, throughput 984957.725614
+193042	[1728266129]	2000000 OPS in 2.038672 seconds, throughput 981030.788670
+193042	[1728266130]	2000000 OPS in 2.027758 seconds, throughput 986310.989773
+193042	[1728266131]	2000000 OPS in 2.039885 seconds, throughput 980447.427183
+193042	[1728266131]	2000000 OPS in 2.029404 seconds, throughput 985511.017028
+193042	[1728266131]	2000000 OPS in 2.039883 seconds, throughput 980448.388461
+193042	[1728266132]	2000000 OPS in 2.023452 seconds, throughput 988409.905449
+193042	[1728266133]	2000000 OPS in 2.037601 seconds, throughput 981546.436226
+193042	[1728266133]	2000000 OPS in 2.031323 seconds, throughput 984580.000325
+193042	[1728266133]	2000000 OPS in 2.040707 seconds, throughput 980052.501413
+193042	[1728266134]	2000000 OPS in 2.027333 seconds, throughput 986517.755100
+193042	[1728266135]	2000000 OPS in 2.037054 seconds, throughput 981810.006018
+193042	[1728266135]	2000000 OPS in 2.032022 seconds, throughput 984241.312348
+193042	[1728266136]	2000000 OPS in 2.040051 seconds, throughput 980367.647672
+193042	[1728266136]	2000000 OPS in 2.026050 seconds, throughput 987142.469337
+193042	[1728266137]	2000000 OPS in 2.040602 seconds, throughput 980102.930410
+193042	[1728266137]	2000000 OPS in 2.028609 seconds, throughput 985897.233030
+193042	[1728266138]	2000000 OPS in 2.041248 seconds, throughput 979792.754237
+193042	[1728266138]	2000000 OPS in 2.023616 seconds, throughput 988329.801702
+193042	[1728266139]	2000000 OPS in 2.043591 seconds, throughput 978669.410856
+193042	[1728266140]	2000000 OPS in 2.030726 seconds, throughput 984869.450630
+193042	[1728266140]	2000000 OPS in 2.040556 seconds, throughput 980125.024748
+193042	[1728266140]	2000000 OPS in 2.033241 seconds, throughput 983651.224818
+193042	[1728266141]	2000000 OPS in 2.044192 seconds, throughput 978381.678433
+193042	[1728266142]	2000000 OPS in 2.038447 seconds, throughput 981139.073030
+193042	[1728266142]	2000000 OPS in 2.047308 seconds, throughput 976892.582845
+193042	[1728266142]	2000000 OPS in 2.027065 seconds, throughput 986648.183457
+193042	[1728266143]	2000000 OPS in 2.036826 seconds, throughput 981919.908721
+193042	[1728266144]	2000000 OPS in 2.029738 seconds, throughput 985348.847979
+193042	[1728266144]	2000000 OPS in 2.038310 seconds, throughput 981205.017882
+193042	[1728266144]	2000000 OPS in 2.026082 seconds, throughput 987126.878379
+193042	[1728266145]	2000000 OPS in 2.041248 seconds, throughput 979792.754237
+193042	[1728266146]	2000000 OPS in 2.031520 seconds, throughput 984484.523903
+193042	[1728266146]	2000000 OPS in 2.039054 seconds, throughput 980847.000619
+193042	[1728266146]	2000000 OPS in 2.025585 seconds, throughput 987369.081031
+193042	[1728266147]	2000000 OPS in 2.038343 seconds, throughput 981189.132545
+193042	[1728266148]	2000000 OPS in 2.028889 seconds, throughput 985761.172740
+193042	[1728266148]	2000000 OPS in 2.032630 seconds, throughput 983946.906225
+193042	[1728266148]	2000000 OPS in 2.021486 seconds, throughput 989371.185356
+193042	[1728266149]	2000000 OPS in 2.030580 seconds, throughput 984940.263373
+193042	[1728266150]	2000000 OPS in 2.028314 seconds, throughput 986040.622902
+193042	[1728266150]	2000000 OPS in 2.035587 seconds, throughput 982517.573555
+193042	[1728266150]	2000000 OPS in 2.024077 seconds, throughput 988104.701550
+193042	[1728266151]	2000000 OPS in 2.034271 seconds, throughput 983153.178706
+193042	[1728266152]	2000000 OPS in 2.026352 seconds, throughput 986995.349278
+193042	[1728266152]	2000000 OPS in 2.035025 seconds, throughput 982788.909227
+193042	[1728266152]	2000000 OPS in 2.023951 seconds, throughput 988166.215486
+193042	[1728266153]	2000000 OPS in 2.037797 seconds, throughput 981452.028833
+193042	[1728266154]	2000000 OPS in 2.026782 seconds, throughput 986785.949352
+193042	[1728266154]	2000000 OPS in 2.033652 seconds, throughput 983452.429423
+193042	[1728266154]	2000000 OPS in 2.022055 seconds, throughput 989092.779375
+193042	[1728266155]	2000000 OPS in 2.039403 seconds, throughput 980679.149732
+193042	[1728266156]	2000000 OPS in 2.027622 seconds, throughput 986377.145247
+193042	[1728266156]	2000000 OPS in 2.039505 seconds, throughput 980630.103873
+193042	[1728266156]	2000000 OPS in 2.030696 seconds, throughput 984884.000362
+193042	[1728266157]	2000000 OPS in 2.035852 seconds, throughput 982389.682551
+193042	[1728266158]	2000000 OPS in 2.036580 seconds, throughput 982038.515551
+193042	[1728266158]	2000000 OPS in 2.042395 seconds, throughput 979242.506959
+193042	[1728266158]	2000000 OPS in 2.025628 seconds, throughput 987348.121175
+193042	[1728266159]	2000000 OPS in 2.038208 seconds, throughput 981254.121267
+193042	[1728266160]	2000000 OPS in 2.028251 seconds, throughput 986071.250550
+193042	[1728266160]	2000000 OPS in 2.038404 seconds, throughput 981159.770095
+193042	[1728266161]	2000000 OPS in 2.024746 seconds, throughput 987778.220083
+193042	[1728266161]	2000000 OPS in 2.040605 seconds, throughput 980101.489509
+193042	[1728266162]	2000000 OPS in 2.029720 seconds, throughput 985357.586268
+193042	[1728266162]	2000000 OPS in 2.038884 seconds, throughput 980928.782609
+193042	[1728266163]	2000000 OPS in 2.027515 seconds, throughput 986429.200277
+193042	[1728266163]	2000000 OPS in 2.039128 seconds, throughput 980811.405660
+193042	[1728266164]	2000000 OPS in 2.028302 seconds, throughput 986046.456593
+193042	[1728266164]	2000000 OPS in 2.038388 seconds, throughput 981167.471551
+193042	[1728266165]	2000000 OPS in 2.025926 seconds, throughput 987202.888951
+193042	[1728266165]	2000000 OPS in 2.040167 seconds, throughput 980311.905839
+193042	[1728266166]	2000000 OPS in 2.029137 seconds, throughput 985640.693556
+193042	[1728266166]	2000000 OPS in 2.038549 seconds, throughput 981089.981158
+193042	[1728266167]	2000000 OPS in 2.027385 seconds, throughput 986492.452100
+193042	[1728266167]	2000000 OPS in 2.038385 seconds, throughput 981168.915588
+193042	[1728266168]	2000000 OPS in 2.028033 seconds, throughput 986177.246623
+193042	[1728266168]	2000000 OPS in 2.037883 seconds, throughput 981410.610913
+193042	[1728266169]	2000000 OPS in 2.023188 seconds, throughput 988538.880223
+193042	[1728266170]	2000000 OPS in 2.037797 seconds, throughput 981452.028833
+193042	[1728266170]	2000000 OPS in 2.035399 seconds, throughput 982608.323970
+193042	[1728266170]	2000000 OPS in 2.038543 seconds, throughput 981092.868779
+193042	[1728266171]	2000000 OPS in 2.032440 seconds, throughput 984038.889217
+193042	[1728266172]	2000000 OPS in 2.042829 seconds, throughput 979034.466419
+193042	[1728266172]	2000000 OPS in 2.025155 seconds, throughput 987578.728542
+193042	[1728266172]	2000000 OPS in 2.033768 seconds, throughput 983396.336259
+193042	[1728266173]	2000000 OPS in 2.026627 seconds, throughput 986861.420478
+193042	[1728266174]	2000000 OPS in 2.038882 seconds, throughput 980929.744831
+193042	[1728266174]	2000000 OPS in 2.023803 seconds, throughput 988238.479733
+193042	[1728266174]	2000000 OPS in 2.038117 seconds, throughput 981297.933337
+193042	[1728266175]	2000000 OPS in 2.027857 seconds, throughput 986262.838060
+193042	[1728266176]	2000000 OPS in 2.042851 seconds, throughput 979023.922939
+193042	[1728266176]	2000000 OPS in 2.033063 seconds, throughput 983737.346064
+193042	[1728266176]	2000000 OPS in 2.044075 seconds, throughput 978437.679635
+193042	[1728266177]	2000000 OPS in 2.026258 seconds, throughput 987041.136913
+193042	[1728266178]	2000000 OPS in 2.039609 seconds, throughput 980580.101382
+193042	[1728266178]	2000000 OPS in 2.031273 seconds, throughput 984604.235866
+193042	[1728266178]	2000000 OPS in 2.037430 seconds, throughput 981628.816696
+193042	[1728266179]	2000000 OPS in 2.027136 seconds, throughput 986613.626318
+193042	[1728266180]	2000000 OPS in 2.040195 seconds, throughput 980298.451864
+193042	[1728266180]	2000000 OPS in 2.027280 seconds, throughput 986543.546032
+193042	[1728266180]	2000000 OPS in 2.037516 seconds, throughput 981587.383854
+193042	[1728266181]	2000000 OPS in 2.025730 seconds, throughput 987298.406007
+193042	[1728266182]	2000000 OPS in 2.041637 seconds, throughput 979606.071011
+193042	[1728266182]	2000000 OPS in 2.034535 seconds, throughput 983025.605359
+193042	[1728266182]	2000000 OPS in 2.042108 seconds, throughput 979380.130728
+193042	[1728266183]	2000000 OPS in 2.025801 seconds, throughput 987263.803305
+193042	[1728266184]	2000000 OPS in 2.042268 seconds, throughput 979303.401904
+193042	[1728266184]	2000000 OPS in 2.030110 seconds, throughput 985168.291373
+193042	[1728266184]	2000000 OPS in 2.037433 seconds, throughput 981627.371305
+193042	[1728266185]	2000000 OPS in 2.023329 seconds, throughput 988469.991781
+193042	[1728266186]	2000000 OPS in 2.039565 seconds, throughput 980601.255660
+193042	[1728266186]	2000000 OPS in 2.029457 seconds, throughput 985485.280053
+193042	[1728266186]	2000000 OPS in 2.037378 seconds, throughput 981653.870808
+193042	[1728266187]	2000000 OPS in 2.027082 seconds, throughput 986639.908992
+193042	[1728266188]	2000000 OPS in 2.033859 seconds, throughput 983352.336617
+193042	[1728266188]	2000000 OPS in 2.028321 seconds, throughput 986037.219947
+193042	[1728266189]	2000000 OPS in 2.035198 seconds, throughput 982705.368225
+193042	[1728266189]	2000000 OPS in 2.023978 seconds, throughput 988153.033284
+193042	[1728266190]	2000000 OPS in 2.038634 seconds, throughput 981049.075018
+193042	[1728266190]	2000000 OPS in 2.026367 seconds, throughput 986988.043133
+193042	[1728266191]	2000000 OPS in 2.036531 seconds, throughput 982062.143910
+193042	[1728266191]	2000000 OPS in 2.023192 seconds, throughput 988536.925808
+193042	[1728266192]	2000000 OPS in 2.033760 seconds, throughput 983400.204547
+193042	[1728266192]	2000000 OPS in 2.030655 seconds, throughput 984903.885692
+193042	[1728266193]	2000000 OPS in 2.036286 seconds, throughput 982180.302767
+193042	[1728266193]	2000000 OPS in 2.025039 seconds, throughput 987635.299863
+193042	[1728266194]	2000000 OPS in 2.037602 seconds, throughput 981545.954509
+193042	[1728266194]	2000000 OPS in 2.029926 seconds, throughput 985257.590671
+193042	[1728266195]	2000000 OPS in 2.038275 seconds, throughput 981221.866529
+193042	[1728266195]	2000000 OPS in 2.028308 seconds, throughput 986043.539739
+193042	[1728266196]	2000000 OPS in 2.040256 seconds, throughput 980269.142696
+193042	[1728266196]	2000000 OPS in 2.030290 seconds, throughput 985080.949027
+193042	[1728266197]	2000000 OPS in 2.040708 seconds, throughput 980052.021161
+193042	[1728266197]	2000000 OPS in 2.025234 seconds, throughput 987540.205231
+193042	[1728266198]	2000000 OPS in 2.040232 seconds, throughput 980280.673963
+193042	[1728266198]	2000000 OPS in 2.030737 seconds, throughput 984864.115836
+193042	[1728266199]	2000000 OPS in 2.040988 seconds, throughput 979917.569334
+193042	[1728266199]	2000000 OPS in 2.029124 seconds, throughput 985647.008266
+193042	[1728266200]	2000000 OPS in 2.043296 seconds, throughput 978810.705840
+193042	[1728266200]	2000000 OPS in 2.035379 seconds, throughput 982617.979256
+193042	[1728266201]	2000000 OPS in 2.045776 seconds, throughput 977624.138713
+193042	[1728266201]	2000000 OPS in 2.029057 seconds, throughput 985679.554591
+193042	[1728266202]	2000000 OPS in 2.037041 seconds, throughput 981816.271739
+193042	[1728266202]	2000000 OPS in 2.028677 seconds, throughput 985864.186364
+193042	[1728266203]	2000000 OPS in 2.039260 seconds, throughput 980747.918363
+193042	[1728266203]	2000000 OPS in 2.022372 seconds, throughput 988937.742413
+193042	[1728266204]	2000000 OPS in 2.038449 seconds, throughput 981138.110397
+193042	[1728266204]	2000000 OPS in 2.026378 seconds, throughput 986982.685363
+193042	[1728266205]	2000000 OPS in 2.040213 seconds, throughput 980289.803074
+193042	[1728266205]	2000000 OPS in 2.024764 seconds, throughput 987769.438809
+193042	[1728266206]	2000000 OPS in 2.036914 seconds, throughput 981877.487218
+193042	[1728266207]	2000000 OPS in 2.031563 seconds, throughput 984463.686334
+193042	[1728266207]	2000000 OPS in 2.035820 seconds, throughput 982405.124225
+193042	[1728266207]	2000000 OPS in 2.025323 seconds, throughput 987496.809151
+193042	[1728266208]	2000000 OPS in 2.041510 seconds, throughput 979667.011183
+193042	[1728266209]	2000000 OPS in 2.030493 seconds, throughput 984982.464850
+193042	[1728266209]	2000000 OPS in 2.035826 seconds, throughput 982402.228874
+193042	[1728266209]	2000000 OPS in 2.025699 seconds, throughput 987313.514989
+193042	[1728266210]	2000000 OPS in 2.036450 seconds, throughput 982101.205529
+193042	[1728266211]	2000000 OPS in 2.025771 seconds, throughput 987278.423869
+193042	[1728266211]	2000000 OPS in 2.037029 seconds, throughput 981822.055552
+193042	[1728266211]	2000000 OPS in 2.025523 seconds, throughput 987399.303785
+193042	[1728266212]	2000000 OPS in 2.037556 seconds, throughput 981568.113956
+193042	[1728266213]	2000000 OPS in 2.028494 seconds, throughput 985953.125816
+193042	[1728266213]	2000000 OPS in 2.040223 seconds, throughput 980284.998258
+193042	[1728266213]	2000000 OPS in 2.024969 seconds, throughput 987669.440866
+193042	[1728266214]	2000000 OPS in 2.037342 seconds, throughput 981671.216713
+193042	[1728266215]	2000000 OPS in 2.030614 seconds, throughput 984923.771825
+193042	[1728266215]	2000000 OPS in 2.037396 seconds, throughput 981645.198086
+193042	[1728266215]	2000000 OPS in 2.027103 seconds, throughput 986629.687786
+193042	[1728266216]	2000000 OPS in 2.035307 seconds, throughput 982652.739857
+193042	[1728266217]	2000000 OPS in 2.029563 seconds, throughput 985433.810135
+193042	[1728266217]	2000000 OPS in 2.035960 seconds, throughput 982337.570483
+193042	[1728266217]	2000000 OPS in 2.026295 seconds, throughput 987023.113614
+193042	[1728266218]	2000000 OPS in 2.035853 seconds, throughput 982389.200006
+193042	[1728266219]	2000000 OPS in 2.335390 seconds, throughput 856388.012281
+193042	[1728266219]	2000000 OPS in 2.045034 seconds, throughput 977978.850229
+193042	[1728266219]	2000000 OPS in 2.016595 seconds, throughput 991770.781937
+193042	[1728266220]	2000000 OPS in 2.028047 seconds, throughput 986170.438851
+193042	[1728266221]	2000000 OPS in 2.040988 seconds, throughput 979917.569334
+193042	[1728266221]	2000000 OPS in 2.013886 seconds, throughput 993104.872868
+193042	[1728266221]	2000000 OPS in 2.419154 seconds, throughput 826735.296719
+193042	[1728266223]	2000000 OPS in 2.036414 seconds, throughput 982118.567246
+193042	[1728266223]	2000000 OPS in 2.037123 seconds, throughput 981776.750839
+193042	[1728266223]	2000000 OPS in 2.023260 seconds, throughput 988503.701946
+193042	[1728266223]	2000000 OPS in 2.027112 seconds, throughput 986625.307334
+193042	[1728266225]	2000000 OPS in 2.041868 seconds, throughput 979495.246510
+193042	[1728266225]	2000000 OPS in 2.037759 seconds, throughput 981470.330888
+193042	[1728266225]	2000000 OPS in 2.025653 seconds, throughput 987335.935622
+193042	[1728266225]	2000000 OPS in 2.031490 seconds, throughput 984499.062265
+193042	[1728266227]	2000000 OPS in 2.037184 seconds, throughput 981747.353209
+193042	[1728266227]	2000000 OPS in 2.037529 seconds, throughput 981581.121054
+193042	[1728266227]	2000000 OPS in 2.028382 seconds, throughput 986007.566622
+193042	[1728266227]	2000000 OPS in 2.025788 seconds, throughput 987270.138830
+193042	[1728266229]	2000000 OPS in 2.040505 seconds, throughput 980149.521810
+193042	[1728266229]	2000000 OPS in 2.040932 seconds, throughput 979944.456748
+193042	[1728266229]	2000000 OPS in 2.023287 seconds, throughput 988490.510738
+193042	[1728266230]	2000000 OPS in 2.029988 seconds, throughput 985227.498882
+193042	[1728266231]	2000000 OPS in 2.043517 seconds, throughput 978704.850510
+193042	[1728266231]	2000000 OPS in 2.040610 seconds, throughput 980099.088018
+193042	[1728266231]	2000000 OPS in 2.033455 seconds, throughput 983547.705752
+193042	[1728266232]	2000000 OPS in 2.033092 seconds, throughput 983723.314046
+193042	[1728266233]	2000000 OPS in 2.038566 seconds, throughput 981081.799657
+193042	[1728266233]	2000000 OPS in 2.037626 seconds, throughput 981534.393456
+193042	[1728266233]	2000000 OPS in 2.024686 seconds, throughput 987807.492125
+193042	[1728266234]	2000000 OPS in 2.028087 seconds, throughput 986150.988592
+193042	[1728266235]	2000000 OPS in 2.038684 seconds, throughput 981025.014176
+193042	[1728266235]	2000000 OPS in 2.037793 seconds, throughput 981453.955333
+193042	[1728266235]	2000000 OPS in 2.026925 seconds, throughput 986716.331389
+193042	[1728266236]	2000000 OPS in 2.025686 seconds, throughput 987319.851152
+193042	[1728266237]	2000000 OPS in 2.038545 seconds, throughput 981091.906237
+193042	[1728266237]	2000000 OPS in 2.040559 seconds, throughput 980123.583783
+193042	[1728266237]	2000000 OPS in 2.030130 seconds, throughput 985158.585903
+193042	[1728266238]	2000000 OPS in 2.032267 seconds, throughput 984122.657111
+193042	[1728266239]	2000000 OPS in 2.036908 seconds, throughput 981880.379477
+193042	[1728266240]	2000000 OPS in 2.038639 seconds, throughput 981046.668881
+193042	[1728266240]	2000000 OPS in 2.025751 seconds, throughput 987288.171152
+193042	[1728266240]	2000000 OPS in 2.029100 seconds, throughput 985658.666404
+193042	[1728266241]	2000000 OPS in 2.042454 seconds, throughput 979214.219757
+193042	[1728266242]	2000000 OPS in 2.038429 seconds, throughput 981147.736811
+193042	[1728266242]	2000000 OPS in 2.026999 seconds, throughput 986680.309166
+193042	[1728266242]	2000000 OPS in 2.028655 seconds, throughput 985874.877690
+193042	[1728266243]	2000000 OPS in 2.041210 seconds, throughput 979810.994459
+193042	[1728266244]	2000000 OPS in 2.024772 seconds, throughput 987765.536070
+193042	[1728266244]	2000000 OPS in 2.035193 seconds, throughput 982707.782505
+193042	[1728266244]	2000000 OPS in 2.028341 seconds, throughput 986027.497349
+193042	[1728266245]	2000000 OPS in 2.042319 seconds, throughput 979278.947118
+193042	[1728266246]	2000000 OPS in 2.028711 seconds, throughput 985847.663861
+193042	[1728266246]	2000000 OPS in 2.038390 seconds, throughput 981166.508862
+193042	[1728266246]	2000000 OPS in 2.031598 seconds, throughput 984446.726173
+193042	[1728266247]	2000000 OPS in 2.040404 seconds, throughput 980198.039212
+193042	[1728266248]	2000000 OPS in 2.030189 seconds, throughput 985129.955881
+193042	[1728266248]	2000000 OPS in 2.042215 seconds, throughput 979328.816995
+193042	[1728266248]	2000000 OPS in 2.032473 seconds, throughput 984022.911989
+193042	[1728266249]	2000000 OPS in 2.038277 seconds, throughput 981220.903734
+193042	[1728266250]	2000000 OPS in 2.023168 seconds, throughput 988548.652410
+193042	[1728266250]	2000000 OPS in 2.036617 seconds, throughput 982020.674481
+193042	[1728266250]	2000000 OPS in 2.022228 seconds, throughput 989008.163273
+193042	[1728266251]	2000000 OPS in 2.036340 seconds, throughput 982154.257148
+193042	[1728266252]	2000000 OPS in 2.028714 seconds, throughput 985846.206020
+193042	[1728266252]	2000000 OPS in 2.036805 seconds, throughput 981930.032576
+193042	[1728266252]	2000000 OPS in 2.025809 seconds, throughput 987259.904562
+193042	[1728266253]	2000000 OPS in 2.040750 seconds, throughput 980031.851035
+193042	[1728266254]	2000000 OPS in 2.024369 seconds, throughput 987962.174880
+193042	[1728266254]	2000000 OPS in 2.037558 seconds, throughput 981567.150481
+193042	[1728266254]	2000000 OPS in 2.033686 seconds, throughput 983435.987660
+193042	[1728266255]	2000000 OPS in 2.037029 seconds, throughput 981822.055552
+193042	[1728266256]	2000000 OPS in 2.024755 seconds, throughput 987773.829426
+193042	[1728266256]	2000000 OPS in 2.042943 seconds, throughput 978979.834484
+193042	[1728266256]	2000000 OPS in 2.030973 seconds, throughput 984749.674171
+193042	[1728266257]	2000000 OPS in 2.037729 seconds, throughput 981484.780361
+193042	[1728266258]	2000000 OPS in 2.026952 seconds, throughput 986703.187841
+193042	[1728266258]	2000000 OPS in 2.043444 seconds, throughput 978739.813765
+193042	[1728266258]	2000000 OPS in 2.029684 seconds, throughput 985375.063310
+193042	[1728266259]	2000000 OPS in 2.036008 seconds, throughput 982314.411338
+193042	[1728266260]	2000000 OPS in 2.027490 seconds, throughput 986441.363459
+193042	[1728266260]	2000000 OPS in 2.042310 seconds, throughput 979283.262580
+193042	[1728266260]	2000000 OPS in 2.032869 seconds, throughput 983831.225721
+193042	[1728266261]	2000000 OPS in 2.040531 seconds, throughput 980137.032959
+193042	[1728266262]	2000000 OPS in 2.026708 seconds, throughput 986821.979289
+193042	[1728266262]	2000000 OPS in 2.039006 seconds, throughput 980870.090623
+193042	[1728266262]	2000000 OPS in 2.026568 seconds, throughput 986890.151231
+193042	[1728266263]	2000000 OPS in 2.035961 seconds, throughput 982337.087989
+193042	[1728266264]	2000000 OPS in 2.026616 seconds, throughput 986866.776933
+193042	[1728266264]	2000000 OPS in 2.041575 seconds, throughput 979635.820384
+193042	[1728266264]	2000000 OPS in 2.025426 seconds, throughput 987446.591482
+193042	[1728266265]	2000000 OPS in 2.036929 seconds, throughput 981870.256646
+193042	[1728266266]	2000000 OPS in 2.026072 seconds, throughput 987131.750500
+193042	[1728266266]	2000000 OPS in 2.043324 seconds, throughput 978797.293038
+193042	[1728266266]	2000000 OPS in 2.028583 seconds, throughput 985909.869106
+193042	[1728266267]	2000000 OPS in 2.037260 seconds, throughput 981710.729117
+193042	[1728266268]	2000000 OPS in 2.026208 seconds, throughput 987065.493770
+193042	[1728266268]	2000000 OPS in 2.041263 seconds, throughput 979785.554336
+193042	[1728266268]	2000000 OPS in 2.024651 seconds, throughput 987824.568284
+193042	[1728266269]	2000000 OPS in 2.038418 seconds, throughput 981153.031419
+193042	[1728266270]	2000000 OPS in 2.025320 seconds, throughput 987498.271878
+193042	[1728266270]	2000000 OPS in 2.031329 seconds, throughput 984577.092140
+193042	[1728266270]	2000000 OPS in 2.045802 seconds, throughput 977611.714135
+193042	[1728266271]	2000000 OPS in 2.038725 seconds, throughput 981005.285166
+193042	[1728266272]	2000000 OPS in 2.023765 seconds, throughput 988257.035772
+193042	[1728266272]	2000000 OPS in 2.025630 seconds, throughput 987347.146320
+193042	[1728266272]	2000000 OPS in 2.039045 seconds, throughput 980851.329912
+193042	[1728266273]	2000000 OPS in 2.038707 seconds, throughput 981013.946585
+193042	[1728266274]	2000000 OPS in 2.027110 seconds, throughput 986626.280764
+193042	[1728266274]	2000000 OPS in 2.022582 seconds, throughput 988835.063300
+193042	[1728266274]	2000000 OPS in 2.038916 seconds, throughput 980913.387310
+193042	[1728266276]	2000000 OPS in 2.039808 seconds, throughput 980484.437751
+193042	[1728266276]	2000000 OPS in 2.025401 seconds, throughput 987458.779768
+193042	[1728266276]	2000000 OPS in 2.032551 seconds, throughput 983985.149696
+193042	[1728266276]	2000000 OPS in 2.045764 seconds, throughput 977629.873241
+193042	[1728266278]	2000000 OPS in 2.040187 seconds, throughput 980302.295819
+193042	[1728266278]	2000000 OPS in 2.023218 seconds, throughput 988524.222303
+193042	[1728266278]	2000000 OPS in 2.029095 seconds, throughput 985661.095217
+193042	[1728266278]	2000000 OPS in 2.042213 seconds, throughput 979329.776081
+193042	[1728266280]	2000000 OPS in 2.039380 seconds, throughput 980690.209770
+193042	[1728266280]	2000000 OPS in 2.021894 seconds, throughput 989171.539161
+193042	[1728266280]	2000000 OPS in 2.028814 seconds, throughput 985797.613778
+193042	[1728266280]	2000000 OPS in 2.041576 seconds, throughput 979635.340541
+193042	[1728266282]	2000000 OPS in 2.040080 seconds, throughput 980353.711619
+193042	[1728266282]	2000000 OPS in 2.024953 seconds, throughput 987677.244855
+193042	[1728266282]	2000000 OPS in 2.029402 seconds, throughput 985511.988261
+193042	[1728266282]	2000000 OPS in 2.037271 seconds, throughput 981705.428487
+193042	[1728266284]	2000000 OPS in 2.039842 seconds, throughput 980468.095078
+193042	[1728266284]	2000000 OPS in 2.024614 seconds, throughput 987842.620865
+193042	[1728266284]	2000000 OPS in 2.027706 seconds, throughput 986336.283465
+193042	[1728266284]	2000000 OPS in 2.040570 seconds, throughput 980118.300279
+193042	[1728266286]	2000000 OPS in 2.035504 seconds, throughput 982557.636831
+193042	[1728266286]	2000000 OPS in 2.025787 seconds, throughput 987270.626181
+193042	[1728266286]	2000000 OPS in 2.029009 seconds, throughput 985702.872683
+193042	[1728266286]	2000000 OPS in 2.040219 seconds, throughput 980286.920179
+193042	[1728266288]	2000000 OPS in 2.035225 seconds, throughput 982692.331315
+193042	[1728266288]	2000000 OPS in 2.029386 seconds, throughput 985519.758193
+193042	[1728266288]	2000000 OPS in 2.028223 seconds, throughput 986084.863449
+193042	[1728266288]	2000000 OPS in 2.038188 seconds, throughput 981263.749958
+193042	[1728266290]	2000000 OPS in 2.036056 seconds, throughput 982291.253286
+193042	[1728266290]	2000000 OPS in 2.027595 seconds, throughput 986390.280110
+193042	[1728266290]	2000000 OPS in 2.029771 seconds, throughput 985332.828186
+193042	[1728266291]	2000000 OPS in 2.045858 seconds, throughput 977584.954577
+193042	[1728266292]	2000000 OPS in 2.042317 seconds, throughput 979279.906107
+193042	[1728266292]	2000000 OPS in 2.024047 seconds, throughput 988119.347031
+193042	[1728266292]	2000000 OPS in 2.027207 seconds, throughput 986579.071599
+193042	[1728266293]	2000000 OPS in 2.039500 seconds, throughput 980632.507968
+193042	[1728266294]	2000000 OPS in 2.035500 seconds, throughput 982559.567674
+193042	[1728266294]	2000000 OPS in 2.024202 seconds, throughput 988043.683387
+193042	[1728266294]	2000000 OPS in 2.030158 seconds, throughput 985144.998567
+193042	[1728266295]	2000000 OPS in 2.037442 seconds, throughput 981623.035159
+193042	[1728266296]	2000000 OPS in 2.036370 seconds, throughput 982139.787956
+193042	[1728266296]	2000000 OPS in 2.024231 seconds, throughput 988029.528250
+193042	[1728266296]	2000000 OPS in 2.030555 seconds, throughput 984952.389864
+193042	[1728266297]	2000000 OPS in 2.038705 seconds, throughput 981014.908974
+193042	[1728266298]	2000000 OPS in 2.040406 seconds, throughput 980197.078425
+193042	[1728266298]	2000000 OPS in 2.026736 seconds, throughput 986808.346030
+193042	[1728266298]	2000000 OPS in 2.026522 seconds, throughput 986912.552639
+193042	[1728266299]	2000000 OPS in 2.033875 seconds, throughput 983344.600824
+193042	[1728266300]	2000000 OPS in 2.039474 seconds, throughput 980645.009449
+193042	[1728266300]	2000000 OPS in 2.027239 seconds, throughput 986563.498433
+193042	[1728266301]	2000000 OPS in 2.025411 seconds, throughput 987453.904417
+193042	[1728266301]	2000000 OPS in 2.037755 seconds, throughput 981472.257460
+193042	[1728266302]	2000000 OPS in 2.036943 seconds, throughput 981863.508208
+193042	[1728266302]	2000000 OPS in 2.026259 seconds, throughput 987040.649789
+193042	[1728266303]	2000000 OPS in 2.029170 seconds, throughput 985624.664272
+193042	[1728266303]	2000000 OPS in 2.041979 seconds, throughput 979442.002097
+193042	[1728266304]	2000000 OPS in 2.038421 seconds, throughput 981151.587430
+193042	[1728266304]	2000000 OPS in 2.025262 seconds, throughput 987526.552120
+193042	[1728266305]	2000000 OPS in 2.028793 seconds, throughput 985807.817752
+193042	[1728266305]	2000000 OPS in 2.043042 seconds, throughput 978932.395908
+193042	[1728266306]	2000000 OPS in 2.036409 seconds, throughput 982120.978644
+193042	[1728266306]	2000000 OPS in 2.023256 seconds, throughput 988505.656229
+193042	[1728266307]	2000000 OPS in 2.028243 seconds, throughput 986075.139912
+193042	[1728266307]	2000000 OPS in 2.037240 seconds, throughput 981720.366771
+193042	[1728266308]	2000000 OPS in 2.036551 seconds, throughput 982052.499545
+193042	[1728266308]	2000000 OPS in 2.023459 seconds, throughput 988406.486121
+193042	[1728266309]	2000000 OPS in 2.026309 seconds, throughput 987016.294158
+193042	[1728266309]	2000000 OPS in 2.039094 seconds, throughput 980827.759780
+193042	[1728266310]	2000000 OPS in 2.038555 seconds, throughput 981087.093554
+193042	[1728266310]	2000000 OPS in 2.027818 seconds, throughput 986281.806355
+193042	[1728266311]	2000000 OPS in 2.025416 seconds, throughput 987451.466760
+193042	[1728266311]	2000000 OPS in 2.042010 seconds, throughput 979427.133070
+193042	[1728266312]	2000000 OPS in 2.041258 seconds, throughput 979787.954291
+193042	[1728266312]	2000000 OPS in 2.027655 seconds, throughput 986361.092000
+193042	[1728266313]	2000000 OPS in 2.028571 seconds, throughput 985915.701250
+193042	[1728266313]	2000000 OPS in 2.039766 seconds, throughput 980504.626511
+193042	[1728266314]	2000000 OPS in 2.030255 seconds, throughput 985097.931048
+193042	[1728266314]	2000000 OPS in 2.021236 seconds, throughput 989493.557407
+193042	[1728266315]	2000000 OPS in 2.046658 seconds, throughput 977202.835061
+193042	[1728266315]	2000000 OPS in 2.351907 seconds, throughput 850373.760527
+193042	[1728266316]	2000000 OPS in 2.036523 seconds, throughput 982066.001710
+193042	[1728266317]	2000000 OPS in 2.026629 seconds, throughput 986860.446584
+193042	[1728266317]	2000000 OPS in 2.038391 seconds, throughput 981166.027519
+193042	[1728266317]	2000000 OPS in 2.030616 seconds, throughput 984922.801751
+193042	[1728266318]	2000000 OPS in 2.041138 seconds, throughput 979845.556743
+193042	[1728266319]	2000000 OPS in 2.027439 seconds, throughput 986466.177281
+193042	[1728266319]	2000000 OPS in 2.039281 seconds, throughput 980737.818869
+193042	[1728266319]	2000000 OPS in 2.029853 seconds, throughput 985293.023682
+193042	[1728266320]	2000000 OPS in 2.045171 seconds, throughput 977913.338298
+193042	[1728266321]	2000000 OPS in 2.032057 seconds, throughput 984224.359848
+193042	[1728266321]	2000000 OPS in 2.043398 seconds, throughput 978761.846689
+193042	[1728266321]	2000000 OPS in 2.034527 seconds, throughput 983029.470732
+193042	[1728266322]	2000000 OPS in 2.037729 seconds, throughput 981484.780361
+193042	[1728266323]	2000000 OPS in 2.023355 seconds, throughput 988457.289996
+193042	[1728266323]	2000000 OPS in 2.040487 seconds, throughput 980158.168124
+193042	[1728266323]	2000000 OPS in 2.031513 seconds, throughput 984487.916149
+193042	[1728266324]	2000000 OPS in 2.037253 seconds, throughput 981714.102274
+193042	[1728266325]	2000000 OPS in 2.026836 seconds, throughput 986759.658897
+193042	[1728266325]	2000000 OPS in 2.027283 seconds, throughput 986542.086132
+193042	[1728266325]	2000000 OPS in 2.037999 seconds, throughput 981354.750419
+193042	[1728266326]	2000000 OPS in 2.032523 seconds, throughput 983998.705058
+193042	[1728266327]	2000000 OPS in 2.019347 seconds, throughput 990419.180062
+193042	[1728266327]	2000000 OPS in 2.045740 seconds, throughput 977641.342497
+193042	[1728266328]	2000000 OPS in 2.330116 seconds, throughput 858326.366584
+193042	[1728266329]	2000000 OPS in 2.033591 seconds, throughput 983481.929257
+193042	[1728266329]	2000000 OPS in 2.026459 seconds, throughput 986943.234479
+193042	[1728266329]	2000000 OPS in 2.037783 seconds, throughput 981458.771616
+193042	[1728266330]	2000000 OPS in 2.029920 seconds, throughput 985260.502877
+193042	[1728266331]	2000000 OPS in 2.036843 seconds, throughput 981911.713372
+193042	[1728266331]	2000000 OPS in 2.029050 seconds, throughput 985682.955077
+193042	[1728266331]	2000000 OPS in 2.040027 seconds, throughput 980379.181256
+193042	[1728266332]	2000000 OPS in 2.025532 seconds, throughput 987394.916496
+193042	[1728266333]	2000000 OPS in 2.035770 seconds, throughput 982429.252813
+193042	[1728266333]	2000000 OPS in 2.022619 seconds, throughput 988816.974428
+193042	[1728266333]	2000000 OPS in 2.040554 seconds, throughput 980125.985394
+193042	[1728266334]	2000000 OPS in 2.027969 seconds, throughput 986208.369063
+193042	[1728266335]	2000000 OPS in 2.039219 seconds, throughput 980767.637022
+193042	[1728266335]	2000000 OPS in 2.025628 seconds, throughput 987348.121175
+193042	[1728266335]	2000000 OPS in 2.040831 seconds, throughput 979992.953851
+193042	[1728266336]	2000000 OPS in 2.031525 seconds, throughput 984482.100885
+193042	[1728266337]	2000000 OPS in 2.039462 seconds, throughput 980650.779470
+193042	[1728266337]	2000000 OPS in 2.026401 seconds, throughput 986971.482939
+193042	[1728266337]	2000000 OPS in 2.036435 seconds, throughput 982108.439503
+193042	[1728266338]	2000000 OPS in 2.026051 seconds, throughput 987141.982112
+193042	[1728266339]	2000000 OPS in 2.038480 seconds, throughput 981123.189828
+193042	[1728266339]	2000000 OPS in 2.028602 seconds, throughput 985900.635019
+193042	[1728266339]	2000000 OPS in 2.037701 seconds, throughput 981498.266919
+193042	[1728266340]	2000000 OPS in 2.031784 seconds, throughput 984356.604836
+193042	[1728266341]	2000000 OPS in 2.041442 seconds, throughput 979699.643683
+193042	[1728266341]	2000000 OPS in 2.027124 seconds, throughput 986619.466791
+193042	[1728266342]	2000000 OPS in 2.039707 seconds, throughput 980532.988316
+193042	[1728266342]	2000000 OPS in 2.031295 seconds, throughput 984593.572081
+193042	[1728266343]	2000000 OPS in 2.038079 seconds, throughput 981316.229646
+193042	[1728266343]	2000000 OPS in 2.025434 seconds, throughput 987442.691295
+193042	[1728266344]	2000000 OPS in 2.033430 seconds, throughput 983559.797977
+193042	[1728266344]	2000000 OPS in 2.024841 seconds, throughput 987731.876231
+193042	[1728266345]	2000000 OPS in 2.038604 seconds, throughput 981063.512090
+193042	[1728266345]	2000000 OPS in 2.023470 seconds, throughput 988401.112940
+193042	[1728266346]	2000000 OPS in 2.039158 seconds, throughput 980796.976007
+193042	[1728266346]	2000000 OPS in 2.025023 seconds, throughput 987643.103313
+193042	[1728266347]	2000000 OPS in 2.041172 seconds, throughput 979829.235361
+193042	[1728266347]	2000000 OPS in 2.022987 seconds, throughput 988637.099497
+193042	[1728266348]	2000000 OPS in 2.041057 seconds, throughput 979884.442228
+193042	[1728266348]	2000000 OPS in 2.028637 seconds, throughput 985883.625311
+193042	[1728266349]	2000000 OPS in 2.037059 seconds, throughput 981807.596147
+193042	[1728266349]	2000000 OPS in 2.022654 seconds, throughput 988799.863941
+193042	[1728266350]	2000000 OPS in 2.040250 seconds, throughput 980272.025487
+193042	[1728266350]	2000000 OPS in 2.028374 seconds, throughput 986011.455481
+193042	[1728266351]	2000000 OPS in 2.042835 seconds, throughput 979031.590902
+193042	[1728266351]	2000000 OPS in 2.034726 seconds, throughput 982933.328615
+193042	[1728266352]	2000000 OPS in 2.049132 seconds, throughput 976023.018527
+193042	[1728266352]	2000000 OPS in 2.033639 seconds, throughput 983458.716124
+193042	[1728266353]	2000000 OPS in 2.020745 seconds, throughput 989733.984248
+193042	[1728266353]	2000000 OPS in 2.038682 seconds, throughput 981025.976587
+193042	[1728266354]	2000000 OPS in 2.040232 seconds, throughput 980280.673963
+193042	[1728266354]	2000000 OPS in 2.030680 seconds, throughput 984891.760396
+193042	[1728266355]	2000000 OPS in 2.040013 seconds, throughput 980385.909305
+193042	[1728266356]	2000000 OPS in 2.012841 seconds, throughput 993620.459838
+193042	[1728266356]	2000000 OPS in 1.998229 seconds, throughput 1000886.284805
+193042	[1728266357]	2000000 OPS in 2.054881 seconds, throughput 973292.370702
+193042	[1728266358]	2000000 OPS in 2.247145 seconds, throughput 890018.223123
+193042	[1728266360]	2000000 OPS in 1.923921 seconds, throughput 1039543.723469
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     255025 ms      1019883 ms            4 CompactionCPUUsage=0.319108 CompactionThroughput=2.89941G Lat_Get_Avg=870.332 Lat_Get_P50=826.621 Lat_Get_P95=1.41975k Lat_Get_P99=2.39993k Lat_Put_Avg=1.18076k Lat_Put_P50=1.13886k Lat_Put_P95=1.83505k Lat_Put_P99=2.42709k items_per_second=3.92119M/s
+4544.29user 28.15system 17:31.95elapsed 434%CPU (0avgtext+0avgdata 873104maxresident)k
+335920inputs+36920outputs (1739major+2984438minor)pagefaults 0swaps

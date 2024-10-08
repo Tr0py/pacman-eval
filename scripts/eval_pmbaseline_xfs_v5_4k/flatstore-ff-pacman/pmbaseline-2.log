@@ -1,0 +1,2368 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 2
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target fastfair
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/fastfair.dir/db/index/FAST_FAIR/ff_btree.cpp.o
+[ 68%] Linking CXX static library libfastfair.a
+[ 68%] Built target fastfair
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 79%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-08T00:40:08-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 2.98, 4.08, 4.50
+[1728366008]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728366008]	Setup starts!
+[1728366008]	Setup starts!
+[1728366008]	Setup starts!
+Using MADVISE_RANDOM
+Using MADV_NOHUGEPAGE
+DB index type: FastFair
+Using MADVISE_RANDOM
+Using MADVISE_NOHUGEPAGE
+[1728366008]	Initializing log segments...
+Log: pool_start 0x7fa3e5400000 total segments: 2028  cleaners: 2
+[1728366008]Initialized 2026 free log segments...
+[1728366008]	DB init finished in 0.104341 seconds
+[1728366008]	DB init finished in 0.104302 seconds
+[1728366008]	DB init finished in 0.104391 seconds
+[1728366008]	DB init finished in 0.104152 seconds
+[1728366068]	DB load finished in 59.299284 seconds
+[1728366068]	DB load finished in 59.365499 seconds
+[1728366068]	DB load finished in 59.391616 seconds
+[1728366068]	DB load finished in 59.670216 seconds
+[1728366068]	DB warmup finished in 0.000017 seconds
+[1728366068]	DB warmup finished in 0.278641 seconds
+[1728366068]	DB warmup finished in 0.370979 seconds
+[1728366068]	DB warmup finished in 0.304769 seconds
+[1728366068]	ETC init!
+[1728366068]	ETC init!
+[1728366068]	ETC init!
+[1728366068]	ETC starts!
+[1728366068]	ETC init!
+[1728366068]	ETC starts!
+[1728366068]	ETC starts!
+[1728366068]	ETC starts!
+55521	[1728366079]	2000000 OPS in 11.246092 seconds, throughput 177839.555287
+55521	[1728366079]	2000000 OPS in 11.390181 seconds, throughput 175589.834788
+55521	[1728366079]	2000000 OPS in 11.418394 seconds, throughput 175155.980780
+55521	[1728366080]	2000000 OPS in 11.541219 seconds, throughput 173291.920030
+55521	[1728366091]	2000000 OPS in 11.429377 seconds, throughput 174987.665557
+55521	[1728366091]	2000000 OPS in 11.440429 seconds, throughput 174818.619127
+55521	[1728366091]	2000000 OPS in 11.579219 seconds, throughput 172723.220798
+55521	[1728366091]	2000000 OPS in 11.446573 seconds, throughput 174724.784440
+55521	[1728366102]	2000000 OPS in 11.455909 seconds, throughput 174582.392371
+55521	[1728366102]	2000000 OPS in 11.427197 seconds, throughput 175021.048469
+55521	[1728366102]	2000000 OPS in 11.544955 seconds, throughput 173235.841976
+55521	[1728366103]	2000000 OPS in 11.794235 seconds, throughput 169574.372564
+55521	[1728366114]	2000000 OPS in 11.559317 seconds, throughput 173020.603207
+55521	[1728366114]	2000000 OPS in 11.467733 seconds, throughput 174402.386243
+55521	[1728366114]	2000000 OPS in 11.781103 seconds, throughput 169763.391424
+55521	[1728366115]	2000000 OPS in 11.818405 seconds, throughput 169227.573433
+55521	[1728366123]	2000000 OPS in 9.709818 seconds, throughput 205977.084225
+55521	[1728366124]	2000000 OPS in 9.615603 seconds, throughput 207995.276011
+55521	[1728366124]	2000000 OPS in 9.342540 seconds, throughput 214074.545038
+55521	[1728366124]	2000000 OPS in 9.094874 seconds, throughput 219904.091030
+55521	[1728366126]	2000000 OPS in 2.577617 seconds, throughput 775910.463036
+55521	[1728366126]	2000000 OPS in 2.581437 seconds, throughput 774762.273881
+55521	[1728366126]	2000000 OPS in 2.594826 seconds, throughput 770764.590766
+55521	[1728366126]	2000000 OPS in 2.585894 seconds, throughput 773426.907677
+55521	[1728366129]	2000000 OPS in 2.598711 seconds, throughput 769612.319338
+55521	[1728366129]	2000000 OPS in 2.598271 seconds, throughput 769742.648092
+55521	[1728366129]	2000000 OPS in 2.614369 seconds, throughput 765002.950999
+55521	[1728366129]	2000000 OPS in 2.617842 seconds, throughput 763988.048171
+55521	[1728366131]	2000000 OPS in 2.697049 seconds, throughput 741551.228769
+55521	[1728366131]	2000000 OPS in 2.696428 seconds, throughput 741722.011491
+55521	[1728366131]	2000000 OPS in 2.712560 seconds, throughput 737310.879759
+55521	[1728366132]	2000000 OPS in 2.702294 seconds, throughput 740111.919725
+55521	[1728366134]	2000000 OPS in 2.680249 seconds, throughput 746199.327003
+55521	[1728366134]	2000000 OPS in 2.685823 seconds, throughput 744650.708554
+55521	[1728366134]	2000000 OPS in 2.696787 seconds, throughput 741623.272435
+55521	[1728366134]	2000000 OPS in 2.701193 seconds, throughput 740413.587626
+55521	[1728366137]	2000000 OPS in 2.695484 seconds, throughput 741981.773960
+55521	[1728366137]	2000000 OPS in 2.675449 seconds, throughput 747538.076786
+55521	[1728366137]	2000000 OPS in 2.688234 seconds, throughput 743982.852683
+55521	[1728366137]	2000000 OPS in 2.687775 seconds, throughput 744109.905033
+55521	[1728366139]	2000000 OPS in 2.697689 seconds, throughput 741375.303083
+55521	[1728366139]	2000000 OPS in 2.679650 seconds, throughput 746366.129905
+55521	[1728366140]	2000000 OPS in 2.699113 seconds, throughput 740984.167762
+55521	[1728366140]	2000000 OPS in 2.678035 seconds, throughput 746816.229063
+55521	[1728366142]	2000000 OPS in 2.671176 seconds, throughput 748733.890990
+55521	[1728366142]	2000000 OPS in 2.654780 seconds, throughput 753358.093703
+55521	[1728366142]	2000000 OPS in 2.673447 seconds, throughput 748097.867659
+55521	[1728366142]	2000000 OPS in 2.670331 seconds, throughput 748970.820471
+55521	[1728366145]	2000000 OPS in 2.672145 seconds, throughput 748462.377603
+55521	[1728366145]	2000000 OPS in 2.661225 seconds, throughput 751533.598249
+55521	[1728366145]	2000000 OPS in 2.673526 seconds, throughput 748075.762121
+55521	[1728366145]	2000000 OPS in 2.666692 seconds, throughput 749992.875068
+55521	[1728366147]	2000000 OPS in 2.659479 seconds, throughput 752026.994761
+55521	[1728366147]	2000000 OPS in 2.646265 seconds, throughput 755782.206242
+55521	[1728366148]	2000000 OPS in 2.662769 seconds, throughput 751097.823356
+55521	[1728366148]	2000000 OPS in 2.654503 seconds, throughput 753436.707361
+55521	[1728366150]	2000000 OPS in 2.627179 seconds, throughput 761272.832951
+55521	[1728366150]	2000000 OPS in 2.643402 seconds, throughput 756600.774305
+55521	[1728366150]	2000000 OPS in 2.648062 seconds, throughput 755269.325265
+55521	[1728366150]	2000000 OPS in 2.637893 seconds, throughput 758180.866320
+55521	[1728366153]	2000000 OPS in 2.631154 seconds, throughput 760122.744621
+55521	[1728366153]	2000000 OPS in 2.645726 seconds, throughput 755936.177820
+55521	[1728366153]	2000000 OPS in 2.648550 seconds, throughput 755130.165562
+55521	[1728366153]	2000000 OPS in 2.643036 seconds, throughput 756705.546198
+55521	[1728366155]	2000000 OPS in 2.634614 seconds, throughput 759124.486547
+55521	[1728366155]	2000000 OPS in 2.645513 seconds, throughput 755997.041028
+55521	[1728366156]	2000000 OPS in 2.650418 seconds, throughput 754597.953983
+55521	[1728366156]	2000000 OPS in 2.646186 seconds, throughput 755804.769582
+55521	[1728366158]	2000000 OPS in 2.636824 seconds, throughput 758488.241915
+55521	[1728366158]	2000000 OPS in 2.649614 seconds, throughput 754826.929507
+55521	[1728366158]	2000000 OPS in 2.652481 seconds, throughput 754011.056064
+55521	[1728366158]	2000000 OPS in 2.647864 seconds, throughput 755325.802232
+55521	[1728366161]	2000000 OPS in 2.642431 seconds, throughput 756878.798349
+55521	[1728366161]	2000000 OPS in 2.655710 seconds, throughput 753094.276107
+55521	[1728366161]	2000000 OPS in 2.661148 seconds, throughput 751555.343784
+55521	[1728366161]	2000000 OPS in 2.655750 seconds, throughput 753082.933258
+55521	[1728366163]	2000000 OPS in 2.644289 seconds, throughput 756346.980228
+55521	[1728366163]	2000000 OPS in 2.657451 seconds, throughput 752600.894617
+55521	[1728366163]	2000000 OPS in 2.658755 seconds, throughput 752231.777655
+55521	[1728366164]	2000000 OPS in 2.654602 seconds, throughput 753408.608899
+55521	[1728366166]	2000000 OPS in 2.646241 seconds, throughput 755789.060785
+55521	[1728366166]	2000000 OPS in 2.660150 seconds, throughput 751837.302408
+55521	[1728366166]	2000000 OPS in 2.660929 seconds, throughput 751617.198354
+55521	[1728366166]	2000000 OPS in 2.655704 seconds, throughput 753095.977564
+55521	[1728366169]	2000000 OPS in 2.654292 seconds, throughput 753496.600977
+55521	[1728366169]	2000000 OPS in 2.661599 seconds, throughput 751427.994976
+55521	[1728366169]	2000000 OPS in 2.663505 seconds, throughput 750890.274281
+55521	[1728366169]	2000000 OPS in 2.656110 seconds, throughput 752980.862991
+55521	[1728366171]	2000000 OPS in 2.663894 seconds, throughput 750780.624154
+55521	[1728366171]	2000000 OPS in 2.675086 seconds, throughput 747639.515141
+55521	[1728366171]	2000000 OPS in 2.675326 seconds, throughput 747572.445377
+55521	[1728366172]	2000000 OPS in 2.669905 seconds, throughput 749090.323438
+55521	[1728366174]	2000000 OPS in 2.658405 seconds, throughput 752330.814906
+55521	[1728366174]	2000000 OPS in 2.669396 seconds, throughput 749233.159861
+55521	[1728366174]	2000000 OPS in 2.668921 seconds, throughput 749366.504291
+55521	[1728366174]	2000000 OPS in 2.665121 seconds, throughput 750434.970870
+55521	[1728366176]	2000000 OPS in 2.659964 seconds, throughput 751889.875201
+55521	[1728366177]	2000000 OPS in 2.677607 seconds, throughput 746935.603320
+55521	[1728366177]	2000000 OPS in 2.678609 seconds, throughput 746656.193569
+55521	[1728366177]	2000000 OPS in 2.672825 seconds, throughput 748271.959444
+55521	[1728366179]	2000000 OPS in 2.666151 seconds, throughput 750145.059301
+55521	[1728366179]	2000000 OPS in 2.679274 seconds, throughput 746470.872333
+55521	[1728366180]	2000000 OPS in 2.682729 seconds, throughput 745509.516615
+55521	[1728366180]	2000000 OPS in 2.678578 seconds, throughput 746664.834849
+55521	[1728366182]	2000000 OPS in 2.683463 seconds, throughput 745305.599518
+55521	[1728366182]	2000000 OPS in 2.697755 seconds, throughput 741357.165495
+55521	[1728366182]	2000000 OPS in 2.696022 seconds, throughput 741833.709072
+55521	[1728366182]	2000000 OPS in 2.692392 seconds, throughput 742833.881545
+55521	[1728366185]	2000000 OPS in 2.683582 seconds, throughput 745272.549898
+55521	[1728366185]	2000000 OPS in 2.698296 seconds, throughput 741208.525677
+55521	[1728366185]	2000000 OPS in 2.702019 seconds, throughput 740187.245167
+55521	[1728366185]	2000000 OPS in 2.696960 seconds, throughput 741575.700047
+55521	[1728366187]	2000000 OPS in 2.689148 seconds, throughput 743729.984367
+55521	[1728366187]	2000000 OPS in 2.702973 seconds, throughput 739926.000001
+55521	[1728366188]	2000000 OPS in 2.697899 seconds, throughput 741317.595655
+55521	[1728366188]	2000000 OPS in 2.698037 seconds, throughput 741279.678522
+55521	[1728366190]	2000000 OPS in 2.694132 seconds, throughput 742354.123703
+55521	[1728366190]	2000000 OPS in 2.705645 seconds, throughput 739195.275064
+55521	[1728366190]	2000000 OPS in 2.706796 seconds, throughput 738880.950024
+55521	[1728366190]	2000000 OPS in 2.702284 seconds, throughput 740114.658563
+55521	[1728366193]	2000000 OPS in 2.690140 seconds, throughput 743455.730929
+55521	[1728366193]	2000000 OPS in 2.701951 seconds, throughput 740205.873460
+55521	[1728366193]	2000000 OPS in 2.699218 seconds, throughput 740955.343362
+55521	[1728366193]	2000000 OPS in 2.693770 seconds, throughput 742453.884333
+55521	[1728366195]	2000000 OPS in 2.687635 seconds, throughput 744148.666020
+55521	[1728366196]	2000000 OPS in 2.705315 seconds, throughput 739285.443654
+55521	[1728366196]	2000000 OPS in 2.704292 seconds, throughput 739565.106135
+55521	[1728366196]	2000000 OPS in 2.693416 seconds, throughput 742551.466242
+55521	[1728366198]	2000000 OPS in 2.688985 seconds, throughput 743775.067544
+55521	[1728366198]	2000000 OPS in 2.702454 seconds, throughput 740068.101067
+55521	[1728366198]	2000000 OPS in 2.701742 seconds, throughput 740263.133934
+55521	[1728366198]	2000000 OPS in 2.698592 seconds, throughput 741127.224864
+55521	[1728366201]	2000000 OPS in 2.698303 seconds, throughput 741206.602817
+55521	[1728366201]	2000000 OPS in 2.706583 seconds, throughput 738939.097748
+55521	[1728366201]	2000000 OPS in 2.707064 seconds, throughput 738807.800628
+55521	[1728366201]	2000000 OPS in 2.702332 seconds, throughput 740101.512323
+55521	[1728366203]	2000000 OPS in 2.693818 seconds, throughput 742440.654862
+55521	[1728366204]	2000000 OPS in 2.708029 seconds, throughput 738544.528142
+55521	[1728366204]	2000000 OPS in 2.701608 seconds, throughput 740299.851052
+55521	[1728366204]	2000000 OPS in 2.697226 seconds, throughput 741502.565970
+55521	[1728366206]	2000000 OPS in 2.688666 seconds, throughput 743863.313628
+55521	[1728366206]	2000000 OPS in 2.705641 seconds, throughput 739196.367885
+55521	[1728366207]	2000000 OPS in 2.703020 seconds, throughput 739913.134198
+55521	[1728366207]	2000000 OPS in 2.700453 seconds, throughput 740616.481753
+55521	[1728366209]	2000000 OPS in 2.694634 seconds, throughput 742215.825971
+55521	[1728366209]	2000000 OPS in 2.707710 seconds, throughput 738631.537351
+55521	[1728366209]	2000000 OPS in 2.707199 seconds, throughput 738770.958470
+55521	[1728366209]	2000000 OPS in 2.704381 seconds, throughput 739540.767370
+55521	[1728366211]	2000000 OPS in 2.693356 seconds, throughput 742568.008091
+55521	[1728366212]	2000000 OPS in 2.707183 seconds, throughput 738775.324756
+55521	[1728366212]	2000000 OPS in 2.700855 seconds, throughput 740506.247096
+55521	[1728366212]	2000000 OPS in 2.708193 seconds, throughput 738499.804113
+55521	[1728366214]	2000000 OPS in 2.699172 seconds, throughput 740967.970918
+55521	[1728366214]	2000000 OPS in 2.705933 seconds, throughput 739116.600448
+55521	[1728366215]	2000000 OPS in 2.700702 seconds, throughput 740548.198209
+55521	[1728366215]	2000000 OPS in 2.708318 seconds, throughput 738465.719314
+55521	[1728366217]	2000000 OPS in 2.701517 seconds, throughput 740324.787888
+55521	[1728366217]	2000000 OPS in 2.714529 seconds, throughput 736776.066861
+55521	[1728366217]	2000000 OPS in 2.705912 seconds, throughput 739122.336573
+55521	[1728366217]	2000000 OPS in 2.718657 seconds, throughput 735657.348463
+55521	[1728366220]	2000000 OPS in 2.689117 seconds, throughput 743738.558047
+55521	[1728366220]	2000000 OPS in 2.704259 seconds, throughput 739574.131028
+55521	[1728366220]	2000000 OPS in 2.695719 seconds, throughput 741917.091507
+55521	[1728366220]	2000000 OPS in 2.707892 seconds, throughput 738581.893222
+55521	[1728366222]	2000000 OPS in 2.680345 seconds, throughput 746172.600915
+55521	[1728366223]	2000000 OPS in 2.700936 seconds, throughput 740484.039607
+55521	[1728366223]	2000000 OPS in 2.693496 seconds, throughput 742529.411590
+55521	[1728366223]	2000000 OPS in 2.705069 seconds, throughput 739352.674553
+55521	[1728366225]	2000000 OPS in 2.685291 seconds, throughput 744798.236020
+55521	[1728366225]	2000000 OPS in 2.702405 seconds, throughput 740081.519979
+55521	[1728366225]	2000000 OPS in 2.700519 seconds, throughput 740598.381274
+55521	[1728366226]	2000000 OPS in 2.702693 seconds, throughput 740002.656610
+55521	[1728366228]	2000000 OPS in 2.686883 seconds, throughput 744356.937016
+55521	[1728366228]	2000000 OPS in 2.705937 seconds, throughput 739115.507863
+55521	[1728366228]	2000000 OPS in 2.699147 seconds, throughput 740974.833901
+55521	[1728366228]	2000000 OPS in 2.700942 seconds, throughput 740482.394661
+55521	[1728366230]	2000000 OPS in 2.690397 seconds, throughput 743384.712368
+55521	[1728366231]	2000000 OPS in 2.705577 seconds, throughput 739213.853459
+55521	[1728366231]	2000000 OPS in 2.700799 seconds, throughput 740521.601200
+55521	[1728366231]	2000000 OPS in 2.704446 seconds, throughput 739522.992879
+55521	[1728366233]	2000000 OPS in 2.694330 seconds, throughput 742299.569837
+55521	[1728366233]	2000000 OPS in 2.705366 seconds, throughput 739271.507072
+55521	[1728366234]	2000000 OPS in 2.696438 seconds, throughput 741719.260743
+55521	[1728366234]	2000000 OPS in 2.703994 seconds, throughput 739646.611642
+55521	[1728366236]	2000000 OPS in 2.692786 seconds, throughput 742725.192422
+55521	[1728366236]	2000000 OPS in 2.707090 seconds, throughput 738800.704816
+55521	[1728366236]	2000000 OPS in 2.700065 seconds, throughput 740722.908523
+55521	[1728366236]	2000000 OPS in 2.710173 seconds, throughput 737960.270433
+55521	[1728366238]	2000000 OPS in 2.695275 seconds, throughput 742039.309532
+55521	[1728366239]	2000000 OPS in 2.711178 seconds, throughput 737686.717729
+55521	[1728366239]	2000000 OPS in 2.701654 seconds, throughput 740287.246257
+55521	[1728366239]	2000000 OPS in 2.711841 seconds, throughput 737506.365602
+55521	[1728366241]	2000000 OPS in 2.759406 seconds, throughput 724793.669362
+55521	[1728366242]	2000000 OPS in 2.712107 seconds, throughput 737434.031917
+55521	[1728366242]	2000000 OPS in 2.698843 seconds, throughput 741058.297945
+55521	[1728366242]	2000000 OPS in 2.710993 seconds, throughput 737737.057971
+55521	[1728366244]	2000000 OPS in 2.705101 seconds, throughput 739343.928378
+55521	[1728366244]	2000000 OPS in 2.716307 seconds, throughput 736293.798897
+55521	[1728366244]	2000000 OPS in 2.704643 seconds, throughput 739469.127719
+55521	[1728366244]	2000000 OPS in 2.715734 seconds, throughput 736449.151500
+55521	[1728366247]	2000000 OPS in 2.701479 seconds, throughput 740335.201569
+55521	[1728366247]	2000000 OPS in 2.719547 seconds, throughput 735416.596955
+55521	[1728366247]	2000000 OPS in 2.707964 seconds, throughput 738562.255628
+55521	[1728366247]	2000000 OPS in 2.715925 seconds, throughput 736397.360015
+55521	[1728366249]	2000000 OPS in 2.709012 seconds, throughput 738276.537719
+55521	[1728366250]	2000000 OPS in 2.718653 seconds, throughput 735658.430848
+55521	[1728366250]	2000000 OPS in 2.710973 seconds, throughput 737742.500571
+55521	[1728366250]	2000000 OPS in 2.712608 seconds, throughput 737297.832934
+55521	[1728366252]	2000000 OPS in 2.754747 seconds, throughput 726019.485637
+55521	[1728366252]	2000000 OPS in 2.719036 seconds, throughput 735554.806924
+55521	[1728366252]	2000000 OPS in 2.709099 seconds, throughput 738252.828708
+55521	[1728366253]	2000000 OPS in 2.712561 seconds, throughput 737310.607946
+55521	[1728366255]	2000000 OPS in 2.695686 seconds, throughput 741926.173894
+55521	[1728366255]	2000000 OPS in 2.725720 seconds, throughput 733751.082283
+55521	[1728366255]	2000000 OPS in 2.715200 seconds, throughput 736593.989393
+55521	[1728366255]	2000000 OPS in 2.720703 seconds, throughput 735104.125662
+55521	[1728366257]	2000000 OPS in 2.690561 seconds, throughput 743339.400222
+55521	[1728366258]	2000000 OPS in 2.716201 seconds, throughput 736322.532832
+55521	[1728366258]	2000000 OPS in 2.711457 seconds, throughput 737610.812194
+55521	[1728366258]	2000000 OPS in 2.722316 seconds, throughput 734668.568968
+55521	[1728366260]	2000000 OPS in 2.689391 seconds, throughput 743662.784623
+55521	[1728366261]	2000000 OPS in 2.718210 seconds, throughput 735778.324706
+55521	[1728366261]	2000000 OPS in 2.715369 seconds, throughput 736548.145022
+55521	[1728366261]	2000000 OPS in 2.723019 seconds, throughput 734478.900074
+55521	[1728366263]	2000000 OPS in 2.693392 seconds, throughput 742558.082893
+55521	[1728366263]	2000000 OPS in 2.715982 seconds, throughput 736381.905329
+55521	[1728366263]	2000000 OPS in 2.716501 seconds, throughput 736241.216182
+55521	[1728366263]	2000000 OPS in 2.722431 seconds, throughput 734637.535350
+55521	[1728366265]	2000000 OPS in 2.694990 seconds, throughput 742117.781513
+55521	[1728366266]	2000000 OPS in 2.721872 seconds, throughput 734788.410329
+55521	[1728366266]	2000000 OPS in 2.718490 seconds, throughput 735702.540749
+55521	[1728366266]	2000000 OPS in 2.725620 seconds, throughput 733778.002803
+55521	[1728366268]	2000000 OPS in 2.694358 seconds, throughput 742291.855796
+55521	[1728366269]	2000000 OPS in 2.718308 seconds, throughput 735751.798545
+55521	[1728366269]	2000000 OPS in 2.715228 seconds, throughput 736586.393482
+55521	[1728366269]	2000000 OPS in 2.722094 seconds, throughput 734728.484762
+55521	[1728366271]	2000000 OPS in 2.696490 seconds, throughput 741704.957185
+55521	[1728366271]	2000000 OPS in 2.718589 seconds, throughput 735675.749442
+55521	[1728366271]	2000000 OPS in 2.718515 seconds, throughput 735695.775083
+55521	[1728366272]	2000000 OPS in 2.722660 seconds, throughput 734575.745778
+55521	[1728366274]	2000000 OPS in 2.695107 seconds, throughput 742085.564692
+55521	[1728366274]	2000000 OPS in 2.726011 seconds, throughput 733672.754805
+55521	[1728366274]	2000000 OPS in 2.721667 seconds, throughput 734843.755684
+55521	[1728366274]	2000000 OPS in 2.724441 seconds, throughput 734095.544737
+55521	[1728366276]	2000000 OPS in 2.705895 seconds, throughput 739126.980167
+55521	[1728366277]	2000000 OPS in 2.731147 seconds, throughput 732293.062219
+55521	[1728366277]	2000000 OPS in 2.723999 seconds, throughput 734214.660138
+55521	[1728366277]	2000000 OPS in 2.733676 seconds, throughput 731615.597459
+55521	[1728366279]	2000000 OPS in 2.694783 seconds, throughput 742174.787358
+55521	[1728366280]	2000000 OPS in 2.721764 seconds, throughput 734817.566843
+55521	[1728366280]	2000000 OPS in 2.715415 seconds, throughput 736535.667660
+55521	[1728366280]	2000000 OPS in 2.719686 seconds, throughput 735379.010665
+55521	[1728366282]	2000000 OPS in 2.694604 seconds, throughput 742224.089328
+55521	[1728366282]	2000000 OPS in 2.721448 seconds, throughput 734902.889932
+55521	[1728366282]	2000000 OPS in 2.714584 seconds, throughput 736761.139092
+55521	[1728366283]	2000000 OPS in 2.725317 seconds, throughput 733859.584041
+55521	[1728366284]	2000000 OPS in 2.701601 seconds, throughput 740301.769210
+55521	[1728366285]	2000000 OPS in 2.719842 seconds, throughput 735336.832066
+55521	[1728366285]	2000000 OPS in 2.720282 seconds, throughput 735217.892851
+55521	[1728366285]	2000000 OPS in 2.722437 seconds, throughput 734635.916276
+55521	[1728366287]	2000000 OPS in 2.695959 seconds, throughput 741851.044471
+55521	[1728366288]	2000000 OPS in 2.723677 seconds, throughput 734301.460856
+55521	[1728366288]	2000000 OPS in 2.717638 seconds, throughput 735933.189041
+55521	[1728366288]	2000000 OPS in 2.722630 seconds, throughput 734583.839890
+55521	[1728366290]	2000000 OPS in 2.692874 seconds, throughput 742700.921023
+55521	[1728366291]	2000000 OPS in 2.722270 seconds, throughput 734680.983150
+55521	[1728366291]	2000000 OPS in 2.714019 seconds, throughput 736914.516811
+55521	[1728366291]	2000000 OPS in 2.719948 seconds, throughput 735308.175009
+55521	[1728366292]	2000000 OPS in 2.697537 seconds, throughput 741417.077875
+55521	[1728366293]	2000000 OPS in 2.721182 seconds, throughput 734974.727894
+55521	[1728366293]	2000000 OPS in 2.716476 seconds, throughput 736247.991884
+55521	[1728366293]	2000000 OPS in 2.721350 seconds, throughput 734929.354916
+55521	[1728366295]	2000000 OPS in 2.695387 seconds, throughput 742008.475963
+55521	[1728366296]	2000000 OPS in 2.721209 seconds, throughput 734967.435430
+55521	[1728366296]	2000000 OPS in 2.713866 seconds, throughput 736956.061943
+55521	[1728366296]	2000000 OPS in 2.724136 seconds, throughput 734177.735620
+55521	[1728366298]	2000000 OPS in 2.699632 seconds, throughput 740841.714723
+55521	[1728366299]	2000000 OPS in 2.720434 seconds, throughput 735176.813700
+55521	[1728366299]	2000000 OPS in 2.716194 seconds, throughput 736324.430435
+55521	[1728366299]	2000000 OPS in 2.722865 seconds, throughput 734520.440786
+55521	[1728366301]	2000000 OPS in 2.697617 seconds, throughput 741395.090556
+55521	[1728366301]	2000000 OPS in 2.718608 seconds, throughput 735670.607899
+55521	[1728366301]	2000000 OPS in 2.718432 seconds, throughput 735718.237572
+55521	[1728366302]	2000000 OPS in 2.718068 seconds, throughput 735816.763966
+55521	[1728366303]	2000000 OPS in 2.696949 seconds, throughput 741578.724700
+55521	[1728366304]	2000000 OPS in 2.716778 seconds, throughput 736166.149755
+55521	[1728366304]	2000000 OPS in 2.725461 seconds, throughput 733820.810498
+55521	[1728366304]	2000000 OPS in 2.723778 seconds, throughput 734274.232335
+55521	[1728366306]	2000000 OPS in 2.692856 seconds, throughput 742705.885499
+55521	[1728366307]	2000000 OPS in 2.717056 seconds, throughput 736090.827719
+55521	[1728366307]	2000000 OPS in 2.722865 seconds, throughput 734520.440786
+55521	[1728366307]	2000000 OPS in 2.726886 seconds, throughput 733437.334747
+55521	[1728366309]	2000000 OPS in 2.698142 seconds, throughput 741250.831127
+55521	[1728366310]	2000000 OPS in 2.723107 seconds, throughput 734455.164634
+55521	[1728366310]	2000000 OPS in 2.725857 seconds, throughput 733714.204377
+55521	[1728366310]	2000000 OPS in 2.725972 seconds, throughput 733683.251332
+55521	[1728366311]	2000000 OPS in 2.698290 seconds, throughput 741210.173851
+55521	[1728366312]	2000000 OPS in 2.719702 seconds, throughput 735374.684432
+55521	[1728366312]	2000000 OPS in 2.728172 seconds, throughput 733091.608594
+55521	[1728366313]	2000000 OPS in 2.728433 seconds, throughput 733021.481561
+55521	[1728366314]	2000000 OPS in 2.702032 seconds, throughput 740183.683983
+55521	[1728366315]	2000000 OPS in 2.717184 seconds, throughput 736056.152252
+55521	[1728366315]	2000000 OPS in 2.723990 seconds, throughput 734217.085966
+55521	[1728366315]	2000000 OPS in 2.727873 seconds, throughput 733171.962184
+55521	[1728366317]	2000000 OPS in 2.697703 seconds, throughput 741371.455642
+55521	[1728366318]	2000000 OPS in 2.716595 seconds, throughput 736215.740661
+55521	[1728366318]	2000000 OPS in 2.724779 seconds, throughput 734004.482565
+55521	[1728366318]	2000000 OPS in 2.727738 seconds, throughput 733208.248006
+55521	[1728366319]	2000000 OPS in 2.703936 seconds, throughput 739662.477218
+55521	[1728366320]	2000000 OPS in 2.720033 seconds, throughput 735285.196908
+55521	[1728366320]	2000000 OPS in 2.727932 seconds, throughput 733156.105064
+55521	[1728366321]	2000000 OPS in 2.729840 seconds, throughput 732643.671424
+55521	[1728366322]	2000000 OPS in 2.698494 seconds, throughput 741154.140050
+55521	[1728366323]	2000000 OPS in 2.724462 seconds, throughput 734089.886370
+55521	[1728366323]	2000000 OPS in 2.723352 seconds, throughput 734389.091091
+55521	[1728366323]	2000000 OPS in 2.727740 seconds, throughput 733207.710412
+55521	[1728366325]	2000000 OPS in 2.698823 seconds, throughput 741063.789659
+55521	[1728366326]	2000000 OPS in 2.724447 seconds, throughput 734093.928052
+55521	[1728366326]	2000000 OPS in 2.724917 seconds, throughput 733967.309830
+55521	[1728366326]	2000000 OPS in 2.726656 seconds, throughput 733499.201953
+55521	[1728366328]	2000000 OPS in 2.698138 seconds, throughput 741251.930035
+55521	[1728366329]	2000000 OPS in 2.724593 seconds, throughput 734054.590906
+55521	[1728366329]	2000000 OPS in 2.727274 seconds, throughput 733332.991111
+55521	[1728366329]	2000000 OPS in 2.729310 seconds, throughput 732785.942234
+55521	[1728366330]	2000000 OPS in 2.702198 seconds, throughput 740138.213410
+55521	[1728366331]	2000000 OPS in 2.724099 seconds, throughput 734187.707569
+55521	[1728366331]	2000000 OPS in 2.730355 seconds, throughput 732505.480057
+55521	[1728366332]	2000000 OPS in 2.734994 seconds, throughput 731263.030193
+55521	[1728366333]	2000000 OPS in 2.706592 seconds, throughput 738936.640617
+55521	[1728366334]	2000000 OPS in 2.728767 seconds, throughput 732931.760022
+55521	[1728366334]	2000000 OPS in 2.731630 seconds, throughput 732163.579987
+55521	[1728366334]	2000000 OPS in 2.731685 seconds, throughput 732148.838537
+55521	[1728366336]	2000000 OPS in 2.715026 seconds, throughput 736641.196070
+55521	[1728366337]	2000000 OPS in 2.734841 seconds, throughput 731303.940522
+55521	[1728366337]	2000000 OPS in 2.736779 seconds, throughput 730786.081010
+55521	[1728366337]	2000000 OPS in 2.742953 seconds, throughput 729141.184701
+55521	[1728366338]	2000000 OPS in 2.705123 seconds, throughput 739337.915503
+55521	[1728366340]	2000000 OPS in 2.732090 seconds, throughput 732040.306139
+55521	[1728366340]	2000000 OPS in 2.730405 seconds, throughput 732492.066195
+55521	[1728366340]	2000000 OPS in 2.736979 seconds, throughput 730732.680083
+55521	[1728366341]	2000000 OPS in 2.706146 seconds, throughput 739058.424786
+55521	[1728366342]	2000000 OPS in 2.724828 seconds, throughput 733991.283120
+55521	[1728366342]	2000000 OPS in 2.726954 seconds, throughput 733419.045572
+55521	[1728366343]	2000000 OPS in 2.734773 seconds, throughput 731322.124359
+55521	[1728366344]	2000000 OPS in 2.705649 seconds, throughput 739194.182246
+55521	[1728366345]	2000000 OPS in 2.724250 seconds, throughput 734147.012939
+55521	[1728366345]	2000000 OPS in 2.730909 seconds, throughput 732356.881903
+55521	[1728366345]	2000000 OPS in 2.730118 seconds, throughput 732569.068443
+55521	[1728366346]	2000000 OPS in 2.702775 seconds, throughput 739980.205530
+55521	[1728366348]	2000000 OPS in 2.722133 seconds, throughput 734717.958307
+55521	[1728366348]	2000000 OPS in 2.729996 seconds, throughput 732601.806010
+55521	[1728366348]	2000000 OPS in 2.733836 seconds, throughput 731572.779055
+55521	[1728366349]	2000000 OPS in 2.704303 seconds, throughput 739562.097886
+55521	[1728366350]	2000000 OPS in 2.724051 seconds, throughput 734200.644555
+55521	[1728366350]	2000000 OPS in 2.729794 seconds, throughput 732656.017267
+55521	[1728366351]	2000000 OPS in 2.731158 seconds, throughput 732290.112839
+55521	[1728366352]	2000000 OPS in 2.700256 seconds, throughput 740670.514203
+55521	[1728366353]	2000000 OPS in 2.725670 seconds, throughput 733764.542296
+55521	[1728366353]	2000000 OPS in 2.731156 seconds, throughput 732290.649088
+55521	[1728366353]	2000000 OPS in 2.729798 seconds, throughput 732654.943699
+55521	[1728366355]	2000000 OPS in 2.704610 seconds, throughput 739478.150269
+55521	[1728366356]	2000000 OPS in 2.725229 seconds, throughput 733883.281001
+55521	[1728366356]	2000000 OPS in 2.726893 seconds, throughput 733435.451996
+55521	[1728366356]	2000000 OPS in 2.732409 seconds, throughput 731954.842778
+55521	[1728366357]	2000000 OPS in 2.708323 seconds, throughput 738464.355987
+55521	[1728366359]	2000000 OPS in 2.723253 seconds, throughput 734415.788764
+55521	[1728366359]	2000000 OPS in 2.728028 seconds, throughput 733130.305114
+55521	[1728366359]	2000000 OPS in 2.732657 seconds, throughput 731888.414828
+55521	[1728366360]	2000000 OPS in 2.704426 seconds, throughput 739528.461862
+55521	[1728366361]	2000000 OPS in 2.728662 seconds, throughput 732959.963528
+55521	[1728366361]	2000000 OPS in 2.733532 seconds, throughput 731654.138309
+55521	[1728366362]	2000000 OPS in 2.733409 seconds, throughput 731687.061834
+55521	[1728366363]	2000000 OPS in 2.705914 seconds, throughput 739121.790271
+55521	[1728366364]	2000000 OPS in 2.725801 seconds, throughput 733729.278109
+55521	[1728366364]	2000000 OPS in 2.730498 seconds, throughput 732467.117720
+55521	[1728366364]	2000000 OPS in 2.736075 seconds, throughput 730974.114379
+55521	[1728366365]	2000000 OPS in 2.714326 seconds, throughput 736831.169137
+55521	[1728366367]	2000000 OPS in 2.729183 seconds, throughput 732820.041749
+55521	[1728366367]	2000000 OPS in 2.731158 seconds, throughput 732290.112839
+55521	[1728366367]	2000000 OPS in 2.736881 seconds, throughput 730758.845562
+55521	[1728366368]	2000000 OPS in 2.706640 seconds, throughput 738923.536192
+55521	[1728366369]	2000000 OPS in 2.727126 seconds, throughput 733372.788789
+55521	[1728366370]	2000000 OPS in 2.731707 seconds, throughput 732142.942124
+55521	[1728366370]	2000000 OPS in 2.731019 seconds, throughput 732327.384028
+55521	[1728366371]	2000000 OPS in 2.704299 seconds, throughput 739563.191792
+55521	[1728366372]	2000000 OPS in 2.720981 seconds, throughput 735029.020783
+55521	[1728366372]	2000000 OPS in 2.731518 seconds, throughput 732193.600774
+55521	[1728366373]	2000000 OPS in 2.732909 seconds, throughput 731820.927810
+55521	[1728366373]	2000000 OPS in 2.702065 seconds, throughput 740174.644207
+55521	[1728366375]	2000000 OPS in 2.721635 seconds, throughput 734852.395711
+55521	[1728366375]	2000000 OPS in 2.725870 seconds, throughput 733710.705206
+55521	[1728366375]	2000000 OPS in 2.730402 seconds, throughput 732492.871013
+55521	[1728366376]	2000000 OPS in 2.703812 seconds, throughput 739696.399010
+55521	[1728366378]	2000000 OPS in 2.722951 seconds, throughput 734497.242146
+55521	[1728366378]	2000000 OPS in 2.728431 seconds, throughput 733022.018882
+55521	[1728366378]	2000000 OPS in 2.727419 seconds, throughput 733294.004332
+55521	[1728366379]	2000000 OPS in 2.702116 seconds, throughput 740160.674079
+55521	[1728366380]	2000000 OPS in 2.726692 seconds, throughput 733489.517701
+55521	[1728366381]	2000000 OPS in 2.732024 seconds, throughput 732057.990706
+55521	[1728366381]	2000000 OPS in 2.733925 seconds, throughput 731548.963487
+55521	[1728366382]	2000000 OPS in 2.706658 seconds, throughput 738918.622153
+55521	[1728366383]	2000000 OPS in 2.727272 seconds, throughput 733333.528889
+55521	[1728366383]	2000000 OPS in 2.733842 seconds, throughput 731571.173462
+55521	[1728366384]	2000000 OPS in 2.729976 seconds, throughput 732607.173103
+55521	[1728366384]	2000000 OPS in 2.705067 seconds, throughput 739353.221196
+55521	[1728366386]	2000000 OPS in 2.727521 seconds, throughput 733266.581632
+55521	[1728366386]	2000000 OPS in 2.731740 seconds, throughput 732134.097681
+55521	[1728366386]	2000000 OPS in 2.729951 seconds, throughput 732613.882081
+55521	[1728366387]	2000000 OPS in 2.705089 seconds, throughput 739347.208169
+55521	[1728366389]	2000000 OPS in 2.724897 seconds, throughput 733972.696950
+55521	[1728366389]	2000000 OPS in 2.729993 seconds, throughput 732602.611069
+55521	[1728366389]	2000000 OPS in 2.731850 seconds, throughput 732104.617750
+55521	[1728366390]	2000000 OPS in 2.706181 seconds, throughput 739048.866281
+55521	[1728366391]	2000000 OPS in 2.729584 seconds, throughput 732712.384012
+55521	[1728366391]	2000000 OPS in 2.730697 seconds, throughput 732413.739056
+55521	[1728366392]	2000000 OPS in 2.732494 seconds, throughput 731932.073776
+55521	[1728366392]	2000000 OPS in 2.702897 seconds, throughput 739946.805224
+55521	[1728366394]	2000000 OPS in 2.723624 seconds, throughput 734315.749898
+55521	[1728366394]	2000000 OPS in 2.729654 seconds, throughput 732693.594133
+55521	[1728366394]	2000000 OPS in 2.731833 seconds, throughput 732109.173584
+55521	[1728366395]	2000000 OPS in 2.715524 seconds, throughput 736506.103426
+55521	[1728366397]	2000000 OPS in 2.741604 seconds, throughput 729499.956960
+55521	[1728366397]	2000000 OPS in 2.746512 seconds, throughput 728196.345037
+55521	[1728366397]	2000000 OPS in 2.748634 seconds, throughput 727634.163006
+55521	[1728366398]	2000000 OPS in 2.711066 seconds, throughput 737717.193163
+55521	[1728366399]	2000000 OPS in 2.730364 seconds, throughput 732503.065525
+55521	[1728366400]	2000000 OPS in 2.729145 seconds, throughput 732830.245370
+55521	[1728366400]	2000000 OPS in 2.737425 seconds, throughput 730613.624118
+55521	[1728366401]	2000000 OPS in 2.708239 seconds, throughput 738487.260541
+55521	[1728366402]	2000000 OPS in 2.727374 seconds, throughput 733306.103233
+55521	[1728366402]	2000000 OPS in 2.732504 seconds, throughput 731929.395163
+55521	[1728366403]	2000000 OPS in 2.738058 seconds, throughput 730444.716657
+55521	[1728366403]	2000000 OPS in 2.709411 seconds, throughput 738167.815809
+55521	[1728366405]	2000000 OPS in 2.727689 seconds, throughput 733221.419304
+55521	[1728366405]	2000000 OPS in 2.732313 seconds, throughput 731980.560060
+55521	[1728366405]	2000000 OPS in 2.735432 seconds, throughput 731145.939654
+55521	[1728366406]	2000000 OPS in 2.709032 seconds, throughput 738271.087237
+55521	[1728366408]	2000000 OPS in 2.726996 seconds, throughput 733407.749773
+55521	[1728366408]	2000000 OPS in 2.729449 seconds, throughput 732748.624356
+55521	[1728366408]	2000000 OPS in 2.734871 seconds, throughput 731295.918528
+55521	[1728366409]	2000000 OPS in 2.707925 seconds, throughput 738572.892528
+55521	[1728366410]	2000000 OPS in 2.722964 seconds, throughput 734493.735503
+55521	[1728366411]	2000000 OPS in 2.729784 seconds, throughput 732658.701201
+55521	[1728366411]	2000000 OPS in 2.728172 seconds, throughput 733091.608594
+55521	[1728366411]	2000000 OPS in 2.703463 seconds, throughput 739791.889144
+55521	[1728366413]	2000000 OPS in 2.725728 seconds, throughput 733748.928727
+55521	[1728366413]	2000000 OPS in 2.733487 seconds, throughput 731666.183157
+55521	[1728366414]	2000000 OPS in 2.735309 seconds, throughput 731178.817457
+55521	[1728366414]	2000000 OPS in 2.708268 seconds, throughput 738479.352856
+55521	[1728366416]	2000000 OPS in 2.728216 seconds, throughput 733079.785472
+55521	[1728366416]	2000000 OPS in 2.733685 seconds, throughput 731613.188791
+55521	[1728366416]	2000000 OPS in 2.735171 seconds, throughput 731215.708268
+55521	[1728366417]	2000000 OPS in 2.710311 seconds, throughput 737922.695956
+55521	[1728366419]	2000000 OPS in 2.731526 seconds, throughput 732191.456351
+55521	[1728366419]	2000000 OPS in 2.732073 seconds, throughput 732044.861173
+55521	[1728366419]	2000000 OPS in 2.734568 seconds, throughput 731376.948754
+55521	[1728366420]	2000000 OPS in 2.711615 seconds, throughput 737567.833192
+55521	[1728366421]	2000000 OPS in 2.730111 seconds, throughput 732570.946749
+55521	[1728366422]	2000000 OPS in 2.733795 seconds, throughput 731583.750793
+55521	[1728366422]	2000000 OPS in 2.742177 seconds, throughput 729347.522060
+55521	[1728366422]	2000000 OPS in 2.710420 seconds, throughput 737893.020270
+55521	[1728366424]	2000000 OPS in 2.729816 seconds, throughput 732650.112682
+55521	[1728366424]	2000000 OPS in 2.734154 seconds, throughput 731487.692354
+55521	[1728366425]	2000000 OPS in 2.733715 seconds, throughput 731605.160011
+55521	[1728366425]	2000000 OPS in 2.709438 seconds, throughput 738160.459844
+55521	[1728366427]	2000000 OPS in 2.727868 seconds, throughput 733173.306040
+55521	[1728366427]	2000000 OPS in 2.739682 seconds, throughput 730011.731289
+55521	[1728366427]	2000000 OPS in 2.740997 seconds, throughput 729661.506379
+55521	[1728366428]	2000000 OPS in 2.707520 seconds, throughput 738683.370760
+55521	[1728366429]	2000000 OPS in 2.725863 seconds, throughput 733712.589371
+55521	[1728366430]	2000000 OPS in 2.729857 seconds, throughput 732639.108935
+55521	[1728366430]	2000000 OPS in 2.733188 seconds, throughput 731746.224555
+55521	[1728366430]	2000000 OPS in 2.709083 seconds, throughput 738257.188872
+55521	[1728366432]	2000000 OPS in 2.732324 seconds, throughput 731977.613197
+55521	[1728366432]	2000000 OPS in 2.737756 seconds, throughput 730525.291516
+55521	[1728366433]	2000000 OPS in 2.736011 seconds, throughput 730991.213120
+55521	[1728366433]	2000000 OPS in 2.710763 seconds, throughput 737799.652718
+55521	[1728366435]	2000000 OPS in 2.725187 seconds, throughput 733894.591454
+55521	[1728366435]	2000000 OPS in 2.730461 seconds, throughput 732477.043254
+55521	[1728366436]	2000000 OPS in 2.732668 seconds, throughput 731885.468707
+55521	[1728366436]	2000000 OPS in 2.704214 seconds, throughput 739586.438056
+55521	[1728366438]	2000000 OPS in 2.730030 seconds, throughput 732592.682132
+55521	[1728366438]	2000000 OPS in 2.735944 seconds, throughput 731009.114222
+55521	[1728366438]	2000000 OPS in 2.738566 seconds, throughput 730309.220227
+55521	[1728366438]	2000000 OPS in 2.705065 seconds, throughput 739353.767839
+55521	[1728366440]	2000000 OPS in 2.724819 seconds, throughput 733993.707472
+55521	[1728366441]	2000000 OPS in 2.733141 seconds, throughput 731758.807906
+55521	[1728366441]	2000000 OPS in 2.738247 seconds, throughput 730394.299711
+55521	[1728366441]	2000000 OPS in 2.709389 seconds, throughput 738173.809667
+55521	[1728366443]	2000000 OPS in 2.724997 seconds, throughput 733945.762142
+55521	[1728366443]	2000000 OPS in 2.732963 seconds, throughput 731806.467925
+55521	[1728366444]	2000000 OPS in 2.739128 seconds, throughput 730159.379189
+55521	[1728366444]	2000000 OPS in 2.711019 seconds, throughput 737729.982711
+55521	[1728366446]	2000000 OPS in 2.732818 seconds, throughput 731845.296686
+55521	[1728366446]	2000000 OPS in 2.734208 seconds, throughput 731473.245635
+55521	[1728366446]	2000000 OPS in 2.737588 seconds, throughput 730570.122312
+55521	[1728366447]	2000000 OPS in 2.711229 seconds, throughput 737672.841357
+55521	[1728366449]	2000000 OPS in 2.732885 seconds, throughput 731827.354609
+55521	[1728366449]	2000000 OPS in 2.733622 seconds, throughput 731630.049802
+55521	[1728366449]	2000000 OPS in 2.736914 seconds, throughput 730750.034528
+55521	[1728366449]	2000000 OPS in 2.705729 seconds, throughput 739172.326571
+55521	[1728366451]	2000000 OPS in 2.732631 seconds, throughput 731895.378483
+55521	[1728366452]	2000000 OPS in 2.732972 seconds, throughput 731804.058000
+55521	[1728366452]	2000000 OPS in 2.738974 seconds, throughput 730200.432717
+55521	[1728366452]	2000000 OPS in 2.704306 seconds, throughput 739561.277459
+55521	[1728366454]	2000000 OPS in 2.729929 seconds, throughput 732619.786082
+55521	[1728366454]	2000000 OPS in 2.732311 seconds, throughput 731981.095856
+55521	[1728366455]	2000000 OPS in 2.740158 seconds, throughput 729884.919045
+55521	[1728366455]	2000000 OPS in 2.703169 seconds, throughput 739872.349823
+55521	[1728366457]	2000000 OPS in 2.741060 seconds, throughput 729644.735978
+55521	[1728366457]	2000000 OPS in 2.742713 seconds, throughput 729204.987908
+55521	[1728366457]	2000000 OPS in 2.748569 seconds, throughput 727651.370586
+55521	[1728366457]	2000000 OPS in 2.718422 seconds, throughput 735720.943989
+55521	[1728366460]	2000000 OPS in 2.730373 seconds, throughput 732500.651010
+55521	[1728366460]	2000000 OPS in 2.732688 seconds, throughput 731880.112183
+55521	[1728366460]	2000000 OPS in 2.706250 seconds, throughput 739030.023095
+55521	[1728366460]	2000000 OPS in 2.738720 seconds, throughput 730268.154466
+55521	[1728366462]	2000000 OPS in 2.730251 seconds, throughput 732533.382462
+55521	[1728366463]	2000000 OPS in 2.735290 seconds, throughput 731183.896406
+55521	[1728366463]	2000000 OPS in 2.706024 seconds, throughput 739091.744936
+55521	[1728366463]	2000000 OPS in 2.739485 seconds, throughput 730064.227400
+55521	[1728366465]	2000000 OPS in 2.730114 seconds, throughput 732570.141760
+55521	[1728366465]	2000000 OPS in 2.736554 seconds, throughput 730846.166383
+55521	[1728366466]	2000000 OPS in 2.706552 seconds, throughput 738947.561325
+55521	[1728366466]	2000000 OPS in 2.737524 seconds, throughput 730587.202158
+55521	[1728366468]	2000000 OPS in 2.728777 seconds, throughput 732929.074087
+55521	[1728366468]	2000000 OPS in 2.734621 seconds, throughput 731362.773854
+55521	[1728366468]	2000000 OPS in 2.710334 seconds, throughput 737916.433916
+55521	[1728366468]	2000000 OPS in 2.732851 seconds, throughput 731836.459434
+55521	[1728366470]	2000000 OPS in 2.727693 seconds, throughput 733220.344078
+55521	[1728366471]	2000000 OPS in 2.731251 seconds, throughput 732265.178118
+55521	[1728366471]	2000000 OPS in 2.704477 seconds, throughput 739514.516115
+55521	[1728366471]	2000000 OPS in 2.729563 seconds, throughput 732718.021163
+55521	[1728366473]	2000000 OPS in 2.732941 seconds, throughput 731812.358920
+55521	[1728366473]	2000000 OPS in 2.734068 seconds, throughput 731510.701270
+55521	[1728366474]	2000000 OPS in 2.711709 seconds, throughput 737542.265781
+55521	[1728366474]	2000000 OPS in 2.735815 seconds, throughput 731043.582991
+55521	[1728366476]	2000000 OPS in 2.727738 seconds, throughput 733208.248006
+55521	[1728366476]	2000000 OPS in 2.734171 seconds, throughput 731483.144251
+55521	[1728366476]	2000000 OPS in 2.709195 seconds, throughput 738226.668808
+55521	[1728366477]	2000000 OPS in 2.738831 seconds, throughput 730238.557983
+55521	[1728366479]	2000000 OPS in 2.729794 seconds, throughput 732656.017267
+55521	[1728366479]	2000000 OPS in 2.737924 seconds, throughput 730480.466222
+55521	[1728366479]	2000000 OPS in 2.710628 seconds, throughput 737836.398060
+55521	[1728366479]	2000000 OPS in 2.735343 seconds, throughput 731169.728988
+55521	[1728366481]	2000000 OPS in 2.730705 seconds, throughput 732411.593343
+55521	[1728366482]	2000000 OPS in 2.738612 seconds, throughput 730296.953347
+55521	[1728366482]	2000000 OPS in 2.710332 seconds, throughput 737916.978437
+55521	[1728366482]	2000000 OPS in 2.739601 seconds, throughput 730033.315070
+55521	[1728366484]	2000000 OPS in 2.730129 seconds, throughput 732566.116839
+55521	[1728366484]	2000000 OPS in 2.729498 seconds, throughput 732735.470039
+55521	[1728366485]	2000000 OPS in 2.702378 seconds, throughput 740088.914282
+55521	[1728366485]	2000000 OPS in 2.732345 seconds, throughput 731971.987432
+55521	[1728366487]	2000000 OPS in 2.735395 seconds, throughput 731155.829414
+55521	[1728366487]	2000000 OPS in 2.736502 seconds, throughput 730860.054186
+55521	[1728366487]	2000000 OPS in 2.714041 seconds, throughput 736908.543386
+55521	[1728366488]	2000000 OPS in 2.739531 seconds, throughput 730051.968749
+55521	[1728366490]	2000000 OPS in 2.732255 seconds, throughput 731996.098461
+55521	[1728366490]	2000000 OPS in 2.735428 seconds, throughput 731147.008804
+55521	[1728366490]	2000000 OPS in 2.708149 seconds, throughput 738511.802711
+55521	[1728366490]	2000000 OPS in 2.737859 seconds, throughput 730497.808689
+55521	[1728366492]	2000000 OPS in 2.729761 seconds, throughput 732664.874324
+55521	[1728366493]	2000000 OPS in 2.733338 seconds, throughput 731706.067819
+55521	[1728366493]	2000000 OPS in 2.706532 seconds, throughput 738953.021801
+55521	[1728366493]	2000000 OPS in 2.735717 seconds, throughput 731069.770740
+55521	[1728366495]	2000000 OPS in 2.728052 seconds, throughput 733123.855410
+55521	[1728366495]	2000000 OPS in 2.732269 seconds, throughput 731992.347752
+55521	[1728366495]	2000000 OPS in 2.707489 seconds, throughput 738691.828480
+55521	[1728366496]	2000000 OPS in 2.736429 seconds, throughput 730879.551415
+55521	[1728366498]	2000000 OPS in 2.731404 seconds, throughput 732224.160175
+55521	[1728366498]	2000000 OPS in 2.710936 seconds, throughput 737752.569592
+55521	[1728366498]	2000000 OPS in 2.732493 seconds, throughput 731932.341638
+55521	[1728366498]	2000000 OPS in 2.741967 seconds, throughput 729403.380858
+55521	[1728366500]	2000000 OPS in 2.732058 seconds, throughput 732048.880368
+55521	[1728366501]	2000000 OPS in 2.711748 seconds, throughput 737531.658546
+55521	[1728366501]	2000000 OPS in 2.735327 seconds, throughput 731174.005887
+55521	[1728366501]	2000000 OPS in 2.740507 seconds, throughput 729791.969150
+55521	[1728366503]	2000000 OPS in 2.727723 seconds, throughput 733212.279986
+55521	[1728366503]	2000000 OPS in 2.709680 seconds, throughput 738094.535148
+55521	[1728366504]	2000000 OPS in 2.733682 seconds, throughput 731613.991679
+55521	[1728366504]	2000000 OPS in 2.737251 seconds, throughput 730660.067345
+55521	[1728366506]	2000000 OPS in 2.731295 seconds, throughput 732253.381638
+55521	[1728366506]	2000000 OPS in 2.711267 seconds, throughput 737662.502439
+55521	[1728366506]	2000000 OPS in 2.740341 seconds, throughput 729836.177322
+55521	[1728366507]	2000000 OPS in 2.739076 seconds, throughput 730173.240903
+55521	[1728366509]	2000000 OPS in 2.727579 seconds, throughput 733250.989247
+55521	[1728366509]	2000000 OPS in 2.705190 seconds, throughput 739319.604168
+55521	[1728366509]	2000000 OPS in 2.734169 seconds, throughput 731483.679319
+55521	[1728366509]	2000000 OPS in 2.737677 seconds, throughput 730546.371979
+55521	[1728366511]	2000000 OPS in 2.735501 seconds, throughput 731127.497303
+55521	[1728366512]	2000000 OPS in 2.710830 seconds, throughput 737781.417499
+55521	[1728366512]	2000000 OPS in 2.735423 seconds, throughput 731148.345247
+55521	[1728366512]	2000000 OPS in 2.734467 seconds, throughput 731403.962820
+55521	[1728366514]	2000000 OPS in 2.734905 seconds, throughput 731286.827148
+55521	[1728366514]	2000000 OPS in 2.714318 seconds, throughput 736833.340824
+55521	[1728366514]	2000000 OPS in 2.736332 seconds, throughput 730905.460302
+55521	[1728366515]	2000000 OPS in 2.735223 seconds, throughput 731201.806946
+55521	[1728366517]	2000000 OPS in 2.740975 seconds, throughput 729667.362891
+55521	[1728366517]	2000000 OPS in 2.719140 seconds, throughput 735526.673875
+55521	[1728366517]	2000000 OPS in 2.740710 seconds, throughput 729737.914628
+55521	[1728366518]	2000000 OPS in 2.747160 seconds, throughput 728024.578110
+55521	[1728366520]	2000000 OPS in 2.734720 seconds, throughput 731336.297683
+55521	[1728366520]	2000000 OPS in 2.707453 seconds, throughput 738701.650592
+55521	[1728366520]	2000000 OPS in 2.737177 seconds, throughput 730679.820852
+55521	[1728366520]	2000000 OPS in 2.741792 seconds, throughput 729449.936392
+55521	[1728366522]	2000000 OPS in 2.736136 seconds, throughput 730957.817886
+55521	[1728366522]	2000000 OPS in 2.713250 seconds, throughput 737123.376025
+55521	[1728366523]	2000000 OPS in 2.734087 seconds, throughput 731505.617780
+55521	[1728366523]	2000000 OPS in 2.743294 seconds, throughput 729050.550178
+55521	[1728366525]	2000000 OPS in 2.730978 seconds, throughput 732338.378412
+55521	[1728366525]	2000000 OPS in 2.709426 seconds, throughput 738163.729144
+55521	[1728366525]	2000000 OPS in 2.734387 seconds, throughput 731425.361516
+55521	[1728366526]	2000000 OPS in 2.736904 seconds, throughput 730752.704516
+55521	[1728366528]	2000000 OPS in 2.725871 seconds, throughput 733710.436040
+55521	[1728366528]	2000000 OPS in 2.706005 seconds, throughput 739096.934411
+55521	[1728366528]	2000000 OPS in 2.733148 seconds, throughput 731756.933763
+55521	[1728366529]	2000000 OPS in 2.738216 seconds, throughput 730402.568680
+55521	[1728366531]	2000000 OPS in 2.729385 seconds, throughput 732765.806216
+55521	[1728366531]	2000000 OPS in 2.706263 seconds, throughput 739026.473037
+55521	[1728366531]	2000000 OPS in 2.737065 seconds, throughput 730709.720083
+55521	[1728366531]	2000000 OPS in 2.736747 seconds, throughput 730794.625882
+55521	[1728366533]	2000000 OPS in 2.728476 seconds, throughput 733009.929353
+55521	[1728366533]	2000000 OPS in 2.706011 seconds, throughput 739095.295621
+55521	[1728366534]	2000000 OPS in 2.740145 seconds, throughput 729888.381819
+55521	[1728366534]	2000000 OPS in 2.740613 seconds, throughput 729763.742637
+55521	[1728366536]	2000000 OPS in 2.733246 seconds, throughput 731730.696761
+55521	[1728366536]	2000000 OPS in 2.710768 seconds, throughput 737798.291849
+55521	[1728366536]	2000000 OPS in 2.737696 seconds, throughput 730541.301883
+55521	[1728366537]	2000000 OPS in 2.736747 seconds, throughput 730794.625882
+55521	[1728366539]	2000000 OPS in 2.708345 seconds, throughput 738458.357410
+55521	[1728366539]	2000000 OPS in 2.730056 seconds, throughput 732585.705202
+55521	[1728366539]	2000000 OPS in 2.736874 seconds, throughput 730760.714596
+55521	[1728366540]	2000000 OPS in 2.736479 seconds, throughput 730866.197036
+55521	[1728366541]	2000000 OPS in 2.713007 seconds, throughput 737189.399069
+55521	[1728366541]	2000000 OPS in 2.728860 seconds, throughput 732906.781586
+55521	[1728366542]	2000000 OPS in 2.737145 seconds, throughput 730688.363240
+55521	[1728366542]	2000000 OPS in 2.738165 seconds, throughput 730416.172875
+55521	[1728366544]	2000000 OPS in 2.707820 seconds, throughput 738601.531860
+55521	[1728366544]	2000000 OPS in 2.725574 seconds, throughput 733790.386906
+55521	[1728366545]	2000000 OPS in 2.731784 seconds, throughput 732122.305424
+55521	[1728366545]	2000000 OPS in 2.738860 seconds, throughput 730230.825964
+55521	[1728366547]	2000000 OPS in 2.712480 seconds, throughput 737332.625494
+55521	[1728366547]	2000000 OPS in 2.732115 seconds, throughput 732033.607663
+55521	[1728366547]	2000000 OPS in 2.736770 seconds, throughput 730788.484235
+55521	[1728366548]	2000000 OPS in 2.737988 seconds, throughput 730463.391366
+55521	[1728366550]	2000000 OPS in 2.712431 seconds, throughput 737345.945390
+55521	[1728366550]	2000000 OPS in 2.732806 seconds, throughput 731848.510286
+55521	[1728366550]	2000000 OPS in 2.731518 seconds, throughput 732193.600774
+55521	[1728366551]	2000000 OPS in 2.736552 seconds, throughput 730846.700519
+55521	[1728366552]	2000000 OPS in 2.711546 seconds, throughput 737586.601887
+55521	[1728366552]	2000000 OPS in 2.731377 seconds, throughput 732231.398302
+55521	[1728366553]	2000000 OPS in 2.732149 seconds, throughput 732024.497932
+55521	[1728366553]	2000000 OPS in 2.734367 seconds, throughput 731430.711386
+55521	[1728366555]	2000000 OPS in 2.712983 seconds, throughput 737195.920505
+55521	[1728366555]	2000000 OPS in 2.732416 seconds, throughput 731952.967630
+55521	[1728366556]	2000000 OPS in 2.735181 seconds, throughput 731213.034896
+55521	[1728366556]	2000000 OPS in 2.738914 seconds, throughput 730216.428847
+55521	[1728366558]	2000000 OPS in 2.712571 seconds, throughput 737307.889821
+55521	[1728366558]	2000000 OPS in 2.732631 seconds, throughput 731895.378483
+55521	[1728366558]	2000000 OPS in 2.735108 seconds, throughput 731232.550963
+55521	[1728366559]	2000000 OPS in 2.738021 seconds, throughput 730454.587456
+55521	[1728366560]	2000000 OPS in 2.708773 seconds, throughput 738341.677210
+55521	[1728366561]	2000000 OPS in 2.731600 seconds, throughput 732171.621028
+55521	[1728366561]	2000000 OPS in 2.739790 seconds, throughput 729982.954898
+55521	[1728366561]	2000000 OPS in 2.743018 seconds, throughput 729123.906588
+55521	[1728366563]	2000000 OPS in 2.707393 seconds, throughput 738718.021359
+55521	[1728366563]	2000000 OPS in 2.735363 seconds, throughput 731164.382936
+55521	[1728366564]	2000000 OPS in 2.738866 seconds, throughput 730229.226256
+55521	[1728366564]	2000000 OPS in 2.744387 seconds, throughput 728760.193078
+55521	[1728366566]	2000000 OPS in 2.706723 seconds, throughput 738900.877556
+55521	[1728366566]	2000000 OPS in 2.733603 seconds, throughput 731635.135021
+55521	[1728366566]	2000000 OPS in 2.739292 seconds, throughput 730115.664924
+55521	[1728366567]	2000000 OPS in 2.735132 seconds, throughput 731226.134607
+55521	[1728366569]	2000000 OPS in 2.707260 seconds, throughput 738754.312478
+55521	[1728366569]	2000000 OPS in 2.732060 seconds, throughput 732048.344473
+55521	[1728366569]	2000000 OPS in 2.735441 seconds, throughput 731143.534077
+55521	[1728366570]	2000000 OPS in 2.743442 seconds, throughput 729011.220212
+55521	[1728366571]	2000000 OPS in 2.711766 seconds, throughput 737526.763002
+55521	[1728366572]	2000000 OPS in 2.730244 seconds, throughput 732535.260585
+55521	[1728366572]	2000000 OPS in 2.737527 seconds, throughput 730586.401522
+55521	[1728366572]	2000000 OPS in 2.739575 seconds, throughput 730040.243468
+55521	[1728366574]	2000000 OPS in 2.712066 seconds, throughput 737445.180169
+55521	[1728366574]	2000000 OPS in 2.730425 seconds, throughput 732486.700788
+55521	[1728366575]	2000000 OPS in 2.735515 seconds, throughput 731123.755490
+55521	[1728366575]	2000000 OPS in 2.744884 seconds, throughput 728628.240756
+55521	[1728366577]	2000000 OPS in 2.714178 seconds, throughput 736871.347421
+55521	[1728366577]	2000000 OPS in 2.733459 seconds, throughput 731673.677930
+55521	[1728366577]	2000000 OPS in 2.742161 seconds, throughput 729351.777667
+55521	[1728366578]	2000000 OPS in 2.740027 seconds, throughput 729919.814659
+55521	[1728366579]	2000000 OPS in 2.708263 seconds, throughput 738480.716238
+55521	[1728366580]	2000000 OPS in 2.727767 seconds, throughput 733200.452971
+55521	[1728366580]	2000000 OPS in 2.736499 seconds, throughput 730860.855421
+55521	[1728366581]	2000000 OPS in 2.739596 seconds, throughput 730034.647444
+55521	[1728366582]	2000000 OPS in 2.711529 seconds, throughput 737591.226205
+55521	[1728366582]	2000000 OPS in 2.730771 seconds, throughput 732393.891688
+55521	[1728366583]	2000000 OPS in 2.737662 seconds, throughput 730550.374736
+55521	[1728366583]	2000000 OPS in 2.742215 seconds, throughput 729337.415192
+55521	[1728366585]	2000000 OPS in 2.711719 seconds, throughput 737539.545949
+55521	[1728366585]	2000000 OPS in 2.732383 seconds, throughput 731961.807697
+55521	[1728366586]	2000000 OPS in 2.736215 seconds, throughput 730936.713672
+55521	[1728366586]	2000000 OPS in 2.740170 seconds, throughput 729881.722667
+55521	[1728366588]	2000000 OPS in 2.714124 seconds, throughput 736886.008156
+55521	[1728366588]	2000000 OPS in 2.728223 seconds, throughput 733077.904555
+55521	[1728366588]	2000000 OPS in 2.734710 seconds, throughput 731338.971957
+55521	[1728366589]	2000000 OPS in 2.741511 seconds, throughput 729524.703713
+55521	[1728366590]	2000000 OPS in 2.714983 seconds, throughput 736652.863020
+55521	[1728366591]	2000000 OPS in 2.733347 seconds, throughput 731703.658555
+55521	[1728366591]	2000000 OPS in 2.736743 seconds, throughput 730795.694006
+55521	[1728366592]	2000000 OPS in 2.738106 seconds, throughput 730431.911694
+55521	[1728366593]	2000000 OPS in 2.707654 seconds, throughput 738646.813810
+55521	[1728366593]	2000000 OPS in 2.729333 seconds, throughput 732779.767071
+55521	[1728366594]	2000000 OPS in 2.734298 seconds, throughput 731449.169037
+55521	[1728366594]	2000000 OPS in 2.742399 seconds, throughput 729288.480633
+55521	[1728366596]	2000000 OPS in 2.710936 seconds, throughput 737752.569592
+55521	[1728366596]	2000000 OPS in 2.735221 seconds, throughput 731202.341602
+55521	[1728366597]	2000000 OPS in 2.734109 seconds, throughput 731499.731722
+55521	[1728366597]	2000000 OPS in 2.741131 seconds, throughput 729625.836926
+55521	[1728366598]	2000000 OPS in 2.715849 seconds, throughput 736417.967273
+55521	[1728366599]	2000000 OPS in 2.734496 seconds, throughput 731396.206102
+55521	[1728366599]	2000000 OPS in 2.737018 seconds, throughput 730722.267811
+55521	[1728366600]	2000000 OPS in 2.738412 seconds, throughput 730350.290606
+55521	[1728366601]	2000000 OPS in 2.711839 seconds, throughput 737506.909518
+55521	[1728366602]	2000000 OPS in 2.730499 seconds, throughput 732466.849466
+55521	[1728366602]	2000000 OPS in 2.736931 seconds, throughput 730745.495593
+55521	[1728366603]	2000000 OPS in 2.738052 seconds, throughput 730446.317309
+55521	[1728366604]	2000000 OPS in 2.710607 seconds, throughput 737842.114331
+55521	[1728366604]	2000000 OPS in 2.728326 seconds, throughput 733050.229335
+55521	[1728366605]	2000000 OPS in 2.736169 seconds, throughput 730949.002054
+55521	[1728366605]	2000000 OPS in 2.740085 seconds, throughput 729904.364281
+55521	[1728366607]	2000000 OPS in 2.712331 seconds, throughput 737373.130344
+55521	[1728366607]	2000000 OPS in 2.735347 seconds, throughput 731168.659772
+55521	[1728366608]	2000000 OPS in 2.737577 seconds, throughput 730573.057854
+55521	[1728366608]	2000000 OPS in 2.739672 seconds, throughput 730014.395884
+55521	[1728366609]	2000000 OPS in 2.708434 seconds, throughput 738434.091434
+55521	[1728366610]	2000000 OPS in 2.733918 seconds, throughput 731550.836565
+55521	[1728366610]	2000000 OPS in 2.733898 seconds, throughput 731556.188270
+55521	[1728366611]	2000000 OPS in 2.741776 seconds, throughput 729454.193194
+55521	[1728366612]	2000000 OPS in 2.713856 seconds, throughput 736958.777474
+55521	[1728366612]	2000000 OPS in 2.730182 seconds, throughput 732551.895808
+55521	[1728366613]	2000000 OPS in 2.737888 seconds, throughput 730490.071179
+55521	[1728366614]	2000000 OPS in 2.737791 seconds, throughput 730515.952459
+55521	[1728366615]	2000000 OPS in 2.715621 seconds, throughput 736479.795966
+55521	[1728366615]	2000000 OPS in 2.732219 seconds, throughput 732005.743317
+55521	[1728366616]	2000000 OPS in 2.734825 seconds, throughput 731308.218990
+55521	[1728366616]	2000000 OPS in 2.739284 seconds, throughput 730117.797205
+55521	[1728366617]	2000000 OPS in 2.710060 seconds, throughput 737991.040789
+55521	[1728366618]	2000000 OPS in 2.727823 seconds, throughput 733185.400959
+55521	[1728366618]	2000000 OPS in 2.736800 seconds, throughput 730780.473546
+55521	[1728366619]	2000000 OPS in 2.736363 seconds, throughput 730897.179943
+55521	[1728366620]	2000000 OPS in 2.714292 seconds, throughput 736840.398896
+55521	[1728366621]	2000000 OPS in 2.735332 seconds, throughput 731172.669351
+55521	[1728366621]	2000000 OPS in 2.738677 seconds, throughput 730279.620415
+55521	[1728366622]	2000000 OPS in 2.744643 seconds, throughput 728692.219717
+55521	[1728366623]	2000000 OPS in 2.715773 seconds, throughput 736438.575684
+55521	[1728366623]	2000000 OPS in 2.732099 seconds, throughput 732037.894674
+55521	[1728366624]	2000000 OPS in 2.740632 seconds, throughput 729758.683399
+55521	[1728366625]	2000000 OPS in 2.741778 seconds, throughput 729453.661091
+55521	[1728366625]	2000000 OPS in 2.709716 seconds, throughput 738084.729175
+55521	[1728366626]	2000000 OPS in 2.730990 seconds, throughput 732335.160510
+55521	[1728366627]	2000000 OPS in 2.732700 seconds, throughput 731876.898306
+55521	[1728366627]	2000000 OPS in 2.736904 seconds, throughput 730752.704516
+55521	[1728366628]	2000000 OPS in 2.711655 seconds, throughput 737556.953226
+55521	[1728366629]	2000000 OPS in 2.732327 seconds, throughput 731976.809511
+55521	[1728366629]	2000000 OPS in 2.733284 seconds, throughput 731720.523736
+55521	[1728366630]	2000000 OPS in 2.738361 seconds, throughput 730363.892854
+55521	[1728366631]	2000000 OPS in 2.714849 seconds, throughput 736689.222863
+55521	[1728366632]	2000000 OPS in 2.729537 seconds, throughput 732725.000614
+55521	[1728366632]	2000000 OPS in 2.737440 seconds, throughput 730609.620667
+55521	[1728366633]	2000000 OPS in 2.739248 seconds, throughput 730127.392627
+55521	[1728366634]	2000000 OPS in 2.716251 seconds, throughput 736308.978809
+55521	[1728366634]	2000000 OPS in 2.729415 seconds, throughput 732757.752119
+55521	[1728366635]	2000000 OPS in 2.738318 seconds, throughput 730375.361810
+55521	[1728366635]	2000000 OPS in 2.751223 seconds, throughput 726949.433034
+55521	[1728366636]	2000000 OPS in 2.720996 seconds, throughput 735024.968798
+55521	[1728366637]	2000000 OPS in 2.740376 seconds, throughput 729826.855877
+55521	[1728366638]	2000000 OPS in 2.744846 seconds, throughput 728638.327979
+55521	[1728366638]	2000000 OPS in 2.741406 seconds, throughput 729552.645613
+55521	[1728366639]	2000000 OPS in 2.712819 seconds, throughput 737240.486741
+55521	[1728366640]	2000000 OPS in 2.730452 seconds, throughput 732479.457614
+55521	[1728366640]	2000000 OPS in 2.742321 seconds, throughput 729309.223829
+55521	[1728366641]	2000000 OPS in 2.744402 seconds, throughput 728756.209914
+55521	[1728366642]	2000000 OPS in 2.709260 seconds, throughput 738208.957427
+55521	[1728366643]	2000000 OPS in 2.734877 seconds, throughput 731294.314150
+55521	[1728366643]	2000000 OPS in 2.737027 seconds, throughput 730719.865021
+55521	[1728366644]	2000000 OPS in 2.739619 seconds, throughput 730028.518564
+55521	[1728366644]	2000000 OPS in 2.715877 seconds, throughput 736410.374991
+55521	[1728366645]	2000000 OPS in 2.733591 seconds, throughput 731638.346775
+55521	[1728366646]	2000000 OPS in 2.735653 seconds, throughput 731086.873957
+55521	[1728366646]	2000000 OPS in 2.742036 seconds, throughput 729385.026309
+55521	[1728366647]	2000000 OPS in 2.710608 seconds, throughput 737841.842125
+55521	[1728366648]	2000000 OPS in 2.730993 seconds, throughput 732334.356038
+55521	[1728366649]	2000000 OPS in 2.735514 seconds, throughput 731124.022761
+55521	[1728366649]	2000000 OPS in 2.738008 seconds, throughput 730458.055638
+55521	[1728366650]	2000000 OPS in 2.709539 seconds, throughput 738132.944386
+55521	[1728366651]	2000000 OPS in 2.736314 seconds, throughput 730910.268339
+55521	[1728366651]	2000000 OPS in 2.736275 seconds, throughput 730920.685969
+55521	[1728366652]	2000000 OPS in 2.736413 seconds, throughput 730883.824920
+55521	[1728366653]	2000000 OPS in 2.710041 seconds, throughput 737996.214817
+55521	[1728366653]	2000000 OPS in 2.729360 seconds, throughput 732772.518099
+55521	[1728366654]	2000000 OPS in 2.737454 seconds, throughput 730605.884154
+55521	[1728366655]	2000000 OPS in 2.738304 seconds, throughput 730379.095966
+55521	[1728366655]	2000000 OPS in 2.712219 seconds, throughput 737403.579873
+55521	[1728366656]	2000000 OPS in 2.732644 seconds, throughput 731891.896639
+55521	[1728366657]	2000000 OPS in 2.736171 seconds, throughput 730948.467768
+55521	[1728366657]	2000000 OPS in 2.733168 seconds, throughput 731751.579120
+55521	[1728366658]	2000000 OPS in 2.709490 seconds, throughput 738146.293214
+55521	[1728366659]	2000000 OPS in 2.731324 seconds, throughput 732245.606892
+55521	[1728366660]	2000000 OPS in 2.733443 seconds, throughput 731677.960726
+55521	[1728366660]	2000000 OPS in 2.735170 seconds, throughput 731215.975607
+55521	[1728366661]	2000000 OPS in 2.711028 seconds, throughput 737727.533615
+55521	[1728366662]	2000000 OPS in 2.731552 seconds, throughput 732184.487061
+55521	[1728366662]	2000000 OPS in 2.737184 seconds, throughput 730677.952231
+55521	[1728366663]	2000000 OPS in 2.737533 seconds, throughput 730584.800256
+55521	[1728366663]	2000000 OPS in 2.710883 seconds, throughput 737766.993264
+55521	[1728366664]	2000000 OPS in 2.731684 seconds, throughput 732149.106558
+55521	[1728366665]	2000000 OPS in 2.739962 seconds, throughput 729937.130515
+55521	[1728366666]	2000000 OPS in 2.735638 seconds, throughput 731090.882639
+55521	[1728366666]	2000000 OPS in 2.709298 seconds, throughput 738198.603476
+55521	[1728366667]	2000000 OPS in 2.733907 seconds, throughput 731553.779993
+55521	[1728366668]	2000000 OPS in 2.739223 seconds, throughput 730134.056263
+55521	[1728366668]	2000000 OPS in 2.736953 seconds, throughput 730739.621762
+55521	[1728366669]	2000000 OPS in 2.714991 seconds, throughput 736650.692396
+55521	[1728366670]	2000000 OPS in 2.731115 seconds, throughput 732301.642370
+55521	[1728366670]	2000000 OPS in 2.738294 seconds, throughput 730381.763244
+55521	[1728366671]	2000000 OPS in 2.741237 seconds, throughput 729597.623263
+55521	[1728366672]	2000000 OPS in 2.710086 seconds, throughput 737983.960657
+55521	[1728366673]	2000000 OPS in 2.733631 seconds, throughput 731627.641039
+55521	[1728366673]	2000000 OPS in 2.739752 seconds, throughput 729993.079666
+55521	[1728366674]	2000000 OPS in 2.736334 seconds, throughput 730904.926080
+55521	[1728366674]	2000000 OPS in 2.708655 seconds, throughput 738373.842368
+55521	[1728366675]	2000000 OPS in 2.730524 seconds, throughput 732460.143181
+55521	[1728366676]	2000000 OPS in 2.737231 seconds, throughput 730665.406025
+55521	[1728366677]	2000000 OPS in 2.732192 seconds, throughput 732012.977126
+55521	[1728366677]	2000000 OPS in 2.709351 seconds, throughput 738184.162923
+55521	[1728366678]	2000000 OPS in 2.729776 seconds, throughput 732660.848363
+55521	[1728366679]	2000000 OPS in 2.733626 seconds, throughput 731628.979239
+55521	[1728366679]	2000000 OPS in 2.738381 seconds, throughput 730358.558579
+55521	[1728366680]	2000000 OPS in 2.707900 seconds, throughput 738579.711215
+55521	[1728366681]	2000000 OPS in 2.732882 seconds, throughput 731828.157967
+55521	[1728366681]	2000000 OPS in 2.735187 seconds, throughput 731211.430882
+55521	[1728366682]	2000000 OPS in 2.743777 seconds, throughput 728922.211973
+55521	[1728366682]	2000000 OPS in 2.713792 seconds, throughput 736976.157347
+55521	[1728366684]	2000000 OPS in 2.730057 seconds, throughput 732585.436861
+55521	[1728366684]	2000000 OPS in 2.739382 seconds, throughput 730091.677612
+55521	[1728366685]	2000000 OPS in 2.744103 seconds, throughput 728835.615864
+55521	[1728366685]	2000000 OPS in 2.715838 seconds, throughput 736420.949998
+55521	[1728366686]	2000000 OPS in 2.734015 seconds, throughput 731524.881904
+55521	[1728366687]	2000000 OPS in 2.736990 seconds, throughput 730729.743258
+55521	[1728366688]	2000000 OPS in 2.743548 seconds, throughput 728983.054060
+55521	[1728366688]	2000000 OPS in 2.713323 seconds, throughput 737103.544252
+55521	[1728366689]	2000000 OPS in 2.733180 seconds, throughput 731748.366372
+55521	[1728366690]	2000000 OPS in 2.738859 seconds, throughput 730231.092583
+55521	[1728366690]	2000000 OPS in 2.734423 seconds, throughput 731415.731948
+55521	[1728366691]	2000000 OPS in 2.713667 seconds, throughput 737010.104777
+55521	[1728366692]	2000000 OPS in 2.730166 seconds, throughput 732556.188891
+55521	[1728366692]	2000000 OPS in 2.738092 seconds, throughput 730435.646428
+55521	[1728366693]	2000000 OPS in 2.740455 seconds, throughput 729805.816917
+55521	[1728366693]	2000000 OPS in 2.711564 seconds, throughput 737581.705613
+55521	[1728366694]	2000000 OPS in 2.729898 seconds, throughput 732628.105519
+55521	[1728366695]	2000000 OPS in 2.738549 seconds, throughput 730313.753743
+55521	[1728366696]	2000000 OPS in 2.752216 seconds, throughput 726687.149555
+55521	[1728366696]	2000000 OPS in 2.719751 seconds, throughput 735361.435661
+55521	[1728366697]	2000000 OPS in 2.737928 seconds, throughput 730479.399020
+55521	[1728366698]	2000000 OPS in 2.749186 seconds, throughput 727488.063740
+55521	[1728366698]	2000000 OPS in 2.734967 seconds, throughput 731270.249330
+55521	[1728366699]	2000000 OPS in 2.712487 seconds, throughput 737330.722691
+55521	[1728366700]	2000000 OPS in 2.726267 seconds, throughput 733603.861984
+55521	[1728366701]	2000000 OPS in 2.735712 seconds, throughput 731071.106900
+55521	[1728366701]	2000000 OPS in 2.737779 seconds, throughput 730519.154395
+55521	[1728366701]	2000000 OPS in 2.715501 seconds, throughput 736512.341553
+55521	[1728366703]	2000000 OPS in 2.735426 seconds, throughput 731147.543381
+55521	[1728366703]	2000000 OPS in 2.742775 seconds, throughput 729188.504343
+55521	[1728366704]	2000000 OPS in 2.738484 seconds, throughput 730331.088296
+55521	[1728366704]	2000000 OPS in 2.716004 seconds, throughput 736375.940536
+55521	[1728366705]	2000000 OPS in 2.730192 seconds, throughput 732549.212656
+55521	[1728366706]	2000000 OPS in 2.734959 seconds, throughput 731272.388361
+55521	[1728366707]	2000000 OPS in 2.738150 seconds, throughput 730420.174205
+55521	[1728366707]	2000000 OPS in 2.713005 seconds, throughput 737189.942518
+55521	[1728366708]	2000000 OPS in 2.727591 seconds, throughput 733247.763319
+55521	[1728366709]	2000000 OPS in 2.738297 seconds, throughput 730380.963058
+55521	[1728366709]	2000000 OPS in 2.734763 seconds, throughput 731324.798529
+55521	[1728366710]	2000000 OPS in 2.707144 seconds, throughput 738785.967795
+55521	[1728366711]	2000000 OPS in 2.729131 seconds, throughput 732834.004670
+55521	[1728366712]	2000000 OPS in 2.738937 seconds, throughput 730210.296914
+55521	[1728366712]	2000000 OPS in 2.740639 seconds, throughput 729756.819486
+55521	[1728366712]	2000000 OPS in 2.715224 seconds, throughput 736587.478602
+55521	[1728366714]	2000000 OPS in 2.731685 seconds, throughput 732148.838537
+55521	[1728366714]	2000000 OPS in 2.740610 seconds, throughput 729764.541471
+55521	[1728366715]	2000000 OPS in 2.735740 seconds, throughput 731063.624467
+55521	[1728366715]	2000000 OPS in 2.715711 seconds, throughput 736455.388662
+55521	[1728366716]	2000000 OPS in 2.732690 seconds, throughput 731879.576534
+55521	[1728366717]	2000000 OPS in 2.734110 seconds, throughput 731499.464177
+55521	[1728366718]	2000000 OPS in 2.740042 seconds, throughput 729915.818809
+55521	[1728366718]	2000000 OPS in 2.712823 seconds, throughput 737239.399695
+55521	[1728366719]	2000000 OPS in 2.731698 seconds, throughput 732145.354281
+55521	[1728366720]	2000000 OPS in 2.738022 seconds, throughput 730454.320674
+55521	[1728366720]	2000000 OPS in 2.735977 seconds, throughput 731000.297152
+55521	[1728366720]	2000000 OPS in 2.712136 seconds, throughput 737426.146771
+55521	[1728366722]	2000000 OPS in 2.735172 seconds, throughput 731215.440930
+55521	[1728366723]	2000000 OPS in 2.737178 seconds, throughput 730679.553906
+55521	[1728366723]	2000000 OPS in 2.737050 seconds, throughput 730713.724631
+55521	[1728366723]	2000000 OPS in 2.714449 seconds, throughput 736797.781060
+55521	[1728366725]	2000000 OPS in 2.737764 seconds, throughput 730523.156854
+55521	[1728366725]	2000000 OPS in 2.738878 seconds, throughput 730226.026862
+55521	[1728366726]	2000000 OPS in 2.711230 seconds, throughput 737672.569277
+55521	[1728366726]	2000000 OPS in 2.739476 seconds, throughput 730066.625880
+55521	[1728366727]	2000000 OPS in 2.735278 seconds, throughput 731187.104199
+55521	[1728366728]	2000000 OPS in 2.738471 seconds, throughput 730334.555305
+55521	[1728366729]	2000000 OPS in 2.712525 seconds, throughput 737320.393360
+55521	[1728366729]	2000000 OPS in 2.735536 seconds, throughput 731118.142843
+55521	[1728366730]	2000000 OPS in 2.731049 seconds, throughput 732319.339565
+55521	[1728366731]	2000000 OPS in 2.738856 seconds, throughput 730231.892440
+55521	[1728366731]	2000000 OPS in 2.714160 seconds, throughput 736876.234268
+55521	[1728366731]	2000000 OPS in 2.742098 seconds, throughput 729368.534604
+55521	[1728366733]	2000000 OPS in 2.733391 seconds, throughput 731691.880159
+55521	[1728366733]	2000000 OPS in 2.744588 seconds, throughput 728706.822299
+55521	[1728366734]	2000000 OPS in 2.715865 seconds, throughput 736413.628807
+55521	[1728366734]	2000000 OPS in 2.737689 seconds, throughput 730543.169805
+55521	[1728366735]	2000000 OPS in 2.736505 seconds, throughput 730859.252952
+55521	[1728366736]	2000000 OPS in 2.739654 seconds, throughput 730019.192205
+55521	[1728366737]	2000000 OPS in 2.716769 seconds, throughput 736168.588496
+55521	[1728366737]	2000000 OPS in 2.738619 seconds, throughput 730295.086684
+55521	[1728366738]	2000000 OPS in 2.731978 seconds, throughput 732070.316818
+55521	[1728366739]	2000000 OPS in 2.740380 seconds, throughput 729825.790584
+55521	[1728366739]	2000000 OPS in 2.711565 seconds, throughput 737581.433600
+55521	[1728366740]	2000000 OPS in 2.737531 seconds, throughput 730585.334011
+55521	[1728366741]	2000000 OPS in 2.730292 seconds, throughput 732522.382221
+55521	[1728366742]	2000000 OPS in 2.735277 seconds, throughput 731187.371517
+55521	[1728366742]	2000000 OPS in 2.711288 seconds, throughput 737656.788950
+55521	[1728366742]	2000000 OPS in 2.740980 seconds, throughput 729666.031857
+55521	[1728366744]	2000000 OPS in 2.732382 seconds, throughput 731962.075581
+55521	[1728366744]	2000000 OPS in 2.734348 seconds, throughput 731435.793835
+55521	[1728366745]	2000000 OPS in 2.709453 seconds, throughput 738156.373261
+55521	[1728366745]	2000000 OPS in 2.738189 seconds, throughput 730409.770838
+55521	[1728366746]	2000000 OPS in 2.728129 seconds, throughput 733103.163377
+55521	[1728366747]	2000000 OPS in 2.735140 seconds, throughput 731223.995847
+55521	[1728366748]	2000000 OPS in 2.710991 seconds, throughput 737737.602227
+55521	[1728366748]	2000000 OPS in 2.742868 seconds, throughput 729163.780393
+55521	[1728366749]	2000000 OPS in 2.732781 seconds, throughput 731855.205375
+55521	[1728366750]	2000000 OPS in 2.734139 seconds, throughput 731491.705433
+55521	[1728366750]	2000000 OPS in 2.712139 seconds, throughput 737425.331076
+55521	[1728366751]	2000000 OPS in 2.736194 seconds, throughput 730942.323534
+55521	[1728366752]	2000000 OPS in 2.729581 seconds, throughput 732713.189314
+55521	[1728366753]	2000000 OPS in 2.739594 seconds, throughput 730035.180395
+55521	[1728366753]	2000000 OPS in 2.712445 seconds, throughput 737342.139656
+55521	[1728366753]	2000000 OPS in 2.739760 seconds, throughput 729990.948112
+55521	[1728366755]	2000000 OPS in 2.730836 seconds, throughput 732376.459077
+55521	[1728366755]	2000000 OPS in 2.738138 seconds, throughput 730423.375301
+55521	[1728366756]	2000000 OPS in 2.713427 seconds, throughput 737075.292610
+55521	[1728366756]	2000000 OPS in 2.747063 seconds, throughput 728050.284977
+55521	[1728366757]	2000000 OPS in 2.739527 seconds, throughput 730053.034703
+55521	[1728366758]	2000000 OPS in 2.737293 seconds, throughput 730648.856370
+55521	[1728366758]	2000000 OPS in 2.711710 seconds, throughput 737541.993797
+55521	[1728366759]	2000000 OPS in 2.741469 seconds, throughput 729535.880216
+55521	[1728366760]	2000000 OPS in 2.738317 seconds, throughput 730375.628534
+55521	[1728366761]	2000000 OPS in 2.734717 seconds, throughput 731337.099963
+55521	[1728366761]	2000000 OPS in 2.715422 seconds, throughput 736533.768969
+55521	[1728366761]	2000000 OPS in 2.738946 seconds, throughput 730207.897490
+55521	[1728366763]	2000000 OPS in 2.729701 seconds, throughput 732680.978613
+55521	[1728366764]	2000000 OPS in 2.735801 seconds, throughput 731047.323983
+55521	[1728366764]	2000000 OPS in 2.705608 seconds, throughput 739205.383781
+55521	[1728366764]	2000000 OPS in 2.737245 seconds, throughput 730661.668941
+55521	[1728366765]	2000000 OPS in 2.736540 seconds, throughput 730849.905355
+55521	[1728366766]	2000000 OPS in 2.743452 seconds, throughput 729008.562935
+55521	[1728366767]	2000000 OPS in 2.714046 seconds, throughput 736907.185803
+55521	[1728366767]	2000000 OPS in 2.740598 seconds, throughput 729767.736822
+55521	[1728366768]	2000000 OPS in 2.730838 seconds, throughput 732375.922702
+55521	[1728366769]	2000000 OPS in 2.737901 seconds, throughput 730486.602693
+55521	[1728366769]	2000000 OPS in 2.710418 seconds, throughput 737893.564756
+55521	[1728366770]	2000000 OPS in 2.739118 seconds, throughput 730162.044863
+55521	[1728366771]	2000000 OPS in 2.733833 seconds, throughput 731573.581854
+55521	[1728366772]	2000000 OPS in 2.739840 seconds, throughput 729969.633263
+55521	[1728366772]	2000000 OPS in 2.718031 seconds, throughput 735826.780489
+55521	[1728366772]	2000000 OPS in 2.741052 seconds, throughput 729646.865510
+55521	[1728366774]	2000000 OPS in 2.727833 seconds, throughput 733182.713165
+55521	[1728366775]	2000000 OPS in 2.740237 seconds, throughput 729863.876738
+55521	[1728366775]	2000000 OPS in 2.708280 seconds, throughput 738476.080760
+55521	[1728366775]	2000000 OPS in 2.734240 seconds, throughput 731464.684885
+55521	[1728366776]	2000000 OPS in 2.729544 seconds, throughput 732723.121518
+55521	[1728366777]	2000000 OPS in 2.738568 seconds, throughput 730308.686876
+55521	[1728366777]	2000000 OPS in 2.710888 seconds, throughput 737765.632516
+55521	[1728366778]	2000000 OPS in 2.742027 seconds, throughput 729387.420328
+55521	[1728366779]	2000000 OPS in 2.729756 seconds, throughput 732666.216321
+55521	[1728366780]	2000000 OPS in 2.730621 seconds, throughput 732434.123959
+55521	[1728366780]	2000000 OPS in 2.707078 seconds, throughput 738803.979789
+55521	[1728366781]	2000000 OPS in 2.736145 seconds, throughput 730955.413547
+55521	[1728366782]	2000000 OPS in 2.730761 seconds, throughput 732396.573702
+55521	[1728366783]	2000000 OPS in 2.733137 seconds, throughput 731759.878850
+55521	[1728366783]	2000000 OPS in 2.709312 seconds, throughput 738194.788935
+55521	[1728366783]	2000000 OPS in 2.735976 seconds, throughput 731000.564332
+55521	[1728366785]	2000000 OPS in 2.731847 seconds, throughput 732105.421717
+55521	[1728366785]	2000000 OPS in 2.737406 seconds, throughput 730618.695217
+55521	[1728366786]	2000000 OPS in 2.713979 seconds, throughput 736925.377831
+55521	[1728366786]	2000000 OPS in 2.741968 seconds, throughput 729403.114843
+55521	[1728366787]	2000000 OPS in 2.732426 seconds, throughput 731950.288864
+55521	[1728366788]	2000000 OPS in 2.734632 seconds, throughput 731359.831963
+55521	[1728366788]	2000000 OPS in 2.710739 seconds, throughput 737806.184955
+55521	[1728366789]	2000000 OPS in 2.738603 seconds, throughput 730299.353356
+55521	[1728366790]	2000000 OPS in 2.741858 seconds, throughput 729432.377607
+55521	[1728366791]	2000000 OPS in 2.718413 seconds, throughput 735723.379781
+55521	[1728366791]	2000000 OPS in 2.745224 seconds, throughput 728537.999085
+55521	[1728366792]	2000000 OPS in 2.742789 seconds, throughput 729184.782351
+55521	[1728366793]	2000000 OPS in 2.734098 seconds, throughput 731502.674740
+55521	[1728366794]	2000000 OPS in 2.713402 seconds, throughput 737082.083672
+55521	[1728366794]	2000000 OPS in 2.737827 seconds, throughput 730506.346822
+55521	[1728366794]	2000000 OPS in 2.736394 seconds, throughput 730888.899771
+55521	[1728366796]	2000000 OPS in 2.737618 seconds, throughput 730562.116409
+55521	[1728366796]	2000000 OPS in 2.716058 seconds, throughput 736361.300090
+55521	[1728366796]	2000000 OPS in 2.740904 seconds, throughput 729686.264094
+55521	[1728366797]	2000000 OPS in 2.741627 seconds, throughput 729493.837054
+55521	[1728366798]	2000000 OPS in 2.731851 seconds, throughput 732104.349761
+55521	[1728366799]	2000000 OPS in 2.711013 seconds, throughput 737731.615451
+55521	[1728366799]	2000000 OPS in 2.740501 seconds, throughput 729793.566943
+55521	[1728366800]	2000000 OPS in 2.743359 seconds, throughput 729033.276359
+55521	[1728366801]	2000000 OPS in 2.737963 seconds, throughput 730470.061137
+55521	[1728366802]	2000000 OPS in 2.711729 seconds, throughput 737536.826136
+55521	[1728366802]	2000000 OPS in 2.742674 seconds, throughput 729215.356984
+55521	[1728366803]	2000000 OPS in 2.737044 seconds, throughput 730715.326462
+55521	[1728366804]	2000000 OPS in 2.731254 seconds, throughput 732264.373800
+55521	[1728366805]	2000000 OPS in 2.710707 seconds, throughput 737814.894786
+55521	[1728366805]	2000000 OPS in 2.734823 seconds, throughput 731308.753802
+55521	[1728366805]	2000000 OPS in 2.735169 seconds, throughput 731216.242945
+55521	[1728366806]	2000000 OPS in 2.731312 seconds, throughput 732248.824008
+55521	[1728366807]	2000000 OPS in 2.710926 seconds, throughput 737755.290997
+55521	[1728366807]	2000000 OPS in 2.734567 seconds, throughput 731377.216210
+55521	[1728366808]	2000000 OPS in 2.736894 seconds, throughput 730755.374523
+55521	[1728366809]	2000000 OPS in 2.733493 seconds, throughput 731664.577155
+55521	[1728366810]	2000000 OPS in 2.714870 seconds, throughput 736683.524441
+55521	[1728366810]	2000000 OPS in 2.736656 seconds, throughput 730818.926456
+55521	[1728366811]	2000000 OPS in 2.739817 seconds, throughput 729975.761155
+55521	[1728366812]	2000000 OPS in 2.733143 seconds, throughput 731758.272436
+55521	[1728366813]	2000000 OPS in 2.711773 seconds, throughput 737524.859197
+55521	[1728366813]	2000000 OPS in 2.734913 seconds, throughput 731284.688032
+55521	[1728366814]	2000000 OPS in 2.739267 seconds, throughput 730122.328346
+55521	[1728366815]	2000000 OPS in 2.730412 seconds, throughput 732490.188294
+55521	[1728366815]	2000000 OPS in 2.722729 seconds, throughput 734557.129997
+55521	[1728366816]	2000000 OPS in 2.742358 seconds, throughput 729299.383961
+55521	[1728366816]	2000000 OPS in 2.748559 seconds, throughput 727654.017978
+55521	[1728366817]	2000000 OPS in 2.734588 seconds, throughput 731371.599671
+55521	[1728366818]	2000000 OPS in 2.715359 seconds, throughput 736550.857548
+55521	[1728366818]	2000000 OPS in 2.739046 seconds, throughput 730181.238285
+55521	[1728366819]	2000000 OPS in 2.740194 seconds, throughput 729875.329995
+55521	[1728366820]	2000000 OPS in 2.728676 seconds, throughput 732956.202935
+55521	[1728366821]	2000000 OPS in 2.708586 seconds, throughput 738392.652107
+55521	[1728366821]	2000000 OPS in 2.733351 seconds, throughput 731702.587776
+55521	[1728366822]	2000000 OPS in 2.741703 seconds, throughput 729473.615486
+55521	[1728366823]	2000000 OPS in 2.731625 seconds, throughput 732164.920148
+55521	[1728366824]	2000000 OPS in 2.710931 seconds, throughput 737753.930292
+55521	[1728366824]	2000000 OPS in 2.733224 seconds, throughput 731736.586537
+55521	[1728366824]	2000000 OPS in 2.743322 seconds, throughput 729043.109048
+55521	[1728366826]	2000000 OPS in 2.733367 seconds, throughput 731698.304692
+55521	[1728366826]	2000000 OPS in 2.716177 seconds, throughput 736329.038940
+55521	[1728366827]	2000000 OPS in 2.739374 seconds, throughput 730093.809754
+55521	[1728366827]	2000000 OPS in 2.738810 seconds, throughput 730244.157134
+55521	[1728366828]	2000000 OPS in 2.733977 seconds, throughput 731535.049490
+55521	[1728366829]	2000000 OPS in 2.708799 seconds, throughput 738334.590348
+55521	[1728366829]	2000000 OPS in 2.730867 seconds, throughput 732368.145355
+55521	[1728366830]	2000000 OPS in 2.737385 seconds, throughput 730624.300199
+55521	[1728366831]	2000000 OPS in 2.728188 seconds, throughput 733087.309232
+55521	[1728366832]	2000000 OPS in 2.714492 seconds, throughput 736786.109519
+55521	[1728366832]	2000000 OPS in 2.735648 seconds, throughput 731088.210179
+55521	[1728366833]	2000000 OPS in 2.740298 seconds, throughput 729847.629710
+55521	[1728366834]	2000000 OPS in 2.731731 seconds, throughput 732136.509781
+55521	[1728366834]	2000000 OPS in 2.712959 seconds, throughput 737202.442057
+55521	[1728366835]	2000000 OPS in 2.738882 seconds, throughput 730224.960404
+55521	[1728366835]	2000000 OPS in 2.741027 seconds, throughput 729653.520378
+55521	[1728366837]	2000000 OPS in 2.733385 seconds, throughput 731693.486282
+55521	[1728366837]	2000000 OPS in 2.710607 seconds, throughput 737842.114331
+55521	[1728366837]	2000000 OPS in 2.736627 seconds, throughput 730826.670935
+55521	[1728366838]	2000000 OPS in 2.740355 seconds, throughput 729832.448716
+55521	[1728366839]	2000000 OPS in 2.729262 seconds, throughput 732798.829867
+55521	[1728366840]	2000000 OPS in 2.710028 seconds, throughput 737999.754984
+55521	[1728366840]	2000000 OPS in 2.737822 seconds, throughput 730507.680923
+55521	[1728366841]	2000000 OPS in 2.739547 seconds, throughput 730047.704967
+55521	[1728366842]	2000000 OPS in 2.729834 seconds, throughput 732645.281728
+55521	[1728366842]	2000000 OPS in 2.715953 seconds, throughput 736389.768159
+55521	[1728366843]	2000000 OPS in 2.740411 seconds, throughput 729817.534669
+55521	[1728366844]	2000000 OPS in 2.742150 seconds, throughput 729354.703426
+55521	[1728366845]	2000000 OPS in 2.733028 seconds, throughput 731789.063266
+55521	[1728366845]	2000000 OPS in 2.713412 seconds, throughput 737079.367232
+55521	[1728366846]	2000000 OPS in 2.737627 seconds, throughput 730559.714673
+55521	[1728366846]	2000000 OPS in 2.741493 seconds, throughput 729529.493601
+55521	[1728366847]	2000000 OPS in 2.738155 seconds, throughput 730418.840424
+55521	[1728366848]	2000000 OPS in 2.711570 seconds, throughput 737580.073537
+55521	[1728366848]	2000000 OPS in 2.734410 seconds, throughput 731419.209263
+55521	[1728366849]	2000000 OPS in 2.739726 seconds, throughput 730000.007300
+55521	[1728366850]	2000000 OPS in 2.731461 seconds, throughput 732208.880156
+55521	[1728366851]	2000000 OPS in 2.714997 seconds, throughput 736649.064437
+55521	[1728366851]	2000000 OPS in 2.739227 seconds, throughput 730132.990073
+55521	[1728366852]	2000000 OPS in 2.742403 seconds, throughput 729287.416911
+55521	[1728366853]	2000000 OPS in 2.729319 seconds, throughput 732783.525854
+55521	[1728366853]	2000000 OPS in 2.715014 seconds, throughput 736644.451925
+55521	[1728366854]	2000000 OPS in 2.738013 seconds, throughput 730456.721718
+55521	[1728366855]	2000000 OPS in 2.739104 seconds, throughput 730165.776838
+55521	[1728366856]	2000000 OPS in 2.732925 seconds, throughput 731816.643340
+55521	[1728366856]	2000000 OPS in 2.717162 seconds, throughput 736062.111865
+55521	[1728366857]	2000000 OPS in 2.741078 seconds, throughput 729639.944577
+55521	[1728366857]	2000000 OPS in 2.739634 seconds, throughput 730024.521524
+55521	[1728366858]	2000000 OPS in 2.731395 seconds, throughput 732226.572868
+55521	[1728366859]	2000000 OPS in 2.714424 seconds, throughput 736804.567009
+55521	[1728366859]	2000000 OPS in 2.738783 seconds, throughput 730251.356168
+55521	[1728366860]	2000000 OPS in 2.744303 seconds, throughput 728782.499600
+55521	[1728366861]	2000000 OPS in 2.733519 seconds, throughput 731657.617891
+55521	[1728366862]	2000000 OPS in 2.715181 seconds, throughput 736599.143851
+55521	[1728366862]	2000000 OPS in 2.742242 seconds, throughput 729330.234166
+55521	[1728366863]	2000000 OPS in 2.744515 seconds, throughput 728726.204812
+55521	[1728366864]	2000000 OPS in 2.729255 seconds, throughput 732800.709351
+55521	[1728366864]	2000000 OPS in 2.713500 seconds, throughput 737055.463424
+55521	[1728366865]	2000000 OPS in 2.737261 seconds, throughput 730657.398034
+55521	[1728366866]	2000000 OPS in 2.739621 seconds, throughput 730027.985623
+55521	[1728366867]	2000000 OPS in 2.730327 seconds, throughput 732512.992034
+55521	[1728366867]	2000000 OPS in 2.713665 seconds, throughput 737010.647961
+55521	[1728366868]	2000000 OPS in 2.738264 seconds, throughput 730389.765194
+55521	[1728366868]	2000000 OPS in 2.741266 seconds, throughput 729589.904810
+55521	[1728366869]	2000000 OPS in 2.730453 seconds, throughput 732479.189351
+55521	[1728366870]	2000000 OPS in 2.707356 seconds, throughput 738728.117026
+55521	[1728366870]	2000000 OPS in 2.733062 seconds, throughput 731779.959620
+55521	[1728366871]	2000000 OPS in 2.740255 seconds, throughput 729859.082458
+55521	[1728366872]	2000000 OPS in 2.729049 seconds, throughput 732856.024205
+55521	[1728366872]	2000000 OPS in 2.713932 seconds, throughput 736938.139939
+55521	[1728366873]	2000000 OPS in 2.737345 seconds, throughput 730634.976592
+55521	[1728366874]	2000000 OPS in 2.742671 seconds, throughput 729216.154617
+55521	[1728366875]	2000000 OPS in 2.728561 seconds, throughput 732987.094663
+55521	[1728366875]	2000000 OPS in 2.715541 seconds, throughput 736501.492704
+55521	[1728366876]	2000000 OPS in 2.741814 seconds, throughput 729444.083370
+55521	[1728366877]	2000000 OPS in 2.751315 seconds, throughput 726925.124895
+55521	[1728366878]	2000000 OPS in 2.747240 seconds, throughput 728003.377936
+55521	[1728366878]	2000000 OPS in 2.727278 seconds, throughput 733331.915558
+55521	[1728366879]	2000000 OPS in 2.742009 seconds, throughput 729392.208414
+55521	[1728366879]	2000000 OPS in 2.743359 seconds, throughput 729033.276359
+55521	[1728366880]	2000000 OPS in 2.731808 seconds, throughput 732115.873444
+55521	[1728366881]	2000000 OPS in 2.712275 seconds, throughput 737388.354794
+55521	[1728366881]	2000000 OPS in 2.738934 seconds, throughput 730211.096726
+55521	[1728366882]	2000000 OPS in 2.741818 seconds, throughput 729443.019194
+55521	[1728366883]	2000000 OPS in 2.732126 seconds, throughput 732030.660372
+55521	[1728366883]	2000000 OPS in 2.712040 seconds, throughput 737452.249967
+55521	[1728366884]	2000000 OPS in 2.740637 seconds, throughput 729757.352032
+55521	[1728366885]	2000000 OPS in 2.739863 seconds, throughput 729963.505475
+55521	[1728366886]	2000000 OPS in 2.731262 seconds, throughput 732262.228962
+55521	[1728366886]	2000000 OPS in 2.709067 seconds, throughput 738261.549087
+55521	[1728366887]	2000000 OPS in 2.738376 seconds, throughput 730359.892140
+55521	[1728366888]	2000000 OPS in 2.740576 seconds, throughput 729773.595040
+55521	[1728366888]	2000000 OPS in 2.733657 seconds, throughput 731620.682478
+55521	[1728366889]	2000000 OPS in 2.714073 seconds, throughput 736899.854941
+55521	[1728366890]	2000000 OPS in 2.739379 seconds, throughput 730092.477164
+55521	[1728366890]	2000000 OPS in 2.739476 seconds, throughput 730066.625880
+55521	[1728366891]	2000000 OPS in 2.732813 seconds, throughput 731846.635683
+55521	[1728366891]	2000000 OPS in 2.714268 seconds, throughput 736846.914159
+55521	[1728366892]	2000000 OPS in 2.739725 seconds, throughput 730000.273750
+55521	[1728366893]	2000000 OPS in 2.739556 seconds, throughput 730045.306612
+55521	[1728366894]	2000000 OPS in 2.736371 seconds, throughput 730895.043106
+55521	[1728366894]	2000000 OPS in 2.713668 seconds, throughput 737009.833185
+55521	[1728366895]	2000000 OPS in 2.737367 seconds, throughput 730629.104537
+55521	[1728366896]	2000000 OPS in 2.742359 seconds, throughput 729299.118022
+55521	[1728366897]	2000000 OPS in 2.735701 seconds, throughput 731074.046469
+55521	[1728366897]	2000000 OPS in 2.713074 seconds, throughput 737171.194004
+55521	[1728366898]	2000000 OPS in 2.739782 seconds, throughput 729985.086405
+55521	[1728366899]	2000000 OPS in 2.741827 seconds, throughput 729440.624810
+55521	[1728366899]	2000000 OPS in 2.736007 seconds, throughput 730992.281818
+55521	[1728366899]	2000000 OPS in 2.712767 seconds, throughput 737254.618624
+55521	[1728366900]	2000000 OPS in 2.735229 seconds, throughput 731200.202981
+55521	[1728366901]	2000000 OPS in 2.738471 seconds, throughput 730334.555305
+55521	[1728366902]	2000000 OPS in 2.735533 seconds, throughput 731118.944644
+55521	[1728366902]	2000000 OPS in 2.709395 seconds, throughput 738172.174969
+55521	[1728366903]	2000000 OPS in 2.736361 seconds, throughput 730897.714154
+55521	[1728366904]	2000000 OPS in 2.737448 seconds, throughput 730607.485512
+55521	[1728366905]	2000000 OPS in 2.734707 seconds, throughput 731339.774243
+55521	[1728366905]	2000000 OPS in 2.711025 seconds, throughput 737728.349978
+55521	[1728366906]	2000000 OPS in 2.737373 seconds, throughput 730627.503084
+55521	[1728366907]	2000000 OPS in 2.743475 seconds, throughput 729002.451271
+55521	[1728366908]	2000000 OPS in 2.737065 seconds, throughput 730709.720083
+55521	[1728366908]	2000000 OPS in 2.715533 seconds, throughput 736503.662449
+55521	[1728366909]	2000000 OPS in 2.739654 seconds, throughput 730019.192205
+55521	[1728366909]	2000000 OPS in 2.741757 seconds, throughput 729459.248212
+55521	[1728366910]	2000000 OPS in 2.732915 seconds, throughput 731819.321128
+55521	[1728366910]	2000000 OPS in 2.713224 seconds, throughput 737130.439654
+55521	[1728366911]	2000000 OPS in 2.731289 seconds, throughput 732254.990226
+55521	[1728366912]	2000000 OPS in 2.742647 seconds, throughput 729222.535747
+55521	[1728366913]	2000000 OPS in 2.715372 seconds, throughput 736547.331268
+55521	[1728366913]	2000000 OPS in 2.736250 seconds, throughput 730927.364093
+55521	[1728366914]	2000000 OPS in 2.741718 seconds, throughput 729469.624520
+55521	[1728366915]	2000000 OPS in 2.746449 seconds, throughput 728213.048922
+55521	[1728366916]	2000000 OPS in 2.720671 seconds, throughput 735112.771813
+55521	[1728366916]	2000000 OPS in 2.735467 seconds, throughput 731136.584722
+55521	[1728366917]	2000000 OPS in 2.741345 seconds, throughput 729568.879510
+55521	[1728366918]	2000000 OPS in 2.739296 seconds, throughput 730114.598787
+55521	[1728366918]	2000000 OPS in 2.711886 seconds, throughput 737494.127703
+55521	[1728366919]	2000000 OPS in 2.732146 seconds, throughput 732025.301723
+55521	[1728366920]	2000000 OPS in 2.733962 seconds, throughput 731539.063089
+55521	[1728366920]	2000000 OPS in 2.733112 seconds, throughput 731766.572318
+55521	[1728366921]	2000000 OPS in 2.713975 seconds, throughput 736926.463950
+55521	[1728366921]	2000000 OPS in 2.731359 seconds, throughput 732236.223799
+55521	[1728366922]	2000000 OPS in 2.734231 seconds, throughput 731467.092576
+55521	[1728366923]	2000000 OPS in 2.742287 seconds, throughput 729318.266104
+55521	[1728366924]	2000000 OPS in 2.713831 seconds, throughput 736965.566389
+55521	[1728366924]	2000000 OPS in 2.734544 seconds, throughput 731383.367757
+55521	[1728366925]	2000000 OPS in 2.735883 seconds, throughput 731025.413002
+55521	[1728366926]	2000000 OPS in 2.743420 seconds, throughput 729017.066290
+55521	[1728366927]	2000000 OPS in 2.711480 seconds, throughput 737604.555446
+55521	[1728366927]	2000000 OPS in 2.730517 seconds, throughput 732462.020929
+55521	[1728366928]	2000000 OPS in 2.736042 seconds, throughput 730982.930818
+55521	[1728366929]	2000000 OPS in 2.742211 seconds, throughput 729338.479059
+55521	[1728366929]	2000000 OPS in 2.718447 seconds, throughput 735714.177985
+55521	[1728366929]	2000000 OPS in 2.736893 seconds, throughput 730755.641525
+55521	[1728366931]	2000000 OPS in 2.740199 seconds, throughput 729873.998202
+55521	[1728366931]	2000000 OPS in 2.741805 seconds, throughput 729446.477777
+55521	[1728366932]	2000000 OPS in 2.714669 seconds, throughput 736738.070093
+55521	[1728366932]	2000000 OPS in 2.735075 seconds, throughput 731241.373637
+55521	[1728366933]	2000000 OPS in 2.735099 seconds, throughput 731234.957126
+55521	[1728366934]	2000000 OPS in 2.744007 seconds, throughput 728861.114421
+55521	[1728366935]	2000000 OPS in 2.710848 seconds, throughput 737776.518639
+55521	[1728366935]	2000000 OPS in 2.728918 seconds, throughput 732891.204499
+55521	[1728366936]	2000000 OPS in 2.741454 seconds, throughput 729539.871907
+55521	[1728366937]	2000000 OPS in 2.748336 seconds, throughput 727713.059830
+55521	[1728366937]	2000000 OPS in 2.725276 seconds, throughput 733870.624480
+55521	[1728366938]	2000000 OPS in 2.739693 seconds, throughput 730008.800256
+55521	[1728366939]	2000000 OPS in 2.731406 seconds, throughput 732223.624024
+55521	[1728366940]	2000000 OPS in 2.736127 seconds, throughput 730960.222241
+55521	[1728366940]	2000000 OPS in 2.715352 seconds, throughput 736552.756328
+55521	[1728366940]	2000000 OPS in 2.733605 seconds, throughput 731634.599732
+55521	[1728366942]	2000000 OPS in 2.739266 seconds, throughput 730122.594885
+55521	[1728366942]	2000000 OPS in 2.742811 seconds, throughput 729178.933583
+55521	[1728366943]	2000000 OPS in 2.710205 seconds, throughput 737951.557170
+55521	[1728366943]	2000000 OPS in 2.732998 seconds, throughput 731797.096083
+55521	[1728366944]	2000000 OPS in 2.736934 seconds, throughput 730744.694611
+55521	[1728366945]	2000000 OPS in 2.741157 seconds, throughput 729618.916392
+55521	[1728366946]	2000000 OPS in 2.712075 seconds, throughput 737442.732963
+55521	[1728366946]	2000000 OPS in 2.731207 seconds, throughput 732276.974978
+55521	[1728366947]	2000000 OPS in 2.736363 seconds, throughput 730897.179943
+55521	[1728366948]	2000000 OPS in 2.741961 seconds, throughput 729404.976949
+55521	[1728366948]	2000000 OPS in 2.714815 seconds, throughput 736698.449066
+55521	[1728366949]	2000000 OPS in 2.735714 seconds, throughput 731070.572436
+55521	[1728366950]	2000000 OPS in 2.735051 seconds, throughput 731247.790261
+55521	[1728366951]	2000000 OPS in 2.741957 seconds, throughput 729406.041014
+55521	[1728366951]	2000000 OPS in 2.715427 seconds, throughput 736532.412766
+55521	[1728366951]	2000000 OPS in 2.734511 seconds, throughput 731392.194071
+55521	[1728366952]	2000000 OPS in 2.738575 seconds, throughput 730306.820153
+55521	[1728366953]	2000000 OPS in 2.739556 seconds, throughput 730045.306612
+55521	[1728366954]	2000000 OPS in 2.713789 seconds, throughput 736976.972049
+55521	[1728366954]	2000000 OPS in 2.730436 seconds, throughput 732483.749848
+55521	[1728366955]	2000000 OPS in 2.733609 seconds, throughput 731633.529155
+55521	[1728366956]	2000000 OPS in 2.735868 seconds, throughput 731029.421010
+55521	[1728366956]	2000000 OPS in 2.711496 seconds, throughput 737600.202988
+55521	[1728366957]	2000000 OPS in 2.727869 seconds, throughput 733173.037268
+55521	[1728366958]	2000000 OPS in 2.735607 seconds, throughput 731099.167388
+55521	[1728366959]	2000000 OPS in 2.743123 seconds, throughput 729095.997518
+55521	[1728366959]	2000000 OPS in 2.716822 seconds, throughput 736154.227255
+55521	[1728366960]	2000000 OPS in 2.737902 seconds, throughput 730486.335888
+55521	[1728366961]	2000000 OPS in 2.739261 seconds, throughput 730123.927585
+55521	[1728366962]	2000000 OPS in 2.747596 seconds, throughput 727909.052131
+55521	[1728366962]	2000000 OPS in 2.719723 seconds, throughput 735369.006329
+55521	[1728366962]	2000000 OPS in 2.732699 seconds, throughput 731877.166128
+55521	[1728366963]	2000000 OPS in 2.738194 seconds, throughput 730408.437094
+55521	[1728366964]	2000000 OPS in 2.739240 seconds, throughput 730129.524978
+55521	[1728366965]	2000000 OPS in 2.714732 seconds, throughput 736720.972825
+55521	[1728366965]	2000000 OPS in 2.733116 seconds, throughput 731765.501354
+55521	[1728366966]	2000000 OPS in 2.739571 seconds, throughput 730041.309387
+55521	[1728366967]	2000000 OPS in 2.739380 seconds, throughput 730092.210646
+55521	[1728366967]	2000000 OPS in 2.718775 seconds, throughput 735625.419536
+55521	[1728366968]	2000000 OPS in 2.734022 seconds, throughput 731523.008959
+55521	[1728366969]	2000000 OPS in 2.737143 seconds, throughput 730688.897146
+55521	[1728366970]	2000000 OPS in 2.737887 seconds, throughput 730490.337987
+55521	[1728366970]	2000000 OPS in 2.717719 seconds, throughput 735911.254990
+55521	[1728366970]	2000000 OPS in 2.733214 seconds, throughput 731739.263739
+55521	[1728366972]	2000000 OPS in 2.739038 seconds, throughput 730183.370950
+55521	[1728366973]	2000000 OPS in 2.738836 seconds, throughput 730237.224865
+55521	[1728366973]	2000000 OPS in 2.714870 seconds, throughput 736683.524441
+55521	[1728366973]	2000000 OPS in 2.730909 seconds, throughput 732356.881903
+55521	[1728366974]	2000000 OPS in 2.732946 seconds, throughput 731811.020049
+55521	[1728366975]	2000000 OPS in 2.734132 seconds, throughput 731493.578218
+55521	[1728366976]	2000000 OPS in 2.713382 seconds, throughput 737087.516612
+55521	[1728366976]	2000000 OPS in 2.732124 seconds, throughput 732031.196241
+55521	[1728366977]	2000000 OPS in 2.735679 seconds, throughput 731079.925678
+55521	[1728366978]	2000000 OPS in 2.738718 seconds, throughput 730268.687758
+55521	[1728366978]	2000000 OPS in 2.708451 seconds, throughput 738429.456542
+55521	[1728366979]	2000000 OPS in 2.735202 seconds, throughput 731207.420878
+55521	[1728366980]	2000000 OPS in 2.736928 seconds, throughput 730746.296578
+55521	[1728366981]	2000000 OPS in 2.739185 seconds, throughput 730144.185223
+55521	[1728366981]	2000000 OPS in 2.715400 seconds, throughput 736539.736319
+55521	[1728366981]	2000000 OPS in 2.733746 seconds, throughput 731596.863791
+55521	[1728366983]	2000000 OPS in 2.734588 seconds, throughput 731371.599671
+55521	[1728366983]	2000000 OPS in 2.739241 seconds, throughput 730129.258433
+55521	[1728366984]	2000000 OPS in 2.711841 seconds, throughput 737506.365602
+55521	[1728366984]	2000000 OPS in 2.736246 seconds, throughput 730928.432604
+55521	[1728366985]	2000000 OPS in 2.738518 seconds, throughput 730322.020889
+55521	[1728366986]	2000000 OPS in 2.741258 seconds, throughput 729592.034022
+55521	[1728366986]	2000000 OPS in 2.714486 seconds, throughput 736787.738084
+55521	[1728366987]	2000000 OPS in 2.731254 seconds, throughput 732264.373800
+55521	[1728366988]	2000000 OPS in 2.738529 seconds, throughput 730319.087364
+55521	[1728366989]	2000000 OPS in 2.738468 seconds, throughput 730335.355388
+55521	[1728366989]	2000000 OPS in 2.711836 seconds, throughput 737507.725393
+55521	[1728366990]	2000000 OPS in 2.730603 seconds, throughput 732438.952129
+55521	[1728366991]	2000000 OPS in 2.740398 seconds, throughput 729820.996804
+55521	[1728366992]	2000000 OPS in 2.743578 seconds, throughput 728975.082903
+55521	[1728366992]	2000000 OPS in 2.713995 seconds, throughput 736921.033384
+55521	[1728366992]	2000000 OPS in 2.735610 seconds, throughput 731098.365630
+55521	[1728366994]	2000000 OPS in 2.738730 seconds, throughput 730265.488018
+55521	[1728366994]	2000000 OPS in 2.742827 seconds, throughput 729174.679993
+55521	[1728366994]	2000000 OPS in 2.708605 seconds, throughput 738387.472518
+55521	[1728366995]	2000000 OPS in 2.736394 seconds, throughput 730888.899771
+55521	[1728366996]	2000000 OPS in 2.743408 seconds, throughput 729020.255099
+55521	[1728366997]	2000000 OPS in 2.750415 seconds, throughput 727162.991767
+55521	[1728366997]	2000000 OPS in 2.719172 seconds, throughput 735518.017985
+55521	[1728366998]	2000000 OPS in 2.744226 seconds, throughput 728802.948445
+55521	[1728366999]	2000000 OPS in 2.740150 seconds, throughput 729887.049979
+55521	[1728367000]	2000000 OPS in 2.737991 seconds, throughput 730462.591002
+55521	[1728367000]	2000000 OPS in 2.709046 seconds, throughput 738267.271947
+55521	[1728367001]	2000000 OPS in 2.729080 seconds, throughput 732847.699591
+55521	[1728367002]	2000000 OPS in 2.734437 seconds, throughput 731411.987184
+55521	[1728367003]	2000000 OPS in 2.714102 seconds, throughput 736891.981215
+55521	[1728367003]	2000000 OPS in 2.737832 seconds, throughput 730505.012725
+55521	[1728367003]	2000000 OPS in 2.730280 seconds, throughput 732525.601770
+55521	[1728367004]	2000000 OPS in 2.742591 seconds, throughput 729237.425486
+55521	[1728367005]	2000000 OPS in 2.715179 seconds, throughput 736599.686430
+55521	[1728367005]	2000000 OPS in 2.739872 seconds, throughput 729961.107672
+55521	[1728367006]	2000000 OPS in 2.730034 seconds, throughput 732591.608749
+55521	[1728367007]	2000000 OPS in 2.736467 seconds, throughput 730869.402043
+55521	[1728367008]	2000000 OPS in 2.713876 seconds, throughput 736953.346431
+55521	[1728367008]	2000000 OPS in 2.739089 seconds, throughput 730169.775425
+55521	[1728367009]	2000000 OPS in 2.729616 seconds, throughput 732703.794233
+55521	[1728367010]	2000000 OPS in 2.735289 seconds, throughput 731184.163721
+55521	[1728367011]	2000000 OPS in 2.712728 seconds, throughput 737265.217891
+55521	[1728367011]	2000000 OPS in 2.733628 seconds, throughput 731628.443958
+55521	[1728367011]	2000000 OPS in 2.727033 seconds, throughput 733397.799000
+55521	[1728367013]	2000000 OPS in 2.739164 seconds, throughput 730149.782926
+55521	[1728367013]	2000000 OPS in 2.710245 seconds, throughput 737940.665881
+55521	[1728367014]	2000000 OPS in 2.736713 seconds, throughput 730803.705029
+55521	[1728367014]	2000000 OPS in 2.726420 seconds, throughput 733562.693936
+55521	[1728367015]	2000000 OPS in 2.732222 seconds, throughput 732004.939569
+55521	[1728367016]	2000000 OPS in 2.710577 seconds, throughput 737850.280586
+55521	[1728367016]	2000000 OPS in 2.738771 seconds, throughput 730254.555784
+55521	[1728367017]	2000000 OPS in 2.739058 seconds, throughput 730178.039311
+55521	[1728367018]	2000000 OPS in 2.738480 seconds, throughput 730332.155064
+55521	[1728367019]	2000000 OPS in 2.714324 seconds, throughput 736831.712058
+55521	[1728367019]	2000000 OPS in 2.739565 seconds, throughput 730042.908272
+55521	[1728367020]	2000000 OPS in 2.735162 seconds, throughput 731218.114320
+55521	[1728367021]	2000000 OPS in 2.737847 seconds, throughput 730501.010466
+55521	[1728367022]	2000000 OPS in 2.712473 seconds, throughput 737334.528307
+55521	[1728367022]	2000000 OPS in 2.738446 seconds, throughput 730341.222723
+55521	[1728367022]	2000000 OPS in 2.732703 seconds, throughput 731876.094841
+55521	[1728367024]	2000000 OPS in 2.734630 seconds, throughput 731360.366850
+55521	[1728367024]	2000000 OPS in 2.712193 seconds, throughput 737410.648873
+55521	[1728367025]	2000000 OPS in 2.737681 seconds, throughput 730545.304584
+55521	[1728367025]	2000000 OPS in 2.731568 seconds, throughput 732180.198333
+55521	[1728367026]	2000000 OPS in 2.739975 seconds, throughput 729933.667278
+55521	[1728367027]	2000000 OPS in 2.712224 seconds, throughput 737402.220466
+55521	[1728367027]	2000000 OPS in 2.738678 seconds, throughput 730279.353761
+55521	[1728367028]	2000000 OPS in 2.734075 seconds, throughput 731508.828397
+55521	[1728367029]	2000000 OPS in 2.736982 seconds, throughput 730731.879128
+55521	[1728367030]	2000000 OPS in 2.715532 seconds, throughput 736503.933668
+55521	[1728367030]	2000000 OPS in 2.736822 seconds, throughput 730774.599152
+55521	[1728367031]	2000000 OPS in 2.735637 seconds, throughput 731091.149886
+55521	[1728367032]	2000000 OPS in 2.744978 seconds, throughput 728603.289352
+55521	[1728367032]	2000000 OPS in 2.712578 seconds, throughput 737305.987146
+55521	[1728367033]	2000000 OPS in 2.737931 seconds, throughput 730478.598621
+55521	[1728367033]	2000000 OPS in 2.732483 seconds, throughput 731935.020273
+55521	[1728367035]	2000000 OPS in 2.734972 seconds, throughput 731268.912442
+55521	[1728367035]	2000000 OPS in 2.712227 seconds, throughput 737401.404823
+55521	[1728367036]	2000000 OPS in 2.739597 seconds, throughput 730034.380969
+55521	[1728367036]	2000000 OPS in 2.735276 seconds, throughput 731187.638834
+55521	[1728367037]	2000000 OPS in 2.743354 seconds, throughput 729034.605086
+55521	[1728367038]	2000000 OPS in 2.715867 seconds, throughput 736413.086502
+55521	[1728367038]	2000000 OPS in 2.742400 seconds, throughput 729288.214702
+55521	[1728367039]	2000000 OPS in 2.737063 seconds, throughput 730710.254020
+55521	[1728367040]	2000000 OPS in 2.741691 seconds, throughput 729476.808291
+55521	[1728367041]	2000000 OPS in 2.712398 seconds, throughput 737354.916203
+55521	[1728367041]	2000000 OPS in 2.734585 seconds, throughput 731372.402028
+55521	[1728367042]	2000000 OPS in 2.732787 seconds, throughput 731853.598542
+55521	[1728367043]	2000000 OPS in 2.740238 seconds, throughput 729863.610387
+55521	[1728367043]	2000000 OPS in 2.709862 seconds, throughput 738044.963175
+55521	[1728367044]	2000000 OPS in 2.736111 seconds, throughput 730964.496689
+55521	[1728367044]	2000000 OPS in 2.731133 seconds, throughput 732296.816010
+55521	[1728367046]	2000000 OPS in 2.735459 seconds, throughput 731138.722971
+55521	[1728367046]	2000000 OPS in 2.711085 seconds, throughput 737712.023046
+55521	[1728367046]	2000000 OPS in 2.739908 seconds, throughput 729951.516620
+55521	[1728367047]	2000000 OPS in 2.735025 seconds, throughput 731254.741730
+55521	[1728367048]	2000000 OPS in 2.739589 seconds, throughput 730036.512776
+55521	[1728367049]	2000000 OPS in 2.714749 seconds, throughput 736716.359413
+55521	[1728367049]	2000000 OPS in 2.739374 seconds, throughput 730093.809754
+55521	[1728367050]	2000000 OPS in 2.735044 seconds, throughput 731249.661797
+55521	[1728367051]	2000000 OPS in 2.737640 seconds, throughput 730556.245525
+55521	[1728367051]	2000000 OPS in 2.709450 seconds, throughput 738157.190574
+55521	[1728367052]	2000000 OPS in 2.740903 seconds, throughput 729686.530315
+55521	[1728367052]	2000000 OPS in 2.734752 seconds, throughput 731327.740139
+55521	[1728367054]	2000000 OPS in 2.739027 seconds, throughput 730186.303384
+55521	[1728367054]	2000000 OPS in 2.705975 seconds, throughput 739105.128466
+55521	[1728367055]	2000000 OPS in 2.738918 seconds, throughput 730215.362417
+55521	[1728367055]	2000000 OPS in 2.736171 seconds, throughput 730948.467768
+55521	[1728367057]	2000000 OPS in 2.745819 seconds, throughput 728380.129936
+55521	[1728367057]	2000000 OPS in 2.719891 seconds, throughput 735323.584658
+55521	[1728367057]	2000000 OPS in 2.751694 seconds, throughput 726825.003071
+55521	[1728367058]	2000000 OPS in 2.746049 seconds, throughput 728319.123220
+55521	[1728367059]	2000000 OPS in 2.739772 seconds, throughput 729987.750806
+55521	[1728367060]	2000000 OPS in 2.713349 seconds, throughput 737096.481138
+55521	[1728367060]	2000000 OPS in 2.744586 seconds, throughput 728707.353313
+55521	[1728367061]	2000000 OPS in 2.735157 seconds, throughput 731219.451022
+55521	[1728367062]	2000000 OPS in 2.731723 seconds, throughput 732138.653883
+55521	[1728367062]	2000000 OPS in 2.711960 seconds, throughput 737474.004041
+55521	[1728367063]	2000000 OPS in 2.736493 seconds, throughput 730862.457898
+55521	[1728367063]	2000000 OPS in 2.731106 seconds, throughput 732304.055573
+55521	[1728367065]	2000000 OPS in 2.737949 seconds, throughput 730473.796261
+55521	[1728367065]	2000000 OPS in 2.711429 seconds, throughput 737618.429249
+55521	[1728367066]	2000000 OPS in 2.745630 seconds, throughput 728430.269191
+55521	[1728367066]	2000000 OPS in 2.732411 seconds, throughput 731954.307020
+55521	[1728367067]	2000000 OPS in 2.737015 seconds, throughput 730723.068745
+55521	[1728367068]	2000000 OPS in 2.710202 seconds, throughput 737952.374030
+55521	[1728367068]	2000000 OPS in 2.740256 seconds, throughput 729858.816111
+55521	[1728367069]	2000000 OPS in 2.728723 seconds, throughput 732943.578370
+55521	[1728367070]	2000000 OPS in 2.735700 seconds, throughput 731074.313704
+55521	[1728367070]	2000000 OPS in 2.708954 seconds, throughput 738292.344573
+55521	[1728367071]	2000000 OPS in 2.741199 seconds, throughput 729607.737344
+55521	[1728367072]	2000000 OPS in 2.730081 seconds, throughput 732578.996740
+55521	[1728367073]	2000000 OPS in 2.734071 seconds, throughput 731509.898609
+55521	[1728367073]	2000000 OPS in 2.714169 seconds, throughput 736873.790836
+55521	[1728367074]	2000000 OPS in 2.740377 seconds, throughput 729826.589553
+55521	[1728367074]	2000000 OPS in 2.736263 seconds, throughput 730923.891453
+55521	[1728367076]	2000000 OPS in 2.735723 seconds, throughput 731068.167355
+55521	[1728367076]	2000000 OPS in 2.712519 seconds, throughput 737322.024288
+55521	[1728367077]	2000000 OPS in 2.740541 seconds, throughput 729782.915125
+55521	[1728367077]	2000000 OPS in 2.727258 seconds, throughput 733337.293355
+55521	[1728367078]	2000000 OPS in 2.735319 seconds, throughput 731176.144355
+55521	[1728367079]	2000000 OPS in 2.707661 seconds, throughput 738644.904218
+55521	[1728367079]	2000000 OPS in 2.739548 seconds, throughput 730047.438483
+55521	[1728367080]	2000000 OPS in 2.734969 seconds, throughput 731269.714574
+55521	[1728367081]	2000000 OPS in 2.735650 seconds, throughput 731087.675690
+55521	[1728367081]	2000000 OPS in 2.711562 seconds, throughput 737582.249641
+55521	[1728367082]	2000000 OPS in 2.734492 seconds, throughput 731397.275984
+55521	[1728367083]	2000000 OPS in 2.734553 seconds, throughput 731380.960618
+55521	[1728367084]	2000000 OPS in 2.737843 seconds, throughput 730502.077731
+55521	[1728367084]	2000000 OPS in 2.714784 seconds, throughput 736706.861393
+55521	[1728367085]	2000000 OPS in 2.739186 seconds, throughput 730143.918668
+55521	[1728367085]	2000000 OPS in 2.734873 seconds, throughput 731295.383734
+55521	[1728367087]	2000000 OPS in 2.738368 seconds, throughput 730362.025849
+55521	[1728367087]	2000000 OPS in 2.713080 seconds, throughput 737169.563743
+55521	[1728367088]	2000000 OPS in 2.741335 seconds, throughput 729571.540873
+55521	[1728367088]	2000000 OPS in 2.739258 seconds, throughput 730124.727207
+55521	[1728367089]	2000000 OPS in 2.735801 seconds, throughput 731047.323983
+55521	[1728367089]	2000000 OPS in 2.712586 seconds, throughput 737303.812672
+55521	[1728367090]	2000000 OPS in 2.737311 seconds, throughput 730644.051772
+55521	[1728367091]	2000000 OPS in 2.732713 seconds, throughput 731873.416638
+55521	[1728367092]	2000000 OPS in 2.736859 seconds, throughput 730764.719702
+55521	[1728367092]	2000000 OPS in 2.716846 seconds, throughput 736147.724236
+55521	[1728367093]	2000000 OPS in 2.742883 seconds, throughput 729159.792817
+55521	[1728367093]	2000000 OPS in 2.732290 seconds, throughput 731986.721761
+55521	[1728367095]	2000000 OPS in 2.735258 seconds, throughput 731192.450584
+55521	[1728367095]	2000000 OPS in 2.715446 seconds, throughput 736527.259242
+55521	[1728367096]	2000000 OPS in 2.739075 seconds, throughput 730173.507480
+55521	[1728367096]	2000000 OPS in 2.735327 seconds, throughput 731174.005887
+55521	[1728367098]	2000000 OPS in 2.733419 seconds, throughput 731684.385014
+55521	[1728367098]	2000000 OPS in 2.712771 seconds, throughput 737253.531537
+55521	[1728367099]	2000000 OPS in 2.740103 seconds, throughput 729899.569469
+55521	[1728367099]	2000000 OPS in 2.728667 seconds, throughput 732958.620455
+55521	[1728367100]	2000000 OPS in 2.717127 seconds, throughput 736071.593267
+55521	[1728367100]	2000000 OPS in 2.736644 seconds, throughput 730822.131048
+55521	[1728367101]	2000000 OPS in 2.744421 seconds, throughput 728751.164635
+55521	[1728367102]	2000000 OPS in 2.730307 seconds, throughput 732518.357826
+55521	[1728367103]	2000000 OPS in 2.709450 seconds, throughput 738157.190574
+55521	[1728367103]	2000000 OPS in 2.733890 seconds, throughput 731558.328974
+55521	[1728367104]	2000000 OPS in 2.741522 seconds, throughput 729521.776590
+55521	[1728367104]	2000000 OPS in 2.730976 seconds, throughput 732338.914732
+55521	[1728367106]	2000000 OPS in 2.717435 seconds, throughput 735988.165310
+55521	[1728367106]	2000000 OPS in 2.739815 seconds, throughput 729976.294020
+55521	[1728367107]	2000000 OPS in 2.741136 seconds, throughput 729624.506044
+55521	[1728367107]	2000000 OPS in 2.729056 seconds, throughput 732854.144437
+55521	[1728367108]	2000000 OPS in 2.712643 seconds, throughput 737288.319915
+55521	[1728367109]	2000000 OPS in 2.739958 seconds, throughput 729938.196133
+55521	[1728367110]	2000000 OPS in 2.742696 seconds, throughput 729209.507725
+55521	[1728367110]	2000000 OPS in 2.736411 seconds, throughput 730884.359111
+55521	[1728367111]	2000000 OPS in 2.713099 seconds, throughput 737164.401299
+55521	[1728367111]	2000000 OPS in 2.742877 seconds, throughput 729161.387842
+55521	[1728367112]	2000000 OPS in 2.745027 seconds, throughput 728590.283447
+55521	[1728367113]	2000000 OPS in 2.734377 seconds, throughput 731428.036441
+55521	[1728367114]	2000000 OPS in 2.710131 seconds, throughput 737971.706903
+55521	[1728367114]	2000000 OPS in 2.741756 seconds, throughput 729459.514267
+55521	[1728367115]	2000000 OPS in 2.738696 seconds, throughput 730274.554021
+55521	[1728367115]	2000000 OPS in 2.733164 seconds, throughput 731752.650042
+55521	[1728367117]	2000000 OPS in 2.727260 seconds, throughput 733336.755572
+55521	[1728367117]	2000000 OPS in 2.751074 seconds, throughput 726988.805099
+55521	[1728367118]	2000000 OPS in 2.757063 seconds, throughput 725409.611605
+55521	[1728367118]	2000000 OPS in 2.738904 seconds, throughput 730219.094937
+55521	[1728367119]	2000000 OPS in 2.714302 seconds, throughput 736837.684237
+55521	[1728367120]	2000000 OPS in 2.744726 seconds, throughput 728670.184201
+55521	[1728367120]	2000000 OPS in 2.741871 seconds, throughput 729428.919158
+55521	[1728367121]	2000000 OPS in 2.729357 seconds, throughput 732773.323534
+55521	[1728367122]	2000000 OPS in 2.713009 seconds, throughput 737188.855621
+55521	[1728367122]	2000000 OPS in 2.735519 seconds, throughput 731122.686408
+55521	[1728367123]	2000000 OPS in 2.741185 seconds, throughput 729611.463655
+55521	[1728367124]	2000000 OPS in 2.731393 seconds, throughput 732227.109025
+55521	[1728367125]	2000000 OPS in 2.712600 seconds, throughput 737300.007373
+55521	[1728367125]	2000000 OPS in 2.733733 seconds, throughput 731600.342828
+55521	[1728367126]	2000000 OPS in 2.740180 seconds, throughput 729879.059040
+55521	[1728367126]	2000000 OPS in 2.728986 seconds, throughput 732872.942551
+55521	[1728367127]	2000000 OPS in 2.716500 seconds, throughput 736241.487208
+55521	[1728367128]	2000000 OPS in 2.737264 seconds, throughput 730656.597245
+55521	[1728367129]	2000000 OPS in 2.741138 seconds, throughput 729623.973693
+55521	[1728367129]	2000000 OPS in 2.732715 seconds, throughput 731872.880999
+55521	[1728367130]	2000000 OPS in 2.712816 seconds, throughput 737241.302027
+55521	[1728367130]	2000000 OPS in 2.730080 seconds, throughput 732579.265076
+55521	[1728367131]	2000000 OPS in 2.737847 seconds, throughput 730501.010466
+55521	[1728367132]	2000000 OPS in 2.731010 seconds, throughput 732329.797401
+55521	[1728367133]	2000000 OPS in 2.708766 seconds, throughput 738343.585234
+55521	[1728367133]	2000000 OPS in 2.732457 seconds, throughput 731941.984814
+55521	[1728367134]	2000000 OPS in 2.737481 seconds, throughput 730598.678128
+55521	[1728367134]	2000000 OPS in 2.726547 seconds, throughput 733528.525274
+55521	[1728367136]	2000000 OPS in 2.709922 seconds, throughput 738028.622226
+55521	[1728367136]	2000000 OPS in 2.732852 seconds, throughput 731836.191642
+55521	[1728367137]	2000000 OPS in 2.741406 seconds, throughput 729552.645613
+55521	[1728367137]	2000000 OPS in 2.728733 seconds, throughput 732940.892348
+55521	[1728367138]	2000000 OPS in 2.716210 seconds, throughput 736320.093071
+55521	[1728367139]	2000000 OPS in 2.737868 seconds, throughput 730495.407375
+55521	[1728367140]	2000000 OPS in 2.743291 seconds, throughput 729051.347451
+55521	[1728367140]	2000000 OPS in 2.735426 seconds, throughput 731147.543381
+55521	[1728367141]	2000000 OPS in 2.712646 seconds, throughput 737287.504525
+55521	[1728367141]	2000000 OPS in 2.738363 seconds, throughput 730363.359423
+55521	[1728367142]	2000000 OPS in 2.740738 seconds, throughput 729730.459460
+55521	[1728367143]	2000000 OPS in 2.733093 seconds, throughput 731771.659435
+55521	[1728367144]	2000000 OPS in 2.713687 seconds, throughput 737004.672978
+55521	[1728367144]	2000000 OPS in 2.738165 seconds, throughput 730416.172875
+55521	[1728367145]	2000000 OPS in 2.740776 seconds, throughput 729720.341976
+55521	[1728367145]	2000000 OPS in 2.729753 seconds, throughput 732667.021522
+55521	[1728367146]	2000000 OPS in 2.710540 seconds, throughput 737860.352550
+55521	[1728367147]	2000000 OPS in 2.735136 seconds, throughput 731225.065225
+55521	[1728367148]	2000000 OPS in 2.738326 seconds, throughput 730373.228023
+55521	[1728367148]	2000000 OPS in 2.728305 seconds, throughput 733055.871686
+55521	[1728367149]	2000000 OPS in 2.713405 seconds, throughput 737081.268738
+55521	[1728367150]	2000000 OPS in 2.740565 seconds, throughput 729776.524184
+55521	[1728367151]	2000000 OPS in 2.739146 seconds, throughput 730154.581026
+55521	[1728367151]	2000000 OPS in 2.730381 seconds, throughput 732498.504787
+55521	[1728367152]	2000000 OPS in 2.713689 seconds, throughput 737004.129803
+55521	[1728367152]	2000000 OPS in 2.745001 seconds, throughput 728597.184482
+55521	[1728367153]	2000000 OPS in 2.748456 seconds, throughput 727681.287239
+55521	[1728367154]	2000000 OPS in 2.734972 seconds, throughput 731268.912442
+55521	[1728367155]	2000000 OPS in 2.715043 seconds, throughput 736636.583656
+55521	[1728367155]	2000000 OPS in 2.740282 seconds, throughput 729851.891156
+55521	[1728367156]	2000000 OPS in 2.741254 seconds, throughput 729593.098633
+55521	[1728367156]	2000000 OPS in 2.728605 seconds, throughput 732975.274912
+55521	[1728367157]	2000000 OPS in 2.708900 seconds, throughput 738307.061907
+55521	[1728367158]	2000000 OPS in 2.734041 seconds, throughput 731517.925298
+55521	[1728367159]	2000000 OPS in 2.736161 seconds, throughput 730951.139206
+55521	[1728367159]	2000000 OPS in 2.729356 seconds, throughput 732773.592012
+55521	[1728367160]	2000000 OPS in 2.716291 seconds, throughput 736298.135951
+55521	[1728367161]	2000000 OPS in 2.740452 seconds, throughput 729806.615843
+55521	[1728367162]	2000000 OPS in 2.740210 seconds, throughput 729871.068276
+55521	[1728367162]	2000000 OPS in 2.731048 seconds, throughput 732319.607711
+55521	[1728367163]	2000000 OPS in 2.709320 seconds, throughput 738192.609216
+55521	[1728367163]	2000000 OPS in 2.735040 seconds, throughput 731250.731251
+55521	[1728367164]	2000000 OPS in 2.740858 seconds, throughput 729698.510466
+55521	[1728367165]	2000000 OPS in 2.729440 seconds, throughput 732751.040506
+55521	[1728367165]	2000000 OPS in 2.717251 seconds, throughput 736038.003114
+55521	[1728367166]	2000000 OPS in 2.737154 seconds, throughput 730685.960673
+55521	[1728367167]	2000000 OPS in 2.741191 seconds, throughput 729609.866660
+55521	[1728367167]	2000000 OPS in 2.733159 seconds, throughput 731753.988700
+55521	[1728367168]	2000000 OPS in 2.713762 seconds, throughput 736984.304445
+55521	[1728367169]	2000000 OPS in 2.740012 seconds, throughput 729923.810553
+55521	[1728367170]	2000000 OPS in 2.737991 seconds, throughput 730462.591002
+55521	[1728367170]	2000000 OPS in 2.731005 seconds, throughput 732331.138171
+55521	[1728367171]	2000000 OPS in 2.709813 seconds, throughput 738058.308821
+55521	[1728367172]	2000000 OPS in 2.735100 seconds, throughput 731234.689774
+55521	[1728367173]	2000000 OPS in 2.741215 seconds, throughput 729603.478749
+55521	[1728367173]	2000000 OPS in 2.730677 seconds, throughput 732419.103395
+55521	[1728367174]	2000000 OPS in 2.714028 seconds, throughput 736912.073125
+55521	[1728367174]	2000000 OPS in 2.743095 seconds, throughput 729103.439728
+55521	[1728367175]	2000000 OPS in 2.745040 seconds, throughput 728586.832979
+55521	[1728367175]	2000000 OPS in 2.741015 seconds, throughput 729656.714757
+55521	[1728367176]	2000000 OPS in 2.723510 seconds, throughput 734346.486703
+55521	[1728367177]	2000000 OPS in 2.750890 seconds, throughput 727037.431522
+55521	[1728367178]	2000000 OPS in 2.748747 seconds, throughput 727604.250227
+55521	[1728367178]	2000000 OPS in 2.734254 seconds, throughput 731460.939620
+55521	[1728367179]	2000000 OPS in 2.709364 seconds, throughput 738180.620987
+55521	[1728367180]	2000000 OPS in 2.737996 seconds, throughput 730461.257065
+55521	[1728367181]	2000000 OPS in 2.735439 seconds, throughput 731144.068649
+55521	[1728367181]	2000000 OPS in 2.732553 seconds, throughput 731916.270243
+55521	[1728367182]	2000000 OPS in 2.708047 seconds, throughput 738539.619143
+55521	[1728367182]	2000000 OPS in 2.736131 seconds, throughput 730959.153637
+55521	[1728367184]	2000000 OPS in 2.736955 seconds, throughput 730739.087782
+55521	[1728367184]	2000000 OPS in 2.733279 seconds, throughput 731721.862276
+55521	[1728367184]	2000000 OPS in 2.710472 seconds, throughput 737878.863903
+55521	[1728367185]	2000000 OPS in 2.733665 seconds, throughput 731618.541409
+55521	[1728367186]	2000000 OPS in 2.736721 seconds, throughput 730801.568739
+55521	[1728367186]	2000000 OPS in 2.731268 seconds, throughput 732260.620342
+55521	[1728367187]	2000000 OPS in 2.715043 seconds, throughput 736636.583656
+55521	[1728367188]	2000000 OPS in 2.735798 seconds, throughput 731048.125629
+55521	[1728367189]	2000000 OPS in 2.741596 seconds, throughput 729502.085646
+55521	[1728367189]	2000000 OPS in 2.734237 seconds, throughput 731465.487447
+55521	[1728367190]	2000000 OPS in 2.716154 seconds, throughput 736335.274068
+55521	[1728367191]	2000000 OPS in 2.737836 seconds, throughput 730503.945452
+55521	[1728367192]	2000000 OPS in 2.739341 seconds, throughput 730102.604970
+55521	[1728367192]	2000000 OPS in 2.733607 seconds, throughput 731634.064443
+55521	[1728367193]	2000000 OPS in 2.712967 seconds, throughput 737200.268193
+55521	[1728367193]	2000000 OPS in 2.735401 seconds, throughput 731154.225651
+55521	[1728367194]	2000000 OPS in 2.743316 seconds, throughput 729044.703563
+55521	[1728367195]	2000000 OPS in 2.732713 seconds, throughput 731873.416638
+55521	[1728367195]	2000000 OPS in 2.714842 seconds, throughput 736691.122356
+55521	[1728367196]	2000000 OPS in 2.744076 seconds, throughput 728842.787153
+55521	[1728367197]	2000000 OPS in 2.746420 seconds, throughput 728220.738270
+55521	[1728367197]	2000000 OPS in 2.734351 seconds, throughput 731434.991338
+55521	[1728367198]	2000000 OPS in 2.713665 seconds, throughput 737010.647961
+55521	[1728367199]	2000000 OPS in 2.749229 seconds, throughput 727476.685282
+55521	[1728367200]	2000000 OPS in 2.740815 seconds, throughput 729709.958534
+55521	[1728367200]	2000000 OPS in 2.729053 seconds, throughput 732854.950050
+55521	[1728367201]	2000000 OPS in 2.713023 seconds, throughput 737185.051509
+55521	[1728367202]	2000000 OPS in 2.734594 seconds, throughput 731369.994961
+55521	[1728367203]	2000000 OPS in 2.740572 seconds, throughput 729774.660180
+55521	[1728367203]	2000000 OPS in 2.728933 seconds, throughput 732887.176050
+55521	[1728367203]	2000000 OPS in 2.716905 seconds, throughput 736131.738136
+55521	[1728367204]	2000000 OPS in 2.739687 seconds, throughput 730010.398998
+55521	[1728367205]	2000000 OPS in 2.742077 seconds, throughput 729374.120420
+55521	[1728367205]	2000000 OPS in 2.730272 seconds, throughput 732527.748151
+55521	[1728367206]	2000000 OPS in 2.712151 seconds, throughput 737422.068314
+55521	[1728367207]	2000000 OPS in 2.736190 seconds, throughput 730943.392089
+55521	[1728367208]	2000000 OPS in 2.744332 seconds, throughput 728774.798384
+55521	[1728367208]	2000000 OPS in 2.731188 seconds, throughput 732282.069195
+55521	[1728367209]	2000000 OPS in 2.711998 seconds, throughput 737463.670696
+55521	[1728367210]	2000000 OPS in 2.735060 seconds, throughput 731245.384014
+55521	[1728367211]	2000000 OPS in 2.737562 seconds, throughput 730577.060903
+55521	[1728367211]	2000000 OPS in 2.730344 seconds, throughput 732508.431172
+55521	[1728367212]	2000000 OPS in 2.712910 seconds, throughput 737215.757250
+55521	[1728367213]	2000000 OPS in 2.738736 seconds, throughput 730263.888159
+55521	[1728367214]	2000000 OPS in 2.736150 seconds, throughput 730954.077810
+55521	[1728367214]	2000000 OPS in 2.729964 seconds, throughput 732610.393397
+55521	[1728367214]	2000000 OPS in 2.717248 seconds, throughput 736038.815743
+55521	[1728367215]	2000000 OPS in 2.740755 seconds, throughput 729725.933183
+55521	[1728367216]	2000000 OPS in 2.740738 seconds, throughput 729730.459460
+55521	[1728367216]	2000000 OPS in 2.734054 seconds, throughput 731514.447045
+55521	[1728367217]	2000000 OPS in 2.710315 seconds, throughput 737921.606898
+55521	[1728367218]	2000000 OPS in 2.736963 seconds, throughput 730736.951870
+55521	[1728367219]	2000000 OPS in 2.733570 seconds, throughput 731643.967413
+55521	[1728367219]	2000000 OPS in 2.741173 seconds, throughput 729614.657667
+55521	[1728367220]	2000000 OPS in 2.714199 seconds, throughput 736865.646181
+55521	[1728367221]	2000000 OPS in 2.738663 seconds, throughput 730283.353593
+55521	[1728367222]	2000000 OPS in 2.727496 seconds, throughput 733273.302692
+55521	[1728367222]	2000000 OPS in 2.737778 seconds, throughput 730519.421224
+55521	[1728367222]	2000000 OPS in 2.714504 seconds, throughput 736782.852411
+55521	[1728367224]	2000000 OPS in 2.730972 seconds, throughput 732339.987374
+55521	[1728367225]	2000000 OPS in 2.732080 seconds, throughput 732042.985564
+55521	[1728367225]	2000000 OPS in 2.736556 seconds, throughput 730845.632247
+55521	[1728367225]	2000000 OPS in 2.712225 seconds, throughput 737401.948585
+55521	[1728367226]	2000000 OPS in 2.738453 seconds, throughput 730339.355833
+55521	[1728367227]	2000000 OPS in 2.737951 seconds, throughput 730473.262670
+55521	[1728367227]	2000000 OPS in 2.742771 seconds, throughput 729189.567777
+55521	[1728367228]	2000000 OPS in 2.720391 seconds, throughput 735188.434310
+55521	[1728367229]	2000000 OPS in 2.740318 seconds, throughput 729842.302974
+55521	[1728367230]	2000000 OPS in 2.731429 seconds, throughput 732217.458334
+55521	[1728367230]	2000000 OPS in 2.737627 seconds, throughput 730559.714673
+55521	[1728367231]	2000000 OPS in 2.721030 seconds, throughput 735015.784464
+55521	[1728367232]	2000000 OPS in 2.739086 seconds, throughput 730170.575148
+55521	[1728367233]	2000000 OPS in 2.731172 seconds, throughput 732286.359116
+55521	[1728367233]	2000000 OPS in 2.739728 seconds, throughput 729999.474400
+55521	[1728367233]	2000000 OPS in 2.707037 seconds, throughput 738815.169501
+55521	[1728367234]	2000000 OPS in 2.737023 seconds, throughput 730720.932926
+55521	[1728367236]	2000000 OPS in 2.742264 seconds, throughput 729324.383065
+55521	[1728367236]	2000000 OPS in 2.753993 seconds, throughput 726218.258362
+55521	[1728367236]	2000000 OPS in 2.723053 seconds, throughput 734469.729381
+55521	[1728367237]	2000000 OPS in 2.742251 seconds, throughput 729327.840522
+55521	[1728367238]	2000000 OPS in 2.728964 seconds, throughput 732878.850729
+55521	[1728367238]	2000000 OPS in 2.737923 seconds, throughput 730480.733023
+55521	[1728367239]	2000000 OPS in 2.709143 seconds, throughput 738240.838523
+55521	[1728367240]	2000000 OPS in 2.738595 seconds, throughput 730301.486711
+55521	[1728367241]	2000000 OPS in 2.729728 seconds, throughput 732673.731595
+55521	[1728367241]	2000000 OPS in 2.741546 seconds, throughput 729515.390221
+55521	[1728367241]	2000000 OPS in 2.711141 seconds, throughput 737696.785228
+55521	[1728367243]	2000000 OPS in 2.735101 seconds, throughput 731234.422422
+55521	[1728367244]	2000000 OPS in 2.734448 seconds, throughput 731409.044897
+55521	[1728367244]	2000000 OPS in 2.741770 seconds, throughput 729455.789508
+55521	[1728367244]	2000000 OPS in 2.716343 seconds, throughput 736284.040712
+55521	[1728367245]	2000000 OPS in 2.734090 seconds, throughput 731504.815130
+55521	[1728367246]	2000000 OPS in 2.733470 seconds, throughput 731670.733536
+55521	[1728367247]	2000000 OPS in 2.737935 seconds, throughput 730477.531424
+55521	[1728367247]	2000000 OPS in 2.714486 seconds, throughput 736787.738084
+55521	[1728367248]	2000000 OPS in 2.739746 seconds, throughput 729994.678339
+55521	[1728367249]	2000000 OPS in 2.733143 seconds, throughput 731758.272436
+55521	[1728367249]	2000000 OPS in 2.740784 seconds, throughput 729718.212015
+55521	[1728367250]	2000000 OPS in 2.714484 seconds, throughput 736788.280940
+55521	[1728367251]	2000000 OPS in 2.740614 seconds, throughput 729763.476360
+55521	[1728367252]	2000000 OPS in 2.730996 seconds, throughput 732333.551569
+55521	[1728367252]	2000000 OPS in 2.739363 seconds, throughput 730096.741469
+55521	[1728367252]	2000000 OPS in 2.717611 seconds, throughput 735940.500682
+55521	[1728367254]	2000000 OPS in 2.735609 seconds, throughput 731098.632882
+55521	[1728367255]	2000000 OPS in 2.735939 seconds, throughput 731010.450160
+55521	[1728367255]	2000000 OPS in 2.738728 seconds, throughput 730266.021306
+55521	[1728367255]	2000000 OPS in 2.718711 seconds, throughput 735642.736576
+55521	[1728367256]	2000000 OPS in 2.736641 seconds, throughput 730822.932200
+55521	[1728367257]	2000000 OPS in 2.735174 seconds, throughput 731214.906255
+55521	[1728367258]	2000000 OPS in 2.743588 seconds, throughput 728972.425889
+55521	[1728367258]	2000000 OPS in 2.712791 seconds, throughput 737248.096149
+55521	[1728367259]	2000000 OPS in 2.738986 seconds, throughput 730197.233575
+55521	[1728367260]	2000000 OPS in 2.732902 seconds, throughput 731822.802281
+55521	[1728367260]	2000000 OPS in 2.740709 seconds, throughput 729738.180887
+55521	[1728367260]	2000000 OPS in 2.710239 seconds, throughput 737942.299554
+55521	[1728367262]	2000000 OPS in 2.740519 seconds, throughput 729788.773586
+55521	[1728367263]	2000000 OPS in 2.733022 seconds, throughput 731790.669815
+55521	[1728367263]	2000000 OPS in 2.743009 seconds, throughput 729126.298893
+55521	[1728367263]	2000000 OPS in 2.718224 seconds, throughput 735774.535138
+55521	[1728367265]	2000000 OPS in 2.738527 seconds, throughput 730319.620730
+55521	[1728367266]	2000000 OPS in 2.734846 seconds, throughput 731302.603510
+55521	[1728367266]	2000000 OPS in 2.738838 seconds, throughput 730236.691619
+55521	[1728367266]	2000000 OPS in 2.708807 seconds, throughput 738332.409803
+55521	[1728367267]	2000000 OPS in 2.736902 seconds, throughput 730753.238516
+55521	[1728367268]	2000000 OPS in 2.733669 seconds, throughput 731617.470879
+55521	[1728367268]	2000000 OPS in 2.737961 seconds, throughput 730470.594724
+55521	[1728367269]	2000000 OPS in 2.712150 seconds, throughput 737422.340210
+55521	[1728367270]	2000000 OPS in 2.739980 seconds, throughput 729932.335273
+55521	[1728367271]	2000000 OPS in 2.739612 seconds, throughput 730030.383865
+55521	[1728367271]	2000000 OPS in 2.746774 seconds, throughput 728126.886304
+55521	[1728367271]	2000000 OPS in 2.713759 seconds, throughput 736985.119165
+55521	[1728367273]	2000000 OPS in 2.744544 seconds, throughput 728718.504786
+55521	[1728367274]	2000000 OPS in 2.736210 seconds, throughput 730938.049346
+55521	[1728367274]	2000000 OPS in 2.712123 seconds, throughput 737429.681471
+55521	[1728367274]	2000000 OPS in 2.740897 seconds, throughput 729688.127646
+55521	[1728367276]	2000000 OPS in 2.737813 seconds, throughput 730510.082318
+55521	[1728367277]	2000000 OPS in 2.730706 seconds, throughput 732411.325130
+55521	[1728367277]	2000000 OPS in 2.713485 seconds, throughput 737059.537827
+55521	[1728367277]	2000000 OPS in 2.740114 seconds, throughput 729896.639337
+55521	[1728367278]	2000000 OPS in 2.738349 seconds, throughput 730367.093457
+55521	[1728367279]	2000000 OPS in 2.733099 seconds, throughput 731770.052969
+55521	[1728367279]	2000000 OPS in 2.717196 seconds, throughput 736052.901594
+55521	[1728367279]	2000000 OPS in 2.739678 seconds, throughput 730012.797124
+55521	[1728367281]	2000000 OPS in 2.737760 seconds, throughput 730524.224183
+55521	[1728367282]	2000000 OPS in 2.734747 seconds, throughput 731329.077242
+55521	[1728367282]	2000000 OPS in 2.714604 seconds, throughput 736755.710962
+55521	[1728367282]	2000000 OPS in 2.740586 seconds, throughput 729770.932202
+55521	[1728367284]	2000000 OPS in 2.738254 seconds, throughput 730392.432550
+55521	[1728367285]	2000000 OPS in 2.733585 seconds, throughput 731639.952663
+55521	[1728367285]	2000000 OPS in 2.713085 seconds, throughput 737168.205198
+55521	[1728367285]	2000000 OPS in 2.739412 seconds, throughput 730083.682192
+55521	[1728367287]	2000000 OPS in 2.734391 seconds, throughput 731424.291552
+55521	[1728367287]	2000000 OPS in 2.732113 seconds, throughput 732034.143537
+55521	[1728367288]	2000000 OPS in 2.708461 seconds, throughput 738426.730162
+55521	[1728367288]	2000000 OPS in 2.736821 seconds, throughput 730774.866168
+55521	[1728367289]	2000000 OPS in 2.736430 seconds, throughput 730879.284323
+55521	[1728367290]	2000000 OPS in 2.735828 seconds, throughput 731040.109247
+55521	[1728367290]	2000000 OPS in 2.714344 seconds, throughput 736826.282888
+55521	[1728367290]	2000000 OPS in 2.740651 seconds, throughput 729753.624230
+55521	[1728367292]	2000000 OPS in 2.735299 seconds, throughput 731181.490579
+55521	[1728367293]	2000000 OPS in 2.706957 seconds, throughput 738837.004060
+55521	[1728367293]	2000000 OPS in 2.880257 seconds, throughput 694382.480452
+55521	[1728367293]	2000000 OPS in 2.751570 seconds, throughput 726857.757571
+55521	[1728367295]	2000000 OPS in 2.732235 seconds, throughput 732001.456683
+55521	[1728367296]	2000000 OPS in 2.741511 seconds, throughput 729524.703713
+55521	[1728367296]	2000000 OPS in 2.720115 seconds, throughput 735263.031159
+55521	[1728367296]	2000000 OPS in 2.746361 seconds, throughput 728236.382617
+55521	[1728367297]	2000000 OPS in 2.747949 seconds, throughput 727815.545339
+55521	[1728367298]	2000000 OPS in 2.724954 seconds, throughput 733957.343867
+55521	[1728367299]	2000000 OPS in 2.716807 seconds, throughput 736158.291701
+55521	[1728367299]	2000000 OPS in 2.741144 seconds, throughput 729622.376643
+55521	[1728367300]	2000000 OPS in 2.738954 seconds, throughput 730205.764682
+55521	[1728367301]	2000000 OPS in 2.727265 seconds, throughput 733335.411117
+55521	[1728367301]	2000000 OPS in 2.720226 seconds, throughput 735233.028432
+55521	[1728367301]	2000000 OPS in 2.743215 seconds, throughput 729071.545613
+55521	[1728367303]	2000000 OPS in 2.740878 seconds, throughput 729693.185906
+55521	[1728367304]	2000000 OPS in 2.726334 seconds, throughput 733585.833577
+55521	[1728367304]	2000000 OPS in 2.719373 seconds, throughput 735463.652835
+55521	[1728367304]	2000000 OPS in 2.736826 seconds, throughput 730773.531090
+55521	[1728367306]	2000000 OPS in 2.735548 seconds, throughput 731114.935655
+55521	[1728367307]	2000000 OPS in 2.724546 seconds, throughput 734067.253774
+55521	[1728367307]	2000000 OPS in 2.721167 seconds, throughput 734978.779325
+55521	[1728367307]	2000000 OPS in 2.732324 seconds, throughput 731977.613197
+55521	[1728367308]	2000000 OPS in 2.741611 seconds, throughput 729498.094369
+55521	[1728367309]	2000000 OPS in 2.722988 seconds, throughput 734487.261787
+55521	[1728367309]	2000000 OPS in 2.720145 seconds, throughput 735254.922072
+55521	[1728367310]	2000000 OPS in 2.736691 seconds, throughput 730809.579890
+55521	[1728367311]	2000000 OPS in 2.737439 seconds, throughput 730609.887563
+55521	[1728367312]	2000000 OPS in 2.725551 seconds, throughput 733796.579114
+55521	[1728367312]	2000000 OPS in 2.717424 seconds, throughput 735991.144555
+55521	[1728367312]	2000000 OPS in 2.736315 seconds, throughput 730910.001224
+55521	[1728367314]	2000000 OPS in 2.740675 seconds, throughput 729747.233802
+55521	[1728367315]	2000000 OPS in 2.721975 seconds, throughput 734760.605810
+55521	[1728367315]	2000000 OPS in 2.715388 seconds, throughput 736542.991278
+55521	[1728367315]	2000000 OPS in 2.739180 seconds, throughput 730145.518002
+55521	[1728367317]	2000000 OPS in 2.737225 seconds, throughput 730667.007645
+55521	[1728367318]	2000000 OPS in 2.728111 seconds, throughput 733108.000371
+55521	[1728367318]	2000000 OPS in 2.713451 seconds, throughput 737068.773307
+55521	[1728367318]	2000000 OPS in 2.740276 seconds, throughput 729853.489211
+55521	[1728367319]	2000000 OPS in 2.734052 seconds, throughput 731514.982158
+55521	[1728367320]	2000000 OPS in 2.721110 seconds, throughput 734994.175171
+55521	[1728367320]	2000000 OPS in 2.715836 seconds, throughput 736421.492314
+55521	[1728367321]	2000000 OPS in 2.738609 seconds, throughput 730297.753349
+55521	[1728367322]	2000000 OPS in 2.736735 seconds, throughput 730797.830261
+55521	[1728367323]	2000000 OPS in 2.726561 seconds, throughput 733524.758845
+55521	[1728367323]	2000000 OPS in 2.720292 seconds, throughput 735215.190134
+55521	[1728367323]	2000000 OPS in 2.743194 seconds, throughput 729077.126882
+55521	[1728367325]	2000000 OPS in 2.736739 seconds, throughput 730796.762132
+55521	[1728367326]	2000000 OPS in 2.724946 seconds, throughput 733959.498647
+55521	[1728367326]	2000000 OPS in 2.717907 seconds, throughput 735860.351366
+55521	[1728367326]	2000000 OPS in 2.737666 seconds, throughput 730549.307330
+55521	[1728367328]	2000000 OPS in 2.740853 seconds, throughput 729699.841619
+55521	[1728367328]	2000000 OPS in 2.731426 seconds, throughput 732218.262549
+55521	[1728367328]	2000000 OPS in 2.723510 seconds, throughput 734346.486703
+55521	[1728367329]	2000000 OPS in 2.745382 seconds, throughput 728496.070856
+55521	[1728367330]	2000000 OPS in 2.739293 seconds, throughput 730115.398389
+55521	[1728367331]	2000000 OPS in 2.725103 seconds, throughput 733917.213404
+55521	[1728367331]	2000000 OPS in 2.715369 seconds, throughput 736548.145022
+55521	[1728367332]	2000000 OPS in 2.740208 seconds, throughput 729871.600988
+55521	[1728367333]	2000000 OPS in 2.739841 seconds, throughput 729969.366836
+55521	[1728367334]	2000000 OPS in 2.725347 seconds, throughput 733851.505882
+55521	[1728367334]	2000000 OPS in 2.714808 seconds, throughput 736700.348607
+55521	[1728367334]	2000000 OPS in 2.741160 seconds, throughput 729618.117877
+55521	[1728367336]	2000000 OPS in 2.736485 seconds, throughput 730864.594544
+55521	[1728367337]	2000000 OPS in 2.725014 seconds, throughput 733941.183421
+55521	[1728367337]	2000000 OPS in 2.723169 seconds, throughput 734438.442858
+55521	[1728367337]	2000000 OPS in 2.740220 seconds, throughput 729868.404727
+55521	[1728367339]	2000000 OPS in 2.738872 seconds, throughput 730227.626556
+55521	[1728367339]	2000000 OPS in 2.717878 seconds, throughput 735868.203061
+55521	[1728367339]	2000000 OPS in 2.716049 seconds, throughput 736363.740124
+55521	[1728367340]	2000000 OPS in 2.740279 seconds, throughput 729852.690182
+55521	[1728367341]	2000000 OPS in 2.739619 seconds, throughput 730028.518564
+55521	[1728367342]	2000000 OPS in 2.722794 seconds, throughput 734539.594255
+55521	[1728367342]	2000000 OPS in 2.714622 seconds, throughput 736750.825713
+55521	[1728367342]	2000000 OPS in 2.738344 seconds, throughput 730368.427049
+55521	[1728367344]	2000000 OPS in 2.740463 seconds, throughput 729803.686457
+55521	[1728367345]	2000000 OPS in 2.723028 seconds, throughput 734476.472515
+55521	[1728367345]	2000000 OPS in 2.717127 seconds, throughput 736071.593267
+55521	[1728367345]	2000000 OPS in 2.736802 seconds, throughput 730779.939506
+55521	[1728367347]	2000000 OPS in 2.731821 seconds, throughput 732112.389501
+55521	[1728367347]	2000000 OPS in 2.716243 seconds, throughput 736311.147419
+55521	[1728367347]	2000000 OPS in 2.722798 seconds, throughput 734538.515160
+55521	[1728367348]	2000000 OPS in 2.739217 seconds, throughput 730135.655554
+55521	[1728367350]	2000000 OPS in 2.741371 seconds, throughput 729561.960056
+55521	[1728367350]	2000000 OPS in 2.716293 seconds, throughput 736297.593816
+55521	[1728367350]	2000000 OPS in 2.727478 seconds, throughput 733278.141932
+55521	[1728367351]	2000000 OPS in 2.739035 seconds, throughput 730184.170702
+55521	[1728367352]	2000000 OPS in 2.736812 seconds, throughput 730777.269319
+55521	[1728367353]	2000000 OPS in 2.718646 seconds, throughput 735660.325029
+55521	[1728367353]	2000000 OPS in 2.727598 seconds, throughput 733245.881541
+55521	[1728367353]	2000000 OPS in 2.739292 seconds, throughput 730115.664924
+55521	[1728367355]	2000000 OPS in 2.740606 seconds, throughput 729765.606585
+55521	[1728367356]	2000000 OPS in 2.723080 seconds, throughput 734462.446935
+55521	[1728367356]	2000000 OPS in 2.735070 seconds, throughput 731242.710424
+55521	[1728367356]	2000000 OPS in 2.747564 seconds, throughput 727917.529856
+55521	[1728367358]	2000000 OPS in 2.750987 seconds, throughput 727011.796130
+55521	[1728367358]	2000000 OPS in 2.719235 seconds, throughput 735500.977297
+55521	[1728367358]	2000000 OPS in 2.726473 seconds, throughput 733548.434186
+55521	[1728367359]	2000000 OPS in 2.742495 seconds, throughput 729262.952166
+55521	[1728367360]	2000000 OPS in 2.740043 seconds, throughput 729915.552420
+55521	[1728367361]	2000000 OPS in 2.720320 seconds, throughput 735207.622633
+55521	[1728367361]	2000000 OPS in 2.725635 seconds, throughput 733773.964599
+55521	[1728367362]	2000000 OPS in 2.743664 seconds, throughput 728952.233218
+55521	[1728367363]	2000000 OPS in 2.737136 seconds, throughput 730690.765822
+55521	[1728367364]	2000000 OPS in 2.720842 seconds, throughput 735066.571304
+55521	[1728367364]	2000000 OPS in 2.725446 seconds, throughput 733824.849217
+55521	[1728367364]	2000000 OPS in 2.743998 seconds, throughput 728863.505003
+55521	[1728367366]	2000000 OPS in 2.743908 seconds, throughput 728887.411677
+55521	[1728367367]	2000000 OPS in 2.724029 seconds, throughput 734206.574159
+55521	[1728367367]	2000000 OPS in 2.725857 seconds, throughput 733714.204377
+55521	[1728367367]	2000000 OPS in 2.740671 seconds, throughput 729748.298865
+55521	[1728367369]	2000000 OPS in 2.736270 seconds, throughput 730922.021584
+55521	[1728367369]	2000000 OPS in 2.716729 seconds, throughput 736179.427540
+55521	[1728367369]	2000000 OPS in 2.723930 seconds, throughput 734233.258564
+55521	[1728367370]	2000000 OPS in 2.742479 seconds, throughput 729267.206786
+55521	[1728367371]	2000000 OPS in 2.740092 seconds, throughput 729902.499624
+55521	[1728367372]	2000000 OPS in 2.722088 seconds, throughput 734730.104244
+55521	[1728367372]	2000000 OPS in 2.732529 seconds, throughput 731922.698716
+55521	[1728367373]	2000000 OPS in 2.739449 seconds, throughput 730073.821414
+55521	[1728367374]	2000000 OPS in 2.737859 seconds, throughput 730497.808689
+55521	[1728367375]	2000000 OPS in 2.716339 seconds, throughput 736285.124942
+55521	[1728367375]	2000000 OPS in 2.724384 seconds, throughput 734110.903602
+55521	[1728367375]	2000000 OPS in 2.742412 seconds, throughput 729285.023549
+55521	[1728367377]	2000000 OPS in 2.739460 seconds, throughput 730070.889883
+55521	[1728367377]	2000000 OPS in 2.720572 seconds, throughput 735139.522130
+55521	[1728367377]	2000000 OPS in 2.725617 seconds, throughput 733778.810449
+55521	[1728367378]	2000000 OPS in 2.743364 seconds, throughput 729031.947638
+55521	[1728367380]	2000000 OPS in 2.738578 seconds, throughput 730306.020132
+55521	[1728367380]	2000000 OPS in 2.720304 seconds, throughput 735211.946900
+55521	[1728367380]	2000000 OPS in 2.729219 seconds, throughput 732810.375422
+55521	[1728367381]	2000000 OPS in 2.739093 seconds, throughput 730168.709131
+55521	[1728367382]	2000000 OPS in 2.735447 seconds, throughput 731141.930368
+55521	[1728367383]	2000000 OPS in 2.723735 seconds, throughput 734285.824429
+55521	[1728367383]	2000000 OPS in 2.730455 seconds, throughput 732478.652825
+55521	[1728367384]	2000000 OPS in 2.736178 seconds, throughput 730946.597773
+55521	[1728367385]	2000000 OPS in 2.737084 seconds, throughput 730704.647720
+55521	[1728367386]	2000000 OPS in 2.722540 seconds, throughput 734608.123297
+55521	[1728367386]	2000000 OPS in 2.726156 seconds, throughput 733633.731892
+55521	[1728367386]	2000000 OPS in 2.741856 seconds, throughput 729432.909679
+55521	[1728367388]	2000000 OPS in 2.736947 seconds, throughput 730741.223707
+55521	[1728367388]	2000000 OPS in 2.725756 seconds, throughput 733741.391379
+55521	[1728367388]	2000000 OPS in 2.727296 seconds, throughput 733327.075609
+55521	[1728367389]	2000000 OPS in 2.740583 seconds, throughput 729771.731051
+55521	[1728367391]	2000000 OPS in 2.736614 seconds, throughput 730830.142651
+55521	[1728367391]	2000000 OPS in 2.715599 seconds, throughput 736485.762441
+55521	[1728367391]	2000000 OPS in 2.719956 seconds, throughput 735306.012303
+55521	[1728367392]	2000000 OPS in 2.734172 seconds, throughput 731482.876717
+55521	[1728367393]	2000000 OPS in 2.738870 seconds, throughput 730228.159789
+55521	[1728367394]	2000000 OPS in 2.715672 seconds, throughput 736465.964962
+55521	[1728367394]	2000000 OPS in 2.723764 seconds, throughput 734278.006465
+55521	[1728367395]	2000000 OPS in 2.740700 seconds, throughput 729740.577225
+55521	[1728367396]	2000000 OPS in 2.738752 seconds, throughput 730259.621901
+55521	[1728367396]	2000000 OPS in 2.720061 seconds, throughput 735277.627965
+55521	[1728367397]	2000000 OPS in 2.727965 seconds, throughput 733147.236127
+55521	[1728367397]	2000000 OPS in 2.738911 seconds, throughput 730217.228672
+55521	[1728367399]	2000000 OPS in 2.742804 seconds, throughput 729180.794545
+55521	[1728367399]	2000000 OPS in 2.721382 seconds, throughput 734920.713079
+55521	[1728367399]	2000000 OPS in 2.728300 seconds, throughput 733057.215116
+55521	[1728367400]	2000000 OPS in 2.740344 seconds, throughput 729835.378332
+55521	[1728367402]	2000000 OPS in 2.739738 seconds, throughput 729996.809914
+55521	[1728367402]	2000000 OPS in 2.721207 seconds, throughput 734967.975608
+55521	[1728367402]	2000000 OPS in 2.726915 seconds, throughput 733429.534841
+55521	[1728367403]	2000000 OPS in 2.740566 seconds, throughput 729776.257897
+55521	[1728367404]	2000000 OPS in 2.740967 seconds, throughput 729669.492555
+55521	[1728367405]	2000000 OPS in 2.722525 seconds, throughput 734612.170687
+55521	[1728367405]	2000000 OPS in 2.726158 seconds, throughput 733633.193674
+55521	[1728367406]	2000000 OPS in 2.741565 seconds, throughput 729510.334426
+55521	[1728367407]	2000000 OPS in 2.736846 seconds, throughput 730768.190830
+55521	[1728367407]	2000000 OPS in 2.718659 seconds, throughput 735656.807272
+55521	[1728367407]	2000000 OPS in 2.725542 seconds, throughput 733799.002180
+55521	[1728367408]	2000000 OPS in 2.736062 seconds, throughput 730977.587496
+55521	[1728367410]	2000000 OPS in 2.738791 seconds, throughput 730249.223106
+55521	[1728367410]	2000000 OPS in 2.720694 seconds, throughput 735106.557371
+55521	[1728367410]	2000000 OPS in 2.726112 seconds, throughput 733645.572889
+55521	[1728367411]	2000000 OPS in 2.737731 seconds, throughput 730531.962417
+55521	[1728367413]	2000000 OPS in 2.738690 seconds, throughput 730276.153928
+55521	[1728367413]	2000000 OPS in 2.719291 seconds, throughput 735485.830682
+55521	[1728367413]	2000000 OPS in 2.725597 seconds, throughput 733784.194802
+55521	[1728367414]	2000000 OPS in 2.738434 seconds, throughput 730344.423127
+55521	[1728367415]	2000000 OPS in 2.736873 seconds, throughput 730760.981602
+55521	[1728367415]	2000000 OPS in 2.717691 seconds, throughput 735918.836983
+55521	[1728367416]	2000000 OPS in 2.736624 seconds, throughput 730827.472097
+55521	[1728367416]	2000000 OPS in 2.753358 seconds, throughput 726385.744244
+55521	[1728367418]	2000000 OPS in 2.748014 seconds, throughput 727798.329994
+55521	[1728367418]	2000000 OPS in 2.730432 seconds, throughput 732484.822914
+55521	[1728367418]	2000000 OPS in 2.725896 seconds, throughput 733703.706965
+55521	[1728367419]	2000000 OPS in 2.739751 seconds, throughput 729993.346111
+55521	[1728367421]	2000000 OPS in 2.738511 seconds, throughput 730323.887689
+55521	[1728367421]	2000000 OPS in 2.719178 seconds, throughput 735516.395028
+55521	[1728367421]	2000000 OPS in 2.725639 seconds, throughput 733772.887752
+55521	[1728367422]	2000000 OPS in 2.739622 seconds, throughput 730027.719152
+55521	[1728367423]	2000000 OPS in 2.738361 seconds, throughput 730363.892854
+55521	[1728367424]	2000000 OPS in 2.723192 seconds, throughput 734432.239813
+55521	[1728367424]	2000000 OPS in 2.727706 seconds, throughput 733216.849616
+55521	[1728367425]	2000000 OPS in 2.736431 seconds, throughput 730879.017231
+55521	[1728367426]	2000000 OPS in 2.736499 seconds, throughput 730860.855421
+55521	[1728367426]	2000000 OPS in 2.715569 seconds, throughput 736493.898700
+55521	[1728367427]	2000000 OPS in 2.721037 seconds, throughput 735013.893600
+55521	[1728367427]	2000000 OPS in 2.737378 seconds, throughput 730626.168545
+55521	[1728367429]	2000000 OPS in 2.739590 seconds, throughput 730036.246300
+55521	[1728367429]	2000000 OPS in 2.718593 seconds, throughput 735674.667006
+55521	[1728367429]	2000000 OPS in 2.723544 seconds, throughput 734337.319316
+55521	[1728367430]	2000000 OPS in 2.740350 seconds, throughput 729833.780357
+55521	[1728367432]	2000000 OPS in 2.738790 seconds, throughput 730249.489738
+55521	[1728367432]	2000000 OPS in 2.719782 seconds, throughput 735353.054032
+55521	[1728367432]	2000000 OPS in 2.727667 seconds, throughput 733227.333102
+55521	[1728367433]	2000000 OPS in 2.737130 seconds, throughput 730692.367553
+55521	[1728367434]	2000000 OPS in 2.735160 seconds, throughput 731218.649000
+55521	[1728367435]	2000000 OPS in 2.719179 seconds, throughput 735516.124536
+55521	[1728367435]	2000000 OPS in 2.728656 seconds, throughput 732961.575222
+55521	[1728367436]	2000000 OPS in 2.744624 seconds, throughput 728697.264179
+55521	[1728367437]	2000000 OPS in 2.738182 seconds, throughput 730411.638087
+55521	[1728367437]	2000000 OPS in 2.722818 seconds, throughput 734533.119731
+55521	[1728367437]	2000000 OPS in 2.729017 seconds, throughput 732864.617553
+55521	[1728367438]	2000000 OPS in 2.737356 seconds, throughput 730632.040553
+55521	[1728367440]	2000000 OPS in 2.734753 seconds, throughput 731327.472719
+55521	[1728367440]	2000000 OPS in 2.720842 seconds, throughput 735066.571304
+55521	[1728367440]	2000000 OPS in 2.725786 seconds, throughput 733733.315822
+55521	[1728367441]	2000000 OPS in 2.744930 seconds, throughput 728616.030281
+55521	[1728367443]	2000000 OPS in 2.734647 seconds, throughput 731355.820331
+55521	[1728367443]	2000000 OPS in 2.715934 seconds, throughput 736394.919759
+55521	[1728367443]	2000000 OPS in 2.725724 seconds, throughput 733750.005503
+55521	[1728367444]	2000000 OPS in 2.741832 seconds, throughput 729439.294603
+55521	[1728367445]	2000000 OPS in 2.737749 seconds, throughput 730527.159356
+55521	[1728367445]	2000000 OPS in 2.719547 seconds, throughput 735416.596955
+55521	[1728367446]	2000000 OPS in 2.726451 seconds, throughput 733554.353260
+55521	[1728367447]	2000000 OPS in 2.742697 seconds, throughput 729209.241852
+55521	[1728367448]	2000000 OPS in 2.732500 seconds, throughput 731930.466606
+55521	[1728367448]	2000000 OPS in 2.718436 seconds, throughput 735717.155011
+55521	[1728367448]	2000000 OPS in 2.724395 seconds, throughput 734107.939561
+55521	[1728367449]	2000000 OPS in 2.734341 seconds, throughput 731437.666333
+55521	[1728367451]	2000000 OPS in 2.735457 seconds, throughput 731139.257535
+55521	[1728367451]	2000000 OPS in 2.722398 seconds, throughput 734646.440381
+55521	[1728367451]	2000000 OPS in 2.723073 seconds, throughput 734464.334963
+55521	[1728367452]	2000000 OPS in 2.736191 seconds, throughput 730943.124950
+55521	[1728367454]	2000000 OPS in 2.717050 seconds, throughput 736092.453212
+55521	[1728367454]	2000000 OPS in 2.737048 seconds, throughput 730714.258573
+55521	[1728367454]	2000000 OPS in 2.728081 seconds, throughput 733116.062170
+55521	[1728367455]	2000000 OPS in 2.739107 seconds, throughput 730164.977126
+55521	[1728367456]	2000000 OPS in 2.719513 seconds, throughput 735425.791309
+55521	[1728367456]	2000000 OPS in 2.737327 seconds, throughput 730639.781071
+55521	[1728367457]	2000000 OPS in 2.726393 seconds, throughput 733569.958550
+55521	[1728367458]	2000000 OPS in 2.738241 seconds, throughput 730395.900142
+55521	[1728367459]	2000000 OPS in 2.721188 seconds, throughput 734973.107334
+55521	[1728367459]	2000000 OPS in 2.737828 seconds, throughput 730506.080002
+55521	[1728367459]	2000000 OPS in 2.730645 seconds, throughput 732427.686499
+55521	[1728367460]	2000000 OPS in 2.735168 seconds, throughput 731216.510284
+55521	[1728367462]	2000000 OPS in 2.720072 seconds, throughput 735274.654494
+55521	[1728367462]	2000000 OPS in 2.740891 seconds, throughput 729689.724984
+55521	[1728367462]	2000000 OPS in 2.725199 seconds, throughput 733891.359860
+55521	[1728367463]	2000000 OPS in 2.737105 seconds, throughput 730699.041506
+55521	[1728367464]	2000000 OPS in 2.722397 seconds, throughput 734646.710234
+55521	[1728367465]	2000000 OPS in 2.737205 seconds, throughput 730672.346426
+55521	[1728367466]	2000000 OPS in 2.708983 seconds, throughput 738284.441061
+55521	[1728367467]	2000000 OPS in 2.685411 seconds, throughput 744764.954042
+55521	[1728367467]	2000000 OPS in 2.658010 seconds, throughput 752442.616845
+55521	[1728367468]	2000000 OPS in 2.660249 seconds, throughput 751809.323112
+55521	[1728367470]	2000000 OPS in 2.683708 seconds, throughput 745237.559377
+55521	[1728367470]	2000000 OPS in 2.659680 seconds, throughput 751970.161824
+55521	[1728367471]	2000000 OPS in 2.660465 seconds, throughput 751748.284604
+55521	[1728367472]	2000000 OPS in 2.656748 seconds, throughput 752800.039748
+55521	[1728367474]	2000000 OPS in 2.644158 seconds, throughput 756384.452064
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     351031 ms      1377829 ms            4 CompactionCPUUsage=0.268922 CompactionThroughput=2.5046G Lat_Get_Avg=1093.91 Lat_Get_P50=1041.43 Lat_Get_P95=1.81246k Lat_Get_P99=3.23407k Lat_Put_Avg=1.70784k Lat_Put_P50=1.59639k Lat_Put_P95=2.71249k Lat_Put_P99=2.87861k items_per_second=2.84875M/s
+6034.87user 160.64system 24:51.14elapsed 415%CPU (0avgtext+0avgdata 271180maxresident)k
+322232inputs+34424outputs (1628major+4213945minor)pagefaults 0swaps

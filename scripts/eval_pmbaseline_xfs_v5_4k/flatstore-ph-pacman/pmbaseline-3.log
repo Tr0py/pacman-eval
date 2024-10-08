@@ -1,0 +1,2368 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT ON
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target cceh
+[ 62%] Built target benchmark
+[ 65%] Building CXX object CMakeFiles/cceh.dir/db/index/CCEH/CCEH_MSB.cpp.o
+[ 68%] Linking CXX static library libcceh.a
+[ 68%] Built target cceh
+Scanning dependencies of target pacman_bench
+[ 72%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 75%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 82%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 82%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 93%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 96%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-07T22:47:49-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.59, 4.04, 4.34
+[1728359269]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728359269]	Setup starts!
+[1728359269]	Setup starts!
+[1728359269]	Setup starts!
+Using MADVISE_RANDOM
+Using MADV_NOHUGEPAGE
+DB index type: CCEH
+Using MADVISE_RANDOM
+Using MADVISE_NOHUGEPAGE
+[1728359286]	Initializing log segments...
+Log: pool_start 0x7fd1e6a00000 total segments: 2028  cleaners: 2
+[1728359286]Initialized 2026 free log segments...
+[1728359286]	DB init finished in 17.134445 seconds
+[1728359286]	DB init finished in 17.134490 seconds
+[1728359286]	DB init finished in 17.134318 seconds
+[1728359286]	DB init finished in 17.134591 seconds
+[1728359342]	DB load finished in 55.369213 seconds
+[1728359343]	DB load finished in 56.098090 seconds
+[1728359343]	DB load finished in 56.160238 seconds
+[1728359343]	DB load finished in 56.217001 seconds
+[1728359343]	DB warmup finished in 0.000014 seconds
+[1728359343]	DB warmup finished in 0.056787 seconds
+[1728359343]	DB warmup finished in 0.118957 seconds
+[1728359343]	DB warmup finished in 0.847836 seconds
+[1728359343]	ETC init!
+[1728359343]	ETC starts!
+[1728359343]	ETC init!
+[1728359343]	ETC init!
+[1728359343]	ETC starts!
+[1728359343]	ETC init!
+[1728359343]	ETC starts!
+[1728359343]	ETC starts!
+28119	[1728359354]	2000000 OPS in 11.574235 seconds, throughput 172797.597422
+28119	[1728359354]	2000000 OPS in 11.606047 seconds, throughput 172323.961811
+28119	[1728359354]	2000000 OPS in 11.639974 seconds, throughput 171821.689636
+28119	[1728359354]	2000000 OPS in 11.684616 seconds, throughput 171165.231275
+28119	[1728359366]	2000000 OPS in 11.386438 seconds, throughput 175647.555451
+28119	[1728359366]	2000000 OPS in 11.483505 seconds, throughput 174162.853589
+28119	[1728359366]	2000000 OPS in 11.471645 seconds, throughput 174342.912459
+28119	[1728359366]	2000000 OPS in 11.435986 seconds, throughput 174886.537986
+28119	[1728359377]	2000000 OPS in 10.925581 seconds, throughput 183056.626462
+28119	[1728359377]	2000000 OPS in 11.022471 seconds, throughput 181447.517530
+28119	[1728359377]	2000000 OPS in 11.075581 seconds, throughput 180577.434267
+28119	[1728359377]	2000000 OPS in 11.371124 seconds, throughput 175884.107851
+28119	[1728359388]	2000000 OPS in 11.187789 seconds, throughput 178766.331757
+28119	[1728359388]	2000000 OPS in 11.425498 seconds, throughput 175047.074535
+28119	[1728359388]	2000000 OPS in 11.126200 seconds, throughput 179755.891499
+28119	[1728359388]	2000000 OPS in 11.532732 seconds, throughput 173419.446494
+28119	[1728359397]	2000000 OPS in 9.366766 seconds, throughput 213520.867288
+28119	[1728359397]	2000000 OPS in 9.025837 seconds, throughput 221586.097777
+28119	[1728359397]	2000000 OPS in 9.479687 seconds, throughput 210977.429951
+28119	[1728359397]	2000000 OPS in 9.222187 seconds, throughput 216868.298160
+28119	[1728359399]	2000000 OPS in 1.586495 seconds, throughput 1260640.594518
+28119	[1728359399]	2000000 OPS in 1.585871 seconds, throughput 1261136.624606
+28119	[1728359399]	2000000 OPS in 1.626129 seconds, throughput 1229914.723863
+28119	[1728359399]	2000000 OPS in 1.699622 seconds, throughput 1176732.238109
+28119	[1728359401]	2000000 OPS in 1.608985 seconds, throughput 1243019.667679
+28119	[1728359401]	2000000 OPS in 1.606688 seconds, throughput 1244796.749587
+28119	[1728359401]	2000000 OPS in 1.621285 seconds, throughput 1233589.405934
+28119	[1728359401]	2000000 OPS in 1.599285 seconds, throughput 1250558.843483
+28119	[1728359402]	2000000 OPS in 1.637184 seconds, throughput 1221609.788515
+28119	[1728359402]	2000000 OPS in 1.622652 seconds, throughput 1232550.170955
+28119	[1728359402]	2000000 OPS in 1.628488 seconds, throughput 1228133.090327
+28119	[1728359402]	2000000 OPS in 1.648040 seconds, throughput 1213562.777602
+28119	[1728359404]	2000000 OPS in 1.623291 seconds, throughput 1232064.984036
+28119	[1728359404]	2000000 OPS in 1.633111 seconds, throughput 1224656.499160
+28119	[1728359404]	2000000 OPS in 1.630332 seconds, throughput 1226744.000608
+28119	[1728359404]	2000000 OPS in 1.642972 seconds, throughput 1217306.198767
+28119	[1728359406]	2000000 OPS in 1.629538 seconds, throughput 1227341.737351
+28119	[1728359406]	2000000 OPS in 1.637454 seconds, throughput 1221408.357120
+28119	[1728359406]	2000000 OPS in 1.635440 seconds, throughput 1222912.488382
+28119	[1728359406]	2000000 OPS in 1.644010 seconds, throughput 1216537.612302
+28119	[1728359407]	2000000 OPS in 1.629292 seconds, throughput 1227527.048559
+28119	[1728359407]	2000000 OPS in 1.637061 seconds, throughput 1221701.573735
+28119	[1728359407]	2000000 OPS in 1.634727 seconds, throughput 1223445.872002
+28119	[1728359407]	2000000 OPS in 1.647819 seconds, throughput 1213725.536603
+28119	[1728359409]	2000000 OPS in 1.629756 seconds, throughput 1227177.565231
+28119	[1728359409]	2000000 OPS in 1.638568 seconds, throughput 1220577.968079
+28119	[1728359409]	2000000 OPS in 1.637929 seconds, throughput 1221054.148257
+28119	[1728359409]	2000000 OPS in 1.649472 seconds, throughput 1212509.215070
+28119	[1728359410]	2000000 OPS in 1.631556 seconds, throughput 1225823.692230
+28119	[1728359410]	2000000 OPS in 1.643527 seconds, throughput 1216895.128586
+28119	[1728359411]	2000000 OPS in 1.639303 seconds, throughput 1220030.708173
+28119	[1728359411]	2000000 OPS in 1.651986 seconds, throughput 1210664.012891
+28119	[1728359412]	2000000 OPS in 1.630921 seconds, throughput 1226300.967368
+28119	[1728359412]	2000000 OPS in 1.641359 seconds, throughput 1218502.472646
+28119	[1728359412]	2000000 OPS in 1.633281 seconds, throughput 1224529.030828
+28119	[1728359412]	2000000 OPS in 1.647100 seconds, throughput 1214255.357902
+28119	[1728359414]	2000000 OPS in 1.627217 seconds, throughput 1229092.370593
+28119	[1728359414]	2000000 OPS in 1.638631 seconds, throughput 1220531.040851
+28119	[1728359414]	2000000 OPS in 1.633706 seconds, throughput 1224210.476059
+28119	[1728359414]	2000000 OPS in 1.647256 seconds, throughput 1214140.364339
+28119	[1728359415]	2000000 OPS in 1.628185 seconds, throughput 1228361.641951
+28119	[1728359415]	2000000 OPS in 1.641219 seconds, throughput 1218606.413891
+28119	[1728359415]	2000000 OPS in 1.639034 seconds, throughput 1220230.940908
+28119	[1728359416]	2000000 OPS in 1.649463 seconds, throughput 1212515.830910
+28119	[1728359417]	2000000 OPS in 1.632609 seconds, throughput 1225033.060580
+28119	[1728359417]	2000000 OPS in 1.642366 seconds, throughput 1217755.360255
+28119	[1728359417]	2000000 OPS in 1.641121 seconds, throughput 1218679.183314
+28119	[1728359417]	2000000 OPS in 1.652506 seconds, throughput 1210283.048897
+28119	[1728359419]	2000000 OPS in 1.634774 seconds, throughput 1223410.697748
+28119	[1728359419]	2000000 OPS in 1.643213 seconds, throughput 1217127.663912
+28119	[1728359419]	2000000 OPS in 1.642868 seconds, throughput 1217383.259032
+28119	[1728359419]	2000000 OPS in 1.653978 seconds, throughput 1209205.926560
+28119	[1728359420]	2000000 OPS in 1.637307 seconds, throughput 1221518.017085
+28119	[1728359420]	2000000 OPS in 1.648954 seconds, throughput 1212890.110943
+28119	[1728359420]	2000000 OPS in 1.645607 seconds, throughput 1215357.008083
+28119	[1728359421]	2000000 OPS in 1.660242 seconds, throughput 1204643.660382
+28119	[1728359422]	2000000 OPS in 1.639515 seconds, throughput 1219872.950232
+28119	[1728359422]	2000000 OPS in 1.650415 seconds, throughput 1211816.421930
+28119	[1728359422]	2000000 OPS in 1.646536 seconds, throughput 1214671.285657
+28119	[1728359422]	2000000 OPS in 1.659089 seconds, throughput 1205480.839183
+28119	[1728359423]	2000000 OPS in 1.642195 seconds, throughput 1217882.163811
+28119	[1728359424]	2000000 OPS in 1.655148 seconds, throughput 1208351.156513
+28119	[1728359424]	2000000 OPS in 1.649515 seconds, throughput 1212477.607054
+28119	[1728359424]	2000000 OPS in 1.660209 seconds, throughput 1204667.605103
+28119	[1728359425]	2000000 OPS in 1.645844 seconds, throughput 1215181.997808
+28119	[1728359425]	2000000 OPS in 1.656147 seconds, throughput 1207622.270245
+28119	[1728359425]	2000000 OPS in 1.651375 seconds, throughput 1211111.952161
+28119	[1728359426]	2000000 OPS in 1.663949 seconds, throughput 1201959.915839
+28119	[1728359427]	2000000 OPS in 1.650201 seconds, throughput 1211973.571704
+28119	[1728359427]	2000000 OPS in 1.661119 seconds, throughput 1204007.659897
+28119	[1728359427]	2000000 OPS in 1.654803 seconds, throughput 1208603.078433
+28119	[1728359427]	2000000 OPS in 1.670387 seconds, throughput 1197327.325943
+28119	[1728359428]	2000000 OPS in 1.649594 seconds, throughput 1212419.540808
+28119	[1728359429]	2000000 OPS in 1.659917 seconds, throughput 1204879.521084
+28119	[1728359429]	2000000 OPS in 1.654469 seconds, throughput 1208847.068153
+28119	[1728359429]	2000000 OPS in 1.670922 seconds, throughput 1196943.962674
+28119	[1728359430]	2000000 OPS in 1.654498 seconds, throughput 1208825.879511
+28119	[1728359430]	2000000 OPS in 1.663188 seconds, throughput 1202509.878619
+28119	[1728359430]	2000000 OPS in 1.661832 seconds, throughput 1203491.086945
+28119	[1728359431]	2000000 OPS in 1.673209 seconds, throughput 1195307.938219
+28119	[1728359432]	2000000 OPS in 1.654990 seconds, throughput 1208466.516414
+28119	[1728359432]	2000000 OPS in 1.665921 seconds, throughput 1200537.120308
+28119	[1728359432]	2000000 OPS in 1.663814 seconds, throughput 1202057.441517
+28119	[1728359432]	2000000 OPS in 1.677642 seconds, throughput 1192149.457393
+28119	[1728359433]	2000000 OPS in 1.659176 seconds, throughput 1205417.628992
+28119	[1728359434]	2000000 OPS in 1.666487 seconds, throughput 1200129.373947
+28119	[1728359434]	2000000 OPS in 1.686137 seconds, throughput 1186143.237471
+28119	[1728359434]	2000000 OPS in 1.679460 seconds, throughput 1190858.966573
+28119	[1728359435]	2000000 OPS in 1.663479 seconds, throughput 1202299.518058
+28119	[1728359435]	2000000 OPS in 1.672607 seconds, throughput 1195738.150085
+28119	[1728359435]	2000000 OPS in 1.673000 seconds, throughput 1195457.262403
+28119	[1728359436]	2000000 OPS in 1.682998 seconds, throughput 1188355.541718
+28119	[1728359437]	2000000 OPS in 1.663793 seconds, throughput 1202072.613600
+28119	[1728359437]	2000000 OPS in 1.668701 seconds, throughput 1198537.065658
+28119	[1728359437]	2000000 OPS in 1.673101 seconds, throughput 1195385.096297
+28119	[1728359437]	2000000 OPS in 1.687582 seconds, throughput 1185127.596763
+28119	[1728359438]	2000000 OPS in 1.668784 seconds, throughput 1198477.454242
+28119	[1728359439]	2000000 OPS in 1.673116 seconds, throughput 1195374.379302
+28119	[1728359439]	2000000 OPS in 1.677960 seconds, throughput 1191923.526187
+28119	[1728359439]	2000000 OPS in 1.687476 seconds, throughput 1185202.041392
+28119	[1728359440]	2000000 OPS in 1.664171 seconds, throughput 1201799.574683
+28119	[1728359440]	2000000 OPS in 1.672737 seconds, throughput 1195645.220976
+28119	[1728359440]	2000000 OPS in 1.678368 seconds, throughput 1191633.777574
+28119	[1728359441]	2000000 OPS in 1.687185 seconds, throughput 1185406.461058
+28119	[1728359442]	2000000 OPS in 1.668331 seconds, throughput 1198802.875449
+28119	[1728359442]	2000000 OPS in 1.675592 seconds, throughput 1193607.990489
+28119	[1728359442]	2000000 OPS in 1.674611 seconds, throughput 1194307.215228
+28119	[1728359442]	2000000 OPS in 1.685281 seconds, throughput 1186745.711843
+28119	[1728359443]	2000000 OPS in 1.671143 seconds, throughput 1196785.673039
+28119	[1728359444]	2000000 OPS in 1.678572 seconds, throughput 1191488.956089
+28119	[1728359444]	2000000 OPS in 1.676517 seconds, throughput 1192949.430277
+28119	[1728359444]	2000000 OPS in 1.690241 seconds, throughput 1183263.215127
+28119	[1728359445]	2000000 OPS in 1.668705 seconds, throughput 1198534.192682
+28119	[1728359445]	2000000 OPS in 1.676761 seconds, throughput 1192775.833884
+28119	[1728359445]	2000000 OPS in 1.681456 seconds, throughput 1189445.337850
+28119	[1728359446]	2000000 OPS in 1.692024 seconds, throughput 1182016.330738
+28119	[1728359447]	2000000 OPS in 1.674106 seconds, throughput 1194667.482226
+28119	[1728359447]	2000000 OPS in 1.677381 seconds, throughput 1192334.955505
+28119	[1728359447]	2000000 OPS in 1.681478 seconds, throughput 1189429.775471
+28119	[1728359447]	2000000 OPS in 1.694791 seconds, throughput 1180086.512142
+28119	[1728359448]	2000000 OPS in 1.672908 seconds, throughput 1195523.005449
+28119	[1728359449]	2000000 OPS in 1.679562 seconds, throughput 1190786.645566
+28119	[1728359449]	2000000 OPS in 1.683258 seconds, throughput 1188171.985519
+28119	[1728359449]	2000000 OPS in 1.690356 seconds, throughput 1183182.714174
+28119	[1728359450]	2000000 OPS in 1.671015 seconds, throughput 1196877.347002
+28119	[1728359450]	2000000 OPS in 1.679825 seconds, throughput 1190600.211332
+28119	[1728359450]	2000000 OPS in 1.685374 seconds, throughput 1186680.226466
+28119	[1728359451]	2000000 OPS in 1.694182 seconds, throughput 1180510.712544
+28119	[1728359452]	2000000 OPS in 1.673287 seconds, throughput 1195252.219135
+28119	[1728359452]	2000000 OPS in 1.683708 seconds, throughput 1187854.426064
+28119	[1728359452]	2000000 OPS in 1.684882 seconds, throughput 1187026.747274
+28119	[1728359452]	2000000 OPS in 1.696207 seconds, throughput 1179101.371472
+28119	[1728359453]	2000000 OPS in 1.673574 seconds, throughput 1195047.246193
+28119	[1728359454]	2000000 OPS in 1.680512 seconds, throughput 1190113.489222
+28119	[1728359454]	2000000 OPS in 1.685791 seconds, throughput 1186386.687318
+28119	[1728359454]	2000000 OPS in 1.695988 seconds, throughput 1179253.626795
+28119	[1728359455]	2000000 OPS in 1.673247 seconds, throughput 1195280.792376
+28119	[1728359455]	2000000 OPS in 1.682294 seconds, throughput 1188852.840229
+28119	[1728359455]	2000000 OPS in 1.685009 seconds, throughput 1186937.280454
+28119	[1728359456]	2000000 OPS in 1.694893 seconds, throughput 1180015.493603
+28119	[1728359457]	2000000 OPS in 1.677206 seconds, throughput 1192459.363966
+28119	[1728359457]	2000000 OPS in 1.680553 seconds, throughput 1190084.454343
+28119	[1728359457]	2000000 OPS in 1.685799 seconds, throughput 1186381.057291
+28119	[1728359458]	2000000 OPS in 1.696512 seconds, throughput 1178889.391882
+28119	[1728359458]	2000000 OPS in 1.675155 seconds, throughput 1193919.368655
+28119	[1728359459]	2000000 OPS in 1.683852 seconds, throughput 1187752.842886
+28119	[1728359459]	2000000 OPS in 1.686439 seconds, throughput 1185930.828213
+28119	[1728359459]	2000000 OPS in 1.695395 seconds, throughput 1179666.095512
+28119	[1728359460]	2000000 OPS in 1.674176 seconds, throughput 1194617.531251
+28119	[1728359460]	2000000 OPS in 1.682556 seconds, throughput 1188667.717449
+28119	[1728359461]	2000000 OPS in 1.685999 seconds, throughput 1186240.323986
+28119	[1728359461]	2000000 OPS in 1.695033 seconds, throughput 1179918.031094
+28119	[1728359462]	2000000 OPS in 1.677718 seconds, throughput 1192095.453467
+28119	[1728359462]	2000000 OPS in 1.680971 seconds, throughput 1189788.521039
+28119	[1728359462]	2000000 OPS in 1.688009 seconds, throughput 1184827.806013
+28119	[1728359463]	2000000 OPS in 1.696628 seconds, throughput 1178808.790141
+28119	[1728359463]	2000000 OPS in 1.675588 seconds, throughput 1193610.839896
+28119	[1728359464]	2000000 OPS in 1.687043 seconds, throughput 1185506.237837
+28119	[1728359464]	2000000 OPS in 1.685708 seconds, throughput 1186445.101999
+28119	[1728359464]	2000000 OPS in 1.695116 seconds, throughput 1179860.257351
+28119	[1728359465]	2000000 OPS in 1.681061 seconds, throughput 1189724.822597
+28119	[1728359465]	2000000 OPS in 1.684090 seconds, throughput 1187584.986551
+28119	[1728359466]	2000000 OPS in 1.687442 seconds, throughput 1185225.921839
+28119	[1728359466]	2000000 OPS in 1.700117 seconds, throughput 1176389.624949
+28119	[1728359467]	2000000 OPS in 1.678599 seconds, throughput 1191469.791177
+28119	[1728359467]	2000000 OPS in 1.687226 seconds, throughput 1185377.655394
+28119	[1728359467]	2000000 OPS in 1.690326 seconds, throughput 1183203.713367
+28119	[1728359468]	2000000 OPS in 1.703254 seconds, throughput 1174222.987294
+28119	[1728359469]	2000000 OPS in 1.680505 seconds, throughput 1190118.446538
+28119	[1728359469]	2000000 OPS in 1.687681 seconds, throughput 1185058.076734
+28119	[1728359469]	2000000 OPS in 1.691440 seconds, throughput 1182424.443078
+28119	[1728359469]	2000000 OPS in 1.701815 seconds, throughput 1175215.872466
+28119	[1728359470]	2000000 OPS in 1.681590 seconds, throughput 1189350.555129
+28119	[1728359471]	2000000 OPS in 1.687813 seconds, throughput 1184965.396048
+28119	[1728359471]	2000000 OPS in 1.692230 seconds, throughput 1181872.440507
+28119	[1728359471]	2000000 OPS in 1.703756 seconds, throughput 1173877.010558
+28119	[1728359472]	2000000 OPS in 1.685470 seconds, throughput 1186612.636238
+28119	[1728359472]	2000000 OPS in 1.688507 seconds, throughput 1184478.358692
+28119	[1728359472]	2000000 OPS in 1.691231 seconds, throughput 1182570.565464
+28119	[1728359473]	2000000 OPS in 1.704857 seconds, throughput 1173118.918478
+28119	[1728359474]	2000000 OPS in 1.685043 seconds, throughput 1186913.330995
+28119	[1728359474]	2000000 OPS in 1.690708 seconds, throughput 1182936.379316
+28119	[1728359474]	2000000 OPS in 1.695158 seconds, throughput 1179831.024601
+28119	[1728359475]	2000000 OPS in 1.702997 seconds, throughput 1174400.189783
+28119	[1728359475]	2000000 OPS in 1.682907 seconds, throughput 1188419.799787
+28119	[1728359476]	2000000 OPS in 1.691394 seconds, throughput 1182456.600887
+28119	[1728359476]	2000000 OPS in 1.694665 seconds, throughput 1180174.252728
+28119	[1728359476]	2000000 OPS in 1.704444 seconds, throughput 1173403.174290
+28119	[1728359477]	2000000 OPS in 1.685300 seconds, throughput 1186732.332522
+28119	[1728359477]	2000000 OPS in 1.689311 seconds, throughput 1183914.625549
+28119	[1728359477]	2000000 OPS in 1.696366 seconds, throughput 1178990.854568
+28119	[1728359478]	2000000 OPS in 1.708435 seconds, throughput 1170662.038649
+28119	[1728359479]	2000000 OPS in 1.686707 seconds, throughput 1185742.396279
+28119	[1728359479]	2000000 OPS in 1.690556 seconds, throughput 1183042.738602
+28119	[1728359479]	2000000 OPS in 1.696151 seconds, throughput 1179140.300598
+28119	[1728359480]	2000000 OPS in 1.708282 seconds, throughput 1170766.887434
+28119	[1728359480]	2000000 OPS in 1.688273 seconds, throughput 1184642.531155
+28119	[1728359481]	2000000 OPS in 1.694563 seconds, throughput 1180245.290379
+28119	[1728359481]	2000000 OPS in 1.697752 seconds, throughput 1178028.357499
+28119	[1728359481]	2000000 OPS in 1.709567 seconds, throughput 1169886.877788
+28119	[1728359482]	2000000 OPS in 1.685540 seconds, throughput 1186563.356550
+28119	[1728359482]	2000000 OPS in 1.692100 seconds, throughput 1181963.240943
+28119	[1728359483]	2000000 OPS in 1.698286 seconds, throughput 1177657.944539
+28119	[1728359483]	2000000 OPS in 1.705648 seconds, throughput 1172574.880632
+28119	[1728359484]	2000000 OPS in 1.689373 seconds, throughput 1183871.175874
+28119	[1728359484]	2000000 OPS in 1.695127 seconds, throughput 1179852.601015
+28119	[1728359484]	2000000 OPS in 1.698442 seconds, throughput 1177549.777973
+28119	[1728359485]	2000000 OPS in 1.709243 seconds, throughput 1170108.638737
+28119	[1728359485]	2000000 OPS in 1.688579 seconds, throughput 1184427.853242
+28119	[1728359486]	2000000 OPS in 1.697403 seconds, throughput 1178270.569806
+28119	[1728359486]	2000000 OPS in 1.701234 seconds, throughput 1175617.228435
+28119	[1728359487]	2000000 OPS in 1.709737 seconds, throughput 1169770.555354
+28119	[1728359487]	2000000 OPS in 1.689216 seconds, throughput 1183981.207850
+28119	[1728359487]	2000000 OPS in 1.693770 seconds, throughput 1180797.865117
+28119	[1728359488]	2000000 OPS in 1.698233 seconds, throughput 1177694.697960
+28119	[1728359488]	2000000 OPS in 1.709953 seconds, throughput 1169622.790802
+28119	[1728359489]	2000000 OPS in 1.691523 seconds, throughput 1182366.423631
+28119	[1728359489]	2000000 OPS in 1.694115 seconds, throughput 1180557.400176
+28119	[1728359489]	2000000 OPS in 1.700953 seconds, throughput 1175811.442174
+28119	[1728359490]	2000000 OPS in 1.711953 seconds, throughput 1168256.371524
+28119	[1728359490]	2000000 OPS in 1.688247 seconds, throughput 1184660.775349
+28119	[1728359491]	2000000 OPS in 1.699492 seconds, throughput 1176822.250414
+28119	[1728359491]	2000000 OPS in 1.701020 seconds, throughput 1175765.129158
+28119	[1728359492]	2000000 OPS in 1.710344 seconds, throughput 1169355.404527
+28119	[1728359492]	2000000 OPS in 1.690294 seconds, throughput 1183226.113327
+28119	[1728359493]	2000000 OPS in 1.696607 seconds, throughput 1178823.381019
+28119	[1728359493]	2000000 OPS in 1.701499 seconds, throughput 1175434.131904
+28119	[1728359493]	2000000 OPS in 1.709053 seconds, throughput 1170238.722848
+28119	[1728359494]	2000000 OPS in 1.691083 seconds, throughput 1182674.061533
+28119	[1728359494]	2000000 OPS in 1.696848 seconds, throughput 1178655.955041
+28119	[1728359494]	2000000 OPS in 1.701326 seconds, throughput 1175553.656383
+28119	[1728359495]	2000000 OPS in 1.713468 seconds, throughput 1167223.432244
+28119	[1728359496]	2000000 OPS in 1.693787 seconds, throughput 1180786.013826
+28119	[1728359496]	2000000 OPS in 1.697512 seconds, throughput 1178194.911141
+28119	[1728359496]	2000000 OPS in 1.702755 seconds, throughput 1174567.098614
+28119	[1728359497]	2000000 OPS in 1.711610 seconds, throughput 1168490.485566
+28119	[1728359497]	2000000 OPS in 1.693360 seconds, throughput 1181083.762460
+28119	[1728359498]	2000000 OPS in 1.695479 seconds, throughput 1179607.650699
+28119	[1728359498]	2000000 OPS in 1.701532 seconds, throughput 1175411.335197
+28119	[1728359498]	2000000 OPS in 1.711585 seconds, throughput 1168507.552941
+28119	[1728359499]	2000000 OPS in 1.690897 seconds, throughput 1182804.156610
+28119	[1728359499]	2000000 OPS in 1.697222 seconds, throughput 1178396.226304
+28119	[1728359500]	2000000 OPS in 1.700786 seconds, throughput 1175926.894977
+28119	[1728359500]	2000000 OPS in 1.713709 seconds, throughput 1167059.284861
+28119	[1728359501]	2000000 OPS in 1.690424 seconds, throughput 1183135.118763
+28119	[1728359501]	2000000 OPS in 1.698313 seconds, throughput 1177639.221981
+28119	[1728359501]	2000000 OPS in 1.704510 seconds, throughput 1173357.739174
+28119	[1728359502]	2000000 OPS in 1.712625 seconds, throughput 1167797.970951
+28119	[1728359502]	2000000 OPS in 1.692254 seconds, throughput 1181855.678876
+28119	[1728359503]	2000000 OPS in 1.698853 seconds, throughput 1177264.895786
+28119	[1728359503]	2000000 OPS in 1.702946 seconds, throughput 1174435.360839
+28119	[1728359504]	2000000 OPS in 1.713753 seconds, throughput 1167029.321028
+28119	[1728359504]	2000000 OPS in 1.691448 seconds, throughput 1182418.850594
+28119	[1728359504]	2000000 OPS in 1.698410 seconds, throughput 1177571.964367
+28119	[1728359505]	2000000 OPS in 1.701417 seconds, throughput 1175490.782095
+28119	[1728359505]	2000000 OPS in 1.712273 seconds, throughput 1168038.040663
+28119	[1728359506]	2000000 OPS in 1.691705 seconds, throughput 1182239.220195
+28119	[1728359506]	2000000 OPS in 1.700164 seconds, throughput 1176357.104373
+28119	[1728359506]	2000000 OPS in 1.701573 seconds, throughput 1175383.013247
+28119	[1728359507]	2000000 OPS in 1.711700 seconds, throughput 1168429.047146
+28119	[1728359507]	2000000 OPS in 1.692580 seconds, throughput 1181628.047123
+28119	[1728359508]	2000000 OPS in 1.698728 seconds, throughput 1177351.524199
+28119	[1728359508]	2000000 OPS in 1.704642 seconds, throughput 1173266.879497
+28119	[1728359509]	2000000 OPS in 1.711830 seconds, throughput 1168340.314167
+28119	[1728359509]	2000000 OPS in 1.695361 seconds, throughput 1179689.753392
+28119	[1728359510]	2000000 OPS in 1.698411 seconds, throughput 1177571.271029
+28119	[1728359510]	2000000 OPS in 1.705777 seconds, throughput 1172486.204234
+28119	[1728359510]	2000000 OPS in 1.714061 seconds, throughput 1166819.617271
+28119	[1728359511]	2000000 OPS in 1.694007 seconds, throughput 1180632.665627
+28119	[1728359511]	2000000 OPS in 1.702096 seconds, throughput 1175021.855407
+28119	[1728359511]	2000000 OPS in 1.703175 seconds, throughput 1174277.452405
+28119	[1728359512]	2000000 OPS in 1.716355 seconds, throughput 1165260.100620
+28119	[1728359512]	2000000 OPS in 1.694959 seconds, throughput 1179969.544986
+28119	[1728359513]	2000000 OPS in 1.700114 seconds, throughput 1176391.700792
+28119	[1728359513]	2000000 OPS in 1.706208 seconds, throughput 1172190.026070
+28119	[1728359514]	2000000 OPS in 1.717203 seconds, throughput 1164684.664539
+28119	[1728359514]	2000000 OPS in 1.696677 seconds, throughput 1178774.746166
+28119	[1728359515]	2000000 OPS in 1.701282 seconds, throughput 1175584.059550
+28119	[1728359515]	2000000 OPS in 1.703223 seconds, throughput 1174244.359077
+28119	[1728359516]	2000000 OPS in 1.716079 seconds, throughput 1165447.511449
+28119	[1728359516]	2000000 OPS in 1.695817 seconds, throughput 1179372.538428
+28119	[1728359516]	2000000 OPS in 1.701622 seconds, throughput 1175349.166854
+28119	[1728359517]	2000000 OPS in 1.706830 seconds, throughput 1171762.858633
+28119	[1728359517]	2000000 OPS in 1.718353 seconds, throughput 1163905.204577
+28119	[1728359518]	2000000 OPS in 1.696637 seconds, throughput 1178802.537019
+28119	[1728359518]	2000000 OPS in 1.702202 seconds, throughput 1174948.684116
+28119	[1728359518]	2000000 OPS in 1.707595 seconds, throughput 1171237.910629
+28119	[1728359519]	2000000 OPS in 1.716399 seconds, throughput 1165230.229102
+28119	[1728359519]	2000000 OPS in 1.697179 seconds, throughput 1178426.082340
+28119	[1728359520]	2000000 OPS in 1.699688 seconds, throughput 1176686.544825
+28119	[1728359520]	2000000 OPS in 1.705444 seconds, throughput 1172715.140456
+28119	[1728359521]	2000000 OPS in 1.719250 seconds, throughput 1163297.949687
+28119	[1728359521]	2000000 OPS in 1.699008 seconds, throughput 1177157.494255
+28119	[1728359521]	2000000 OPS in 1.704157 seconds, throughput 1173600.789129
+28119	[1728359522]	2000000 OPS in 1.707834 seconds, throughput 1171074.003680
+28119	[1728359523]	2000000 OPS in 1.719278 seconds, throughput 1163279.004326
+28119	[1728359523]	2000000 OPS in 1.695946 seconds, throughput 1179282.830939
+28119	[1728359523]	2000000 OPS in 1.703378 seconds, throughput 1174137.507940
+28119	[1728359523]	2000000 OPS in 1.706645 seconds, throughput 1171889.877508
+28119	[1728359524]	2000000 OPS in 1.717031 seconds, throughput 1164801.334396
+28119	[1728359524]	2000000 OPS in 1.698514 seconds, throughput 1177499.861644
+28119	[1728359525]	2000000 OPS in 1.704546 seconds, throughput 1173332.957867
+28119	[1728359525]	2000000 OPS in 1.708905 seconds, throughput 1170340.071566
+28119	[1728359526]	2000000 OPS in 1.721730 seconds, throughput 1161622.321735
+28119	[1728359526]	2000000 OPS in 1.697264 seconds, throughput 1178367.066055
+28119	[1728359527]	2000000 OPS in 1.706207 seconds, throughput 1172190.713085
+28119	[1728359527]	2000000 OPS in 1.706321 seconds, throughput 1172112.398546
+28119	[1728359528]	2000000 OPS in 1.718705 seconds, throughput 1163666.830550
+28119	[1728359528]	2000000 OPS in 1.699161 seconds, throughput 1177051.497769
+28119	[1728359528]	2000000 OPS in 1.703717 seconds, throughput 1173903.881924
+28119	[1728359529]	2000000 OPS in 1.707109 seconds, throughput 1171571.352503
+28119	[1728359529]	2000000 OPS in 1.717854 seconds, throughput 1164243.294250
+28119	[1728359529]	2000000 OPS in 1.699807 seconds, throughput 1176604.167414
+28119	[1728359530]	2000000 OPS in 1.703453 seconds, throughput 1174085.812758
+28119	[1728359530]	2000000 OPS in 1.706577 seconds, throughput 1171936.572449
+28119	[1728359531]	2000000 OPS in 1.719425 seconds, throughput 1163179.551303
+28119	[1728359531]	2000000 OPS in 1.699847 seconds, throughput 1176576.480119
+28119	[1728359532]	2000000 OPS in 1.707967 seconds, throughput 1170982.811729
+28119	[1728359532]	2000000 OPS in 1.708548 seconds, throughput 1170584.613368
+28119	[1728359533]	2000000 OPS in 1.717304 seconds, throughput 1164616.165804
+28119	[1728359533]	2000000 OPS in 1.700888 seconds, throughput 1175856.376199
+28119	[1728359533]	2000000 OPS in 1.706813 seconds, throughput 1171774.529489
+28119	[1728359534]	2000000 OPS in 1.706242 seconds, throughput 1172166.668034
+28119	[1728359535]	2000000 OPS in 1.697599 seconds, throughput 1178134.530004
+28119	[1728359535]	2000000 OPS in 1.720707 seconds, throughput 1162312.932998
+28119	[1728359535]	2000000 OPS in 1.704379 seconds, throughput 1173447.924435
+28119	[1728359535]	2000000 OPS in 1.709530 seconds, throughput 1169912.198090
+28119	[1728359536]	2000000 OPS in 1.701214 seconds, throughput 1175631.049357
+28119	[1728359536]	2000000 OPS in 1.721267 seconds, throughput 1161934.784086
+28119	[1728359537]	2000000 OPS in 1.703931 seconds, throughput 1173756.449058
+28119	[1728359537]	2000000 OPS in 1.708269 seconds, throughput 1170775.797020
+28119	[1728359538]	2000000 OPS in 1.699796 seconds, throughput 1176611.781649
+28119	[1728359538]	2000000 OPS in 1.718918 seconds, throughput 1163522.634588
+28119	[1728359539]	2000000 OPS in 1.708373 seconds, throughput 1170704.524129
+28119	[1728359539]	2000000 OPS in 1.708745 seconds, throughput 1170449.657497
+28119	[1728359540]	2000000 OPS in 1.698843 seconds, throughput 1177271.825590
+28119	[1728359540]	2000000 OPS in 1.719604 seconds, throughput 1163058.471602
+28119	[1728359540]	2000000 OPS in 1.708517 seconds, throughput 1170605.852912
+28119	[1728359540]	2000000 OPS in 1.706665 seconds, throughput 1171876.144410
+28119	[1728359541]	2000000 OPS in 1.699611 seconds, throughput 1176739.854002
+28119	[1728359541]	2000000 OPS in 1.720206 seconds, throughput 1162651.449884
+28119	[1728359542]	2000000 OPS in 1.703944 seconds, throughput 1173747.494049
+28119	[1728359542]	2000000 OPS in 1.709783 seconds, throughput 1169739.083849
+28119	[1728359543]	2000000 OPS in 1.699570 seconds, throughput 1176768.241379
+28119	[1728359543]	2000000 OPS in 1.719785 seconds, throughput 1162936.064683
+28119	[1728359544]	2000000 OPS in 1.709308 seconds, throughput 1170064.142916
+28119	[1728359544]	2000000 OPS in 1.710471 seconds, throughput 1169268.581578
+28119	[1728359545]	2000000 OPS in 1.700421 seconds, throughput 1176179.310888
+28119	[1728359545]	2000000 OPS in 1.719317 seconds, throughput 1163252.617173
+28119	[1728359545]	2000000 OPS in 1.705241 seconds, throughput 1172854.746045
+28119	[1728359546]	2000000 OPS in 1.711676 seconds, throughput 1168445.430093
+28119	[1728359546]	2000000 OPS in 1.698038 seconds, throughput 1177829.942557
+28119	[1728359547]	2000000 OPS in 1.719158 seconds, throughput 1163360.203076
+28119	[1728359547]	2000000 OPS in 1.705935 seconds, throughput 1172377.611105
+28119	[1728359547]	2000000 OPS in 1.707295 seconds, throughput 1171443.716522
+28119	[1728359548]	2000000 OPS in 1.698559 seconds, throughput 1177468.666087
+28119	[1728359548]	2000000 OPS in 1.719774 seconds, throughput 1162943.503042
+28119	[1728359549]	2000000 OPS in 1.706654 seconds, throughput 1171883.697574
+28119	[1728359549]	2000000 OPS in 1.708668 seconds, throughput 1170502.403041
+28119	[1728359550]	2000000 OPS in 1.699508 seconds, throughput 1176811.171233
+28119	[1728359550]	2000000 OPS in 1.719077 seconds, throughput 1163415.018641
+28119	[1728359550]	2000000 OPS in 1.707858 seconds, throughput 1171057.546939
+28119	[1728359551]	2000000 OPS in 1.709334 seconds, throughput 1170046.345536
+28119	[1728359552]	2000000 OPS in 1.701652 seconds, throughput 1175328.445534
+28119	[1728359552]	2000000 OPS in 1.719372 seconds, throughput 1163215.406555
+28119	[1728359552]	2000000 OPS in 1.707480 seconds, throughput 1171316.794340
+28119	[1728359552]	2000000 OPS in 1.710123 seconds, throughput 1169506.520876
+28119	[1728359553]	2000000 OPS in 1.699692 seconds, throughput 1176683.775649
+28119	[1728359553]	2000000 OPS in 1.721640 seconds, throughput 1161683.046398
+28119	[1728359554]	2000000 OPS in 1.706657 seconds, throughput 1171881.637611
+28119	[1728359554]	2000000 OPS in 1.709753 seconds, throughput 1169759.608552
+28119	[1728359555]	2000000 OPS in 1.702124 seconds, throughput 1175002.526255
+28119	[1728359555]	2000000 OPS in 1.721610 seconds, throughput 1161703.289363
+28119	[1728359556]	2000000 OPS in 1.707348 seconds, throughput 1171407.352221
+28119	[1728359556]	2000000 OPS in 1.709208 seconds, throughput 1170132.599426
+28119	[1728359557]	2000000 OPS in 1.701063 seconds, throughput 1175735.407801
+28119	[1728359557]	2000000 OPS in 1.720586 seconds, throughput 1162394.672513
+28119	[1728359557]	2000000 OPS in 1.707589 seconds, throughput 1171242.026038
+28119	[1728359558]	2000000 OPS in 1.708794 seconds, throughput 1170416.094626
+28119	[1728359558]	2000000 OPS in 1.703564 seconds, throughput 1174009.312242
+28119	[1728359559]	2000000 OPS in 1.721407 seconds, throughput 1161840.285302
+28119	[1728359559]	2000000 OPS in 1.709882 seconds, throughput 1169671.357439
+28119	[1728359559]	2000000 OPS in 1.709886 seconds, throughput 1169668.621183
+28119	[1728359560]	2000000 OPS in 1.703607 seconds, throughput 1173979.679586
+28119	[1728359560]	2000000 OPS in 1.721448 seconds, throughput 1161812.613567
+28119	[1728359561]	2000000 OPS in 1.709418 seconds, throughput 1169988.850006
+28119	[1728359561]	2000000 OPS in 1.711832 seconds, throughput 1168338.949149
+28119	[1728359562]	2000000 OPS in 1.701702 seconds, throughput 1175293.911625
+28119	[1728359562]	2000000 OPS in 1.721239 seconds, throughput 1161953.685688
+28119	[1728359562]	2000000 OPS in 1.706602 seconds, throughput 1171919.404759
+28119	[1728359563]	2000000 OPS in 1.712361 seconds, throughput 1167978.013982
+28119	[1728359563]	2000000 OPS in 1.701796 seconds, throughput 1175228.993369
+28119	[1728359564]	2000000 OPS in 1.719119 seconds, throughput 1163386.595111
+28119	[1728359564]	2000000 OPS in 1.708907 seconds, throughput 1170338.701872
+28119	[1728359564]	2000000 OPS in 1.711171 seconds, throughput 1168790.261172
+28119	[1728359565]	2000000 OPS in 1.699557 seconds, throughput 1176777.242540
+28119	[1728359566]	2000000 OPS in 1.723905 seconds, throughput 1160156.737175
+28119	[1728359566]	2000000 OPS in 1.705359 seconds, throughput 1172773.591953
+28119	[1728359566]	2000000 OPS in 1.712022 seconds, throughput 1168209.287030
+28119	[1728359567]	2000000 OPS in 1.702325 seconds, throughput 1174863.789229
+28119	[1728359567]	2000000 OPS in 1.721434 seconds, throughput 1161822.062304
+28119	[1728359568]	2000000 OPS in 1.708254 seconds, throughput 1170786.077480
+28119	[1728359568]	2000000 OPS in 1.713298 seconds, throughput 1167339.248630
+28119	[1728359569]	2000000 OPS in 1.703425 seconds, throughput 1174105.111760
+28119	[1728359569]	2000000 OPS in 1.722201 seconds, throughput 1161304.632851
+28119	[1728359569]	2000000 OPS in 1.708068 seconds, throughput 1170913.570186
+28119	[1728359570]	2000000 OPS in 1.713454 seconds, throughput 1167232.969196
+28119	[1728359570]	2000000 OPS in 1.704495 seconds, throughput 1173368.065028
+28119	[1728359571]	2000000 OPS in 1.723109 seconds, throughput 1160692.678176
+28119	[1728359571]	2000000 OPS in 1.702078 seconds, throughput 1175034.281625
+28119	[1728359571]	2000000 OPS in 1.711522 seconds, throughput 1168550.564936
+28119	[1728359572]	2000000 OPS in 1.700750 seconds, throughput 1175951.785977
+28119	[1728359572]	2000000 OPS in 1.723530 seconds, throughput 1160409.160270
+28119	[1728359573]	2000000 OPS in 1.708375 seconds, throughput 1170703.153582
+28119	[1728359573]	2000000 OPS in 1.712336 seconds, throughput 1167995.066389
+28119	[1728359574]	2000000 OPS in 1.704511 seconds, throughput 1173357.050791
+28119	[1728359574]	2000000 OPS in 1.723939 seconds, throughput 1160133.856244
+28119	[1728359574]	2000000 OPS in 1.709316 seconds, throughput 1170058.666742
+28119	[1728359575]	2000000 OPS in 1.712628 seconds, throughput 1167795.925326
+28119	[1728359575]	2000000 OPS in 1.704147 seconds, throughput 1173607.675864
+28119	[1728359576]	2000000 OPS in 1.725487 seconds, throughput 1159093.056047
+28119	[1728359576]	2000000 OPS in 1.709608 seconds, throughput 1169858.821437
+28119	[1728359576]	2000000 OPS in 1.713975 seconds, throughput 1166878.163334
+28119	[1728359577]	2000000 OPS in 1.703085 seconds, throughput 1174339.507423
+28119	[1728359578]	2000000 OPS in 1.722963 seconds, throughput 1160791.032657
+28119	[1728359578]	2000000 OPS in 1.707967 seconds, throughput 1170982.811729
+28119	[1728359578]	2000000 OPS in 1.713796 seconds, throughput 1167000.039678
+28119	[1728359579]	2000000 OPS in 1.702935 seconds, throughput 1174442.947030
+28119	[1728359579]	2000000 OPS in 1.724786 seconds, throughput 1159564.143030
+28119	[1728359579]	2000000 OPS in 1.708122 seconds, throughput 1170876.553314
+28119	[1728359580]	2000000 OPS in 1.714473 seconds, throughput 1166539.222257
+28119	[1728359580]	2000000 OPS in 1.704444 seconds, throughput 1173403.174290
+28119	[1728359581]	2000000 OPS in 1.723029 seconds, throughput 1160746.568978
+28119	[1728359581]	2000000 OPS in 1.709723 seconds, throughput 1169780.133975
+28119	[1728359582]	2000000 OPS in 1.713131 seconds, throughput 1167453.043579
+28119	[1728359582]	2000000 OPS in 1.702837 seconds, throughput 1174510.537415
+28119	[1728359583]	2000000 OPS in 1.723302 seconds, throughput 1160562.687213
+28119	[1728359583]	2000000 OPS in 1.709160 seconds, throughput 1170165.461396
+28119	[1728359583]	2000000 OPS in 1.711879 seconds, throughput 1168306.872156
+28119	[1728359584]	2000000 OPS in 1.704348 seconds, throughput 1173469.268013
+28119	[1728359584]	2000000 OPS in 1.723866 seconds, throughput 1160182.984060
+28119	[1728359585]	2000000 OPS in 1.707640 seconds, throughput 1171207.045982
+28119	[1728359585]	2000000 OPS in 1.711942 seconds, throughput 1168263.878099
+28119	[1728359586]	2000000 OPS in 1.701235 seconds, throughput 1175616.537398
+28119	[1728359586]	2000000 OPS in 1.725082 seconds, throughput 1159365.178003
+28119	[1728359586]	2000000 OPS in 1.715236 seconds, throughput 1166020.302746
+28119	[1728359587]	2000000 OPS in 1.714867 seconds, throughput 1166271.203539
+28119	[1728359587]	2000000 OPS in 1.702026 seconds, throughput 1175070.181067
+28119	[1728359588]	2000000 OPS in 1.723633 seconds, throughput 1160339.817119
+28119	[1728359588]	2000000 OPS in 1.711353 seconds, throughput 1168665.961961
+28119	[1728359588]	2000000 OPS in 1.714053 seconds, throughput 1166825.063169
+28119	[1728359589]	2000000 OPS in 1.701555 seconds, throughput 1175395.447106
+28119	[1728359590]	2000000 OPS in 1.723877 seconds, throughput 1160175.580972
+28119	[1728359590]	2000000 OPS in 1.711032 seconds, throughput 1168885.210797
+28119	[1728359590]	2000000 OPS in 1.713719 seconds, throughput 1167052.474764
+28119	[1728359591]	2000000 OPS in 1.702099 seconds, throughput 1175019.784396
+28119	[1728359591]	2000000 OPS in 1.724455 seconds, throughput 1159786.715223
+28119	[1728359591]	2000000 OPS in 1.709238 seconds, throughput 1170112.061632
+28119	[1728359592]	2000000 OPS in 1.712626 seconds, throughput 1167797.289075
+28119	[1728359592]	2000000 OPS in 1.702821 seconds, throughput 1174521.573319
+28119	[1728359593]	2000000 OPS in 1.722926 seconds, throughput 1160815.960755
+28119	[1728359593]	2000000 OPS in 1.712425 seconds, throughput 1167934.362089
+28119	[1728359594]	2000000 OPS in 1.715112 seconds, throughput 1166104.604247
+28119	[1728359594]	2000000 OPS in 1.704544 seconds, throughput 1173334.334579
+28119	[1728359595]	2000000 OPS in 1.724361 seconds, throughput 1159849.938615
+28119	[1728359595]	2000000 OPS in 1.707507 seconds, throughput 1171298.272862
+28119	[1728359595]	2000000 OPS in 1.715683 seconds, throughput 1165716.510568
+28119	[1728359596]	2000000 OPS in 1.705949 seconds, throughput 1172367.989899
+28119	[1728359597]	2000000 OPS in 1.723009 seconds, throughput 1160760.042461
+28119	[1728359597]	2000000 OPS in 1.709230 seconds, throughput 1170117.538307
+28119	[1728359597]	2000000 OPS in 1.712451 seconds, throughput 1167916.629439
+28119	[1728359597]	2000000 OPS in 1.704214 seconds, throughput 1173561.536286
+28119	[1728359598]	2000000 OPS in 1.725113 seconds, throughput 1159344.344399
+28119	[1728359598]	2000000 OPS in 1.710723 seconds, throughput 1169096.341138
+28119	[1728359599]	2000000 OPS in 1.715593 seconds, throughput 1165777.664050
+28119	[1728359599]	2000000 OPS in 1.703975 seconds, throughput 1173726.140348
+28119	[1728359600]	2000000 OPS in 1.724735 seconds, throughput 1159598.431063
+28119	[1728359600]	2000000 OPS in 1.709859 seconds, throughput 1169687.091158
+28119	[1728359600]	2000000 OPS in 1.712418 seconds, throughput 1167939.136356
+28119	[1728359601]	2000000 OPS in 1.706007 seconds, throughput 1172328.132300
+28119	[1728359602]	2000000 OPS in 1.726549 seconds, throughput 1158380.098103
+28119	[1728359602]	2000000 OPS in 1.711449 seconds, throughput 1168600.408192
+28119	[1728359602]	2000000 OPS in 1.715783 seconds, throughput 1165648.569778
+28119	[1728359603]	2000000 OPS in 1.704873 seconds, throughput 1173107.908918
+28119	[1728359603]	2000000 OPS in 1.723546 seconds, throughput 1160398.387975
+28119	[1728359603]	2000000 OPS in 1.710754 seconds, throughput 1169075.156335
+28119	[1728359604]	2000000 OPS in 1.714352 seconds, throughput 1166621.557300
+28119	[1728359604]	2000000 OPS in 1.703776 seconds, throughput 1173863.230847
+28119	[1728359605]	2000000 OPS in 1.711025 seconds, throughput 1168889.992841
+28119	[1728359605]	2000000 OPS in 1.724053 seconds, throughput 1160057.144415
+28119	[1728359606]	2000000 OPS in 1.713850 seconds, throughput 1166963.269831
+28119	[1728359606]	2000000 OPS in 1.706071 seconds, throughput 1172284.154645
+28119	[1728359607]	2000000 OPS in 1.710676 seconds, throughput 1169128.461497
+28119	[1728359607]	2000000 OPS in 1.724839 seconds, throughput 1159528.512516
+28119	[1728359607]	2000000 OPS in 1.716394 seconds, throughput 1165233.623515
+28119	[1728359608]	2000000 OPS in 1.703803 seconds, throughput 1173844.628751
+28119	[1728359609]	2000000 OPS in 1.709038 seconds, throughput 1170248.993878
+28119	[1728359609]	2000000 OPS in 1.725635 seconds, throughput 1158993.645817
+28119	[1728359609]	2000000 OPS in 1.715322 seconds, throughput 1165961.842733
+28119	[1728359609]	2000000 OPS in 1.704486 seconds, throughput 1173374.260628
+28119	[1728359610]	2000000 OPS in 1.707717 seconds, throughput 1171154.236914
+28119	[1728359610]	2000000 OPS in 1.724745 seconds, throughput 1159591.707760
+28119	[1728359611]	2000000 OPS in 1.714526 seconds, throughput 1166503.161807
+28119	[1728359611]	2000000 OPS in 1.703515 seconds, throughput 1174043.081511
+28119	[1728359612]	2000000 OPS in 1.711427 seconds, throughput 1168615.430281
+28119	[1728359612]	2000000 OPS in 1.725784 seconds, throughput 1158893.581120
+28119	[1728359612]	2000000 OPS in 1.715263 seconds, throughput 1166001.948389
+28119	[1728359613]	2000000 OPS in 1.704474 seconds, throughput 1173382.521529
+28119	[1728359614]	2000000 OPS in 1.711141 seconds, throughput 1168810.752591
+28119	[1728359614]	2000000 OPS in 1.725104 seconds, throughput 1159350.392788
+28119	[1728359614]	2000000 OPS in 1.715460 seconds, throughput 1165868.047054
+28119	[1728359615]	2000000 OPS in 1.704093 seconds, throughput 1173644.865626
+28119	[1728359615]	2000000 OPS in 1.713695 seconds, throughput 1167068.819131
+28119	[1728359616]	2000000 OPS in 1.724649 seconds, throughput 1159656.254693
+28119	[1728359616]	2000000 OPS in 1.713888 seconds, throughput 1166937.396143
+28119	[1728359616]	2000000 OPS in 1.704727 seconds, throughput 1173208.378820
+28119	[1728359617]	2000000 OPS in 1.710863 seconds, throughput 1169000.673929
+28119	[1728359617]	2000000 OPS in 1.724106 seconds, throughput 1160021.483598
+28119	[1728359618]	2000000 OPS in 1.715872 seconds, throughput 1165588.109136
+28119	[1728359618]	2000000 OPS in 1.702827 seconds, throughput 1174517.434830
+28119	[1728359619]	2000000 OPS in 1.711147 seconds, throughput 1168806.654250
+28119	[1728359619]	2000000 OPS in 1.725948 seconds, throughput 1158783.462769
+28119	[1728359619]	2000000 OPS in 1.715001 seconds, throughput 1166180.078029
+28119	[1728359620]	2000000 OPS in 1.704795 seconds, throughput 1173161.582478
+28119	[1728359621]	2000000 OPS in 1.711700 seconds, throughput 1168429.047146
+28119	[1728359621]	2000000 OPS in 1.726548 seconds, throughput 1158380.769026
+28119	[1728359621]	2000000 OPS in 1.715192 seconds, throughput 1166050.214786
+28119	[1728359621]	2000000 OPS in 1.706299 seconds, throughput 1172127.511063
+28119	[1728359622]	2000000 OPS in 1.710425 seconds, throughput 1169300.027771
+28119	[1728359622]	2000000 OPS in 1.723857 seconds, throughput 1160189.041202
+28119	[1728359623]	2000000 OPS in 1.713453 seconds, throughput 1167233.650412
+28119	[1728359623]	2000000 OPS in 1.705749 seconds, throughput 1172505.450685
+28119	[1728359624]	2000000 OPS in 1.711169 seconds, throughput 1168791.627244
+28119	[1728359624]	2000000 OPS in 1.724489 seconds, throughput 1159763.848885
+28119	[1728359624]	2000000 OPS in 1.712189 seconds, throughput 1168095.344614
+28119	[1728359625]	2000000 OPS in 1.706485 seconds, throughput 1171999.753880
+28119	[1728359626]	2000000 OPS in 1.712753 seconds, throughput 1167710.697339
+28119	[1728359626]	2000000 OPS in 1.723499 seconds, throughput 1160430.032161
+28119	[1728359626]	2000000 OPS in 1.716896 seconds, throughput 1164892.923043
+28119	[1728359626]	2000000 OPS in 1.706125 seconds, throughput 1172247.051066
+28119	[1728359627]	2000000 OPS in 1.713729 seconds, throughput 1167045.664746
+28119	[1728359628]	2000000 OPS in 1.727591 seconds, throughput 1157681.418808
+28119	[1728359628]	2000000 OPS in 1.718069 seconds, throughput 1164097.600271
+28119	[1728359628]	2000000 OPS in 1.709218 seconds, throughput 1170125.753415
+28119	[1728359629]	2000000 OPS in 1.713891 seconds, throughput 1166935.353532
+28119	[1728359629]	2000000 OPS in 1.726062 seconds, throughput 1158706.929415
+28119	[1728359630]	2000000 OPS in 1.715570 seconds, throughput 1165793.293191
+28119	[1728359630]	2000000 OPS in 1.706810 seconds, throughput 1171776.589076
+28119	[1728359631]	2000000 OPS in 1.707506 seconds, throughput 1171298.958832
+28119	[1728359631]	2000000 OPS in 1.725806 seconds, throughput 1158878.807931
+28119	[1728359631]	2000000 OPS in 1.716620 seconds, throughput 1165080.215773
+28119	[1728359632]	2000000 OPS in 1.707397 seconds, throughput 1171373.734404
+28119	[1728359633]	2000000 OPS in 1.714425 seconds, throughput 1166571.882701
+28119	[1728359633]	2000000 OPS in 1.728284 seconds, throughput 1157217.216615
+28119	[1728359633]	2000000 OPS in 1.717259 seconds, throughput 1164646.684047
+28119	[1728359633]	2000000 OPS in 1.705196 seconds, throughput 1172885.697597
+28119	[1728359634]	2000000 OPS in 1.711865 seconds, throughput 1168316.426821
+28119	[1728359634]	2000000 OPS in 1.726029 seconds, throughput 1158729.082767
+28119	[1728359635]	2000000 OPS in 1.713761 seconds, throughput 1167023.873224
+28119	[1728359635]	2000000 OPS in 1.706931 seconds, throughput 1171693.524811
+28119	[1728359636]	2000000 OPS in 1.712296 seconds, throughput 1168022.351276
+28119	[1728359636]	2000000 OPS in 1.726708 seconds, throughput 1158273.431292
+28119	[1728359636]	2000000 OPS in 1.717012 seconds, throughput 1164814.223779
+28119	[1728359637]	2000000 OPS in 1.706902 seconds, throughput 1171713.431703
+28119	[1728359638]	2000000 OPS in 1.712383 seconds, throughput 1167963.008276
+28119	[1728359638]	2000000 OPS in 1.729606 seconds, throughput 1156332.713924
+28119	[1728359638]	2000000 OPS in 1.717413 seconds, throughput 1164542.250466
+28119	[1728359638]	2000000 OPS in 1.706208 seconds, throughput 1172190.026070
+28119	[1728359639]	2000000 OPS in 1.710970 seconds, throughput 1168927.567403
+28119	[1728359640]	2000000 OPS in 1.724572 seconds, throughput 1159708.031906
+28119	[1728359640]	2000000 OPS in 1.714326 seconds, throughput 1166639.250644
+28119	[1728359640]	2000000 OPS in 1.707188 seconds, throughput 1171517.138124
+28119	[1728359641]	2000000 OPS in 1.713400 seconds, throughput 1167269.756041
+28119	[1728359641]	2000000 OPS in 1.726455 seconds, throughput 1158443.168226
+28119	[1728359642]	2000000 OPS in 1.713491 seconds, throughput 1167207.764733
+28119	[1728359642]	2000000 OPS in 1.709128 seconds, throughput 1170187.370402
+28119	[1728359643]	2000000 OPS in 1.711063 seconds, throughput 1168864.033645
+28119	[1728359643]	2000000 OPS in 1.726931 seconds, throughput 1158123.862505
+28119	[1728359643]	2000000 OPS in 1.715450 seconds, throughput 1165874.843336
+28119	[1728359644]	2000000 OPS in 1.706163 seconds, throughput 1172220.942548
+28119	[1728359645]	2000000 OPS in 1.710695 seconds, throughput 1169115.476458
+28119	[1728359645]	2000000 OPS in 1.728832 seconds, throughput 1156850.405360
+28119	[1728359645]	2000000 OPS in 1.718351 seconds, throughput 1163906.559254
+28119	[1728359645]	2000000 OPS in 1.708905 seconds, throughput 1170340.071566
+28119	[1728359646]	2000000 OPS in 1.713177 seconds, throughput 1167421.696649
+28119	[1728359647]	2000000 OPS in 1.727146 seconds, throughput 1157979.695984
+28119	[1728359647]	2000000 OPS in 1.717622 seconds, throughput 1164400.549131
+28119	[1728359647]	2000000 OPS in 1.706791 seconds, throughput 1171789.633294
+28119	[1728359648]	2000000 OPS in 1.712316 seconds, throughput 1168008.708673
+28119	[1728359648]	2000000 OPS in 1.727252 seconds, throughput 1157908.631746
+28119	[1728359648]	2000000 OPS in 1.719193 seconds, throughput 1163336.518937
+28119	[1728359649]	2000000 OPS in 1.707593 seconds, throughput 1171239.282429
+28119	[1728359650]	2000000 OPS in 1.711290 seconds, throughput 1168708.985619
+28119	[1728359650]	2000000 OPS in 1.727347 seconds, throughput 1157844.949509
+28119	[1728359650]	2000000 OPS in 1.715423 seconds, throughput 1165893.193690
+28119	[1728359650]	2000000 OPS in 1.704925 seconds, throughput 1173072.129273
+28119	[1728359651]	2000000 OPS in 1.713267 seconds, throughput 1167360.370567
+28119	[1728359652]	2000000 OPS in 1.727719 seconds, throughput 1157595.650682
+28119	[1728359652]	2000000 OPS in 1.717145 seconds, throughput 1164724.004088
+28119	[1728359652]	2000000 OPS in 1.704963 seconds, throughput 1173045.983989
+28119	[1728359653]	2000000 OPS in 1.713981 seconds, throughput 1166874.078534
+28119	[1728359653]	2000000 OPS in 1.726438 seconds, throughput 1158454.575258
+28119	[1728359654]	2000000 OPS in 1.715647 seconds, throughput 1165740.971190
+28119	[1728359654]	2000000 OPS in 1.707953 seconds, throughput 1170992.410213
+28119	[1728359655]	2000000 OPS in 1.711512 seconds, throughput 1168557.392528
+28119	[1728359655]	2000000 OPS in 1.725142 seconds, throughput 1159324.855577
+28119	[1728359655]	2000000 OPS in 1.715415 seconds, throughput 1165898.630944
+28119	[1728359655]	2000000 OPS in 1.706675 seconds, throughput 1171869.277982
+28119	[1728359657]	2000000 OPS in 1.713703 seconds, throughput 1167063.370958
+28119	[1728359657]	2000000 OPS in 1.728385 seconds, throughput 1157149.593407
+28119	[1728359657]	2000000 OPS in 1.714773 seconds, throughput 1166335.135904
+28119	[1728359657]	2000000 OPS in 1.704827 seconds, throughput 1173139.561961
+28119	[1728359658]	2000000 OPS in 1.711869 seconds, throughput 1168313.696901
+28119	[1728359659]	2000000 OPS in 1.729823 seconds, throughput 1156187.656194
+28119	[1728359659]	2000000 OPS in 1.715418 seconds, throughput 1165896.591968
+28119	[1728359659]	2000000 OPS in 1.707657 seconds, throughput 1171195.386427
+28119	[1728359660]	2000000 OPS in 1.712442 seconds, throughput 1167922.767603
+28119	[1728359660]	2000000 OPS in 1.726839 seconds, throughput 1158185.563333
+28119	[1728359660]	2000000 OPS in 1.715994 seconds, throughput 1165505.240694
+28119	[1728359661]	2000000 OPS in 1.708122 seconds, throughput 1170876.553314
+28119	[1728359662]	2000000 OPS in 1.714416 seconds, throughput 1166578.006738
+28119	[1728359662]	2000000 OPS in 1.728369 seconds, throughput 1157160.305467
+28119	[1728359662]	2000000 OPS in 1.716609 seconds, throughput 1165087.681586
+28119	[1728359662]	2000000 OPS in 1.708059 seconds, throughput 1170919.739892
+28119	[1728359663]	2000000 OPS in 1.711195 seconds, throughput 1168773.868554
+28119	[1728359664]	2000000 OPS in 1.727326 seconds, throughput 1157859.026032
+28119	[1728359664]	2000000 OPS in 1.715209 seconds, throughput 1166038.657680
+28119	[1728359664]	2000000 OPS in 1.707947 seconds, throughput 1170996.523897
+28119	[1728359665]	2000000 OPS in 1.714796 seconds, throughput 1166319.492231
+28119	[1728359666]	2000000 OPS in 1.714414 seconds, throughput 1166579.367644
+28119	[1728359666]	2000000 OPS in 1.728462 seconds, throughput 1157098.044389
+28119	[1728359666]	2000000 OPS in 1.706164 seconds, throughput 1172220.255497
+28119	[1728359667]	2000000 OPS in 1.710738 seconds, throughput 1169086.090331
+28119	[1728359667]	2000000 OPS in 1.715251 seconds, throughput 1166010.105810
+28119	[1728359667]	2000000 OPS in 1.726810 seconds, throughput 1158205.013870
+28119	[1728359667]	2000000 OPS in 1.707174 seconds, throughput 1171526.745370
+28119	[1728359668]	2000000 OPS in 1.714936 seconds, throughput 1166224.278924
+28119	[1728359669]	2000000 OPS in 1.716373 seconds, throughput 1165247.880268
+28119	[1728359669]	2000000 OPS in 1.727080 seconds, throughput 1158023.947935
+28119	[1728359669]	2000000 OPS in 1.707025 seconds, throughput 1171629.003676
+28119	[1728359670]	2000000 OPS in 1.714530 seconds, throughput 1166500.440354
+28119	[1728359671]	2000000 OPS in 1.716903 seconds, throughput 1164888.173648
+28119	[1728359671]	2000000 OPS in 1.729774 seconds, throughput 1156220.407984
+28119	[1728359671]	2000000 OPS in 1.705267 seconds, throughput 1172836.863670
+28119	[1728359672]	2000000 OPS in 1.710242 seconds, throughput 1169425.145681
+28119	[1728359672]	2000000 OPS in 1.718227 seconds, throughput 1163990.555381
+28119	[1728359672]	2000000 OPS in 1.729626 seconds, throughput 1156319.343026
+28119	[1728359673]	2000000 OPS in 1.707001 seconds, throughput 1171645.476482
+28119	[1728359674]	2000000 OPS in 1.716491 seconds, throughput 1165167.775421
+28119	[1728359674]	2000000 OPS in 1.717580 seconds, throughput 1164429.022229
+28119	[1728359674]	2000000 OPS in 1.726729 seconds, throughput 1158259.344692
+28119	[1728359674]	2000000 OPS in 1.709257 seconds, throughput 1170099.054735
+28119	[1728359675]	2000000 OPS in 1.715994 seconds, throughput 1165505.240694
+28119	[1728359676]	2000000 OPS in 1.715856 seconds, throughput 1165598.978003
+28119	[1728359676]	2000000 OPS in 1.725862 seconds, throughput 1158841.205148
+28119	[1728359676]	2000000 OPS in 1.706094 seconds, throughput 1172268.350982
+28119	[1728359677]	2000000 OPS in 1.711093 seconds, throughput 1168843.540357
+28119	[1728359678]	2000000 OPS in 1.718186 seconds, throughput 1164018.330961
+28119	[1728359678]	2000000 OPS in 1.728224 seconds, throughput 1157257.392560
+28119	[1728359678]	2000000 OPS in 1.705222 seconds, throughput 1172867.814279
+28119	[1728359679]	2000000 OPS in 1.713139 seconds, throughput 1167447.591818
+28119	[1728359679]	2000000 OPS in 1.717079 seconds, throughput 1164768.773015
+28119	[1728359679]	2000000 OPS in 1.708073 seconds, throughput 1170910.142599
+28119	[1728359679]	2000000 OPS in 1.726482 seconds, throughput 1158425.051637
+28119	[1728359680]	2000000 OPS in 1.712276 seconds, throughput 1168035.994197
+28119	[1728359681]	2000000 OPS in 1.715424 seconds, throughput 1165892.514037
+28119	[1728359681]	2000000 OPS in 1.709419 seconds, throughput 1169988.165570
+28119	[1728359681]	2000000 OPS in 1.729531 seconds, throughput 1156382.857549
+28119	[1728359682]	2000000 OPS in 1.717599 seconds, throughput 1164416.141369
+28119	[1728359683]	2000000 OPS in 1.719041 seconds, throughput 1163439.382772
+28119	[1728359683]	2000000 OPS in 1.708095 seconds, throughput 1170895.061457
+28119	[1728359683]	2000000 OPS in 1.728882 seconds, throughput 1156816.948756
+28119	[1728359684]	2000000 OPS in 1.712704 seconds, throughput 1167744.105228
+28119	[1728359684]	2000000 OPS in 1.716247 seconds, throughput 1165333.428114
+28119	[1728359685]	2000000 OPS in 1.708617 seconds, throughput 1170537.341019
+28119	[1728359685]	2000000 OPS in 1.727578 seconds, throughput 1157690.130344
+28119	[1728359686]	2000000 OPS in 1.714413 seconds, throughput 1166580.048098
+28119	[1728359686]	2000000 OPS in 1.716266 seconds, throughput 1165320.527238
+28119	[1728359686]	2000000 OPS in 1.707788 seconds, throughput 1171105.547059
+28119	[1728359686]	2000000 OPS in 1.726533 seconds, throughput 1158390.832958
+28119	[1728359687]	2000000 OPS in 1.714301 seconds, throughput 1166656.263982
+28119	[1728359688]	2000000 OPS in 1.715355 seconds, throughput 1165939.411958
+28119	[1728359688]	2000000 OPS in 1.706551 seconds, throughput 1171954.427380
+28119	[1728359688]	2000000 OPS in 1.729278 seconds, throughput 1156552.040794
+28119	[1728359689]	2000000 OPS in 1.713243 seconds, throughput 1167376.723559
+28119	[1728359690]	2000000 OPS in 1.711321 seconds, throughput 1168687.814852
+28119	[1728359690]	2000000 OPS in 1.709679 seconds, throughput 1169810.239232
+28119	[1728359690]	2000000 OPS in 1.726082 seconds, throughput 1158693.503553
+28119	[1728359691]	2000000 OPS in 1.714177 seconds, throughput 1166740.657470
+28119	[1728359691]	2000000 OPS in 1.715209 seconds, throughput 1166038.657680
+28119	[1728359691]	2000000 OPS in 1.707937 seconds, throughput 1171003.380101
+28119	[1728359691]	2000000 OPS in 1.729000 seconds, throughput 1156737.998843
+28119	[1728359692]	2000000 OPS in 1.714244 seconds, throughput 1166695.056246
+28119	[1728359693]	2000000 OPS in 1.717207 seconds, throughput 1164681.951564
+28119	[1728359693]	2000000 OPS in 1.706352 seconds, throughput 1172091.104297
+28119	[1728359693]	2000000 OPS in 1.729822 seconds, throughput 1156188.324579
+28119	[1728359694]	2000000 OPS in 1.715622 seconds, throughput 1165757.958338
+28119	[1728359695]	2000000 OPS in 1.716777 seconds, throughput 1164973.668683
+28119	[1728359695]	2000000 OPS in 1.709346 seconds, throughput 1170038.131543
+28119	[1728359695]	2000000 OPS in 1.727565 seconds, throughput 1157698.842012
+28119	[1728359696]	2000000 OPS in 1.710089 seconds, throughput 1169529.773012
+28119	[1728359696]	2000000 OPS in 1.717171 seconds, throughput 1164706.368789
+28119	[1728359696]	2000000 OPS in 1.707442 seconds, throughput 1171342.862598
+28119	[1728359697]	2000000 OPS in 1.727077 seconds, throughput 1158025.959468
+28119	[1728359698]	2000000 OPS in 1.711052 seconds, throughput 1168871.548030
+28119	[1728359698]	2000000 OPS in 1.706258 seconds, throughput 1172155.676340
+28119	[1728359698]	2000000 OPS in 1.715711 seconds, throughput 1165697.486348
+28119	[1728359698]	2000000 OPS in 1.731147 seconds, throughput 1155303.391335
+28119	[1728359699]	2000000 OPS in 1.716834 seconds, throughput 1164934.990803
+28119	[1728359700]	2000000 OPS in 1.707907 seconds, throughput 1171023.949196
+28119	[1728359700]	2000000 OPS in 1.715609 seconds, throughput 1165766.791851
+28119	[1728359700]	2000000 OPS in 1.726829 seconds, throughput 1158192.270341
+28119	[1728359701]	2000000 OPS in 1.713787 seconds, throughput 1167006.168211
+28119	[1728359702]	2000000 OPS in 1.706335 seconds, throughput 1172102.781693
+28119	[1728359702]	2000000 OPS in 1.718311 seconds, throughput 1163933.653454
+28119	[1728359702]	2000000 OPS in 1.728149 seconds, throughput 1157307.616415
+28119	[1728359703]	2000000 OPS in 1.713682 seconds, throughput 1167077.672520
+28119	[1728359703]	2000000 OPS in 1.710725 seconds, throughput 1169094.974353
+28119	[1728359703]	2000000 OPS in 1.716242 seconds, throughput 1165336.823129
+28119	[1728359704]	2000000 OPS in 1.726451 seconds, throughput 1158445.852214
+28119	[1728359704]	2000000 OPS in 1.717145 seconds, throughput 1164724.004088
+28119	[1728359705]	2000000 OPS in 1.708658 seconds, throughput 1170509.253461
+28119	[1728359705]	2000000 OPS in 1.718096 seconds, throughput 1164079.306395
+28119	[1728359705]	2000000 OPS in 1.726501 seconds, throughput 1158412.303265
+28119	[1728359706]	2000000 OPS in 1.714372 seconds, throughput 1166607.947400
+28119	[1728359707]	2000000 OPS in 1.709561 seconds, throughput 1169890.983709
+28119	[1728359707]	2000000 OPS in 1.716508 seconds, throughput 1165156.235800
+28119	[1728359707]	2000000 OPS in 1.725526 seconds, throughput 1159066.858454
+28119	[1728359708]	2000000 OPS in 1.713107 seconds, throughput 1167469.399168
+28119	[1728359708]	2000000 OPS in 1.707218 seconds, throughput 1171496.551700
+28119	[1728359708]	2000000 OPS in 1.717796 seconds, throughput 1164282.603988
+28119	[1728359709]	2000000 OPS in 1.725111 seconds, throughput 1159345.688480
+28119	[1728359710]	2000000 OPS in 1.711883 seconds, throughput 1168304.142281
+28119	[1728359710]	2000000 OPS in 1.707861 seconds, throughput 1171055.489879
+28119	[1728359710]	2000000 OPS in 1.716849 seconds, throughput 1164924.812840
+28119	[1728359711]	2000000 OPS in 1.728291 seconds, throughput 1157212.529603
+28119	[1728359711]	2000000 OPS in 1.717322 seconds, throughput 1164603.958955
+28119	[1728359712]	2000000 OPS in 1.708447 seconds, throughput 1170653.816010
+28119	[1728359712]	2000000 OPS in 1.717378 seconds, throughput 1164565.983726
+28119	[1728359712]	2000000 OPS in 1.728112 seconds, throughput 1157332.395123
+28119	[1728359713]	2000000 OPS in 1.718243 seconds, throughput 1163979.716489
+28119	[1728359714]	2000000 OPS in 1.709151 seconds, throughput 1170171.623221
+28119	[1728359714]	2000000 OPS in 1.717078 seconds, throughput 1164769.451359
+28119	[1728359714]	2000000 OPS in 1.729877 seconds, throughput 1156151.564533
+28119	[1728359715]	2000000 OPS in 1.713821 seconds, throughput 1166983.016313
+28119	[1728359715]	2000000 OPS in 1.705382 seconds, throughput 1172757.775091
+28119	[1728359715]	2000000 OPS in 1.719278 seconds, throughput 1163279.004326
+28119	[1728359716]	2000000 OPS in 1.727297 seconds, throughput 1157878.465603
+28119	[1728359716]	2000000 OPS in 1.717040 seconds, throughput 1164795.228999
+28119	[1728359717]	2000000 OPS in 1.707005 seconds, throughput 1171642.730982
+28119	[1728359717]	2000000 OPS in 1.715351 seconds, throughput 1165942.130794
+28119	[1728359717]	2000000 OPS in 1.728011 seconds, throughput 1157400.039699
+28119	[1728359718]	2000000 OPS in 1.718838 seconds, throughput 1163576.788505
+28119	[1728359719]	2000000 OPS in 1.709576 seconds, throughput 1169880.718962
+28119	[1728359719]	2000000 OPS in 1.718518 seconds, throughput 1163793.454593
+28119	[1728359719]	2000000 OPS in 1.729818 seconds, throughput 1156190.998128
+28119	[1728359720]	2000000 OPS in 1.713226 seconds, throughput 1167388.307205
+28119	[1728359720]	2000000 OPS in 1.706318 seconds, throughput 1172114.459321
+28119	[1728359721]	2000000 OPS in 1.718561 seconds, throughput 1163764.335395
+28119	[1728359721]	2000000 OPS in 1.730278 seconds, throughput 1155883.621014
+28119	[1728359722]	2000000 OPS in 1.713197 seconds, throughput 1167408.068074
+28119	[1728359722]	2000000 OPS in 1.709975 seconds, throughput 1169607.742803
+28119	[1728359722]	2000000 OPS in 1.717075 seconds, throughput 1164771.486394
+28119	[1728359723]	2000000 OPS in 1.725801 seconds, throughput 1158882.165441
+28119	[1728359723]	2000000 OPS in 1.713192 seconds, throughput 1167411.475188
+28119	[1728359724]	2000000 OPS in 1.706617 seconds, throughput 1171909.104386
+28119	[1728359724]	2000000 OPS in 1.715444 seconds, throughput 1165878.921142
+28119	[1728359724]	2000000 OPS in 1.726100 seconds, throughput 1158681.420543
+28119	[1728359725]	2000000 OPS in 1.711750 seconds, throughput 1168394.917482
+28119	[1728359726]	2000000 OPS in 1.707378 seconds, throughput 1171386.769655
+28119	[1728359726]	2000000 OPS in 1.716816 seconds, throughput 1164947.204593
+28119	[1728359726]	2000000 OPS in 1.724023 seconds, throughput 1160077.330755
+28119	[1728359727]	2000000 OPS in 1.714623 seconds, throughput 1166437.170153
+28119	[1728359727]	2000000 OPS in 1.708025 seconds, throughput 1170943.048257
+28119	[1728359727]	2000000 OPS in 1.718770 seconds, throughput 1163622.823298
+28119	[1728359728]	2000000 OPS in 1.729132 seconds, throughput 1156649.694760
+28119	[1728359728]	2000000 OPS in 1.710904 seconds, throughput 1168972.660067
+28119	[1728359729]	2000000 OPS in 1.706362 seconds, throughput 1172084.235350
+28119	[1728359729]	2000000 OPS in 1.718160 seconds, throughput 1164035.945430
+28119	[1728359730]	2000000 OPS in 1.729784 seconds, throughput 1156213.723794
+28119	[1728359730]	2000000 OPS in 1.718533 seconds, throughput 1163783.296567
+28119	[1728359731]	2000000 OPS in 1.708912 seconds, throughput 1170335.277650
+28119	[1728359731]	2000000 OPS in 1.719452 seconds, throughput 1163161.286270
+28119	[1728359731]	2000000 OPS in 1.727247 seconds, throughput 1157911.983636
+28119	[1728359732]	2000000 OPS in 1.714208 seconds, throughput 1166719.557953
+28119	[1728359732]	2000000 OPS in 1.710813 seconds, throughput 1169034.838992
+28119	[1728359733]	2000000 OPS in 1.717579 seconds, throughput 1164429.700177
+28119	[1728359733]	2000000 OPS in 1.729672 seconds, throughput 1156288.591132
+28119	[1728359734]	2000000 OPS in 1.718464 seconds, throughput 1163830.024953
+28119	[1728359734]	2000000 OPS in 1.707805 seconds, throughput 1171093.889525
+28119	[1728359734]	2000000 OPS in 1.715969 seconds, throughput 1165522.220973
+28119	[1728359735]	2000000 OPS in 1.730451 seconds, throughput 1155768.062777
+28119	[1728359735]	2000000 OPS in 1.713026 seconds, throughput 1167524.602662
+28119	[1728359736]	2000000 OPS in 1.708105 seconds, throughput 1170888.206521
+28119	[1728359736]	2000000 OPS in 1.716733 seconds, throughput 1165003.527048
+28119	[1728359736]	2000000 OPS in 1.727483 seconds, throughput 1157753.795551
+28119	[1728359737]	2000000 OPS in 1.713756 seconds, throughput 1167027.278096
+28119	[1728359737]	2000000 OPS in 1.707726 seconds, throughput 1171148.064736
+28119	[1728359738]	2000000 OPS in 1.716089 seconds, throughput 1165440.720149
+28119	[1728359738]	2000000 OPS in 1.727404 seconds, throughput 1157806.743530
+28119	[1728359739]	2000000 OPS in 1.713310 seconds, throughput 1167331.072602
+28119	[1728359739]	2000000 OPS in 1.707694 seconds, throughput 1171170.010552
+28119	[1728359739]	2000000 OPS in 1.714706 seconds, throughput 1166380.708996
+28119	[1728359740]	2000000 OPS in 1.730379 seconds, throughput 1155816.153571
+28119	[1728359740]	2000000 OPS in 1.713872 seconds, throughput 1166948.290187
+28119	[1728359741]	2000000 OPS in 1.706292 seconds, throughput 1172132.319673
+28119	[1728359741]	2000000 OPS in 1.717765 seconds, throughput 1164303.615454
+28119	[1728359742]	2000000 OPS in 1.728727 seconds, throughput 1156920.670528
+28119	[1728359742]	2000000 OPS in 1.715688 seconds, throughput 1165713.113340
+28119	[1728359743]	2000000 OPS in 1.711167 seconds, throughput 1168792.993320
+28119	[1728359743]	2000000 OPS in 1.716216 seconds, throughput 1165354.477525
+28119	[1728359743]	2000000 OPS in 1.728736 seconds, throughput 1156914.647465
+28119	[1728359744]	2000000 OPS in 1.714747 seconds, throughput 1166352.820562
+28119	[1728359744]	2000000 OPS in 1.708282 seconds, throughput 1170766.887434
+28119	[1728359745]	2000000 OPS in 1.715280 seconds, throughput 1165990.392239
+28119	[1728359745]	2000000 OPS in 1.729064 seconds, throughput 1156695.183059
+28119	[1728359746]	2000000 OPS in 1.714510 seconds, throughput 1166514.047745
+28119	[1728359746]	2000000 OPS in 1.708912 seconds, throughput 1170335.277650
+28119	[1728359746]	2000000 OPS in 1.715326 seconds, throughput 1165959.123805
+28119	[1728359747]	2000000 OPS in 1.726651 seconds, throughput 1158311.668079
+28119	[1728359747]	2000000 OPS in 1.715639 seconds, throughput 1165746.407024
+28119	[1728359748]	2000000 OPS in 1.710278 seconds, throughput 1169400.530206
+28119	[1728359748]	2000000 OPS in 1.718595 seconds, throughput 1163741.311944
+28119	[1728359749]	2000000 OPS in 1.730503 seconds, throughput 1155733.333025
+28119	[1728359749]	2000000 OPS in 1.717887 seconds, throughput 1164220.929549
+28119	[1728359749]	2000000 OPS in 1.707637 seconds, throughput 1171209.103574
+28119	[1728359750]	2000000 OPS in 1.715681 seconds, throughput 1165717.869464
+28119	[1728359750]	2000000 OPS in 1.727428 seconds, throughput 1157790.657556
+28119	[1728359751]	2000000 OPS in 1.714958 seconds, throughput 1166209.318246
+28119	[1728359751]	2000000 OPS in 1.710192 seconds, throughput 1169459.335560
+28119	[1728359751]	2000000 OPS in 1.716286 seconds, throughput 1165306.947677
+28119	[1728359752]	2000000 OPS in 1.727503 seconds, throughput 1157740.391768
+28119	[1728359753]	2000000 OPS in 1.717289 seconds, throughput 1164626.338374
+28119	[1728359753]	2000000 OPS in 1.707460 seconds, throughput 1171330.514331
+28119	[1728359753]	2000000 OPS in 1.717965 seconds, throughput 1164168.070944
+28119	[1728359754]	2000000 OPS in 1.728659 seconds, throughput 1156966.180143
+28119	[1728359754]	2000000 OPS in 1.713668 seconds, throughput 1167087.207090
+28119	[1728359755]	2000000 OPS in 1.706614 seconds, throughput 1171911.164446
+28119	[1728359755]	2000000 OPS in 1.713967 seconds, throughput 1166883.609778
+28119	[1728359755]	2000000 OPS in 1.727094 seconds, throughput 1158014.560875
+28119	[1728359756]	2000000 OPS in 1.713073 seconds, throughput 1167492.570369
+28119	[1728359756]	2000000 OPS in 1.707699 seconds, throughput 1171166.581464
+28119	[1728359757]	2000000 OPS in 1.716094 seconds, throughput 1165437.324529
+28119	[1728359757]	2000000 OPS in 1.725740 seconds, throughput 1158923.128629
+28119	[1728359758]	2000000 OPS in 1.709452 seconds, throughput 1169965.579613
+28119	[1728359758]	2000000 OPS in 1.708599 seconds, throughput 1170549.672568
+28119	[1728359758]	2000000 OPS in 1.718679 seconds, throughput 1163684.434382
+28119	[1728359759]	2000000 OPS in 1.728532 seconds, throughput 1157051.185630
+28119	[1728359759]	2000000 OPS in 1.713872 seconds, throughput 1166948.290187
+28119	[1728359760]	2000000 OPS in 1.709265 seconds, throughput 1170093.578234
+28119	[1728359760]	2000000 OPS in 1.717293 seconds, throughput 1164623.625671
+28119	[1728359761]	2000000 OPS in 1.727479 seconds, throughput 1157756.476345
+28119	[1728359761]	2000000 OPS in 1.715986 seconds, throughput 1165510.674330
+28119	[1728359761]	2000000 OPS in 1.706166 seconds, throughput 1172218.881398
+28119	[1728359762]	2000000 OPS in 1.717047 seconds, throughput 1164790.480400
+28119	[1728359762]	2000000 OPS in 1.727234 seconds, throughput 1157920.698643
+28119	[1728359763]	2000000 OPS in 1.714341 seconds, throughput 1166629.042880
+28119	[1728359763]	2000000 OPS in 1.705922 seconds, throughput 1172386.545223
+28119	[1728359763]	2000000 OPS in 1.718339 seconds, throughput 1163914.687381
+28119	[1728359764]	2000000 OPS in 1.728940 seconds, throughput 1156778.141520
+28119	[1728359765]	2000000 OPS in 1.714351 seconds, throughput 1166622.237803
+28119	[1728359765]	2000000 OPS in 1.706745 seconds, throughput 1171821.215237
+28119	[1728359765]	2000000 OPS in 1.714768 seconds, throughput 1166338.536758
+28119	[1728359766]	2000000 OPS in 1.729388 seconds, throughput 1156478.476779
+28119	[1728359766]	2000000 OPS in 1.710683 seconds, throughput 1169123.677502
+28119	[1728359767]	2000000 OPS in 1.709820 seconds, throughput 1169713.771040
+28119	[1728359767]	2000000 OPS in 1.716034 seconds, throughput 1165478.073278
+28119	[1728359768]	2000000 OPS in 1.727800 seconds, throughput 1157541.382104
+28119	[1728359768]	2000000 OPS in 1.716248 seconds, throughput 1165332.749113
+28119	[1728359768]	2000000 OPS in 1.709027 seconds, throughput 1170256.526082
+28119	[1728359769]	2000000 OPS in 1.715080 seconds, throughput 1166126.361453
+28119	[1728359769]	2000000 OPS in 1.728475 seconds, throughput 1157089.341761
+28119	[1728359770]	2000000 OPS in 1.715009 seconds, throughput 1166174.638151
+28119	[1728359770]	2000000 OPS in 1.707454 seconds, throughput 1171334.630391
+28119	[1728359770]	2000000 OPS in 1.718664 seconds, throughput 1163694.590682
+28119	[1728359771]	2000000 OPS in 1.727229 seconds, throughput 1157924.050604
+28119	[1728359771]	2000000 OPS in 1.712072 seconds, throughput 1168175.170203
+28119	[1728359772]	2000000 OPS in 1.708190 seconds, throughput 1170829.942805
+28119	[1728359772]	2000000 OPS in 1.717875 seconds, throughput 1164229.062068
+28119	[1728359773]	2000000 OPS in 1.729871 seconds, throughput 1156155.574606
+28119	[1728359773]	2000000 OPS in 1.715202 seconds, throughput 1166043.416461
+28119	[1728359773]	2000000 OPS in 1.710322 seconds, throughput 1169370.446033
+28119	[1728359774]	2000000 OPS in 1.715445 seconds, throughput 1165878.241506
+28119	[1728359774]	2000000 OPS in 1.730209 seconds, throughput 1155929.717161
+28119	[1728359775]	2000000 OPS in 1.712692 seconds, throughput 1167752.287043
+28119	[1728359775]	2000000 OPS in 1.708417 seconds, throughput 1170674.372826
+28119	[1728359775]	2000000 OPS in 1.718488 seconds, throughput 1163813.771176
+28119	[1728359776]	2000000 OPS in 1.729074 seconds, throughput 1156688.493379
+28119	[1728359776]	2000000 OPS in 1.714892 seconds, throughput 1166254.201431
+28119	[1728359777]	2000000 OPS in 1.708405 seconds, throughput 1170682.595755
+28119	[1728359777]	2000000 OPS in 1.718065 seconds, throughput 1164100.310524
+28119	[1728359778]	2000000 OPS in 1.729766 seconds, throughput 1156225.755391
+28119	[1728359778]	2000000 OPS in 1.711900 seconds, throughput 1168292.540452
+28119	[1728359778]	2000000 OPS in 1.706682 seconds, throughput 1171864.471530
+28119	[1728359779]	2000000 OPS in 1.718449 seconds, throughput 1163840.183794
+28119	[1728359780]	2000000 OPS in 1.729748 seconds, throughput 1156237.787238
+28119	[1728359780]	2000000 OPS in 1.712072 seconds, throughput 1168175.170203
+28119	[1728359780]	2000000 OPS in 1.706851 seconds, throughput 1171748.442014
+28119	[1728359781]	2000000 OPS in 1.717327 seconds, throughput 1164600.568209
+28119	[1728359781]	2000000 OPS in 1.728279 seconds, throughput 1157220.564504
+28119	[1728359782]	2000000 OPS in 1.712559 seconds, throughput 1167842.976505
+28119	[1728359782]	2000000 OPS in 1.709409 seconds, throughput 1169995.009971
+28119	[1728359782]	2000000 OPS in 1.717193 seconds, throughput 1164691.447030
+28119	[1728359783]	2000000 OPS in 1.727733 seconds, throughput 1157586.270564
+28119	[1728359783]	2000000 OPS in 1.710677 seconds, throughput 1169127.778067
+28119	[1728359784]	2000000 OPS in 1.707155 seconds, throughput 1171539.784027
+28119	[1728359784]	2000000 OPS in 1.717332 seconds, throughput 1164597.177482
+28119	[1728359785]	2000000 OPS in 1.729977 seconds, throughput 1156084.734074
+28119	[1728359785]	2000000 OPS in 1.713177 seconds, throughput 1167421.696649
+28119	[1728359785]	2000000 OPS in 1.708347 seconds, throughput 1170722.341538
+28119	[1728359786]	2000000 OPS in 1.719325 seconds, throughput 1163247.204572
+28119	[1728359787]	2000000 OPS in 1.726113 seconds, throughput 1158672.694082
+28119	[1728359787]	2000000 OPS in 1.716822 seconds, throughput 1164943.133301
+28119	[1728359787]	2000000 OPS in 1.707637 seconds, throughput 1171209.103574
+28119	[1728359787]	2000000 OPS in 1.719625 seconds, throughput 1163044.268372
+28119	[1728359788]	2000000 OPS in 1.727391 seconds, throughput 1157815.456952
+28119	[1728359788]	2000000 OPS in 1.711629 seconds, throughput 1168477.514695
+28119	[1728359789]	2000000 OPS in 1.707095 seconds, throughput 1171580.960638
+28119	[1728359789]	2000000 OPS in 1.716055 seconds, throughput 1165463.810892
+28119	[1728359790]	2000000 OPS in 1.726541 seconds, throughput 1158385.465506
+28119	[1728359790]	2000000 OPS in 1.713568 seconds, throughput 1167155.315692
+28119	[1728359790]	2000000 OPS in 1.708795 seconds, throughput 1170415.409689
+28119	[1728359791]	2000000 OPS in 1.718764 seconds, throughput 1163626.885366
+28119	[1728359792]	2000000 OPS in 1.729493 seconds, throughput 1156408.265312
+28119	[1728359792]	2000000 OPS in 1.710930 seconds, throughput 1168954.895875
+28119	[1728359792]	2000000 OPS in 1.708467 seconds, throughput 1170640.111866
+28119	[1728359793]	2000000 OPS in 1.719857 seconds, throughput 1162887.379590
+28119	[1728359793]	2000000 OPS in 1.727410 seconds, throughput 1157802.721994
+28119	[1728359794]	2000000 OPS in 1.714399 seconds, throughput 1166589.574539
+28119	[1728359794]	2000000 OPS in 1.709799 seconds, throughput 1169728.137635
+28119	[1728359794]	2000000 OPS in 1.716735 seconds, throughput 1165002.169817
+28119	[1728359795]	2000000 OPS in 1.726684 seconds, throughput 1158289.530684
+28119	[1728359795]	2000000 OPS in 1.718154 seconds, throughput 1164040.010383
+28119	[1728359796]	2000000 OPS in 1.707575 seconds, throughput 1171251.628772
+28119	[1728359796]	2000000 OPS in 1.717980 seconds, throughput 1164157.906378
+28119	[1728359797]	2000000 OPS in 1.728347 seconds, throughput 1157175.034874
+28119	[1728359797]	2000000 OPS in 1.714910 seconds, throughput 1166241.960219
+28119	[1728359797]	2000000 OPS in 1.710351 seconds, throughput 1169350.618674
+28119	[1728359798]	2000000 OPS in 1.716908 seconds, throughput 1164884.781246
+28119	[1728359799]	2000000 OPS in 1.725555 seconds, throughput 1159047.378959
+28119	[1728359799]	2000000 OPS in 1.714850 seconds, throughput 1166282.765256
+28119	[1728359799]	2000000 OPS in 1.708754 seconds, throughput 1170443.492744
+28119	[1728359799]	2000000 OPS in 1.716531 seconds, throughput 1165140.623735
+28119	[1728359800]	2000000 OPS in 1.732401 seconds, throughput 1154467.123951
+28119	[1728359800]	2000000 OPS in 1.713887 seconds, throughput 1166938.077014
+28119	[1728359801]	2000000 OPS in 1.707839 seconds, throughput 1171070.575154
+28119	[1728359801]	2000000 OPS in 1.717981 seconds, throughput 1164157.228747
+28119	[1728359802]	2000000 OPS in 1.730430 seconds, throughput 1155782.088845
+28119	[1728359802]	2000000 OPS in 1.709848 seconds, throughput 1169694.616130
+28119	[1728359802]	2000000 OPS in 1.707034 seconds, throughput 1171622.826493
+28119	[1728359803]	2000000 OPS in 1.717812 seconds, throughput 1164271.759657
+28119	[1728359804]	2000000 OPS in 1.728710 seconds, throughput 1156932.047596
+28119	[1728359804]	2000000 OPS in 1.713538 seconds, throughput 1167175.749823
+28119	[1728359804]	2000000 OPS in 1.707037 seconds, throughput 1171620.767447
+28119	[1728359805]	2000000 OPS in 1.718355 seconds, throughput 1163903.849903
+28119	[1728359806]	2000000 OPS in 1.728683 seconds, throughput 1156950.117517
+28119	[1728359806]	2000000 OPS in 1.714084 seconds, throughput 1166803.960599
+28119	[1728359806]	2000000 OPS in 1.708959 seconds, throughput 1170303.090946
+28119	[1728359806]	2000000 OPS in 1.719970 seconds, throughput 1162810.979261
+28119	[1728359807]	2000000 OPS in 1.728593 seconds, throughput 1157010.354664
+28119	[1728359807]	2000000 OPS in 1.714508 seconds, throughput 1166515.408502
+28119	[1728359808]	2000000 OPS in 1.707312 seconds, throughput 1171432.052255
+28119	[1728359808]	2000000 OPS in 1.717005 seconds, throughput 1164818.972571
+28119	[1728359809]	2000000 OPS in 1.729590 seconds, throughput 1156343.410866
+28119	[1728359809]	2000000 OPS in 1.715048 seconds, throughput 1166148.119470
+28119	[1728359809]	2000000 OPS in 1.710896 seconds, throughput 1168978.126081
+28119	[1728359810]	2000000 OPS in 1.718538 seconds, throughput 1163779.910598
+28119	[1728359811]	2000000 OPS in 1.729738 seconds, throughput 1156244.471706
+28119	[1728359811]	2000000 OPS in 1.715637 seconds, throughput 1165747.765990
+28119	[1728359811]	2000000 OPS in 1.709224 seconds, throughput 1170121.645846
+28119	[1728359812]	2000000 OPS in 1.717420 seconds, throughput 1164537.503930
+28119	[1728359812]	2000000 OPS in 1.727177 seconds, throughput 1157958.912144
+28119	[1728359812]	2000000 OPS in 1.714229 seconds, throughput 1166705.265166
+28119	[1728359813]	2000000 OPS in 1.710922 seconds, throughput 1168960.361723
+28119	[1728359813]	2000000 OPS in 1.718600 seconds, throughput 1163737.926219
+28119	[1728359814]	2000000 OPS in 1.717206 seconds, throughput 1164682.629807
+28119	[1728359814]	2000000 OPS in 1.729022 seconds, throughput 1156723.280560
+28119	[1728359814]	2000000 OPS in 1.710280 seconds, throughput 1169399.162710
+28119	[1728359815]	2000000 OPS in 1.716802 seconds, throughput 1164956.704384
+28119	[1728359816]	2000000 OPS in 1.713866 seconds, throughput 1166952.375507
+28119	[1728359816]	2000000 OPS in 1.727966 seconds, throughput 1157430.180918
+28119	[1728359816]	2000000 OPS in 1.709577 seconds, throughput 1169880.034652
+28119	[1728359817]	2000000 OPS in 1.715803 seconds, throughput 1165634.982571
+28119	[1728359818]	2000000 OPS in 1.714043 seconds, throughput 1166831.870612
+28119	[1728359818]	2000000 OPS in 1.727647 seconds, throughput 1157643.893689
+28119	[1728359818]	2000000 OPS in 1.707572 seconds, throughput 1171253.686521
+28119	[1728359818]	2000000 OPS in 1.718859 seconds, throughput 1163562.572614
+28119	[1728359819]	2000000 OPS in 1.714486 seconds, throughput 1166530.377034
+28119	[1728359819]	2000000 OPS in 1.729523 seconds, throughput 1156388.206459
+28119	[1728359819]	2000000 OPS in 1.709747 seconds, throughput 1169763.713579
+28119	[1728359820]	2000000 OPS in 1.716972 seconds, throughput 1164841.360255
+28119	[1728359821]	2000000 OPS in 1.715949 seconds, throughput 1165535.805551
+28119	[1728359821]	2000000 OPS in 1.730545 seconds, throughput 1155705.283596
+28119	[1728359821]	2000000 OPS in 1.705789 seconds, throughput 1172477.955949
+28119	[1728359822]	2000000 OPS in 1.721052 seconds, throughput 1162079.937155
+28119	[1728359823]	2000000 OPS in 1.713621 seconds, throughput 1167119.217143
+28119	[1728359823]	2000000 OPS in 1.727718 seconds, throughput 1157596.320696
+28119	[1728359823]	2000000 OPS in 1.708813 seconds, throughput 1170403.080969
+28119	[1728359824]	2000000 OPS in 1.718854 seconds, throughput 1163565.957318
+28119	[1728359824]	2000000 OPS in 1.715545 seconds, throughput 1165810.281864
+28119	[1728359825]	2000000 OPS in 1.727932 seconds, throughput 1157452.955325
+28119	[1728359825]	2000000 OPS in 1.707943 seconds, throughput 1170999.266369
+28119	[1728359825]	2000000 OPS in 1.716517 seconds, throughput 1165150.126681
+28119	[1728359826]	2000000 OPS in 1.716603 seconds, throughput 1165091.753888
+28119	[1728359826]	2000000 OPS in 1.708187 seconds, throughput 1170831.999073
+28119	[1728359826]	2000000 OPS in 1.731169 seconds, throughput 1155288.709537
+28119	[1728359827]	2000000 OPS in 1.719123 seconds, throughput 1163383.888180
+28119	[1728359828]	2000000 OPS in 1.718305 seconds, throughput 1163937.717693
+28119	[1728359828]	2000000 OPS in 1.711644 seconds, throughput 1168467.274737
+28119	[1728359828]	2000000 OPS in 1.733849 seconds, throughput 1153502.986708
+28119	[1728359829]	2000000 OPS in 1.722299 seconds, throughput 1161238.553817
+28119	[1728359830]	2000000 OPS in 1.714067 seconds, throughput 1166815.532882
+28119	[1728359830]	2000000 OPS in 1.708681 seconds, throughput 1170493.497616
+28119	[1728359830]	2000000 OPS in 1.733230 seconds, throughput 1153914.944929
+28119	[1728359830]	2000000 OPS in 1.717935 seconds, throughput 1164188.400609
+28119	[1728359831]	2000000 OPS in 1.714603 seconds, throughput 1166450.776069
+28119	[1728359831]	2000000 OPS in 1.707565 seconds, throughput 1171258.487964
+28119	[1728359832]	2000000 OPS in 1.732066 seconds, throughput 1154690.410181
+28119	[1728359832]	2000000 OPS in 1.720022 seconds, throughput 1162775.824960
+28119	[1728359833]	2000000 OPS in 1.715563 seconds, throughput 1165798.049970
+28119	[1728359833]	2000000 OPS in 1.706647 seconds, throughput 1171888.504184
+28119	[1728359833]	2000000 OPS in 1.731321 seconds, throughput 1155187.281850
+28119	[1728359834]	2000000 OPS in 1.718469 seconds, throughput 1163826.638712
+28119	[1728359835]	2000000 OPS in 1.718022 seconds, throughput 1164129.446538
+28119	[1728359835]	2000000 OPS in 1.708733 seconds, throughput 1170457.877269
+28119	[1728359835]	2000000 OPS in 1.731398 seconds, throughput 1155135.907515
+28119	[1728359836]	2000000 OPS in 1.718236 seconds, throughput 1163984.458480
+28119	[1728359836]	2000000 OPS in 1.713876 seconds, throughput 1166945.566657
+28119	[1728359837]	2000000 OPS in 1.706820 seconds, throughput 1171769.723814
+28119	[1728359837]	2000000 OPS in 1.728167 seconds, throughput 1157295.562292
+28119	[1728359837]	2000000 OPS in 1.719093 seconds, throughput 1163404.190466
+28119	[1728359838]	2000000 OPS in 1.714380 seconds, throughput 1166602.503529
+28119	[1728359838]	2000000 OPS in 1.709031 seconds, throughput 1170253.787088
+28119	[1728359838]	2000000 OPS in 1.730379 seconds, throughput 1155816.153571
+28119	[1728359839]	2000000 OPS in 1.716751 seconds, throughput 1164991.312077
+28119	[1728359840]	2000000 OPS in 1.715769 seconds, throughput 1165658.081012
+28119	[1728359840]	2000000 OPS in 1.708180 seconds, throughput 1170836.797059
+28119	[1728359840]	2000000 OPS in 1.726990 seconds, throughput 1158084.296956
+28119	[1728359841]	2000000 OPS in 1.715692 seconds, throughput 1165710.395572
+28119	[1728359842]	2000000 OPS in 1.714782 seconds, throughput 1166329.014417
+28119	[1728359842]	2000000 OPS in 1.708152 seconds, throughput 1170855.989397
+28119	[1728359842]	2000000 OPS in 1.727585 seconds, throughput 1157685.439501
+28119	[1728359842]	2000000 OPS in 1.718323 seconds, throughput 1163925.525061
+28119	[1728359843]	2000000 OPS in 1.716807 seconds, throughput 1164953.311584
+28119	[1728359843]	2000000 OPS in 1.710477 seconds, throughput 1169264.480025
+28119	[1728359844]	2000000 OPS in 1.728913 seconds, throughput 1156796.206634
+28119	[1728359844]	2000000 OPS in 1.719686 seconds, throughput 1163003.013341
+28119	[1728359845]	2000000 OPS in 1.713038 seconds, throughput 1167516.424037
+28119	[1728359845]	2000000 OPS in 1.707626 seconds, throughput 1171216.648142
+28119	[1728359845]	2000000 OPS in 1.732272 seconds, throughput 1154553.095588
+28119	[1728359846]	2000000 OPS in 1.717615 seconds, throughput 1164405.294551
+28119	[1728359847]	2000000 OPS in 1.716127 seconds, throughput 1165414.913931
+28119	[1728359847]	2000000 OPS in 1.708528 seconds, throughput 1170598.316211
+28119	[1728359847]	2000000 OPS in 1.731680 seconds, throughput 1154947.796360
+28119	[1728359848]	2000000 OPS in 1.716313 seconds, throughput 1165288.615771
+28119	[1728359849]	2000000 OPS in 1.712644 seconds, throughput 1167785.015450
+28119	[1728359849]	2000000 OPS in 1.707598 seconds, throughput 1171235.852935
+28119	[1728359849]	2000000 OPS in 1.730103 seconds, throughput 1156000.538696
+28119	[1728359849]	2000000 OPS in 1.713355 seconds, throughput 1167300.413516
+28119	[1728359850]	2000000 OPS in 1.716296 seconds, throughput 1165300.158015
+28119	[1728359850]	2000000 OPS in 1.708968 seconds, throughput 1170296.927737
+28119	[1728359851]	2000000 OPS in 1.726833 seconds, throughput 1158189.587528
+28119	[1728359851]	2000000 OPS in 1.717027 seconds, throughput 1164804.047927
+28119	[1728359852]	2000000 OPS in 1.710437 seconds, throughput 1169291.824253
+28119	[1728359852]	2000000 OPS in 1.716123 seconds, throughput 1165417.630321
+28119	[1728359852]	2000000 OPS in 1.730492 seconds, throughput 1155740.679529
+28119	[1728359853]	2000000 OPS in 1.718215 seconds, throughput 1163998.684681
+28119	[1728359854]	2000000 OPS in 1.706975 seconds, throughput 1171663.322544
+28119	[1728359854]	2000000 OPS in 1.715250 seconds, throughput 1166010.785600
+28119	[1728359854]	2000000 OPS in 1.727437 seconds, throughput 1157784.625431
+28119	[1728359854]	2000000 OPS in 1.715136 seconds, throughput 1166088.286876
+28119	[1728359855]	2000000 OPS in 1.708641 seconds, throughput 1170520.899358
+28119	[1728359855]	2000000 OPS in 1.715016 seconds, throughput 1166169.878299
+28119	[1728359856]	2000000 OPS in 1.726961 seconds, throughput 1158103.744091
+28119	[1728359856]	2000000 OPS in 1.717803 seconds, throughput 1164277.859568
+28119	[1728359857]	2000000 OPS in 1.709311 seconds, throughput 1170062.089345
+28119	[1728359857]	2000000 OPS in 1.717843 seconds, throughput 1164250.749341
+28119	[1728359857]	2000000 OPS in 1.729407 seconds, throughput 1156465.771215
+28119	[1728359858]	2000000 OPS in 1.718134 seconds, throughput 1164053.560432
+28119	[1728359859]	2000000 OPS in 1.709235 seconds, throughput 1170114.115379
+28119	[1728359859]	2000000 OPS in 1.717764 seconds, throughput 1164304.293256
+28119	[1728359859]	2000000 OPS in 1.728807 seconds, throughput 1156867.134388
+28119	[1728359860]	2000000 OPS in 1.718458 seconds, throughput 1163834.088468
+28119	[1728359860]	2000000 OPS in 1.709293 seconds, throughput 1170074.410882
+28119	[1728359861]	2000000 OPS in 1.715119 seconds, throughput 1166099.844967
+28119	[1728359861]	2000000 OPS in 1.731261 seconds, throughput 1155227.316967
+28119	[1728359861]	2000000 OPS in 1.717905 seconds, throughput 1164208.730983
+28119	[1728359862]	2000000 OPS in 1.707483 seconds, throughput 1171314.736369
+28119	[1728359862]	2000000 OPS in 1.711464 seconds, throughput 1168590.166080
+28119	[1728359863]	2000000 OPS in 1.728731 seconds, throughput 1156917.993603
+28119	[1728359863]	2000000 OPS in 1.716432 seconds, throughput 1165207.826468
+28119	[1728359864]	2000000 OPS in 1.710562 seconds, throughput 1169206.377787
+28119	[1728359864]	2000000 OPS in 1.714535 seconds, throughput 1166497.038556
+28119	[1728359864]	2000000 OPS in 1.730318 seconds, throughput 1155856.900292
+28119	[1728359865]	2000000 OPS in 1.719916 seconds, throughput 1162847.487901
+28119	[1728359866]	2000000 OPS in 1.708930 seconds, throughput 1170322.950618
+28119	[1728359866]	2000000 OPS in 1.714434 seconds, throughput 1166565.758729
+28119	[1728359866]	2000000 OPS in 1.730306 seconds, throughput 1155864.916379
+28119	[1728359867]	2000000 OPS in 1.719694 seconds, throughput 1162997.603062
+28119	[1728359867]	2000000 OPS in 1.707039 seconds, throughput 1171619.394753
+28119	[1728359867]	2000000 OPS in 1.714075 seconds, throughput 1166810.087073
+28119	[1728359868]	2000000 OPS in 1.729523 seconds, throughput 1156388.206459
+28119	[1728359868]	2000000 OPS in 1.716318 seconds, throughput 1165285.221037
+28119	[1728359869]	2000000 OPS in 1.708891 seconds, throughput 1170349.659516
+28119	[1728359869]	2000000 OPS in 1.713160 seconds, throughput 1167433.281188
+28119	[1728359870]	2000000 OPS in 1.728818 seconds, throughput 1156859.773556
+28119	[1728359870]	2000000 OPS in 1.720926 seconds, throughput 1162165.020460
+28119	[1728359871]	2000000 OPS in 1.706130 seconds, throughput 1172243.615668
+28119	[1728359871]	2000000 OPS in 1.715520 seconds, throughput 1165827.271032
+28119	[1728359871]	2000000 OPS in 1.729863 seconds, throughput 1156160.921414
+28119	[1728359872]	2000000 OPS in 1.717322 seconds, throughput 1164603.958955
+28119	[1728359872]	2000000 OPS in 1.708936 seconds, throughput 1170318.841665
+28119	[1728359873]	2000000 OPS in 1.714729 seconds, throughput 1166365.064101
+28119	[1728359873]	2000000 OPS in 1.729300 seconds, throughput 1156537.327242
+28119	[1728359873]	2000000 OPS in 1.718716 seconds, throughput 1163659.382935
+28119	[1728359874]	2000000 OPS in 1.707644 seconds, throughput 1171204.302536
+28119	[1728359874]	2000000 OPS in 1.713102 seconds, throughput 1167472.806640
+28119	[1728359875]	2000000 OPS in 1.727255 seconds, throughput 1157906.620621
+28119	[1728359875]	2000000 OPS in 1.716219 seconds, throughput 1165352.440452
+28119	[1728359876]	2000000 OPS in 1.705987 seconds, throughput 1172341.875993
+28119	[1728359876]	2000000 OPS in 1.713818 seconds, throughput 1166985.059090
+28119	[1728359876]	2000000 OPS in 1.728692 seconds, throughput 1156944.094147
+28119	[1728359877]	2000000 OPS in 1.716523 seconds, throughput 1165146.053971
+28119	[1728359878]	2000000 OPS in 1.710090 seconds, throughput 1169529.089112
+28119	[1728359878]	2000000 OPS in 1.718209 seconds, throughput 1164002.749374
+28119	[1728359878]	2000000 OPS in 1.730560 seconds, throughput 1155695.266272
+28119	[1728359879]	2000000 OPS in 1.717508 seconds, throughput 1164477.836493
+28119	[1728359879]	2000000 OPS in 1.707357 seconds, throughput 1171401.177375
+28119	[1728359879]	2000000 OPS in 1.715710 seconds, throughput 1165698.165774
+28119	[1728359880]	2000000 OPS in 1.731137 seconds, throughput 1155310.065004
+28119	[1728359880]	2000000 OPS in 1.718513 seconds, throughput 1163796.840641
+28119	[1728359881]	2000000 OPS in 1.709614 seconds, throughput 1169854.715743
+28119	[1728359881]	2000000 OPS in 1.715688 seconds, throughput 1165713.113340
+28119	[1728359882]	2000000 OPS in 1.730739 seconds, throughput 1155575.739612
+28119	[1728359882]	2000000 OPS in 1.718630 seconds, throughput 1163717.612284
+28119	[1728359883]	2000000 OPS in 1.709213 seconds, throughput 1170129.176410
+28119	[1728359883]	2000000 OPS in 1.716859 seconds, throughput 1164918.027631
+28119	[1728359883]	2000000 OPS in 1.729384 seconds, throughput 1156481.151670
+28119	[1728359884]	2000000 OPS in 1.717354 seconds, throughput 1164582.258521
+28119	[1728359884]	2000000 OPS in 1.708346 seconds, throughput 1170723.026834
+28119	[1728359885]	2000000 OPS in 1.714119 seconds, throughput 1166780.136035
+28119	[1728359885]	2000000 OPS in 1.730854 seconds, throughput 1155498.961784
+28119	[1728359885]	2000000 OPS in 1.719032 seconds, throughput 1163445.473964
+28119	[1728359886]	2000000 OPS in 1.708798 seconds, throughput 1170413.354885
+28119	[1728359886]	2000000 OPS in 1.713659 seconds, throughput 1167093.336539
+28119	[1728359887]	2000000 OPS in 1.728435 seconds, throughput 1157116.119495
+28119	[1728359887]	2000000 OPS in 1.716150 seconds, throughput 1165399.294933
+28119	[1728359888]	2000000 OPS in 1.707858 seconds, throughput 1171057.546939
+28119	[1728359888]	2000000 OPS in 1.713985 seconds, throughput 1166871.355350
+28119	[1728359889]	2000000 OPS in 1.728668 seconds, throughput 1156960.156606
+28119	[1728359889]	2000000 OPS in 1.719959 seconds, throughput 1162818.416020
+28119	[1728359890]	2000000 OPS in 1.707691 seconds, throughput 1171172.068015
+28119	[1728359890]	2000000 OPS in 1.712318 seconds, throughput 1168007.344430
+28119	[1728359890]	2000000 OPS in 1.731906 seconds, throughput 1154797.084830
+28119	[1728359891]	2000000 OPS in 1.718868 seconds, throughput 1163556.480195
+28119	[1728359891]	2000000 OPS in 1.707292 seconds, throughput 1171445.774947
+28119	[1728359891]	2000000 OPS in 1.714266 seconds, throughput 1166680.083488
+28119	[1728359892]	2000000 OPS in 1.729825 seconds, throughput 1156186.319425
+28119	[1728359892]	2000000 OPS in 1.718179 seconds, throughput 1164023.073265
+28119	[1728359893]	2000000 OPS in 1.706820 seconds, throughput 1171769.723814
+28119	[1728359893]	2000000 OPS in 1.712457 seconds, throughput 1167912.537366
+28119	[1728359894]	2000000 OPS in 1.728428 seconds, throughput 1157120.805726
+28119	[1728359894]	2000000 OPS in 1.718541 seconds, throughput 1163777.879026
+28119	[1728359895]	2000000 OPS in 1.708787 seconds, throughput 1170420.889204
+28119	[1728359895]	2000000 OPS in 1.716922 seconds, throughput 1164875.282628
+28119	[1728359895]	2000000 OPS in 1.726282 seconds, throughput 1158559.262044
+28119	[1728359896]	2000000 OPS in 1.718996 seconds, throughput 1163469.839371
+28119	[1728359896]	2000000 OPS in 1.708561 seconds, throughput 1170575.706691
+28119	[1728359897]	2000000 OPS in 1.712972 seconds, throughput 1167561.407892
+28119	[1728359897]	2000000 OPS in 1.727654 seconds, throughput 1157639.203220
+28119	[1728359897]	2000000 OPS in 1.715705 seconds, throughput 1165701.562914
+28119	[1728359898]	2000000 OPS in 1.708388 seconds, throughput 1170694.245101
+28119	[1728359898]	2000000 OPS in 1.715271 seconds, throughput 1165996.510172
+28119	[1728359899]	2000000 OPS in 1.725864 seconds, throughput 1158839.862237
+28119	[1728359899]	2000000 OPS in 1.713689 seconds, throughput 1167072.905294
+28119	[1728359900]	2000000 OPS in 1.709118 seconds, throughput 1170194.217134
+28119	[1728359900]	2000000 OPS in 1.714356 seconds, throughput 1166618.835294
+28119	[1728359901]	2000000 OPS in 1.725564 seconds, throughput 1159041.333732
+28119	[1728359901]	2000000 OPS in 1.713852 seconds, throughput 1166961.908029
+28119	[1728359901]	2000000 OPS in 1.706916 seconds, throughput 1171703.821395
+28119	[1728359902]	2000000 OPS in 1.712728 seconds, throughput 1167727.741942
+28119	[1728359902]	2000000 OPS in 1.729823 seconds, throughput 1156187.656194
+28119	[1728359903]	2000000 OPS in 1.714130 seconds, throughput 1166772.648516
+28119	[1728359903]	2000000 OPS in 1.706770 seconds, throughput 1171804.050927
+28119	[1728359903]	2000000 OPS in 1.714479 seconds, throughput 1166535.139830
+28119	[1728359904]	2000000 OPS in 1.728074 seconds, throughput 1157357.844629
+28119	[1728359904]	2000000 OPS in 1.715531 seconds, throughput 1165819.795737
+28119	[1728359905]	2000000 OPS in 1.705636 seconds, throughput 1172583.130281
+28119	[1728359905]	2000000 OPS in 1.717846 seconds, throughput 1164248.716125
+28119	[1728359906]	2000000 OPS in 1.728859 seconds, throughput 1156832.338554
+28119	[1728359906]	2000000 OPS in 1.718067 seconds, throughput 1164098.955396
+28119	[1728359907]	2000000 OPS in 1.707398 seconds, throughput 1171373.048346
+28119	[1728359907]	2000000 OPS in 1.716526 seconds, throughput 1165144.017626
+28119	[1728359908]	2000000 OPS in 1.727576 seconds, throughput 1157691.470592
+28119	[1728359908]	2000000 OPS in 1.717429 seconds, throughput 1164531.401298
+28119	[1728359908]	2000000 OPS in 1.707799 seconds, throughput 1171098.003922
+28119	[1728359909]	2000000 OPS in 1.712414 seconds, throughput 1167941.864526
+28119	[1728359909]	2000000 OPS in 1.730015 seconds, throughput 1156059.340526
+28119	[1728359909]	2000000 OPS in 1.720316 seconds, throughput 1162577.107927
+28119	[1728359910]	2000000 OPS in 1.705673 seconds, throughput 1172557.694236
+28119	[1728359910]	2000000 OPS in 1.715928 seconds, throughput 1165550.069700
+28119	[1728359911]	2000000 OPS in 1.730786 seconds, throughput 1155544.359615
+28119	[1728359911]	2000000 OPS in 1.720635 seconds, throughput 1162361.570002
+28119	[1728359912]	2000000 OPS in 1.710815 seconds, throughput 1169033.472351
+28119	[1728359912]	2000000 OPS in 1.713780 seconds, throughput 1167010.934892
+28119	[1728359913]	2000000 OPS in 1.729027 seconds, throughput 1156719.935548
+28119	[1728359913]	2000000 OPS in 1.720218 seconds, throughput 1162643.339391
+28119	[1728359913]	2000000 OPS in 1.707654 seconds, throughput 1171197.443979
+28119	[1728359914]	2000000 OPS in 1.713830 seconds, throughput 1166976.888023
+28119	[1728359915]	2000000 OPS in 1.731199 seconds, throughput 1155268.689504
+28119	[1728359915]	2000000 OPS in 1.719538 seconds, throughput 1163103.112580
+28119	[1728359915]	2000000 OPS in 1.708848 seconds, throughput 1170379.109201
+28119	[1728359915]	2000000 OPS in 1.714181 seconds, throughput 1166737.934909
+28119	[1728359916]	2000000 OPS in 1.731186 seconds, throughput 1155277.364766
+28119	[1728359916]	2000000 OPS in 1.717931 seconds, throughput 1164191.111284
+28119	[1728359917]	2000000 OPS in 1.704352 seconds, throughput 1173466.513960
+28119	[1728359917]	2000000 OPS in 1.719123 seconds, throughput 1163383.888180
+28119	[1728359918]	2000000 OPS in 1.726605 seconds, throughput 1158342.527677
+28119	[1728359918]	2000000 OPS in 1.716627 seconds, throughput 1165075.464851
+28119	[1728359919]	2000000 OPS in 1.708662 seconds, throughput 1170506.513283
+28119	[1728359919]	2000000 OPS in 1.716219 seconds, throughput 1165352.440452
+28119	[1728359920]	2000000 OPS in 1.732114 seconds, throughput 1154658.411629
+28119	[1728359920]	2000000 OPS in 1.719242 seconds, throughput 1163303.362761
+28119	[1728359920]	2000000 OPS in 1.709778 seconds, throughput 1169742.504582
+28119	[1728359921]	2000000 OPS in 1.714985 seconds, throughput 1166190.957938
+28119	[1728359921]	2000000 OPS in 1.728726 seconds, throughput 1156921.339761
+28119	[1728359921]	2000000 OPS in 1.717472 seconds, throughput 1164502.245160
+28119	[1728359922]	2000000 OPS in 1.707215 seconds, throughput 1171498.610310
+28119	[1728359922]	2000000 OPS in 1.715257 seconds, throughput 1166006.027085
+28119	[1728359923]	2000000 OPS in 1.728809 seconds, throughput 1156865.796048
+28119	[1728359923]	2000000 OPS in 1.717463 seconds, throughput 1164508.347487
+28119	[1728359924]	2000000 OPS in 1.708872 seconds, throughput 1170362.671985
+28119	[1728359924]	2000000 OPS in 1.717842 seconds, throughput 1164251.427081
+28119	[1728359925]	2000000 OPS in 1.728321 seconds, throughput 1157192.442839
+28119	[1728359925]	2000000 OPS in 1.718809 seconds, throughput 1163596.420545
+28119	[1728359925]	2000000 OPS in 1.709866 seconds, throughput 1169682.302590
+28119	[1728359926]	2000000 OPS in 1.716751 seconds, throughput 1164991.312077
+28119	[1728359927]	2000000 OPS in 1.728803 seconds, throughput 1156869.811077
+28119	[1728359927]	2000000 OPS in 1.718208 seconds, throughput 1164003.426826
+28119	[1728359927]	2000000 OPS in 1.705894 seconds, throughput 1172405.788402
+28119	[1728359927]	2000000 OPS in 1.716782 seconds, throughput 1164970.275783
+28119	[1728359928]	2000000 OPS in 1.718107 seconds, throughput 1164071.853499
+28119	[1728359928]	2000000 OPS in 1.728482 seconds, throughput 1157084.655785
+28119	[1728359929]	2000000 OPS in 1.707064 seconds, throughput 1171602.236354
+28119	[1728359929]	2000000 OPS in 1.713440 seconds, throughput 1167242.506303
+28119	[1728359930]	2000000 OPS in 1.718189 seconds, throughput 1164016.298556
+28119	[1728359930]	2000000 OPS in 1.730102 seconds, throughput 1156001.206865
+28119	[1728359931]	2000000 OPS in 1.707486 seconds, throughput 1171312.678406
+28119	[1728359931]	2000000 OPS in 1.714085 seconds, throughput 1166803.279884
+28119	[1728359932]	2000000 OPS in 1.717300 seconds, throughput 1164618.878472
+28119	[1728359932]	2000000 OPS in 1.730090 seconds, throughput 1156009.224954
+28119	[1728359932]	2000000 OPS in 1.708620 seconds, throughput 1170535.285786
+28119	[1728359933]	2000000 OPS in 1.717521 seconds, throughput 1164469.022504
+28119	[1728359933]	2000000 OPS in 1.719212 seconds, throughput 1163323.662236
+28119	[1728359934]	2000000 OPS in 1.730998 seconds, throughput 1155402.836976
+28119	[1728359934]	2000000 OPS in 1.710582 seconds, throughput 1169192.707511
+28119	[1728359934]	2000000 OPS in 1.715396 seconds, throughput 1165911.544623
+28119	[1728359935]	2000000 OPS in 1.717970 seconds, throughput 1164164.682736
+28119	[1728359935]	2000000 OPS in 1.728098 seconds, throughput 1157341.771126
+28119	[1728359936]	2000000 OPS in 1.709514 seconds, throughput 1169923.147748
+28119	[1728359936]	2000000 OPS in 1.717521 seconds, throughput 1164469.022504
+28119	[1728359937]	2000000 OPS in 1.717722 seconds, throughput 1164332.761646
+28119	[1728359937]	2000000 OPS in 1.727139 seconds, throughput 1157984.389212
+28119	[1728359937]	2000000 OPS in 1.710153 seconds, throughput 1169486.005053
+28119	[1728359938]	2000000 OPS in 1.716717 seconds, throughput 1165014.385015
+28119	[1728359939]	2000000 OPS in 1.716517 seconds, throughput 1165150.126681
+28119	[1728359939]	2000000 OPS in 1.731125 seconds, throughput 1155318.073507
+28119	[1728359939]	2000000 OPS in 1.709062 seconds, throughput 1170232.560317
+28119	[1728359939]	2000000 OPS in 1.715122 seconds, throughput 1166097.805287
+28119	[1728359940]	2000000 OPS in 1.719061 seconds, throughput 1163425.847018
+28119	[1728359940]	2000000 OPS in 1.729763 seconds, throughput 1156227.760682
+28119	[1728359941]	2000000 OPS in 1.706889 seconds, throughput 1171722.355701
+28119	[1728359941]	2000000 OPS in 1.713827 seconds, throughput 1166978.930779
+28119	[1728359942]	2000000 OPS in 1.716791 seconds, throughput 1164964.168615
+28119	[1728359942]	2000000 OPS in 1.729196 seconds, throughput 1156606.885512
+28119	[1728359942]	2000000 OPS in 1.708222 seconds, throughput 1170808.009732
+28119	[1728359943]	2000000 OPS in 1.715329 seconds, throughput 1165957.084618
+28119	[1728359944]	2000000 OPS in 1.720966 seconds, throughput 1162138.008537
+28119	[1728359944]	2000000 OPS in 1.727508 seconds, throughput 1157737.040870
+28119	[1728359944]	2000000 OPS in 1.709623 seconds, throughput 1169848.557255
+28119	[1728359945]	2000000 OPS in 1.715848 seconds, throughput 1165604.412512
+28119	[1728359946]	2000000 OPS in 1.720724 seconds, throughput 1162301.449855
+28119	[1728359946]	2000000 OPS in 1.730726 seconds, throughput 1155584.419486
+28119	[1728359946]	2000000 OPS in 1.709430 seconds, throughput 1169980.636820
+28119	[1728359946]	2000000 OPS in 1.716109 seconds, throughput 1165427.137787
+28119	[1728359947]	2000000 OPS in 1.717967 seconds, throughput 1164166.715659
+28119	[1728359947]	2000000 OPS in 1.729411 seconds, throughput 1156463.096395
+28119	[1728359948]	2000000 OPS in 1.711241 seconds, throughput 1168742.450654
+28119	[1728359948]	2000000 OPS in 1.715091 seconds, throughput 1166118.882322
+28119	[1728359949]	2000000 OPS in 1.715772 seconds, throughput 1165656.042877
+28119	[1728359949]	2000000 OPS in 1.729341 seconds, throughput 1156509.907531
+28119	[1728359949]	2000000 OPS in 1.709018 seconds, throughput 1170262.688866
+28119	[1728359950]	2000000 OPS in 1.714034 seconds, throughput 1166837.997379
+28119	[1728359951]	2000000 OPS in 1.721064 seconds, throughput 1162071.834633
+28119	[1728359951]	2000000 OPS in 1.730800 seconds, throughput 1155535.012711
+28119	[1728359951]	2000000 OPS in 1.709972 seconds, throughput 1169609.794780
+28119	[1728359951]	2000000 OPS in 1.716590 seconds, throughput 1165100.577307
+28119	[1728359952]	2000000 OPS in 1.719214 seconds, throughput 1163322.308916
+28119	[1728359953]	2000000 OPS in 1.729393 seconds, throughput 1156475.133183
+28119	[1728359953]	2000000 OPS in 1.709190 seconds, throughput 1170144.922449
+28119	[1728359953]	2000000 OPS in 1.715904 seconds, throughput 1165566.372011
+28119	[1728359954]	2000000 OPS in 1.721404 seconds, throughput 1161842.310114
+28119	[1728359954]	2000000 OPS in 1.732037 seconds, throughput 1154709.743499
+28119	[1728359954]	2000000 OPS in 1.708765 seconds, throughput 1170435.958134
+28119	[1728359955]	2000000 OPS in 1.715526 seconds, throughput 1165823.193586
+28119	[1728359956]	2000000 OPS in 1.716389 seconds, throughput 1165237.017949
+28119	[1728359956]	2000000 OPS in 1.728024 seconds, throughput 1157391.332528
+28119	[1728359956]	2000000 OPS in 1.708011 seconds, throughput 1170952.646090
+28119	[1728359957]	2000000 OPS in 1.716525 seconds, throughput 1165144.696407
+28119	[1728359958]	2000000 OPS in 1.718875 seconds, throughput 1163551.741692
+28119	[1728359958]	2000000 OPS in 1.729604 seconds, throughput 1156334.051031
+28119	[1728359958]	2000000 OPS in 1.708908 seconds, throughput 1170338.017026
+28119	[1728359958]	2000000 OPS in 1.711947 seconds, throughput 1168260.466007
+28119	[1728359959]	2000000 OPS in 1.717978 seconds, throughput 1164159.261644
+28119	[1728359959]	2000000 OPS in 1.729283 seconds, throughput 1156548.696772
+28119	[1728359960]	2000000 OPS in 1.707326 seconds, throughput 1171422.446563
+28119	[1728359960]	2000000 OPS in 1.717142 seconds, throughput 1164726.038965
+28119	[1728359961]	2000000 OPS in 1.719801 seconds, throughput 1162925.245421
+28119	[1728359961]	2000000 OPS in 1.730722 seconds, throughput 1155587.090243
+28119	[1728359961]	2000000 OPS in 1.708407 seconds, throughput 1170681.225258
+28119	[1728359962]	2000000 OPS in 1.717206 seconds, throughput 1164682.629807
+28119	[1728359963]	2000000 OPS in 1.718355 seconds, throughput 1163903.849903
+28119	[1728359963]	2000000 OPS in 1.728534 seconds, throughput 1157049.846864
+28119	[1728359963]	2000000 OPS in 1.707643 seconds, throughput 1171204.988396
+28119	[1728359963]	2000000 OPS in 1.715053 seconds, throughput 1166144.719726
+28119	[1728359964]	2000000 OPS in 1.720798 seconds, throughput 1162251.467052
+28119	[1728359965]	2000000 OPS in 1.731274 seconds, throughput 1155218.642456
+28119	[1728359965]	2000000 OPS in 1.709561 seconds, throughput 1169890.983709
+28119	[1728359965]	2000000 OPS in 1.716539 seconds, throughput 1165135.193549
+28119	[1728359966]	2000000 OPS in 1.721624 seconds, throughput 1161693.842558
+28119	[1728359966]	2000000 OPS in 1.708787 seconds, throughput 1170420.889204
+28119	[1728359966]	2000000 OPS in 1.729387 seconds, throughput 1156479.145501
+28119	[1728359967]	2000000 OPS in 1.711556 seconds, throughput 1168527.351720
+28119	[1728359968]	2000000 OPS in 1.717687 seconds, throughput 1164356.486368
+28119	[1728359968]	2000000 OPS in 1.709315 seconds, throughput 1170059.351261
+28119	[1728359968]	2000000 OPS in 1.731870 seconds, throughput 1154821.089343
+28119	[1728359969]	2000000 OPS in 1.710374 seconds, throughput 1169334.894006
+28119	[1728359970]	2000000 OPS in 1.718612 seconds, throughput 1163729.800560
+28119	[1728359970]	2000000 OPS in 1.705471 seconds, throughput 1172696.574729
+28119	[1728359970]	2000000 OPS in 1.732996 seconds, throughput 1154070.753770
+28119	[1728359970]	2000000 OPS in 1.714906 seconds, throughput 1166244.680466
+28119	[1728359971]	2000000 OPS in 1.717034 seconds, throughput 1164799.299257
+28119	[1728359972]	2000000 OPS in 1.706738 seconds, throughput 1171826.021334
+28119	[1728359972]	2000000 OPS in 1.729315 seconds, throughput 1156527.295490
+28119	[1728359972]	2000000 OPS in 1.713637 seconds, throughput 1167108.319907
+28119	[1728359973]	2000000 OPS in 1.717927 seconds, throughput 1164193.821973
+28119	[1728359973]	2000000 OPS in 1.708383 seconds, throughput 1170697.671424
+28119	[1728359973]	2000000 OPS in 1.729212 seconds, throughput 1156596.183695
+28119	[1728359974]	2000000 OPS in 1.715322 seconds, throughput 1165961.842733
+28119	[1728359975]	2000000 OPS in 1.716753 seconds, throughput 1164989.954874
+28119	[1728359975]	2000000 OPS in 1.709487 seconds, throughput 1169941.625763
+28119	[1728359975]	2000000 OPS in 1.730959 seconds, throughput 1155428.869199
+28119	[1728359975]	2000000 OPS in 1.713929 seconds, throughput 1166909.481081
+28119	[1728359976]	2000000 OPS in 1.718457 seconds, throughput 1163834.765723
+28119	[1728359977]	2000000 OPS in 1.706272 seconds, throughput 1172146.058776
+28119	[1728359977]	2000000 OPS in 1.727786 seconds, throughput 1157550.761495
+28119	[1728359977]	2000000 OPS in 1.719566 seconds, throughput 1163084.173565
+28119	[1728359978]	2000000 OPS in 1.718553 seconds, throughput 1163769.752809
+28119	[1728359978]	2000000 OPS in 1.707783 seconds, throughput 1171108.975789
+28119	[1728359979]	2000000 OPS in 1.729243 seconds, throughput 1156575.449489
+28119	[1728359979]	2000000 OPS in 1.717814 seconds, throughput 1164270.404130
+28119	[1728359980]	2000000 OPS in 1.716645 seconds, throughput 1165063.248371
+28119	[1728359980]	2000000 OPS in 1.709242 seconds, throughput 1170109.323314
+28119	[1728359980]	2000000 OPS in 1.728245 seconds, throughput 1157243.330662
+28119	[1728359981]	2000000 OPS in 1.717469 seconds, throughput 1164504.279262
+28119	[1728359982]	2000000 OPS in 1.715541 seconds, throughput 1165813.000097
+28119	[1728359982]	2000000 OPS in 1.706513 seconds, throughput 1171980.524028
+28119	[1728359982]	2000000 OPS in 1.728250 seconds, throughput 1157239.982641
+28119	[1728359982]	2000000 OPS in 1.717210 seconds, throughput 1164679.916842
+28119	[1728359983]	2000000 OPS in 1.719090 seconds, throughput 1163406.220733
+28119	[1728359983]	2000000 OPS in 1.707682 seconds, throughput 1171178.240445
+28119	[1728359984]	2000000 OPS in 1.729186 seconds, throughput 1156613.574248
+28119	[1728359984]	2000000 OPS in 1.713159 seconds, throughput 1167433.962639
+28119	[1728359985]	2000000 OPS in 1.718483 seconds, throughput 1163817.157342
+28119	[1728359985]	2000000 OPS in 1.708084 seconds, throughput 1170902.601980
+28119	[1728359985]	2000000 OPS in 1.727674 seconds, throughput 1157625.802090
+28119	[1728359986]	2000000 OPS in 1.712966 seconds, throughput 1167565.497505
+28119	[1728359987]	2000000 OPS in 1.716330 seconds, throughput 1165277.073756
+28119	[1728359987]	2000000 OPS in 1.708303 seconds, throughput 1170752.495313
+28119	[1728359987]	2000000 OPS in 1.731330 seconds, throughput 1155181.276822
+28119	[1728359987]	2000000 OPS in 1.712108 seconds, throughput 1168150.607322
+28119	[1728359988]	2000000 OPS in 1.719656 seconds, throughput 1163023.302335
+28119	[1728359989]	2000000 OPS in 1.708438 seconds, throughput 1170659.982979
+28119	[1728359989]	2000000 OPS in 1.728977 seconds, throughput 1156753.386540
+28119	[1728359989]	2000000 OPS in 1.712676 seconds, throughput 1167763.196308
+28119	[1728359990]	2000000 OPS in 1.717908 seconds, throughput 1164206.697914
+28119	[1728359990]	2000000 OPS in 1.707845 seconds, throughput 1171066.460949
+28119	[1728359991]	2000000 OPS in 1.732219 seconds, throughput 1154588.420979
+28119	[1728359991]	2000000 OPS in 1.712128 seconds, throughput 1168136.961722
+28119	[1728359992]	2000000 OPS in 1.716570 seconds, throughput 1165114.152059
+28119	[1728359992]	2000000 OPS in 1.707623 seconds, throughput 1171218.705768
+28119	[1728359992]	2000000 OPS in 1.730058 seconds, throughput 1156030.607066
+28119	[1728359993]	2000000 OPS in 1.714926 seconds, throughput 1166231.079359
+28119	[1728359994]	2000000 OPS in 1.718019 seconds, throughput 1164131.479338
+28119	[1728359994]	2000000 OPS in 1.710192 seconds, throughput 1169459.335560
+28119	[1728359994]	2000000 OPS in 1.730933 seconds, throughput 1155446.224666
+28119	[1728359994]	2000000 OPS in 1.716904 seconds, throughput 1164887.495166
+28119	[1728359995]	2000000 OPS in 1.719510 seconds, throughput 1163122.052213
+28119	[1728359995]	2000000 OPS in 1.710403 seconds, throughput 1169315.067852
+28119	[1728359996]	2000000 OPS in 1.729973 seconds, throughput 1156087.407145
+28119	[1728359996]	2000000 OPS in 1.716418 seconds, throughput 1165217.330510
+28119	[1728359997]	2000000 OPS in 1.717091 seconds, throughput 1164760.632954
+28119	[1728359997]	2000000 OPS in 1.710162 seconds, throughput 1169479.850447
+28119	[1728359998]	2000000 OPS in 1.727036 seconds, throughput 1158053.451115
+28119	[1728359998]	2000000 OPS in 1.715083 seconds, throughput 1166124.321680
+28119	[1728359999]	2000000 OPS in 1.718986 seconds, throughput 1163476.607721
+28119	[1728359999]	2000000 OPS in 1.709876 seconds, throughput 1169675.461846
+28119	[1728359999]	2000000 OPS in 1.731406 seconds, throughput 1155130.570184
+28119	[1728359999]	2000000 OPS in 1.715102 seconds, throughput 1166111.403287
+28119	[1728360001]	2000000 OPS in 1.716487 seconds, throughput 1165170.490659
+28119	[1728360001]	2000000 OPS in 1.707662 seconds, throughput 1171191.957191
+28119	[1728360001]	2000000 OPS in 1.729671 seconds, throughput 1156289.259634
+28119	[1728360001]	2000000 OPS in 1.710967 seconds, throughput 1168929.616994
+28119	[1728360002]	2000000 OPS in 1.715148 seconds, throughput 1166080.128362
+28119	[1728360002]	2000000 OPS in 1.709598 seconds, throughput 1169865.664326
+28119	[1728360003]	2000000 OPS in 1.729976 seconds, throughput 1156085.402341
+28119	[1728360003]	2000000 OPS in 1.714195 seconds, throughput 1166728.406045
+28119	[1728360004]	2000000 OPS in 1.717310 seconds, throughput 1164612.096826
+28119	[1728360004]	2000000 OPS in 1.710509 seconds, throughput 1169242.605564
+28119	[1728360004]	2000000 OPS in 1.730918 seconds, throughput 1155456.237673
+28119	[1728360005]	2000000 OPS in 1.715057 seconds, throughput 1166141.999945
+28119	[1728360006]	2000000 OPS in 1.717716 seconds, throughput 1164336.828672
+28119	[1728360006]	2000000 OPS in 1.706786 seconds, throughput 1171793.066032
+28119	[1728360006]	2000000 OPS in 1.732191 seconds, throughput 1154607.084323
+28119	[1728360006]	2000000 OPS in 1.713710 seconds, throughput 1167058.603848
+28119	[1728360007]	2000000 OPS in 1.718016 seconds, throughput 1164133.512144
+28119	[1728360007]	2000000 OPS in 1.705847 seconds, throughput 1172438.090872
+28119	[1728360008]	2000000 OPS in 1.730140 seconds, throughput 1155975.816986
+28119	[1728360008]	2000000 OPS in 1.717124 seconds, throughput 1164738.248373
+28119	[1728360009]	2000000 OPS in 1.716323 seconds, throughput 1165281.826323
+28119	[1728360009]	2000000 OPS in 1.708358 seconds, throughput 1170714.803337
+28119	[1728360010]	2000000 OPS in 1.731563 seconds, throughput 1155025.835040
+28119	[1728360010]	2000000 OPS in 1.713062 seconds, throughput 1167500.067131
+28119	[1728360011]	2000000 OPS in 1.708088 seconds, throughput 1170899.859960
+28119	[1728360011]	2000000 OPS in 1.717877 seconds, throughput 1164227.706640
+28119	[1728360011]	2000000 OPS in 1.729848 seconds, throughput 1156170.946812
+28119	[1728360011]	2000000 OPS in 1.715466 seconds, throughput 1165863.969324
+28119	[1728360013]	2000000 OPS in 1.709506 seconds, throughput 1169928.622655
+28119	[1728360013]	2000000 OPS in 1.720150 seconds, throughput 1162689.300352
+28119	[1728360013]	2000000 OPS in 1.728781 seconds, throughput 1156884.533090
+28119	[1728360013]	2000000 OPS in 1.713106 seconds, throughput 1167470.080661
+28119	[1728360014]	2000000 OPS in 1.708132 seconds, throughput 1170869.698595
+28119	[1728360014]	2000000 OPS in 1.717323 seconds, throughput 1164603.280804
+28119	[1728360015]	2000000 OPS in 1.729008 seconds, throughput 1156732.646697
+28119	[1728360015]	2000000 OPS in 1.715667 seconds, throughput 1165727.381829
+28119	[1728360016]	2000000 OPS in 1.708044 seconds, throughput 1170930.022880
+28119	[1728360016]	2000000 OPS in 1.717174 seconds, throughput 1164704.333981
+28119	[1728360017]	2000000 OPS in 1.729089 seconds, throughput 1156678.459004
+28119	[1728360017]	2000000 OPS in 1.714576 seconds, throughput 1166469.144558
+28119	[1728360018]	2000000 OPS in 1.709794 seconds, throughput 1169731.558305
+28119	[1728360018]	2000000 OPS in 1.717119 seconds, throughput 1164741.639921
+28119	[1728360018]	2000000 OPS in 1.726569 seconds, throughput 1158366.679814
+28119	[1728360018]	2000000 OPS in 1.715792 seconds, throughput 1165642.455496
+28119	[1728360019]	2000000 OPS in 1.708196 seconds, throughput 1170825.830291
+28119	[1728360019]	2000000 OPS in 1.718561 seconds, throughput 1163764.335395
+28119	[1728360020]	2000000 OPS in 1.712070 seconds, throughput 1168176.534838
+28119	[1728360020]	2000000 OPS in 1.727496 seconds, throughput 1157745.083057
+28119	[1728360021]	2000000 OPS in 1.706624 seconds, throughput 1171904.297607
+28119	[1728360021]	2000000 OPS in 1.717627 seconds, throughput 1164397.159570
+28119	[1728360022]	2000000 OPS in 1.716678 seconds, throughput 1165040.852157
+28119	[1728360022]	2000000 OPS in 1.732187 seconds, throughput 1154609.750564
+28119	[1728360023]	2000000 OPS in 1.708112 seconds, throughput 1170883.408114
+28119	[1728360023]	2000000 OPS in 1.720469 seconds, throughput 1162473.720828
+28119	[1728360023]	2000000 OPS in 1.717300 seconds, throughput 1164618.878472
+28119	[1728360023]	2000000 OPS in 1.731125 seconds, throughput 1155318.073507
+28119	[1728360024]	2000000 OPS in 1.708981 seconds, throughput 1170288.025437
+28119	[1728360025]	2000000 OPS in 1.715924 seconds, throughput 1165552.786720
+28119	[1728360025]	2000000 OPS in 1.717180 seconds, throughput 1164700.264387
+28119	[1728360025]	2000000 OPS in 1.728576 seconds, throughput 1157021.733496
+28119	[1728360026]	2000000 OPS in 1.709075 seconds, throughput 1170223.658997
+28119	[1728360026]	2000000 OPS in 1.717404 seconds, throughput 1164548.353212
+28119	[1728360027]	2000000 OPS in 1.712858 seconds, throughput 1167639.115443
+28119	[1728360027]	2000000 OPS in 1.728615 seconds, throughput 1156995.629449
+28119	[1728360028]	2000000 OPS in 1.706127 seconds, throughput 1172245.676904
+28119	[1728360028]	2000000 OPS in 1.716423 seconds, throughput 1165213.936192
+28119	[1728360029]	2000000 OPS in 1.715059 seconds, throughput 1166140.640060
+28119	[1728360029]	2000000 OPS in 1.728889 seconds, throughput 1156812.264986
+28119	[1728360030]	2000000 OPS in 1.708207 seconds, throughput 1170818.290758
+28119	[1728360030]	2000000 OPS in 1.717433 seconds, throughput 1164528.689038
+28119	[1728360030]	2000000 OPS in 1.711726 seconds, throughput 1168411.299472
+28119	[1728360030]	2000000 OPS in 1.729465 seconds, throughput 1156426.987537
+28119	[1728360031]	2000000 OPS in 1.706565 seconds, throughput 1171944.813119
+28119	[1728360031]	2000000 OPS in 1.717581 seconds, throughput 1164428.344282
+28119	[1728360032]	2000000 OPS in 1.712832 seconds, throughput 1167656.839667
+28119	[1728360032]	2000000 OPS in 1.728361 seconds, throughput 1157165.661572
+28119	[1728360033]	2000000 OPS in 1.705054 seconds, throughput 1172983.377653
+28119	[1728360033]	2000000 OPS in 1.718746 seconds, throughput 1163639.071742
+28119	[1728360034]	2000000 OPS in 1.712239 seconds, throughput 1168061.234442
+28119	[1728360034]	2000000 OPS in 1.727693 seconds, throughput 1157613.071304
+28119	[1728360035]	2000000 OPS in 1.706562 seconds, throughput 1171946.873304
+28119	[1728360035]	2000000 OPS in 1.718648 seconds, throughput 1163705.424264
+28119	[1728360035]	2000000 OPS in 1.711437 seconds, throughput 1168608.602011
+28119	[1728360036]	2000000 OPS in 1.727115 seconds, throughput 1158000.480570
+28119	[1728360036]	2000000 OPS in 1.709430 seconds, throughput 1169980.636820
+28119	[1728360037]	2000000 OPS in 1.719629 seconds, throughput 1163041.563035
+28119	[1728360037]	2000000 OPS in 1.715272 seconds, throughput 1165995.830399
+28119	[1728360037]	2000000 OPS in 1.730702 seconds, throughput 1155600.444213
+28119	[1728360038]	2000000 OPS in 1.707374 seconds, throughput 1171389.513955
+28119	[1728360038]	2000000 OPS in 1.718175 seconds, throughput 1164025.783171
+28119	[1728360039]	2000000 OPS in 1.712440 seconds, throughput 1167924.131648
+28119	[1728360039]	2000000 OPS in 1.727823 seconds, throughput 1157525.973436
+28119	[1728360040]	2000000 OPS in 1.709614 seconds, throughput 1169854.715743
+28119	[1728360040]	2000000 OPS in 1.719807 seconds, throughput 1162921.188250
+28119	[1728360041]	2000000 OPS in 1.713662 seconds, throughput 1167091.293382
+28119	[1728360041]	2000000 OPS in 1.730006 seconds, throughput 1156065.354687
+28119	[1728360042]	2000000 OPS in 1.710604 seconds, throughput 1169177.670577
+28119	[1728360042]	2000000 OPS in 1.722325 seconds, throughput 1161221.023907
+28119	[1728360042]	2000000 OPS in 1.713413 seconds, throughput 1167260.899736
+28119	[1728360042]	2000000 OPS in 1.730304 seconds, throughput 1155866.252404
+28119	[1728360043]	2000000 OPS in 1.708677 seconds, throughput 1170496.237732
+28119	[1728360043]	2000000 OPS in 1.717120 seconds, throughput 1164740.961610
+28119	[1728360044]	2000000 OPS in 1.716110 seconds, throughput 1165426.458677
+28119	[1728360044]	2000000 OPS in 1.728840 seconds, throughput 1156845.052174
+28119	[1728360045]	2000000 OPS in 1.707104 seconds, throughput 1171574.783962
+28119	[1728360045]	2000000 OPS in 1.716703 seconds, throughput 1165023.885902
+28119	[1728360046]	2000000 OPS in 1.712750 seconds, throughput 1167712.742665
+28119	[1728360046]	2000000 OPS in 1.728285 seconds, throughput 1157216.547039
+28119	[1728360047]	2000000 OPS in 1.707454 seconds, throughput 1171334.630391
+28119	[1728360047]	2000000 OPS in 1.717624 seconds, throughput 1164399.193304
+28119	[1728360047]	2000000 OPS in 1.714068 seconds, throughput 1166814.852153
+28119	[1728360048]	2000000 OPS in 1.728329 seconds, throughput 1157187.086486
+28119	[1728360048]	2000000 OPS in 1.708634 seconds, throughput 1170525.694795
+28119	[1728360049]	2000000 OPS in 1.718389 seconds, throughput 1163880.820932
+28119	[1728360049]	2000000 OPS in 1.715949 seconds, throughput 1165535.805551
+28119	[1728360049]	2000000 OPS in 1.727321 seconds, throughput 1157862.377636
+28119	[1728360050]	2000000 OPS in 1.708665 seconds, throughput 1170504.458159
+28119	[1728360050]	2000000 OPS in 1.717582 seconds, throughput 1164427.666336
+28119	[1728360051]	2000000 OPS in 1.714958 seconds, throughput 1166209.318246
+28119	[1728360051]	2000000 OPS in 1.728734 seconds, throughput 1156915.985918
+28119	[1728360052]	2000000 OPS in 1.709543 seconds, throughput 1169903.301643
+28119	[1728360052]	2000000 OPS in 1.717216 seconds, throughput 1164675.847418
+28119	[1728360053]	2000000 OPS in 1.716019 seconds, throughput 1165488.260911
+28119	[1728360053]	2000000 OPS in 1.728713 seconds, throughput 1156930.039862
+28119	[1728360054]	2000000 OPS in 1.707475 seconds, throughput 1171320.224308
+28119	[1728360054]	2000000 OPS in 1.721653 seconds, throughput 1161674.274665
+28119	[1728360054]	2000000 OPS in 1.716556 seconds, throughput 1165123.654573
+28119	[1728360055]	2000000 OPS in 1.730587 seconds, throughput 1155677.235528
+28119	[1728360055]	2000000 OPS in 1.709469 seconds, throughput 1169953.944763
+28119	[1728360055]	2000000 OPS in 1.720093 seconds, throughput 1162727.829251
+28119	[1728360056]	2000000 OPS in 1.716093 seconds, throughput 1165438.003651
+28119	[1728360056]	2000000 OPS in 1.730559 seconds, throughput 1155695.934088
+28119	[1728360057]	2000000 OPS in 1.708338 seconds, throughput 1170728.509229
+28119	[1728360057]	2000000 OPS in 1.717881 seconds, throughput 1164224.995794
+28119	[1728360058]	2000000 OPS in 1.714577 seconds, throughput 1166468.464233
+28119	[1728360058]	2000000 OPS in 1.729240 seconds, throughput 1156577.455992
+28119	[1728360059]	2000000 OPS in 1.708715 seconds, throughput 1170470.207144
+28119	[1728360059]	2000000 OPS in 1.716188 seconds, throughput 1165373.490550
+28119	[1728360059]	2000000 OPS in 1.715940 seconds, throughput 1165541.918715
+28119	[1728360060]	2000000 OPS in 1.729319 seconds, throughput 1156524.620385
+28119	[1728360060]	2000000 OPS in 1.708511 seconds, throughput 1170609.963881
+28119	[1728360061]	2000000 OPS in 1.720265 seconds, throughput 1162611.574380
+28119	[1728360061]	2000000 OPS in 1.716353 seconds, throughput 1165261.458453
+28119	[1728360062]	2000000 OPS in 1.728178 seconds, throughput 1157288.196008
+28119	[1728360062]	2000000 OPS in 1.708515 seconds, throughput 1170607.223232
+28119	[1728360062]	2000000 OPS in 1.719314 seconds, throughput 1163254.646912
+28119	[1728360063]	2000000 OPS in 1.714382 seconds, throughput 1166601.142569
+28119	[1728360063]	2000000 OPS in 1.728686 seconds, throughput 1156948.109720
+28119	[1728360064]	2000000 OPS in 1.710031 seconds, throughput 1169569.440554
+28119	[1728360064]	2000000 OPS in 1.716771 seconds, throughput 1164977.740188
+28119	[1728360065]	2000000 OPS in 1.714522 seconds, throughput 1166505.883272
+28119	[1728360065]	2000000 OPS in 1.730196 seconds, throughput 1155938.402354
+28119	[1728360065]	2000000 OPS in 1.708793 seconds, throughput 1170416.779563
+28119	[1728360066]	2000000 OPS in 1.721145 seconds, throughput 1162017.145563
+28119	[1728360066]	2000000 OPS in 1.714693 seconds, throughput 1166389.551949
+28119	[1728360067]	2000000 OPS in 1.730475 seconds, throughput 1155752.033401
+28119	[1728360067]	2000000 OPS in 1.710420 seconds, throughput 1169303.445937
+28119	[1728360068]	2000000 OPS in 1.718726 seconds, throughput 1163652.612458
+28119	[1728360068]	2000000 OPS in 1.714883 seconds, throughput 1166260.322133
+28119	[1728360068]	2000000 OPS in 1.727905 seconds, throughput 1157471.041521
+28119	[1728360069]	2000000 OPS in 1.710374 seconds, throughput 1169334.894006
+28119	[1728360069]	2000000 OPS in 1.720098 seconds, throughput 1162724.449421
+28119	[1728360070]	2000000 OPS in 1.711814 seconds, throughput 1168351.234421
+28119	[1728360070]	2000000 OPS in 1.728961 seconds, throughput 1156764.091266
+28119	[1728360071]	2000000 OPS in 1.706532 seconds, throughput 1171967.475559
+28119	[1728360071]	2000000 OPS in 1.718550 seconds, throughput 1163771.784353
+28119	[1728360071]	2000000 OPS in 1.715481 seconds, throughput 1165853.775122
+28119	[1728360072]	2000000 OPS in 1.728854 seconds, throughput 1156835.684216
+28119	[1728360072]	2000000 OPS in 1.708368 seconds, throughput 1170707.950512
+28119	[1728360073]	2000000 OPS in 1.716483 seconds, throughput 1165173.205910
+28119	[1728360073]	2000000 OPS in 1.711987 seconds, throughput 1168233.169995
+28119	[1728360074]	2000000 OPS in 1.730065 seconds, throughput 1156025.929662
+28119	[1728360074]	2000000 OPS in 1.708390 seconds, throughput 1170692.874578
+28119	[1728360074]	2000000 OPS in 1.718516 seconds, throughput 1163794.809010
+28119	[1728360075]	2000000 OPS in 1.718517 seconds, throughput 1163794.131801
+28119	[1728360075]	2000000 OPS in 1.729311 seconds, throughput 1156529.970607
+28119	[1728360076]	2000000 OPS in 1.709047 seconds, throughput 1170242.831239
+28119	[1728360076]	2000000 OPS in 1.717301 seconds, throughput 1164618.200304
+28119	[1728360077]	2000000 OPS in 1.712184 seconds, throughput 1168098.755741
+28119	[1728360077]	2000000 OPS in 1.729733 seconds, throughput 1156247.813969
+28119	[1728360077]	2000000 OPS in 1.706134 seconds, throughput 1172240.867364
+28119	[1728360078]	2000000 OPS in 1.720251 seconds, throughput 1162621.036116
+28119	[1728360078]	2000000 OPS in 1.711806 seconds, throughput 1168356.694625
+28119	[1728360079]	2000000 OPS in 1.730714 seconds, throughput 1155592.431794
+28119	[1728360079]	2000000 OPS in 1.707599 seconds, throughput 1171235.167039
+28119	[1728360080]	2000000 OPS in 1.718748 seconds, throughput 1163637.717688
+28119	[1728360080]	2000000 OPS in 1.714638 seconds, throughput 1166426.965925
+28119	[1728360081]	2000000 OPS in 1.730758 seconds, throughput 1155563.053876
+28119	[1728360081]	2000000 OPS in 1.708132 seconds, throughput 1170869.698595
+28119	[1728360081]	2000000 OPS in 1.716558 seconds, throughput 1165122.297062
+28119	[1728360082]	2000000 OPS in 1.712493 seconds, throughput 1167887.985528
+28119	[1728360082]	2000000 OPS in 1.727559 seconds, throughput 1157702.862826
+28119	[1728360083]	2000000 OPS in 1.708078 seconds, throughput 1170906.715033
+28119	[1728360083]	2000000 OPS in 1.719772 seconds, throughput 1162944.855481
+28119	[1728360083]	2000000 OPS in 1.715553 seconds, throughput 1165804.845435
+28119	[1728360084]	2000000 OPS in 1.728189 seconds, throughput 1157280.829817
+28119	[1728360084]	2000000 OPS in 1.708153 seconds, throughput 1170855.303945
+28119	[1728360085]	2000000 OPS in 1.718867 seconds, throughput 1163557.157127
+28119	[1728360085]	2000000 OPS in 1.712069 seconds, throughput 1168177.217157
+28119	[1728360086]	2000000 OPS in 1.726453 seconds, throughput 1158444.510218
+28119	[1728360086]	2000000 OPS in 1.706934 seconds, throughput 1171691.465517
+28119	[1728360086]	2000000 OPS in 1.718058 seconds, throughput 1164105.053496
+28119	[1728360087]	2000000 OPS in 1.714524 seconds, throughput 1166504.522538
+28119	[1728360087]	2000000 OPS in 1.730701 seconds, throughput 1155601.111919
+28119	[1728360088]	2000000 OPS in 1.709214 seconds, throughput 1170128.491810
+28119	[1728360088]	2000000 OPS in 1.719322 seconds, throughput 1163249.234291
+28119	[1728360089]	2000000 OPS in 1.712610 seconds, throughput 1167808.199181
+28119	[1728360089]	2000000 OPS in 1.730704 seconds, throughput 1155599.108802
+28119	[1728360089]	2000000 OPS in 1.707425 seconds, throughput 1171354.525089
+28119	[1728360090]	2000000 OPS in 1.720089 seconds, throughput 1162730.533129
+28119	[1728360090]	2000000 OPS in 1.717461 seconds, throughput 1164509.703568
+28119	[1728360091]	2000000 OPS in 1.728654 seconds, throughput 1156969.526580
+28119	[1728360091]	2000000 OPS in 1.708826 seconds, throughput 1170394.177055
+28119	[1728360092]	2000000 OPS in 1.720113 seconds, throughput 1162714.310048
+28119	[1728360092]	2000000 OPS in 1.711292 seconds, throughput 1168707.619740
+28119	[1728360093]	2000000 OPS in 1.728343 seconds, throughput 1157177.712989
+28119	[1728360093]	2000000 OPS in 1.706071 seconds, throughput 1172284.154645
+28119	[1728360093]	2000000 OPS in 1.718005 seconds, throughput 1164140.965830
+28119	[1728360094]	2000000 OPS in 1.712499 seconds, throughput 1167883.893655
+28119	[1728360094]	2000000 OPS in 1.729807 seconds, throughput 1156198.350452
+28119	[1728360095]	2000000 OPS in 1.708218 seconds, throughput 1170810.751321
+28119	[1728360095]	2000000 OPS in 1.717965 seconds, throughput 1164168.070944
+28119	[1728360095]	2000000 OPS in 1.713826 seconds, throughput 1166979.611699
+28119	[1728360096]	2000000 OPS in 1.729144 seconds, throughput 1156641.667785
+28119	[1728360096]	2000000 OPS in 1.707530 seconds, throughput 1171282.495769
+28119	[1728360097]	2000000 OPS in 1.719528 seconds, throughput 1163109.876664
+28119	[1728360097]	2000000 OPS in 1.713555 seconds, throughput 1167164.170394
+28119	[1728360098]	2000000 OPS in 1.728126 seconds, throughput 1157323.019271
+28119	[1728360098]	2000000 OPS in 1.710303 seconds, throughput 1169383.436736
+28119	[1728360098]	2000000 OPS in 1.719656 seconds, throughput 1163023.302335
+28119	[1728360099]	2000000 OPS in 1.714150 seconds, throughput 1166759.035090
+28119	[1728360100]	2000000 OPS in 1.728429 seconds, throughput 1157120.136262
+28119	[1728360100]	2000000 OPS in 1.707619 seconds, throughput 1171221.449281
+28119	[1728360100]	2000000 OPS in 1.719795 seconds, throughput 1162929.302620
+28119	[1728360101]	2000000 OPS in 1.712493 seconds, throughput 1167887.985528
+28119	[1728360101]	2000000 OPS in 1.729902 seconds, throughput 1156134.856194
+28119	[1728360101]	2000000 OPS in 1.707084 seconds, throughput 1171588.509997
+28119	[1728360102]	2000000 OPS in 1.720146 seconds, throughput 1162692.004051
+28119	[1728360102]	2000000 OPS in 1.716883 seconds, throughput 1164901.743450
+28119	[1728360103]	2000000 OPS in 1.729426 seconds, throughput 1156453.065931
+28119	[1728360103]	2000000 OPS in 1.708535 seconds, throughput 1170593.520180
+28119	[1728360104]	2000000 OPS in 1.717528 seconds, throughput 1164464.276565
+28119	[1728360104]	2000000 OPS in 1.715056 seconds, throughput 1166142.679889
+28119	[1728360105]	2000000 OPS in 1.728378 seconds, throughput 1157154.279909
+28119	[1728360105]	2000000 OPS in 1.707394 seconds, throughput 1171375.792582
+28119	[1728360105]	2000000 OPS in 1.718058 seconds, throughput 1164105.053496
+28119	[1728360106]	2000000 OPS in 1.715527 seconds, throughput 1165822.514015
+28119	[1728360106]	2000000 OPS in 1.708752 seconds, throughput 1170444.862683
+28119	[1728360106]	2000000 OPS in 1.726336 seconds, throughput 1158523.022169
+28119	[1728360107]	2000000 OPS in 1.719136 seconds, throughput 1163375.090743
+28119	[1728360107]	2000000 OPS in 1.717042 seconds, throughput 1164793.872252
+28119	[1728360108]	2000000 OPS in 1.708757 seconds, throughput 1170441.437840
+28119	[1728360108]	2000000 OPS in 1.728604 seconds, throughput 1157002.992010
+28119	[1728360109]	2000000 OPS in 1.717884 seconds, throughput 1164222.962668
+28119	[1728360109]	2000000 OPS in 1.716671 seconds, throughput 1165045.602798
+28119	[1728360110]	2000000 OPS in 1.707961 seconds, throughput 1170986.925345
+28119	[1728360110]	2000000 OPS in 1.727674 seconds, throughput 1157625.802090
+28119	[1728360110]	2000000 OPS in 1.718656 seconds, throughput 1163700.007448
+28119	[1728360111]	2000000 OPS in 1.714461 seconds, throughput 1166547.387196
+28119	[1728360112]	2000000 OPS in 1.710315 seconds, throughput 1169375.232048
+28119	[1728360112]	2000000 OPS in 1.727050 seconds, throughput 1158044.063577
+28119	[1728360112]	2000000 OPS in 1.715282 seconds, throughput 1165989.032707
+28119	[1728360113]	2000000 OPS in 1.716660 seconds, throughput 1165053.068167
+28119	[1728360113]	2000000 OPS in 1.706962 seconds, throughput 1171672.245779
+28119	[1728360113]	2000000 OPS in 1.728313 seconds, throughput 1157197.799241
+28119	[1728360114]	2000000 OPS in 1.718676 seconds, throughput 1163686.465628
+28119	[1728360114]	2000000 OPS in 1.714361 seconds, throughput 1166615.432806
+28119	[1728360115]	2000000 OPS in 1.709415 seconds, throughput 1169990.903321
+28119	[1728360115]	2000000 OPS in 1.728222 seconds, throughput 1157258.731806
+28119	[1728360116]	2000000 OPS in 1.719672 seconds, throughput 1163012.481450
+28119	[1728360116]	2000000 OPS in 1.713422 seconds, throughput 1167254.768528
+28119	[1728360117]	2000000 OPS in 1.708961 seconds, throughput 1170301.721338
+28119	[1728360117]	2000000 OPS in 1.730956 seconds, throughput 1155430.871726
+28119	[1728360117]	2000000 OPS in 1.717722 seconds, throughput 1164332.761646
+28119	[1728360118]	2000000 OPS in 1.717077 seconds, throughput 1164770.129703
+28119	[1728360118]	2000000 OPS in 1.708179 seconds, throughput 1170837.482489
+28119	[1728360119]	2000000 OPS in 1.727496 seconds, throughput 1157745.083057
+28119	[1728360119]	2000000 OPS in 1.718312 seconds, throughput 1163932.976084
+28119	[1728360119]	2000000 OPS in 1.714119 seconds, throughput 1166780.136035
+28119	[1728360120]	2000000 OPS in 1.707427 seconds, throughput 1171353.153019
+28119	[1728360120]	2000000 OPS in 1.729119 seconds, throughput 1156658.390776
+28119	[1728360121]	2000000 OPS in 1.716304 seconds, throughput 1165294.726342
+28119	[1728360121]	2000000 OPS in 1.715202 seconds, throughput 1166043.416461
+28119	[1728360122]	2000000 OPS in 1.706496 seconds, throughput 1171992.199220
+28119	[1728360122]	2000000 OPS in 1.728405 seconds, throughput 1157136.203610
+28119	[1728360123]	2000000 OPS in 1.719101 seconds, throughput 1163398.776454
+28119	[1728360123]	2000000 OPS in 1.718451 seconds, throughput 1163838.829271
+28119	[1728360124]	2000000 OPS in 1.710387 seconds, throughput 1169326.006337
+28119	[1728360124]	2000000 OPS in 1.729256 seconds, throughput 1156566.754720
+28119	[1728360124]	2000000 OPS in 1.720284 seconds, throughput 1162598.733697
+28119	[1728360125]	2000000 OPS in 1.714251 seconds, throughput 1166690.292145
+28119	[1728360125]	2000000 OPS in 1.708028 seconds, throughput 1170940.991600
+28119	[1728360125]	2000000 OPS in 1.729998 seconds, throughput 1156070.700660
+28119	[1728360126]	2000000 OPS in 1.718455 seconds, throughput 1163836.120236
+28119	[1728360126]	2000000 OPS in 1.715820 seconds, throughput 1165623.433694
+28119	[1728360127]	2000000 OPS in 1.708074 seconds, throughput 1170909.457084
+28119	[1728360127]	2000000 OPS in 1.730320 seconds, throughput 1155855.564289
+28119	[1728360128]	2000000 OPS in 1.716707 seconds, throughput 1165021.171347
+28119	[1728360128]	2000000 OPS in 1.711311 seconds, throughput 1168694.644048
+28119	[1728360129]	2000000 OPS in 1.705855 seconds, throughput 1172432.592454
+28119	[1728360129]	2000000 OPS in 1.729595 seconds, throughput 1156340.068051
+28119	[1728360129]	2000000 OPS in 1.716217 seconds, throughput 1165353.798500
+28119	[1728360130]	2000000 OPS in 1.714623 seconds, throughput 1166437.170153
+28119	[1728360130]	2000000 OPS in 1.711022 seconds, throughput 1168892.042300
+28119	[1728360131]	2000000 OPS in 1.730226 seconds, throughput 1155918.359798
+28119	[1728360131]	2000000 OPS in 1.718047 seconds, throughput 1164112.506817
+28119	[1728360131]	2000000 OPS in 1.713662 seconds, throughput 1167091.293382
+28119	[1728360132]	2000000 OPS in 1.706482 seconds, throughput 1172001.814259
+28119	[1728360132]	2000000 OPS in 1.730086 seconds, throughput 1156011.897674
+28119	[1728360133]	2000000 OPS in 1.718711 seconds, throughput 1163662.768202
+28119	[1728360133]	2000000 OPS in 1.715246 seconds, throughput 1166013.504768
+28119	[1728360134]	2000000 OPS in 1.708521 seconds, throughput 1170603.112282
+28119	[1728360134]	2000000 OPS in 1.731403 seconds, throughput 1155132.571677
+28119	[1728360135]	2000000 OPS in 1.718133 seconds, throughput 1164054.237943
+28119	[1728360135]	2000000 OPS in 1.716444 seconds, throughput 1165199.680269
+28119	[1728360136]	2000000 OPS in 1.706873 seconds, throughput 1171733.339270
+28119	[1728360136]	2000000 OPS in 1.730167 seconds, throughput 1155957.777486
+28119	[1728360136]	2000000 OPS in 1.718829 seconds, throughput 1163582.881136
+28119	[1728360137]	2000000 OPS in 1.716728 seconds, throughput 1165006.920141
+28119	[1728360137]	2000000 OPS in 1.708110 seconds, throughput 1170884.779083
+28119	[1728360138]	2000000 OPS in 1.727997 seconds, throughput 1157409.416799
+28119	[1728360138]	2000000 OPS in 1.719006 seconds, throughput 1163463.071100
+28119	[1728360138]	2000000 OPS in 1.715963 seconds, throughput 1165526.296313
+28119	[1728360139]	2000000 OPS in 1.707934 seconds, throughput 1171005.436978
+28119	[1728360139]	2000000 OPS in 1.728508 seconds, throughput 1157067.251063
+28119	[1728360140]	2000000 OPS in 1.716713 seconds, throughput 1165017.099538
+28119	[1728360140]	2000000 OPS in 1.712793 seconds, throughput 1167683.427011
+28119	[1728360141]	2000000 OPS in 1.708142 seconds, throughput 1170862.843956
+28119	[1728360141]	2000000 OPS in 1.728401 seconds, throughput 1157138.881544
+28119	[1728360141]	2000000 OPS in 1.718036 seconds, throughput 1164119.960234
+28119	[1728360142]	2000000 OPS in 1.714419 seconds, throughput 1166575.965385
+28119	[1728360142]	2000000 OPS in 1.707520 seconds, throughput 1171289.355322
+28119	[1728360143]	2000000 OPS in 1.729971 seconds, throughput 1156088.743684
+28119	[1728360143]	2000000 OPS in 1.718303 seconds, throughput 1163939.072445
+28119	[1728360143]	2000000 OPS in 1.713761 seconds, throughput 1167023.873224
+28119	[1728360144]	2000000 OPS in 1.708461 seconds, throughput 1170644.223076
+28119	[1728360145]	2000000 OPS in 1.729638 seconds, throughput 1156311.320635
+28119	[1728360145]	2000000 OPS in 1.715732 seconds, throughput 1165683.218591
+28119	[1728360145]	2000000 OPS in 1.716095 seconds, throughput 1165436.645407
+28119	[1728360146]	2000000 OPS in 1.706056 seconds, throughput 1172294.461612
+28119	[1728360146]	2000000 OPS in 1.730953 seconds, throughput 1155432.874261
+28119	[1728360147]	2000000 OPS in 1.718660 seconds, throughput 1163697.299059
+28119	[1728360147]	2000000 OPS in 1.714354 seconds, throughput 1166620.196296
+28119	[1728360147]	2000000 OPS in 1.708577 seconds, throughput 1170564.744814
+28119	[1728360148]	2000000 OPS in 1.729551 seconds, throughput 1156369.485491
+28119	[1728360148]	2000000 OPS in 1.718674 seconds, throughput 1163687.819796
+28119	[1728360149]	2000000 OPS in 1.714368 seconds, throughput 1166610.669355
+28119	[1728360149]	2000000 OPS in 1.707617 seconds, throughput 1171222.821042
+28119	[1728360150]	2000000 OPS in 1.730331 seconds, throughput 1155848.216324
+28119	[1728360150]	2000000 OPS in 1.719127 seconds, throughput 1163381.181262
+28119	[1728360150]	2000000 OPS in 1.718688 seconds, throughput 1163678.340688
+28119	[1728360151]	2000000 OPS in 1.707171 seconds, throughput 1171528.804086
+28119	[1728360151]	2000000 OPS in 1.733312 seconds, throughput 1153860.355204
+28119	[1728360152]	2000000 OPS in 1.720670 seconds, throughput 1162337.926505
+28119	[1728360152]	2000000 OPS in 1.715925 seconds, throughput 1165552.107464
+28119	[1728360153]	2000000 OPS in 1.709059 seconds, throughput 1170234.614487
+28119	[1728360153]	2000000 OPS in 1.729271 seconds, throughput 1156556.722457
+28119	[1728360153]	2000000 OPS in 1.718570 seconds, throughput 1163758.240863
+28119	[1728360154]	2000000 OPS in 1.716815 seconds, throughput 1164947.883144
+28119	[1728360154]	2000000 OPS in 1.707284 seconds, throughput 1171451.264113
+28119	[1728360155]	2000000 OPS in 1.729365 seconds, throughput 1156493.857572
+28119	[1728360155]	2000000 OPS in 1.716238 seconds, throughput 1165339.539155
+28119	[1728360155]	2000000 OPS in 1.714365 seconds, throughput 1166612.710829
+28119	[1728360156]	2000000 OPS in 1.706083 seconds, throughput 1172275.909203
+28119	[1728360157]	2000000 OPS in 1.728269 seconds, throughput 1157227.260340
+28119	[1728360157]	2000000 OPS in 1.719573 seconds, throughput 1163079.438907
+28119	[1728360157]	2000000 OPS in 1.716098 seconds, throughput 1165434.608047
+28119	[1728360158]	2000000 OPS in 1.707259 seconds, throughput 1171468.418090
+28119	[1728360158]	2000000 OPS in 1.731894 seconds, throughput 1154805.086224
+28119	[1728360159]	2000000 OPS in 1.716808 seconds, throughput 1164952.633026
+28119	[1728360159]	2000000 OPS in 1.716306 seconds, throughput 1165293.368432
+28119	[1728360159]	2000000 OPS in 1.710282 seconds, throughput 1169397.795217
+28119	[1728360160]	2000000 OPS in 1.730617 seconds, throughput 1155657.202027
+28119	[1728360160]	2000000 OPS in 1.719151 seconds, throughput 1163364.940020
+28119	[1728360161]	2000000 OPS in 1.716637 seconds, throughput 1165068.677886
+28119	[1728360161]	2000000 OPS in 1.705943 seconds, throughput 1172372.113253
+28119	[1728360162]	2000000 OPS in 1.729356 seconds, throughput 1156499.876255
+28119	[1728360162]	2000000 OPS in 1.718622 seconds, throughput 1163723.029264
+28119	[1728360162]	2000000 OPS in 1.714356 seconds, throughput 1166618.835294
+28119	[1728360163]	2000000 OPS in 1.711244 seconds, throughput 1168740.401719
+28119	[1728360164]	2000000 OPS in 1.731928 seconds, throughput 1154782.415897
+28119	[1728360164]	2000000 OPS in 1.716744 seconds, throughput 1164996.062313
+28119	[1728360164]	2000000 OPS in 1.712471 seconds, throughput 1167902.989306
+28119	[1728360165]	2000000 OPS in 1.707917 seconds, throughput 1171017.092751
+28119	[1728360165]	2000000 OPS in 1.730234 seconds, throughput 1155913.015234
+28119	[1728360165]	2000000 OPS in 1.719239 seconds, throughput 1163305.392677
+28119	[1728360166]	2000000 OPS in 1.714961 seconds, throughput 1166207.278183
+28119	[1728360166]	2000000 OPS in 1.706350 seconds, throughput 1172092.478097
+28119	[1728360167]	2000000 OPS in 1.728984 seconds, throughput 1156748.703285
+28119	[1728360167]	2000000 OPS in 1.718425 seconds, throughput 1163856.438308
+28119	[1728360167]	2000000 OPS in 1.715289 seconds, throughput 1165984.274370
+28119	[1728360168]	2000000 OPS in 1.707843 seconds, throughput 1171067.832348
+28119	[1728360169]	2000000 OPS in 1.728299 seconds, throughput 1157207.173064
+28119	[1728360169]	2000000 OPS in 1.716753 seconds, throughput 1164989.954874
+28119	[1728360169]	2000000 OPS in 1.712405 seconds, throughput 1167948.002955
+28119	[1728360170]	2000000 OPS in 1.707184 seconds, throughput 1171519.883035
+28119	[1728360170]	2000000 OPS in 1.729316 seconds, throughput 1156526.626713
+28119	[1728360171]	2000000 OPS in 1.716110 seconds, throughput 1165426.458677
+28119	[1728360171]	2000000 OPS in 1.713906 seconds, throughput 1166925.140585
+28119	[1728360171]	2000000 OPS in 1.709962 seconds, throughput 1169616.634756
+28119	[1728360172]	2000000 OPS in 1.729622 seconds, throughput 1156322.017181
+28119	[1728360172]	2000000 OPS in 1.716314 seconds, throughput 1165287.936823
+28119	[1728360173]	2000000 OPS in 1.716834 seconds, throughput 1164934.990803
+28119	[1728360173]	2000000 OPS in 1.711844 seconds, throughput 1168330.759111
+28119	[1728360174]	2000000 OPS in 1.731069 seconds, throughput 1155355.447992
+28119	[1728360174]	2000000 OPS in 1.716751 seconds, throughput 1164991.312077
+28119	[1728360174]	2000000 OPS in 1.713546 seconds, throughput 1167170.300651
+28119	[1728360175]	2000000 OPS in 1.708028 seconds, throughput 1170940.991600
+28119	[1728360176]	2000000 OPS in 1.730717 seconds, throughput 1155590.428707
+28119	[1728360176]	2000000 OPS in 1.718016 seconds, throughput 1164133.512144
+28119	[1728360176]	2000000 OPS in 1.715340 seconds, throughput 1165949.607658
+28119	[1728360177]	2000000 OPS in 1.706849 seconds, throughput 1171749.815010
+28119	[1728360177]	2000000 OPS in 1.730050 seconds, throughput 1156035.952718
+28119	[1728360177]	2000000 OPS in 1.718379 seconds, throughput 1163887.594064
+28119	[1728360178]	2000000 OPS in 1.714172 seconds, throughput 1166744.060689
+28119	[1728360178]	2000000 OPS in 1.710145 seconds, throughput 1169491.475869
+28119	[1728360179]	2000000 OPS in 1.728336 seconds, throughput 1157182.399719
+28119	[1728360179]	2000000 OPS in 1.716502 seconds, throughput 1165160.308581
+28119	[1728360179]	2000000 OPS in 1.715117 seconds, throughput 1166101.204757
+28119	[1728360180]	2000000 OPS in 1.707851 seconds, throughput 1171062.346774
+28119	[1728360181]	2000000 OPS in 1.728822 seconds, throughput 1156857.096913
+28119	[1728360181]	2000000 OPS in 1.715106 seconds, throughput 1166108.683662
+28119	[1728360181]	2000000 OPS in 1.715063 seconds, throughput 1166137.920298
+28119	[1728360182]	2000000 OPS in 1.710188 seconds, throughput 1169462.070837
+28119	[1728360183]	2000000 OPS in 1.727842 seconds, throughput 1157513.244845
+28119	[1728360183]	2000000 OPS in 1.718426 seconds, throughput 1163855.761028
+28119	[1728360183]	2000000 OPS in 1.717006 seconds, throughput 1164818.294170
+28119	[1728360183]	2000000 OPS in 1.708277 seconds, throughput 1170770.314182
+28119	[1728360184]	2000000 OPS in 1.728714 seconds, throughput 1156929.370619
+28119	[1728360184]	2000000 OPS in 1.718733 seconds, throughput 1163647.873172
+28119	[1728360185]	2000000 OPS in 1.714498 seconds, throughput 1166522.212333
+28119	[1728360185]	2000000 OPS in 1.706622 seconds, throughput 1171905.670969
+28119	[1728360186]	2000000 OPS in 1.730700 seconds, throughput 1155601.779627
+28119	[1728360186]	2000000 OPS in 1.716863 seconds, throughput 1164915.313569
+28119	[1728360186]	2000000 OPS in 1.716594 seconds, throughput 1165097.862395
+28119	[1728360187]	2000000 OPS in 1.707022 seconds, throughput 1171631.062751
+28119	[1728360188]	2000000 OPS in 1.731293 seconds, throughput 1155205.964559
+28119	[1728360188]	2000000 OPS in 1.718318 seconds, throughput 1163928.911878
+28119	[1728360188]	2000000 OPS in 1.715640 seconds, throughput 1165745.727542
+28119	[1728360188]	2000000 OPS in 1.707963 seconds, throughput 1170985.554137
+28119	[1728360189]	2000000 OPS in 1.730108 seconds, throughput 1155997.197863
+28119	[1728360190]	2000000 OPS in 1.719352 seconds, throughput 1163228.937414
+28119	[1728360190]	2000000 OPS in 1.717320 seconds, throughput 1164605.315259
+28119	[1728360190]	2000000 OPS in 1.707447 seconds, throughput 1171339.432498
+28119	[1728360191]	2000000 OPS in 1.731561 seconds, throughput 1155027.169127
+28119	[1728360191]	2000000 OPS in 1.720700 seconds, throughput 1162317.661417
+28119	[1728360191]	2000000 OPS in 1.717738 seconds, throughput 1164321.916381
+28119	[1728360192]	2000000 OPS in 1.710985 seconds, throughput 1168917.319556
+28119	[1728360193]	2000000 OPS in 1.718649 seconds, throughput 1163704.747159
+28119	[1728360193]	2000000 OPS in 1.732322 seconds, throughput 1154519.771728
+28119	[1728360193]	2000000 OPS in 1.713904 seconds, throughput 1166926.502301
+28119	[1728360194]	2000000 OPS in 1.708585 seconds, throughput 1170559.263952
+28119	[1728360195]	2000000 OPS in 1.716330 seconds, throughput 1165277.073756
+28119	[1728360195]	2000000 OPS in 1.732061 seconds, throughput 1154693.743465
+28119	[1728360195]	2000000 OPS in 1.713301 seconds, throughput 1167337.204613
+28119	[1728360195]	2000000 OPS in 1.706549 seconds, throughput 1171955.800859
+28119	[1728360196]	2000000 OPS in 1.720053 seconds, throughput 1162754.868600
+28119	[1728360196]	2000000 OPS in 1.728632 seconds, throughput 1156984.251130
+28119	[1728360197]	2000000 OPS in 1.717424 seconds, throughput 1164534.791641
+28119	[1728360197]	2000000 OPS in 1.708733 seconds, throughput 1170457.877269
+28119	[1728360198]	2000000 OPS in 1.716353 seconds, throughput 1165261.458453
+28119	[1728360198]	2000000 OPS in 1.727241 seconds, throughput 1157916.005931
+28119	[1728360198]	2000000 OPS in 1.716277 seconds, throughput 1165313.058440
+28119	[1728360199]	2000000 OPS in 1.708152 seconds, throughput 1170855.989397
+28119	[1728360200]	2000000 OPS in 1.720254 seconds, throughput 1162619.008588
+28119	[1728360200]	2000000 OPS in 1.729466 seconds, throughput 1156426.318875
+28119	[1728360200]	2000000 OPS in 1.714881 seconds, throughput 1166261.682297
+28119	[1728360200]	2000000 OPS in 1.707434 seconds, throughput 1171348.350800
+28119	[1728360202]	2000000 OPS in 1.720039 seconds, throughput 1162764.332669
+28119	[1728360202]	2000000 OPS in 1.730403 seconds, throughput 1155800.122862
+28119	[1728360202]	2000000 OPS in 1.715904 seconds, throughput 1165566.372011
+28119	[1728360202]	2000000 OPS in 1.708474 seconds, throughput 1170635.315492
+28119	[1728360203]	2000000 OPS in 1.717722 seconds, throughput 1164332.761646
+28119	[1728360203]	2000000 OPS in 1.727350 seconds, throughput 1157842.938605
+28119	[1728360203]	2000000 OPS in 1.715471 seconds, throughput 1165860.571237
+28119	[1728360204]	2000000 OPS in 1.710894 seconds, throughput 1168979.492593
+28119	[1728360205]	2000000 OPS in 1.719697 seconds, throughput 1162995.574220
+28119	[1728360205]	2000000 OPS in 1.729718 seconds, throughput 1156257.840873
+28119	[1728360205]	2000000 OPS in 1.716934 seconds, throughput 1164867.141078
+28119	[1728360206]	2000000 OPS in 1.709722 seconds, throughput 1169780.818168
+28119	[1728360207]	2000000 OPS in 1.720689 seconds, throughput 1162325.091867
+28119	[1728360207]	2000000 OPS in 1.730274 seconds, throughput 1155886.293154
+28119	[1728360207]	2000000 OPS in 1.714897 seconds, throughput 1166250.801069
+28119	[1728360207]	2000000 OPS in 1.709046 seconds, throughput 1170243.515973
+28119	[1728360208]	2000000 OPS in 1.719203 seconds, throughput 1163329.752217
+28119	[1728360209]	2000000 OPS in 1.731379 seconds, throughput 1155148.583874
+28119	[1728360209]	2000000 OPS in 1.714397 seconds, throughput 1166590.935472
+28119	[1728360209]	2000000 OPS in 1.707411 seconds, throughput 1171364.129668
+28119	[1728360210]	2000000 OPS in 1.718059 seconds, throughput 1164104.375927
+28119	[1728360210]	2000000 OPS in 1.728596 seconds, throughput 1157008.346658
+28119	[1728360210]	2000000 OPS in 1.718620 seconds, throughput 1163724.383517
+28119	[1728360211]	2000000 OPS in 1.708043 seconds, throughput 1170930.708419
+28119	[1728360212]	2000000 OPS in 1.720228 seconds, throughput 1162636.580732
+28119	[1728360212]	2000000 OPS in 1.727994 seconds, throughput 1157411.426197
+28119	[1728360212]	2000000 OPS in 1.713658 seconds, throughput 1167094.017593
+28119	[1728360212]	2000000 OPS in 1.709124 seconds, throughput 1170190.109085
+28119	[1728360214]	2000000 OPS in 1.719514 seconds, throughput 1163119.346513
+28119	[1728360214]	2000000 OPS in 1.734131 seconds, throughput 1153315.406968
+28119	[1728360214]	2000000 OPS in 1.714289 seconds, throughput 1166664.430560
+28119	[1728360214]	2000000 OPS in 1.709771 seconds, throughput 1169747.293643
+28119	[1728360215]	2000000 OPS in 1.718689 seconds, throughput 1163677.663615
+28119	[1728360215]	2000000 OPS in 1.730820 seconds, throughput 1155521.660254
+28119	[1728360215]	2000000 OPS in 1.715516 seconds, throughput 1165829.989344
+28119	[1728360216]	2000000 OPS in 1.708881 seconds, throughput 1170356.508148
+28119	[1728360217]	2000000 OPS in 1.716638 seconds, throughput 1165067.999194
+28119	[1728360217]	2000000 OPS in 1.730219 seconds, throughput 1155923.036332
+28119	[1728360217]	2000000 OPS in 1.715583 seconds, throughput 1165784.459277
+28119	[1728360218]	2000000 OPS in 1.707306 seconds, throughput 1171436.169029
+28119	[1728360219]	2000000 OPS in 1.718103 seconds, throughput 1164074.563632
+28119	[1728360219]	2000000 OPS in 1.732043 seconds, throughput 1154705.743449
+28119	[1728360219]	2000000 OPS in 1.715989 seconds, throughput 1165508.636710
+28119	[1728360219]	2000000 OPS in 1.708319 seconds, throughput 1170741.530124
+28119	[1728360220]	2000000 OPS in 1.722206 seconds, throughput 1161301.261289
+28119	[1728360221]	2000000 OPS in 1.729625 seconds, throughput 1156320.011563
+28119	[1728360221]	2000000 OPS in 1.716634 seconds, throughput 1165070.713967
+28119	[1728360221]	2000000 OPS in 1.710037 seconds, throughput 1169565.336890
+28119	[1728360222]	2000000 OPS in 1.717126 seconds, throughput 1164736.891760
+28119	[1728360222]	2000000 OPS in 1.714951 seconds, throughput 1166214.078420
+28119	[1728360222]	2000000 OPS in 1.728869 seconds, throughput 1156825.647287
+28119	[1728360223]	2000000 OPS in 1.706991 seconds, throughput 1171652.340288
+28119	[1728360224]	2000000 OPS in 1.716817 seconds, throughput 1164946.526042
+28119	[1728360224]	2000000 OPS in 1.713846 seconds, throughput 1166965.993444
+28119	[1728360224]	2000000 OPS in 1.728816 seconds, throughput 1156861.111882
+28119	[1728360224]	2000000 OPS in 1.708183 seconds, throughput 1170834.740774
+28119	[1728360226]	2000000 OPS in 1.718286 seconds, throughput 1163950.587970
+28119	[1728360226]	2000000 OPS in 1.713357 seconds, throughput 1167299.050928
+28119	[1728360226]	2000000 OPS in 1.730317 seconds, throughput 1155857.568295
+28119	[1728360226]	2000000 OPS in 1.708754 seconds, throughput 1170443.492744
+28119	[1728360227]	2000000 OPS in 1.719022 seconds, throughput 1163452.242031
+28119	[1728360228]	2000000 OPS in 1.715576 seconds, throughput 1165789.215983
+28119	[1728360228]	2000000 OPS in 1.728345 seconds, throughput 1157176.373930
+28119	[1728360228]	2000000 OPS in 1.709391 seconds, throughput 1170007.330096
+28119	[1728360229]	2000000 OPS in 1.718415 seconds, throughput 1163863.211157
+28119	[1728360229]	2000000 OPS in 1.714580 seconds, throughput 1166466.423264
+28119	[1728360229]	2000000 OPS in 1.729787 seconds, throughput 1156211.718553
+28119	[1728360229]	2000000 OPS in 1.708940 seconds, throughput 1170316.102379
+28119	[1728360231]	2000000 OPS in 1.720379 seconds, throughput 1162534.534542
+28119	[1728360231]	2000000 OPS in 1.719220 seconds, throughput 1163318.248973
+28119	[1728360231]	2000000 OPS in 1.730518 seconds, throughput 1155723.315215
+28119	[1728360231]	2000000 OPS in 1.711321 seconds, throughput 1168687.814852
+28119	[1728360232]	2000000 OPS in 1.714941 seconds, throughput 1166220.878736
+28119	[1728360233]	2000000 OPS in 1.716069 seconds, throughput 1165454.302828
+28119	[1728360233]	2000000 OPS in 1.728533 seconds, throughput 1157050.516247
+28119	[1728360233]	2000000 OPS in 1.709411 seconds, throughput 1169993.641085
+28119	[1728360234]	2000000 OPS in 1.717051 seconds, throughput 1164787.766933
+28119	[1728360234]	2000000 OPS in 1.715446 seconds, throughput 1165877.561870
+28119	[1728360234]	2000000 OPS in 1.728648 seconds, throughput 1156973.542329
+28119	[1728360235]	2000000 OPS in 1.710394 seconds, throughput 1169321.220725
+28119	[1728360236]	2000000 OPS in 1.718387 seconds, throughput 1163882.175552
+28119	[1728360236]	2000000 OPS in 1.715523 seconds, throughput 1165825.232305
+28119	[1728360236]	2000000 OPS in 1.730867 seconds, throughput 1155490.283193
+28119	[1728360236]	2000000 OPS in 1.707649 seconds, throughput 1171200.873247
+28119	[1728360238]	2000000 OPS in 1.719315 seconds, throughput 1163253.970331
+28119	[1728360238]	2000000 OPS in 1.714801 seconds, throughput 1166316.091488
+28119	[1728360238]	2000000 OPS in 1.731384 seconds, throughput 1155145.247963
+28119	[1728360238]	2000000 OPS in 1.710502 seconds, throughput 1169247.390532
+28119	[1728360239]	2000000 OPS in 1.717395 seconds, throughput 1164554.456022
+28119	[1728360240]	2000000 OPS in 1.713330 seconds, throughput 1167317.446143
+28119	[1728360240]	2000000 OPS in 1.727486 seconds, throughput 1157751.784964
+28119	[1728360241]	2000000 OPS in 1.685410 seconds, throughput 1186654.879228
+28119	[1728360241]	2000000 OPS in 1.718919 seconds, throughput 1163521.957696
+28119	[1728360241]	2000000 OPS in 1.685994 seconds, throughput 1186243.841912
+28119	[1728360243]	2000000 OPS in 1.672991 seconds, throughput 1195463.693469
+28119	[1728360243]	2000000 OPS in 1.683986 seconds, throughput 1187658.329701
+28119	[1728360245]	2000000 OPS in 1.640837 seconds, throughput 1218890.115228
+28119	[1728360246]	2000000 OPS in 1.524512 seconds, throughput 1311895.216305
+28119	[1728360248]	2000000 OPS in 1.528824 seconds, throughput 1308195.057116
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     225349 ms       870913 ms            4 CompactionCPUUsage=0.268643 CompactionThroughput=3.89368G Lat_Get_Avg=671.286 Lat_Get_P50=616.322 Lat_Get_P95=1.18819k Lat_Get_P99=2.6136k Lat_Put_Avg=1.11626k Lat_Put_P50=1034.36 Lat_Put_P95=1.58699k Lat_Put_P99=1.87318k items_per_second=4.43756M/s
+3800.92user 159.88system 16:42.82elapsed 394%CPU (0avgtext+0avgdata 252928maxresident)k
+324640inputs+34376outputs (1638major+3796715minor)pagefaults 0swaps

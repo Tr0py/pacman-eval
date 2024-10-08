@@ -1,0 +1,2352 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 1
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+[ 81%] Built target benchmark
+Scanning dependencies of target viper_bench
+[ 86%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/viper_bench.cpp.o
+[ 90%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/viper/hotkeyset.cpp.o
+[ 95%] Building CXX object benchmarks/other/CMakeFiles/viper_bench.dir/__/histogram.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/other/viper_bench.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+[100%] Linking CXX executable viper_bench
+[100%] Built target viper_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. ViperFixture/bench will be repeated at least 180 times.
+2024-10-06T21:17:22-05:00
+Running ./benchmarks/other/viper_bench
+Run on (64 X 2994.08 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.14, 4.03, 4.30
+[1728267442]	Setup starts!
+[1728267442]	Setup starts!
+[1728267442]	Setup starts!
+threads of service / gc : 4 / 2
+[1728267442]	Setup starts!
+pool size 8141 MB, num_allocated_blocks 173693
+[1728267443]	DB init finished in 1.224283 seconds
+[1728267443]	DB init finished in 1.224266 seconds
+[1728267443]	DB init finished in 1.224049 seconds
+[1728267443]	DB init finished in 1.224263 seconds
+[1728267448]	DB load finished in 5.383872 seconds
+[1728267448]	DB load finished in 5.466750 seconds
+[1728267448]	DB load finished in 5.535620 seconds
+[1728267449]	DB load finished in 5.768076 seconds
+[1728267449]	DB warmup finished in 0.000016 seconds
+[1728267449]	DB warmup finished in 0.384230 seconds
+[1728267449]	DB warmup finished in 0.232779 seconds
+[1728267449]	DB warmup finished in 0.301658 seconds
+[1728267449]	ETC init!
+[1728267449]	ETC starts!
+[1728267449]	ETC init!
+[1728267449]	ETC starts!
+[1728267449]	ETC init!
+[1728267449]	ETC starts!
+[1728267449]	ETC init!
+[1728267449]	ETC starts!
+213655	[1728267451]	2000000 OPS in 2.752833 seconds, throughput 726524.275174
+213655	[1728267451]	2000000 OPS in 2.818669 seconds, throughput 709554.757937
+213655	[1728267451]	2000000 OPS in 2.828833 seconds, throughput 707005.326932
+213655	[1728267451]	2000000 OPS in 2.926777 seconds, throughput 683345.536746
+213655	[1728267454]	2000000 OPS in 2.571358 seconds, throughput 777799.124043
+213655	[1728267454]	2000000 OPS in 2.607014 seconds, throughput 767161.204351
+213655	[1728267454]	2000000 OPS in 2.634439 seconds, throughput 759174.913520
+213655	[1728267454]	2000000 OPS in 2.602498 seconds, throughput 768492.425354
+213655	[1728267456]	2000000 OPS in 2.462736 seconds, throughput 812104.910961
+213655	[1728267456]	2000000 OPS in 2.459743 seconds, throughput 813093.075171
+213655	[1728267457]	2000000 OPS in 2.447283 seconds, throughput 817232.825137
+213655	[1728267457]	2000000 OPS in 2.633065 seconds, throughput 759571.070217
+213655	[1728267459]	2000000 OPS in 2.330407 seconds, throughput 858219.186606
+213655	[1728267459]	2000000 OPS in 2.324967 seconds, throughput 860227.263441
+213655	[1728267459]	2000000 OPS in 2.300828 seconds, throughput 869252.286568
+213655	[1728267459]	2000000 OPS in 2.300808 seconds, throughput 869259.842629
+213655	[1728267461]	2000000 OPS in 2.271602 seconds, throughput 880435.921433
+213655	[1728267461]	2000000 OPS in 2.271434 seconds, throughput 880501.040312
+213655	[1728267461]	2000000 OPS in 2.269119 seconds, throughput 881399.344856
+213655	[1728267461]	2000000 OPS in 2.639269 seconds, throughput 757785.583811
+213655	[1728267463]	2000000 OPS in 2.302027 seconds, throughput 868799.540579
+213655	[1728267463]	2000000 OPS in 2.319809 seconds, throughput 862139.943418
+213655	[1728267463]	2000000 OPS in 2.311166 seconds, throughput 865364.062988
+213655	[1728267464]	2000000 OPS in 2.697997 seconds, throughput 741290.668596
+213655	[1728267465]	2000000 OPS in 2.177005 seconds, throughput 918693.342459
+213655	[1728267466]	2000000 OPS in 2.197639 seconds, throughput 910067.577068
+213655	[1728267466]	2000000 OPS in 2.182657 seconds, throughput 916314.381967
+213655	[1728267467]	2000000 OPS in 2.545130 seconds, throughput 785814.477060
+213655	[1728267468]	2000000 OPS in 2.181691 seconds, throughput 916720.103809
+213655	[1728267468]	2000000 OPS in 2.176743 seconds, throughput 918803.919434
+213655	[1728267468]	2000000 OPS in 2.178649 seconds, throughput 918000.100062
+213655	[1728267469]	2000000 OPS in 2.571148 seconds, throughput 777862.651236
+213655	[1728267470]	2000000 OPS in 2.153978 seconds, throughput 928514.590214
+213655	[1728267470]	2000000 OPS in 2.155680 seconds, throughput 927781.488904
+213655	[1728267470]	2000000 OPS in 2.151580 seconds, throughput 929549.447383
+213655	[1728267472]	2000000 OPS in 2.545868 seconds, throughput 785586.683991
+213655	[1728267472]	2000000 OPS in 2.146382 seconds, throughput 931800.583494
+213655	[1728267472]	2000000 OPS in 2.164523 seconds, throughput 923991.105662
+213655	[1728267472]	2000000 OPS in 2.153366 seconds, throughput 928778.479831
+213655	[1728267474]	2000000 OPS in 2.153461 seconds, throughput 928737.506739
+213655	[1728267474]	2000000 OPS in 2.152323 seconds, throughput 929228.559096
+213655	[1728267474]	2000000 OPS in 2.155272 seconds, throughput 927957.120957
+213655	[1728267474]	2000000 OPS in 2.548040 seconds, throughput 784917.034269
+213655	[1728267476]	2000000 OPS in 2.161088 seconds, throughput 925459.768413
+213655	[1728267476]	2000000 OPS in 2.172039 seconds, throughput 920793.779486
+213655	[1728267476]	2000000 OPS in 2.167860 seconds, throughput 922568.800568
+213655	[1728267477]	2000000 OPS in 2.571912 seconds, throughput 777631.583040
+213655	[1728267478]	2000000 OPS in 2.140815 seconds, throughput 934223.648470
+213655	[1728267479]	2000000 OPS in 2.161234 seconds, throughput 925397.249904
+213655	[1728267479]	2000000 OPS in 2.158309 seconds, throughput 926651.373830
+213655	[1728267479]	2000000 OPS in 2.533890 seconds, throughput 789300.245867
+213655	[1728267480]	2000000 OPS in 2.159748 seconds, throughput 926033.963222
+213655	[1728267481]	2000000 OPS in 2.152736 seconds, throughput 929050.287634
+213655	[1728267481]	2000000 OPS in 2.152864 seconds, throughput 928995.050314
+213655	[1728267482]	2000000 OPS in 2.540368 seconds, throughput 787287.511101
+213655	[1728267483]	2000000 OPS in 2.131704 seconds, throughput 938216.562900
+213655	[1728267483]	2000000 OPS in 2.145814 seconds, throughput 932047.232426
+213655	[1728267483]	2000000 OPS in 2.143430 seconds, throughput 933083.888907
+213655	[1728267485]	2000000 OPS in 2.537493 seconds, throughput 788179.514190
+213655	[1728267485]	2000000 OPS in 2.147892 seconds, throughput 931145.513834
+213655	[1728267485]	2000000 OPS in 2.161883 seconds, throughput 925119.444484
+213655	[1728267485]	2000000 OPS in 2.161222 seconds, throughput 925402.388093
+213655	[1728267487]	2000000 OPS in 2.131152 seconds, throughput 938459.574915
+213655	[1728267487]	2000000 OPS in 2.530936 seconds, throughput 790221.483277
+213655	[1728267487]	2000000 OPS in 2.117944 seconds, throughput 944312.030913
+213655	[1728267487]	2000000 OPS in 2.119529 seconds, throughput 943605.867153
+213655	[1728267489]	2000000 OPS in 2.142121 seconds, throughput 933654.074630
+213655	[1728267489]	2000000 OPS in 2.145748 seconds, throughput 932075.900805
+213655	[1728267489]	2000000 OPS in 2.147151 seconds, throughput 931466.860039
+213655	[1728267490]	2000000 OPS in 2.544081 seconds, throughput 786138.491660
+213655	[1728267491]	2000000 OPS in 2.128520 seconds, throughput 939620.017665
+213655	[1728267491]	2000000 OPS in 2.133832 seconds, throughput 937280.910587
+213655	[1728267491]	2000000 OPS in 2.130060 seconds, throughput 938940.687117
+213655	[1728267492]	2000000 OPS in 2.531859 seconds, throughput 789933.404664
+213655	[1728267493]	2000000 OPS in 2.147772 seconds, throughput 931197.538659
+213655	[1728267494]	2000000 OPS in 2.153175 seconds, throughput 928860.868253
+213655	[1728267494]	2000000 OPS in 2.149186 seconds, throughput 930584.881904
+213655	[1728267495]	2000000 OPS in 2.363510 seconds, throughput 846199.085259
+213655	[1728267495]	2000000 OPS in 2.114061 seconds, throughput 946046.495347
+213655	[1728267496]	2000000 OPS in 2.127122 seconds, throughput 940237.560422
+213655	[1728267496]	2000000 OPS in 2.129618 seconds, throughput 939135.563279
+213655	[1728267497]	2000000 OPS in 2.145573 seconds, throughput 932151.923985
+213655	[1728267498]	2000000 OPS in 2.157389 seconds, throughput 927046.536346
+213655	[1728267498]	2000000 OPS in 2.178680 seconds, throughput 917987.038023
+213655	[1728267498]	2000000 OPS in 2.179968 seconds, throughput 917444.659738
+213655	[1728267499]	2000000 OPS in 2.141121 seconds, throughput 934090.133159
+213655	[1728267500]	2000000 OPS in 2.140485 seconds, throughput 934367.678353
+213655	[1728267500]	2000000 OPS in 2.150925 seconds, throughput 929832.513918
+213655	[1728267500]	2000000 OPS in 2.161420 seconds, throughput 925317.615271
+213655	[1728267501]	2000000 OPS in 2.157838 seconds, throughput 926853.637762
+213655	[1728267502]	2000000 OPS in 2.118164 seconds, throughput 944213.951328
+213655	[1728267502]	2000000 OPS in 2.126996 seconds, throughput 940293.258662
+213655	[1728267502]	2000000 OPS in 2.127757 seconds, throughput 939956.959371
+213655	[1728267503]	2000000 OPS in 2.136982 seconds, throughput 935899.319695
+213655	[1728267504]	2000000 OPS in 2.137633 seconds, throughput 935614.298619
+213655	[1728267504]	2000000 OPS in 2.154376 seconds, throughput 928343.056180
+213655	[1728267504]	2000000 OPS in 2.155609 seconds, throughput 927812.047547
+213655	[1728267505]	2000000 OPS in 2.120310 seconds, throughput 943258.297136
+213655	[1728267506]	2000000 OPS in 2.102909 seconds, throughput 951063.502986
+213655	[1728267506]	2000000 OPS in 2.119020 seconds, throughput 943832.526357
+213655	[1728267506]	2000000 OPS in 2.118957 seconds, throughput 943860.588016
+213655	[1728267507]	2000000 OPS in 2.131148 seconds, throughput 938461.336331
+213655	[1728267508]	2000000 OPS in 2.152457 seconds, throughput 929170.710495
+213655	[1728267509]	2000000 OPS in 2.167347 seconds, throughput 922787.167906
+213655	[1728267509]	2000000 OPS in 2.162174 seconds, throughput 924994.935653
+213655	[1728267509]	2000000 OPS in 2.128536 seconds, throughput 939612.954632
+213655	[1728267510]	2000000 OPS in 2.104210 seconds, throughput 950475.475357
+213655	[1728267511]	2000000 OPS in 2.123425 seconds, throughput 941874.565855
+213655	[1728267511]	2000000 OPS in 2.126158 seconds, throughput 940663.864115
+213655	[1728267512]	2000000 OPS in 2.121718 seconds, throughput 942632.338511
+213655	[1728267512]	2000000 OPS in 2.136891 seconds, throughput 935939.175185
+213655	[1728267513]	2000000 OPS in 2.149080 seconds, throughput 930630.781544
+213655	[1728267513]	2000000 OPS in 2.147656 seconds, throughput 931247.834849
+213655	[1728267514]	2000000 OPS in 2.151230 seconds, throughput 929700.682865
+213655	[1728267515]	2000000 OPS in 2.122289 seconds, throughput 942378.724104
+213655	[1728267515]	2000000 OPS in 2.142776 seconds, throughput 933368.676894
+213655	[1728267515]	2000000 OPS in 2.144956 seconds, throughput 932420.058966
+213655	[1728267516]	2000000 OPS in 2.123555 seconds, throughput 941816.906084
+213655	[1728267517]	2000000 OPS in 2.107116 seconds, throughput 949164.640200
+213655	[1728267517]	2000000 OPS in 2.121315 seconds, throughput 942811.416503
+213655	[1728267517]	2000000 OPS in 2.121701 seconds, throughput 942639.891295
+213655	[1728267518]	2000000 OPS in 2.107353 seconds, throughput 949057.893955
+213655	[1728267519]	2000000 OPS in 2.120183 seconds, throughput 943314.798770
+213655	[1728267519]	2000000 OPS in 2.154116 seconds, throughput 928455.106410
+213655	[1728267519]	2000000 OPS in 2.148458 seconds, throughput 930900.208429
+213655	[1728267520]	2000000 OPS in 2.137602 seconds, throughput 935627.867115
+213655	[1728267521]	2000000 OPS in 2.129036 seconds, throughput 939392.288341
+213655	[1728267521]	2000000 OPS in 2.131049 seconds, throughput 938504.933486
+213655	[1728267521]	2000000 OPS in 2.133020 seconds, throughput 937637.715539
+213655	[1728267522]	2000000 OPS in 2.128534 seconds, throughput 939613.837505
+213655	[1728267523]	2000000 OPS in 2.113316 seconds, throughput 946380.001855
+213655	[1728267524]	2000000 OPS in 2.132365 seconds, throughput 937925.730351
+213655	[1728267524]	2000000 OPS in 2.132937 seconds, throughput 937674.202285
+213655	[1728267524]	2000000 OPS in 2.116423 seconds, throughput 944990.675305
+213655	[1728267525]	2000000 OPS in 2.099167 seconds, throughput 952758.880070
+213655	[1728267526]	2000000 OPS in 2.137310 seconds, throughput 935755.692904
+213655	[1728267526]	2000000 OPS in 2.133558 seconds, throughput 937401.279928
+213655	[1728267526]	2000000 OPS in 2.130347 seconds, throughput 938814.193181
+213655	[1728267527]	2000000 OPS in 2.129185 seconds, throughput 939326.549830
+213655	[1728267528]	2000000 OPS in 2.154604 seconds, throughput 928244.819002
+213655	[1728267528]	2000000 OPS in 2.148201 seconds, throughput 931011.576663
+213655	[1728267529]	2000000 OPS in 2.127642 seconds, throughput 940007.764464
+213655	[1728267529]	2000000 OPS in 2.133790 seconds, throughput 937299.359356
+213655	[1728267530]	2000000 OPS in 2.145516 seconds, throughput 932176.688498
+213655	[1728267530]	2000000 OPS in 2.145691 seconds, throughput 932100.661279
+213655	[1728267531]	2000000 OPS in 2.141052 seconds, throughput 934120.236220
+213655	[1728267532]	2000000 OPS in 2.129797 seconds, throughput 939056.633097
+213655	[1728267532]	2000000 OPS in 2.141084 seconds, throughput 934106.275139
+213655	[1728267532]	2000000 OPS in 2.140497 seconds, throughput 934362.440125
+213655	[1728267533]	2000000 OPS in 2.123394 seconds, throughput 941888.316535
+213655	[1728267534]	2000000 OPS in 2.102881 seconds, throughput 951076.166459
+213655	[1728267534]	2000000 OPS in 2.125633 seconds, throughput 940896.194216
+213655	[1728267534]	2000000 OPS in 2.128113 seconds, throughput 939799.719282
+213655	[1728267535]	2000000 OPS in 2.124084 seconds, throughput 941582.347967
+213655	[1728267536]	2000000 OPS in 2.108593 seconds, throughput 948499.781608
+213655	[1728267536]	2000000 OPS in 2.143238 seconds, throughput 933167.478367
+213655	[1728267536]	2000000 OPS in 2.136630 seconds, throughput 936053.504818
+213655	[1728267537]	2000000 OPS in 2.123773 seconds, throughput 941720.230929
+213655	[1728267538]	2000000 OPS in 2.129377 seconds, throughput 939241.853368
+213655	[1728267539]	2000000 OPS in 2.155056 seconds, throughput 928050.129556
+213655	[1728267539]	2000000 OPS in 2.149916 seconds, throughput 930268.903529
+213655	[1728267539]	2000000 OPS in 2.139253 seconds, throughput 934905.782533
+213655	[1728267540]	2000000 OPS in 2.114148 seconds, throughput 946007.564276
+213655	[1728267541]	2000000 OPS in 2.119023 seconds, throughput 943831.190129
+213655	[1728267541]	2000000 OPS in 2.119217 seconds, throughput 943744.788759
+213655	[1728267541]	2000000 OPS in 2.111789 seconds, throughput 947064.313717
+213655	[1728267542]	2000000 OPS in 2.131427 seconds, throughput 938338.493413
+213655	[1728267543]	2000000 OPS in 2.154749 seconds, throughput 928182.354418
+213655	[1728267543]	2000000 OPS in 2.156222 seconds, throughput 927548.276569
+213655	[1728267544]	2000000 OPS in 2.142174 seconds, throughput 933630.974888
+213655	[1728267544]	2000000 OPS in 2.117444 seconds, throughput 944535.014858
+213655	[1728267545]	2000000 OPS in 2.139456 seconds, throughput 934817.074995
+213655	[1728267545]	2000000 OPS in 2.141463 seconds, throughput 933940.955319
+213655	[1728267546]	2000000 OPS in 2.136430 seconds, throughput 936141.132637
+213655	[1728267546]	2000000 OPS in 2.121811 seconds, throughput 942591.022480
+213655	[1728267547]	2000000 OPS in 2.155096 seconds, throughput 928032.904335
+213655	[1728267547]	2000000 OPS in 2.145454 seconds, throughput 932203.626831
+213655	[1728267548]	2000000 OPS in 2.129191 seconds, throughput 939323.902834
+213655	[1728267549]	2000000 OPS in 2.113947 seconds, throughput 946097.513325
+213655	[1728267549]	2000000 OPS in 2.133304 seconds, throughput 937512.890802
+213655	[1728267549]	2000000 OPS in 2.135453 seconds, throughput 936569.430467
+213655	[1728267550]	2000000 OPS in 2.132683 seconds, throughput 937785.878164
+213655	[1728267551]	2000000 OPS in 2.129858 seconds, throughput 939029.738133
+213655	[1728267551]	2000000 OPS in 2.129936 seconds, throughput 938995.350095
+213655	[1728267551]	2000000 OPS in 2.129876 seconds, throughput 939021.802208
+213655	[1728267552]	2000000 OPS in 2.111586 seconds, throughput 947155.360947
+213655	[1728267553]	2000000 OPS in 2.096227 seconds, throughput 954095.143322
+213655	[1728267553]	2000000 OPS in 2.123833 seconds, throughput 941693.626570
+213655	[1728267554]	2000000 OPS in 2.123779 seconds, throughput 941717.570425
+213655	[1728267554]	2000000 OPS in 2.120022 seconds, throughput 943386.436556
+213655	[1728267555]	2000000 OPS in 2.113853 seconds, throughput 946139.584919
+213655	[1728267556]	2000000 OPS in 2.139487 seconds, throughput 934803.530005
+213655	[1728267556]	2000000 OPS in 2.140871 seconds, throughput 934199.211442
+213655	[1728267556]	2000000 OPS in 2.122922 seconds, throughput 942097.731334
+213655	[1728267557]	2000000 OPS in 2.116993 seconds, throughput 944736.236728
+213655	[1728267558]	2000000 OPS in 2.127899 seconds, throughput 939894.233702
+213655	[1728267558]	2000000 OPS in 2.129344 seconds, throughput 939256.409486
+213655	[1728267558]	2000000 OPS in 2.122234 seconds, throughput 942403.146873
+213655	[1728267559]	2000000 OPS in 2.110435 seconds, throughput 947671.925456
+213655	[1728267560]	2000000 OPS in 2.120627 seconds, throughput 943117.295026
+213655	[1728267560]	2000000 OPS in 2.119962 seconds, throughput 943413.136651
+213655	[1728267560]	2000000 OPS in 2.107964 seconds, throughput 948782.806537
+213655	[1728267561]	2000000 OPS in 2.105650 seconds, throughput 949825.469570
+213655	[1728267562]	2000000 OPS in 2.151937 seconds, throughput 929395.237872
+213655	[1728267562]	2000000 OPS in 2.145436 seconds, throughput 932211.447929
+213655	[1728267563]	2000000 OPS in 2.135932 seconds, throughput 936359.397209
+213655	[1728267563]	2000000 OPS in 2.119574 seconds, throughput 943585.833757
+213655	[1728267564]	2000000 OPS in 2.135788 seconds, throughput 936422.528828
+213655	[1728267564]	2000000 OPS in 2.138343 seconds, throughput 935303.643990
+213655	[1728267565]	2000000 OPS in 2.133487 seconds, throughput 937432.475567
+213655	[1728267565]	2000000 OPS in 2.131457 seconds, throughput 938325.286412
+213655	[1728267566]	2000000 OPS in 2.137769 seconds, throughput 935554.776966
+213655	[1728267566]	2000000 OPS in 2.136339 seconds, throughput 936181.008726
+213655	[1728267567]	2000000 OPS in 2.140170 seconds, throughput 934505.202858
+213655	[1728267568]	2000000 OPS in 2.122954 seconds, throughput 942083.530778
+213655	[1728267568]	2000000 OPS in 2.140975 seconds, throughput 934153.831782
+213655	[1728267568]	2000000 OPS in 2.142934 seconds, throughput 933299.858978
+213655	[1728267569]	2000000 OPS in 2.115567 seconds, throughput 945373.037110
+213655	[1728267570]	2000000 OPS in 2.112231 seconds, throughput 946866.133486
+213655	[1728267571]	2000000 OPS in 2.129750 seconds, throughput 939077.356497
+213655	[1728267571]	2000000 OPS in 2.130964 seconds, throughput 938542.368618
+213655	[1728267571]	2000000 OPS in 2.113762 seconds, throughput 946180.317368
+213655	[1728267572]	2000000 OPS in 2.110445 seconds, throughput 947667.435067
+213655	[1728267573]	2000000 OPS in 2.145440 seconds, throughput 932209.709896
+213655	[1728267573]	2000000 OPS in 2.139527 seconds, throughput 934786.053179
+213655	[1728267573]	2000000 OPS in 2.131777 seconds, throughput 938184.434863
+213655	[1728267574]	2000000 OPS in 2.118365 seconds, throughput 944124.360061
+213655	[1728267575]	2000000 OPS in 2.146852 seconds, throughput 931596.588866
+213655	[1728267575]	2000000 OPS in 2.147681 seconds, throughput 931236.994693
+213655	[1728267575]	2000000 OPS in 2.131757 seconds, throughput 938193.236846
+213655	[1728267576]	2000000 OPS in 2.122800 seconds, throughput 942151.874882
+213655	[1728267577]	2000000 OPS in 2.129672 seconds, throughput 939111.750542
+213655	[1728267577]	2000000 OPS in 2.128286 seconds, throughput 939723.326658
+213655	[1728267578]	2000000 OPS in 2.120969 seconds, throughput 942965.220142
+213655	[1728267578]	2000000 OPS in 2.135539 seconds, throughput 936531.714008
+213655	[1728267579]	2000000 OPS in 2.143303 seconds, throughput 933139.178175
+213655	[1728267579]	2000000 OPS in 2.144627 seconds, throughput 932563.098385
+213655	[1728267580]	2000000 OPS in 2.128642 seconds, throughput 939566.164719
+213655	[1728267580]	2000000 OPS in 2.102220 seconds, throughput 951375.212870
+213655	[1728267581]	2000000 OPS in 2.153027 seconds, throughput 928924.718547
+213655	[1728267581]	2000000 OPS in 2.146482 seconds, throughput 931757.172900
+213655	[1728267582]	2000000 OPS in 2.137648 seconds, throughput 935607.733359
+213655	[1728267582]	2000000 OPS in 2.125859 seconds, throughput 940796.167573
+213655	[1728267583]	2000000 OPS in 2.114212 seconds, throughput 945978.927373
+213655	[1728267583]	2000000 OPS in 2.117809 seconds, throughput 944372.226202
+213655	[1728267584]	2000000 OPS in 2.122797 seconds, throughput 942153.206359
+213655	[1728267585]	2000000 OPS in 2.123030 seconds, throughput 942049.806173
+213655	[1728267586]	2000000 OPS in 2.147090 seconds, throughput 931493.323522
+213655	[1728267586]	2000000 OPS in 2.154082 seconds, throughput 928469.761133
+213655	[1728267586]	2000000 OPS in 2.121008 seconds, throughput 942947.881385
+213655	[1728267587]	2000000 OPS in 2.107572 seconds, throughput 948959.276362
+213655	[1728267588]	2000000 OPS in 2.116347 seconds, throughput 945024.610803
+213655	[1728267588]	2000000 OPS in 2.117653 seconds, throughput 944441.794761
+213655	[1728267588]	2000000 OPS in 2.109264 seconds, throughput 948198.044436
+213655	[1728267589]	2000000 OPS in 2.109891 seconds, throughput 947916.266764
+213655	[1728267590]	2000000 OPS in 2.131468 seconds, throughput 938320.443938
+213655	[1728267590]	2000000 OPS in 2.131494 seconds, throughput 938308.998289
+213655	[1728267590]	2000000 OPS in 2.118084 seconds, throughput 944249.614274
+213655	[1728267591]	2000000 OPS in 2.119248 seconds, throughput 943730.983821
+213655	[1728267592]	2000000 OPS in 2.132975 seconds, throughput 937657.497158
+213655	[1728267592]	2000000 OPS in 2.144023 seconds, throughput 932825.813902
+213655	[1728267592]	2000000 OPS in 2.128304 seconds, throughput 939715.379006
+213655	[1728267593]	2000000 OPS in 2.113371 seconds, throughput 946355.372530
+213655	[1728267594]	2000000 OPS in 2.127829 seconds, throughput 939925.153760
+213655	[1728267594]	2000000 OPS in 2.128596 seconds, throughput 939586.469203
+213655	[1728267594]	2000000 OPS in 2.112358 seconds, throughput 946809.205637
+213655	[1728267595]	2000000 OPS in 2.102038 seconds, throughput 951457.585448
+213655	[1728267596]	2000000 OPS in 2.121698 seconds, throughput 942641.224152
+213655	[1728267596]	2000000 OPS in 2.123820 seconds, throughput 941699.390720
+213655	[1728267597]	2000000 OPS in 2.117671 seconds, throughput 944433.767096
+213655	[1728267597]	2000000 OPS in 2.114891 seconds, throughput 945675.214467
+213655	[1728267598]	2000000 OPS in 2.148312 seconds, throughput 930963.472717
+213655	[1728267598]	2000000 OPS in 2.140666 seconds, throughput 934288.674646
+213655	[1728267599]	2000000 OPS in 2.126996 seconds, throughput 940293.258662
+213655	[1728267599]	2000000 OPS in 2.116395 seconds, throughput 945003.177573
+213655	[1728267600]	2000000 OPS in 2.144219 seconds, throughput 932740.545625
+213655	[1728267601]	2000000 OPS in 2.146837 seconds, throughput 931603.097953
+213655	[1728267601]	2000000 OPS in 2.144357 seconds, throughput 932680.519149
+213655	[1728267601]	2000000 OPS in 2.136780 seconds, throughput 935987.794719
+213655	[1728267603]	2000000 OPS in 2.125066 seconds, throughput 941147.239662
+213655	[1728267603]	2000000 OPS in 2.125077 seconds, throughput 941142.368018
+213655	[1728267603]	2000000 OPS in 2.107554 seconds, throughput 948967.381144
+213655	[1728267604]	2000000 OPS in 2.102875 seconds, throughput 951078.880105
+213655	[1728267605]	2000000 OPS in 2.130509 seconds, throughput 938742.807470
+213655	[1728267605]	2000000 OPS in 2.131351 seconds, throughput 938371.952813
+213655	[1728267605]	2000000 OPS in 2.121836 seconds, throughput 942579.916638
+213655	[1728267606]	2000000 OPS in 2.113126 seconds, throughput 946465.094841
+213655	[1728267607]	2000000 OPS in 2.115517 seconds, throughput 945395.380893
+213655	[1728267607]	2000000 OPS in 2.115304 seconds, throughput 945490.577241
+213655	[1728267607]	2000000 OPS in 2.128838 seconds, throughput 939479.659796
+213655	[1728267608]	2000000 OPS in 2.129634 seconds, throughput 939128.507528
+213655	[1728267609]	2000000 OPS in 2.155505 seconds, throughput 927856.813137
+213655	[1728267609]	2000000 OPS in 2.154903 seconds, throughput 928116.021928
+213655	[1728267609]	2000000 OPS in 2.122634 seconds, throughput 942225.555607
+213655	[1728267610]	2000000 OPS in 2.110861 seconds, throughput 947480.672579
+213655	[1728267611]	2000000 OPS in 2.131312 seconds, throughput 938389.123695
+213655	[1728267611]	2000000 OPS in 2.141053 seconds, throughput 934119.799930
+213655	[1728267611]	2000000 OPS in 2.128383 seconds, throughput 939680.499233
+213655	[1728267612]	2000000 OPS in 2.125344 seconds, throughput 941024.135387
+213655	[1728267613]	2000000 OPS in 2.130563 seconds, throughput 938719.014645
+213655	[1728267613]	2000000 OPS in 2.132012 seconds, throughput 938081.023934
+213655	[1728267614]	2000000 OPS in 2.118810 seconds, throughput 943926.071710
+213655	[1728267614]	2000000 OPS in 2.106242 seconds, throughput 949558.502774
+213655	[1728267615]	2000000 OPS in 2.119789 seconds, throughput 943490.130386
+213655	[1728267615]	2000000 OPS in 2.121303 seconds, throughput 942816.749894
+213655	[1728267616]	2000000 OPS in 2.113286 seconds, throughput 946393.436572
+213655	[1728267616]	2000000 OPS in 2.112689 seconds, throughput 946660.866791
+213655	[1728267618]	2000000 OPS in 2.124852 seconds, throughput 941242.025327
+213655	[1728267618]	2000000 OPS in 2.127006 seconds, throughput 940288.837925
+213655	[1728267618]	2000000 OPS in 2.132545 seconds, throughput 937846.563613
+213655	[1728267618]	2000000 OPS in 2.126371 seconds, throughput 940569.637189
+213655	[1728267620]	2000000 OPS in 2.145470 seconds, throughput 932196.674854
+213655	[1728267620]	2000000 OPS in 2.148914 seconds, throughput 930702.671210
+213655	[1728267620]	2000000 OPS in 2.122423 seconds, throughput 942319.226657
+213655	[1728267620]	2000000 OPS in 2.115338 seconds, throughput 945475.380294
+213655	[1728267622]	2000000 OPS in 2.120324 seconds, throughput 943252.069023
+213655	[1728267622]	2000000 OPS in 2.121534 seconds, throughput 942714.092727
+213655	[1728267622]	2000000 OPS in 2.109384 seconds, throughput 948144.102733
+213655	[1728267623]	2000000 OPS in 2.101645 seconds, throughput 951635.504569
+213655	[1728267624]	2000000 OPS in 2.128000 seconds, throughput 939849.624060
+213655	[1728267624]	2000000 OPS in 2.129620 seconds, throughput 939134.681305
+213655	[1728267624]	2000000 OPS in 2.119974 seconds, throughput 943407.796511
+213655	[1728267625]	2000000 OPS in 2.130957 seconds, throughput 938545.451644
+213655	[1728267626]	2000000 OPS in 2.140317 seconds, throughput 934441.019718
+213655	[1728267626]	2000000 OPS in 2.142169 seconds, throughput 933633.154060
+213655	[1728267626]	2000000 OPS in 2.130366 seconds, throughput 938805.820221
+213655	[1728267627]	2000000 OPS in 2.104139 seconds, throughput 950507.547268
+213655	[1728267628]	2000000 OPS in 2.129879 seconds, throughput 939020.479567
+213655	[1728267628]	2000000 OPS in 2.133460 seconds, throughput 937444.339242
+213655	[1728267628]	2000000 OPS in 2.121730 seconds, throughput 942627.007206
+213655	[1728267629]	2000000 OPS in 2.112604 seconds, throughput 946698.955412
+213655	[1728267630]	2000000 OPS in 2.116864 seconds, throughput 944793.808199
+213655	[1728267630]	2000000 OPS in 2.118850 seconds, throughput 943908.252118
+213655	[1728267631]	2000000 OPS in 2.107568 seconds, throughput 948961.077412
+213655	[1728267631]	2000000 OPS in 2.105659 seconds, throughput 949821.409829
+213655	[1728267632]	2000000 OPS in 2.153318 seconds, throughput 928799.183400
+213655	[1728267633]	2000000 OPS in 2.154160 seconds, throughput 928436.142162
+213655	[1728267633]	2000000 OPS in 2.143160 seconds, throughput 933201.440863
+213655	[1728267633]	2000000 OPS in 2.131933 seconds, throughput 938115.785065
+213655	[1728267635]	2000000 OPS in 2.117005 seconds, throughput 944730.881599
+213655	[1728267635]	2000000 OPS in 2.118539 seconds, throughput 944046.817170
+213655	[1728267635]	2000000 OPS in 2.108700 seconds, throughput 948451.652677
+213655	[1728267635]	2000000 OPS in 2.105292 seconds, throughput 949986.985178
+213655	[1728267637]	2000000 OPS in 2.127749 seconds, throughput 939960.493460
+213655	[1728267637]	2000000 OPS in 2.129357 seconds, throughput 939250.675204
+213655	[1728267637]	2000000 OPS in 2.113853 seconds, throughput 946139.584919
+213655	[1728267637]	2000000 OPS in 2.106783 seconds, throughput 949314.666010
+213655	[1728267639]	2000000 OPS in 2.142512 seconds, throughput 933483.686439
+213655	[1728267639]	2000000 OPS in 2.145691 seconds, throughput 932100.661279
+213655	[1728267639]	2000000 OPS in 2.134935 seconds, throughput 936796.670625
+213655	[1728267640]	2000000 OPS in 2.135170 seconds, throughput 936693.565384
+213655	[1728267641]	2000000 OPS in 2.126299 seconds, throughput 940601.486433
+213655	[1728267641]	2000000 OPS in 2.128201 seconds, throughput 939760.859054
+213655	[1728267641]	2000000 OPS in 2.113412 seconds, throughput 946337.013323
+213655	[1728267642]	2000000 OPS in 2.101467 seconds, throughput 951716.110698
+213655	[1728267643]	2000000 OPS in 2.124473 seconds, throughput 941409.940253
+213655	[1728267643]	2000000 OPS in 2.126417 seconds, throughput 940549.290191
+213655	[1728267643]	2000000 OPS in 2.114411 seconds, throughput 945889.895578
+213655	[1728267644]	2000000 OPS in 2.112842 seconds, throughput 946592.314996
+213655	[1728267645]	2000000 OPS in 2.135013 seconds, throughput 936762.445943
+213655	[1728267645]	2000000 OPS in 2.137478 seconds, throughput 935682.145033
+213655	[1728267645]	2000000 OPS in 2.128096 seconds, throughput 939807.226742
+213655	[1728267646]	2000000 OPS in 2.122859 seconds, throughput 942125.689930
+213655	[1728267647]	2000000 OPS in 2.136428 seconds, throughput 936142.008998
+213655	[1728267647]	2000000 OPS in 2.135476 seconds, throughput 936559.343210
+213655	[1728267648]	2000000 OPS in 2.120756 seconds, throughput 943059.927686
+213655	[1728267648]	2000000 OPS in 2.115889 seconds, throughput 945229.168449
+213655	[1728267649]	2000000 OPS in 2.114803 seconds, throughput 945714.565376
+213655	[1728267650]	2000000 OPS in 2.116578 seconds, throughput 944921.472301
+213655	[1728267650]	2000000 OPS in 2.104115 seconds, throughput 950518.388966
+213655	[1728267650]	2000000 OPS in 2.101767 seconds, throughput 951580.265558
+213655	[1728267652]	2000000 OPS in 2.127640 seconds, throughput 940008.648080
+213655	[1728267652]	2000000 OPS in 2.130508 seconds, throughput 938743.248089
+213655	[1728267652]	2000000 OPS in 2.118403 seconds, throughput 944107.424319
+213655	[1728267652]	2000000 OPS in 2.132124 seconds, throughput 938031.746746
+213655	[1728267654]	2000000 OPS in 2.139784 seconds, throughput 934673.780157
+213655	[1728267654]	2000000 OPS in 2.141853 seconds, throughput 933770.898376
+213655	[1728267654]	2000000 OPS in 2.129512 seconds, throughput 939182.310313
+213655	[1728267654]	2000000 OPS in 2.111630 seconds, throughput 947135.625086
+213655	[1728267656]	2000000 OPS in 2.128811 seconds, throughput 939491.575344
+213655	[1728267656]	2000000 OPS in 2.131324 seconds, throughput 938383.840280
+213655	[1728267656]	2000000 OPS in 2.118265 seconds, throughput 944168.930705
+213655	[1728267656]	2000000 OPS in 2.110656 seconds, throughput 947572.697777
+213655	[1728267658]	2000000 OPS in 2.117406 seconds, throughput 944551.965943
+213655	[1728267658]	2000000 OPS in 2.122830 seconds, throughput 942138.560318
+213655	[1728267658]	2000000 OPS in 2.107813 seconds, throughput 948850.775662
+213655	[1728267659]	2000000 OPS in 2.105062 seconds, throughput 950090.781174
+213655	[1728267660]	2000000 OPS in 2.129363 seconds, throughput 939248.028636
+213655	[1728267660]	2000000 OPS in 2.128220 seconds, throughput 939752.469200
+213655	[1728267660]	2000000 OPS in 2.115902 seconds, throughput 945223.361006
+213655	[1728267661]	2000000 OPS in 2.108381 seconds, throughput 948595.154291
+213655	[1728267662]	2000000 OPS in 2.121250 seconds, throughput 942840.306423
+213655	[1728267662]	2000000 OPS in 2.123088 seconds, throughput 942024.070599
+213655	[1728267662]	2000000 OPS in 2.110637 seconds, throughput 947581.227847
+213655	[1728267663]	2000000 OPS in 2.112917 seconds, throughput 946558.714800
+213655	[1728267664]	2000000 OPS in 2.122506 seconds, throughput 942282.377529
+213655	[1728267664]	2000000 OPS in 2.110281 seconds, throughput 947741.082823
+213655	[1728267664]	2000000 OPS in 2.124738 seconds, throughput 941292.526420
+213655	[1728267665]	2000000 OPS in 2.103181 seconds, throughput 950940.503932
+213655	[1728267666]	2000000 OPS in 2.141931 seconds, throughput 933736.894419
+213655	[1728267667]	2000000 OPS in 2.131007 seconds, throughput 938523.430472
+213655	[1728267667]	2000000 OPS in 2.144960 seconds, throughput 932418.320155
+213655	[1728267667]	2000000 OPS in 2.137373 seconds, throughput 935728.111097
+213655	[1728267669]	2000000 OPS in 2.118216 seconds, throughput 944190.771857
+213655	[1728267669]	2000000 OPS in 2.105971 seconds, throughput 949680.693609
+213655	[1728267669]	2000000 OPS in 2.119116 seconds, throughput 943789.768941
+213655	[1728267669]	2000000 OPS in 2.100017 seconds, throughput 952373.242693
+213655	[1728267671]	2000000 OPS in 2.129244 seconds, throughput 939300.521688
+213655	[1728267671]	2000000 OPS in 2.118640 seconds, throughput 944001.812483
+213655	[1728267671]	2000000 OPS in 2.130536 seconds, throughput 938730.910907
+213655	[1728267671]	2000000 OPS in 2.113982 seconds, throughput 946081.849325
+213655	[1728267673]	2000000 OPS in 2.138558 seconds, throughput 935209.613207
+213655	[1728267673]	2000000 OPS in 2.127976 seconds, throughput 939860.223987
+213655	[1728267673]	2000000 OPS in 2.139209 seconds, throughput 934925.012002
+213655	[1728267673]	2000000 OPS in 2.123164 seconds, throughput 941990.350251
+213655	[1728267675]	2000000 OPS in 2.129384 seconds, throughput 939238.765765
+213655	[1728267675]	2000000 OPS in 2.116814 seconds, throughput 944816.124610
+213655	[1728267675]	2000000 OPS in 2.131617 seconds, throughput 938254.855352
+213655	[1728267675]	2000000 OPS in 2.113337 seconds, throughput 946370.597780
+213655	[1728267677]	2000000 OPS in 2.115938 seconds, throughput 945207.279230
+213655	[1728267677]	2000000 OPS in 2.106096 seconds, throughput 949624.328616
+213655	[1728267677]	2000000 OPS in 2.117048 seconds, throughput 944711.692886
+213655	[1728267678]	2000000 OPS in 2.102730 seconds, throughput 951144.464577
+213655	[1728267679]	2000000 OPS in 2.141856 seconds, throughput 933769.590486
+213655	[1728267679]	2000000 OPS in 2.129627 seconds, throughput 939131.594406
+213655	[1728267679]	2000000 OPS in 2.142867 seconds, throughput 933329.040020
+213655	[1728267680]	2000000 OPS in 2.130604 seconds, throughput 938700.950529
+213655	[1728267681]	2000000 OPS in 2.120974 seconds, throughput 942962.997189
+213655	[1728267681]	2000000 OPS in 2.111075 seconds, throughput 947384.626316
+213655	[1728267682]	2000000 OPS in 2.122265 seconds, throughput 942389.381156
+213655	[1728267682]	2000000 OPS in 2.106667 seconds, throughput 949366.938391
+213655	[1728267684]	2000000 OPS in 2.125868 seconds, throughput 940792.184651
+213655	[1728267684]	2000000 OPS in 2.113017 seconds, throughput 946513.918251
+213655	[1728267684]	2000000 OPS in 2.126598 seconds, throughput 940469.237721
+213655	[1728267684]	2000000 OPS in 2.107311 seconds, throughput 949076.809261
+213655	[1728267686]	2000000 OPS in 2.110087 seconds, throughput 947828.217510
+213655	[1728267686]	2000000 OPS in 2.123008 seconds, throughput 942059.568311
+213655	[1728267686]	2000000 OPS in 2.123726 seconds, throughput 941741.072059
+213655	[1728267686]	2000000 OPS in 2.120695 seconds, throughput 943087.054008
+213655	[1728267688]	2000000 OPS in 2.126726 seconds, throughput 940412.634256
+213655	[1728267688]	2000000 OPS in 2.138320 seconds, throughput 935313.704216
+213655	[1728267688]	2000000 OPS in 2.145879 seconds, throughput 932019.000139
+213655	[1728267688]	2000000 OPS in 2.108701 seconds, throughput 948451.202897
+213655	[1728267690]	2000000 OPS in 2.116882 seconds, throughput 944785.774550
+213655	[1728267690]	2000000 OPS in 2.127648 seconds, throughput 940005.113628
+213655	[1728267690]	2000000 OPS in 2.129566 seconds, throughput 939158.495205
+213655	[1728267690]	2000000 OPS in 2.114170 seconds, throughput 945997.720145
+213655	[1728267692]	2000000 OPS in 2.106205 seconds, throughput 949575.183802
+213655	[1728267692]	2000000 OPS in 2.116453 seconds, throughput 944977.280384
+213655	[1728267692]	2000000 OPS in 2.117781 seconds, throughput 944384.712111
+213655	[1728267692]	2000000 OPS in 2.100506 seconds, throughput 952151.529203
+213655	[1728267694]	2000000 OPS in 2.133756 seconds, throughput 937314.294605
+213655	[1728267694]	2000000 OPS in 2.143920 seconds, throughput 932870.629501
+213655	[1728267694]	2000000 OPS in 2.145578 seconds, throughput 932149.751722
+213655	[1728267694]	2000000 OPS in 2.137821 seconds, throughput 935532.020688
+213655	[1728267696]	2000000 OPS in 2.104673 seconds, throughput 950266.383424
+213655	[1728267696]	2000000 OPS in 2.114599 seconds, throughput 945805.800532
+213655	[1728267696]	2000000 OPS in 2.117719 seconds, throughput 944412.360658
+213655	[1728267697]	2000000 OPS in 2.101615 seconds, throughput 951649.088915
+213655	[1728267698]	2000000 OPS in 2.119378 seconds, throughput 943673.096541
+213655	[1728267698]	2000000 OPS in 2.129379 seconds, throughput 939240.971194
+213655	[1728267699]	2000000 OPS in 2.129418 seconds, throughput 939223.769124
+213655	[1728267699]	2000000 OPS in 2.113340 seconds, throughput 946369.254356
+213655	[1728267700]	2000000 OPS in 2.120078 seconds, throughput 943361.517831
+213655	[1728267701]	2000000 OPS in 2.134198 seconds, throughput 937120.173480
+213655	[1728267701]	2000000 OPS in 2.142201 seconds, throughput 933619.207535
+213655	[1728267701]	2000000 OPS in 2.120730 seconds, throughput 943071.489534
+213655	[1728267703]	2000000 OPS in 2.115745 seconds, throughput 945293.501816
+213655	[1728267703]	2000000 OPS in 2.126895 seconds, throughput 940337.910428
+213655	[1728267703]	2000000 OPS in 2.125770 seconds, throughput 940835.556057
+213655	[1728267703]	2000000 OPS in 2.107176 seconds, throughput 949137.613564
+213655	[1728267705]	2000000 OPS in 2.107092 seconds, throughput 949175.451285
+213655	[1728267705]	2000000 OPS in 2.119814 seconds, throughput 943479.003347
+213655	[1728267705]	2000000 OPS in 2.122696 seconds, throughput 942198.034952
+213655	[1728267705]	2000000 OPS in 2.107590 seconds, throughput 948951.171717
+213655	[1728267707]	2000000 OPS in 2.137285 seconds, throughput 935766.638516
+213655	[1728267707]	2000000 OPS in 2.147713 seconds, throughput 931223.119663
+213655	[1728267707]	2000000 OPS in 2.147673 seconds, throughput 931240.463516
+213655	[1728267707]	2000000 OPS in 2.130421 seconds, throughput 938781.583546
+213655	[1728267709]	2000000 OPS in 2.111551 seconds, throughput 947171.060514
+213655	[1728267709]	2000000 OPS in 2.123884 seconds, throughput 941671.014048
+213655	[1728267709]	2000000 OPS in 2.126221 seconds, throughput 940635.992213
+213655	[1728267709]	2000000 OPS in 2.110667 seconds, throughput 947567.759386
+213655	[1728267711]	2000000 OPS in 2.110686 seconds, throughput 947559.229559
+213655	[1728267711]	2000000 OPS in 2.120240 seconds, throughput 943289.438931
+213655	[1728267711]	2000000 OPS in 2.121768 seconds, throughput 942610.125141
+213655	[1728267711]	2000000 OPS in 2.103981 seconds, throughput 950578.926331
+213655	[1728267713]	2000000 OPS in 2.126663 seconds, throughput 940440.492922
+213655	[1728267713]	2000000 OPS in 2.148984 seconds, throughput 930672.354936
+213655	[1728267713]	2000000 OPS in 2.126411 seconds, throughput 940551.944097
+213655	[1728267713]	2000000 OPS in 2.144073 seconds, throughput 932804.060310
+213655	[1728267715]	2000000 OPS in 2.111387 seconds, throughput 947244.631136
+213655	[1728267715]	2000000 OPS in 2.118701 seconds, throughput 943974.633514
+213655	[1728267716]	2000000 OPS in 2.100585 seconds, throughput 952115.720145
+213655	[1728267716]	2000000 OPS in 2.116577 seconds, throughput 944921.918740
+213655	[1728267717]	2000000 OPS in 2.118472 seconds, throughput 944076.674131
+213655	[1728267718]	2000000 OPS in 2.130862 seconds, throughput 938587.294719
+213655	[1728267718]	2000000 OPS in 2.114234 seconds, throughput 945969.083838
+213655	[1728267718]	2000000 OPS in 2.131237 seconds, throughput 938422.146387
+213655	[1728267720]	2000000 OPS in 2.106347 seconds, throughput 949511.167913
+213655	[1728267720]	2000000 OPS in 2.118053 seconds, throughput 944263.434390
+213655	[1728267720]	2000000 OPS in 2.104150 seconds, throughput 950502.578238
+213655	[1728267720]	2000000 OPS in 2.118759 seconds, throughput 943948.792666
+213655	[1728267722]	2000000 OPS in 2.119652 seconds, throughput 943551.111220
+213655	[1728267722]	2000000 OPS in 2.129239 seconds, throughput 939302.727406
+213655	[1728267722]	2000000 OPS in 2.113259 seconds, throughput 946405.528144
+213655	[1728267722]	2000000 OPS in 2.128443 seconds, throughput 939654.009997
+213655	[1728267724]	2000000 OPS in 2.122626 seconds, throughput 942229.106776
+213655	[1728267724]	2000000 OPS in 2.133120 seconds, throughput 937593.759376
+213655	[1728267724]	2000000 OPS in 2.119172 seconds, throughput 943764.828905
+213655	[1728267724]	2000000 OPS in 2.136792 seconds, throughput 935982.538310
+213655	[1728267726]	2000000 OPS in 2.117042 seconds, throughput 944714.370334
+213655	[1728267726]	2000000 OPS in 2.126019 seconds, throughput 940725.365107
+213655	[1728267726]	2000000 OPS in 2.109206 seconds, throughput 948224.118460
+213655	[1728267726]	2000000 OPS in 2.123799 seconds, throughput 941708.702189
+213655	[1728267728]	2000000 OPS in 2.108744 seconds, throughput 948431.862758
+213655	[1728267728]	2000000 OPS in 2.121665 seconds, throughput 942655.885826
+213655	[1728267728]	2000000 OPS in 2.106394 seconds, throughput 949489.981456
+213655	[1728267728]	2000000 OPS in 2.122700 seconds, throughput 942196.259481
+213655	[1728267730]	2000000 OPS in 2.129974 seconds, throughput 938978.597861
+213655	[1728267730]	2000000 OPS in 2.139217 seconds, throughput 934921.515676
+213655	[1728267730]	2000000 OPS in 2.121894 seconds, throughput 942554.152092
+213655	[1728267731]	2000000 OPS in 2.135158 seconds, throughput 936698.829782
+213655	[1728267732]	2000000 OPS in 2.114096 seconds, throughput 946030.833037
+213655	[1728267732]	2000000 OPS in 2.125044 seconds, throughput 941156.983102
+213655	[1728267732]	2000000 OPS in 2.112727 seconds, throughput 946643.839928
+213655	[1728267733]	2000000 OPS in 2.127512 seconds, throughput 940065.202922
+213655	[1728267734]	2000000 OPS in 2.109763 seconds, throughput 947973.777149
+213655	[1728267735]	2000000 OPS in 2.103661 seconds, throughput 950723.524370
+213655	[1728267735]	2000000 OPS in 2.118496 seconds, throughput 944065.978883
+213655	[1728267735]	2000000 OPS in 2.117658 seconds, throughput 944439.564840
+213655	[1728267736]	2000000 OPS in 2.116411 seconds, throughput 944996.033379
+213655	[1728267737]	2000000 OPS in 2.120750 seconds, throughput 943062.595780
+213655	[1728267737]	2000000 OPS in 2.140124 seconds, throughput 934525.289189
+213655	[1728267737]	2000000 OPS in 2.144040 seconds, throughput 932818.417567
+213655	[1728267739]	2000000 OPS in 2.123117 seconds, throughput 942011.203339
+213655	[1728267739]	2000000 OPS in 2.108626 seconds, throughput 948484.937585
+213655	[1728267739]	2000000 OPS in 2.121008 seconds, throughput 942947.881385
+213655	[1728267739]	2000000 OPS in 2.119309 seconds, throughput 943703.820443
+213655	[1728267741]	2000000 OPS in 2.116567 seconds, throughput 944926.383148
+213655	[1728267741]	2000000 OPS in 2.115978 seconds, throughput 945189.411232
+213655	[1728267741]	2000000 OPS in 2.129634 seconds, throughput 939128.507528
+213655	[1728267741]	2000000 OPS in 2.130394 seconds, throughput 938793.481394
+213655	[1728267743]	2000000 OPS in 2.104174 seconds, throughput 950491.736900
+213655	[1728267743]	2000000 OPS in 2.098458 seconds, throughput 953080.785987
+213655	[1728267743]	2000000 OPS in 2.114967 seconds, throughput 945641.232227
+213655	[1728267743]	2000000 OPS in 2.117615 seconds, throughput 944458.742500
+213655	[1728267745]	2000000 OPS in 2.134664 seconds, throughput 936915.598895
+213655	[1728267745]	2000000 OPS in 2.129247 seconds, throughput 939299.198261
+213655	[1728267745]	2000000 OPS in 2.145969 seconds, throughput 931979.912105
+213655	[1728267745]	2000000 OPS in 2.144054 seconds, throughput 932812.326555
+213655	[1728267747]	2000000 OPS in 2.104587 seconds, throughput 950305.214277
+213655	[1728267747]	2000000 OPS in 2.101186 seconds, throughput 951843.387496
+213655	[1728267747]	2000000 OPS in 2.119729 seconds, throughput 943516.836350
+213655	[1728267748]	2000000 OPS in 2.120051 seconds, throughput 943373.532052
+213655	[1728267749]	2000000 OPS in 2.116811 seconds, throughput 944817.463628
+213655	[1728267749]	2000000 OPS in 2.111493 seconds, throughput 947197.078086
+213655	[1728267749]	2000000 OPS in 2.124158 seconds, throughput 941549.545749
+213655	[1728267750]	2000000 OPS in 2.120127 seconds, throughput 943339.715027
+213655	[1728267751]	2000000 OPS in 2.121605 seconds, throughput 942682.544583
+213655	[1728267751]	2000000 OPS in 2.121178 seconds, throughput 942872.309632
+213655	[1728267752]	2000000 OPS in 2.137156 seconds, throughput 935823.121943
+213655	[1728267752]	2000000 OPS in 2.139537 seconds, throughput 934781.684075
+213655	[1728267753]	2000000 OPS in 2.116599 seconds, throughput 944912.097190
+213655	[1728267754]	2000000 OPS in 2.110557 seconds, throughput 947617.145616
+213655	[1728267754]	2000000 OPS in 2.123936 seconds, throughput 941647.959261
+213655	[1728267754]	2000000 OPS in 2.122431 seconds, throughput 942315.674809
+213655	[1728267755]	2000000 OPS in 2.110499 seconds, throughput 947643.187701
+213655	[1728267756]	2000000 OPS in 2.107379 seconds, throughput 949046.184858
+213655	[1728267756]	2000000 OPS in 2.127013 seconds, throughput 940285.743435
+213655	[1728267756]	2000000 OPS in 2.129321 seconds, throughput 939266.554925
+213655	[1728267758]	2000000 OPS in 2.121308 seconds, throughput 942814.527640
+213655	[1728267758]	2000000 OPS in 2.118962 seconds, throughput 943858.360839
+213655	[1728267758]	2000000 OPS in 2.131020 seconds, throughput 938517.705137
+213655	[1728267758]	2000000 OPS in 2.133262 seconds, throughput 937531.348704
+213655	[1728267760]	2000000 OPS in 2.118147 seconds, throughput 944221.529478
+213655	[1728267760]	2000000 OPS in 2.112657 seconds, throughput 946675.205677
+213655	[1728267760]	2000000 OPS in 2.127577 seconds, throughput 940036.482816
+213655	[1728267760]	2000000 OPS in 2.130172 seconds, throughput 938891.319574
+213655	[1728267762]	2000000 OPS in 2.109541 seconds, throughput 948073.538272
+213655	[1728267762]	2000000 OPS in 2.101349 seconds, throughput 951769.553749
+213655	[1728267762]	2000000 OPS in 2.115280 seconds, throughput 945501.304792
+213655	[1728267762]	2000000 OPS in 2.116521 seconds, throughput 944946.919969
+213655	[1728267764]	2000000 OPS in 2.117912 seconds, throughput 944326.298732
+213655	[1728267764]	2000000 OPS in 2.113664 seconds, throughput 946224.187004
+213655	[1728267764]	2000000 OPS in 2.130111 seconds, throughput 938918.206610
+213655	[1728267765]	2000000 OPS in 2.140167 seconds, throughput 934506.512810
+213655	[1728267766]	2000000 OPS in 2.120874 seconds, throughput 943007.458246
+213655	[1728267766]	2000000 OPS in 2.114481 seconds, throughput 945858.581846
+213655	[1728267767]	2000000 OPS in 2.129797 seconds, throughput 939056.633097
+213655	[1728267767]	2000000 OPS in 2.122865 seconds, throughput 942123.027135
+213655	[1728267768]	2000000 OPS in 2.118558 seconds, throughput 944038.350614
+213655	[1728267768]	2000000 OPS in 2.113270 seconds, throughput 946400.601911
+213655	[1728267769]	2000000 OPS in 2.127688 seconds, throughput 939987.441768
+213655	[1728267769]	2000000 OPS in 2.127664 seconds, throughput 939998.044804
+213655	[1728267770]	2000000 OPS in 2.103861 seconds, throughput 950633.145441
+213655	[1728267770]	2000000 OPS in 2.101863 seconds, throughput 951536.803303
+213655	[1728267771]	2000000 OPS in 2.119476 seconds, throughput 943629.463131
+213655	[1728267771]	2000000 OPS in 2.122695 seconds, throughput 942198.478821
+213655	[1728267772]	2000000 OPS in 2.133758 seconds, throughput 937313.416048
+213655	[1728267773]	2000000 OPS in 2.128155 seconds, throughput 939781.171954
+213655	[1728267773]	2000000 OPS in 2.140003 seconds, throughput 934578.129096
+213655	[1728267773]	2000000 OPS in 2.138069 seconds, throughput 935423.505977
+213655	[1728267775]	2000000 OPS in 2.107694 seconds, throughput 948904.347595
+213655	[1728267775]	2000000 OPS in 2.105804 seconds, throughput 949756.007682
+213655	[1728267775]	2000000 OPS in 2.123712 seconds, throughput 941747.280234
+213655	[1728267775]	2000000 OPS in 2.127797 seconds, throughput 939939.289321
+213655	[1728267777]	2000000 OPS in 2.114164 seconds, throughput 946000.404888
+213655	[1728267777]	2000000 OPS in 2.106875 seconds, throughput 949273.212697
+213655	[1728267777]	2000000 OPS in 2.120181 seconds, throughput 943315.688613
+213655	[1728267777]	2000000 OPS in 2.120296 seconds, throughput 943264.525330
+213655	[1728267779]	2000000 OPS in 2.111256 seconds, throughput 947303.406124
+213655	[1728267779]	2000000 OPS in 2.110332 seconds, throughput 947718.178941
+213655	[1728267779]	2000000 OPS in 2.127903 seconds, throughput 939892.466903
+213655	[1728267779]	2000000 OPS in 2.130450 seconds, throughput 938768.804713
+213655	[1728267781]	2000000 OPS in 2.110703 seconds, throughput 947551.597738
+213655	[1728267781]	2000000 OPS in 2.104099 seconds, throughput 950525.616903
+213655	[1728267781]	2000000 OPS in 2.115706 seconds, throughput 945310.926944
+213655	[1728267782]	2000000 OPS in 2.117193 seconds, throughput 944646.992504
+213655	[1728267783]	2000000 OPS in 2.116316 seconds, throughput 945038.453615
+213655	[1728267783]	2000000 OPS in 2.112714 seconds, throughput 946649.664839
+213655	[1728267784]	2000000 OPS in 2.130576 seconds, throughput 938713.286923
+213655	[1728267784]	2000000 OPS in 2.131575 seconds, throughput 938273.342481
+213655	[1728267785]	2000000 OPS in 2.118348 seconds, throughput 944131.936773
+213655	[1728267785]	2000000 OPS in 2.115040 seconds, throughput 945608.593691
+213655	[1728267786]	2000000 OPS in 2.131804 seconds, throughput 938172.552449
+213655	[1728267786]	2000000 OPS in 2.131280 seconds, throughput 938403.213093
+213655	[1728267787]	2000000 OPS in 2.121063 seconds, throughput 942923.430374
+213655	[1728267787]	2000000 OPS in 2.115929 seconds, throughput 945211.299623
+213655	[1728267788]	2000000 OPS in 2.128971 seconds, throughput 939420.969097
+213655	[1728267788]	2000000 OPS in 2.127787 seconds, throughput 939943.706771
+213655	[1728267789]	2000000 OPS in 2.103613 seconds, throughput 950745.217870
+213655	[1728267789]	2000000 OPS in 2.100311 seconds, throughput 952239.930182
+213655	[1728267790]	2000000 OPS in 2.116722 seconds, throughput 944857.189560
+213655	[1728267790]	2000000 OPS in 2.120324 seconds, throughput 943252.069023
+213655	[1728267791]	2000000 OPS in 2.120755 seconds, throughput 943060.372367
+213655	[1728267792]	2000000 OPS in 2.114868 seconds, throughput 945685.499048
+213655	[1728267792]	2000000 OPS in 2.147585 seconds, throughput 931278.622266
+213655	[1728267792]	2000000 OPS in 2.148112 seconds, throughput 931050.150085
+213655	[1728267794]	2000000 OPS in 2.129559 seconds, throughput 939161.582281
+213655	[1728267794]	2000000 OPS in 2.127344 seconds, throughput 940139.441482
+213655	[1728267794]	2000000 OPS in 2.123830 seconds, throughput 941694.956753
+213655	[1728267794]	2000000 OPS in 2.126047 seconds, throughput 940712.975771
+213655	[1728267796]	2000000 OPS in 2.116214 seconds, throughput 945084.003792
+213655	[1728267796]	2000000 OPS in 2.110531 seconds, throughput 947628.819477
+213655	[1728267796]	2000000 OPS in 2.121667 seconds, throughput 942654.997226
+213655	[1728267796]	2000000 OPS in 2.121730 seconds, throughput 942627.007206
+213655	[1728267798]	2000000 OPS in 2.108150 seconds, throughput 948699.096364
+213655	[1728267798]	2000000 OPS in 2.106562 seconds, throughput 949414.258873
+213655	[1728267798]	2000000 OPS in 2.126560 seconds, throughput 940486.043187
+213655	[1728267799]	2000000 OPS in 2.129765 seconds, throughput 939070.742547
+213655	[1728267800]	2000000 OPS in 2.127462 seconds, throughput 940087.296506
+213655	[1728267800]	2000000 OPS in 2.122457 seconds, throughput 942304.131485
+213655	[1728267801]	2000000 OPS in 2.140419 seconds, throughput 934396.489659
+213655	[1728267801]	2000000 OPS in 2.130853 seconds, throughput 938591.258993
+213655	[1728267802]	2000000 OPS in 2.110863 seconds, throughput 947479.774860
+213655	[1728267802]	2000000 OPS in 2.111486 seconds, throughput 947200.218235
+213655	[1728267803]	2000000 OPS in 2.128655 seconds, throughput 939560.426654
+213655	[1728267803]	2000000 OPS in 2.130674 seconds, throughput 938670.110960
+213655	[1728267804]	2000000 OPS in 2.110436 seconds, throughput 947671.476415
+213655	[1728267804]	2000000 OPS in 2.105595 seconds, throughput 949850.279850
+213655	[1728267805]	2000000 OPS in 2.116301 seconds, throughput 945045.151895
+213655	[1728267805]	2000000 OPS in 2.115188 seconds, throughput 945542.429325
+213655	[1728267806]	2000000 OPS in 2.131122 seconds, throughput 938472.785697
+213655	[1728267806]	2000000 OPS in 2.128520 seconds, throughput 939620.017665
+213655	[1728267807]	2000000 OPS in 2.144631 seconds, throughput 932561.359040
+213655	[1728267807]	2000000 OPS in 2.145087 seconds, throughput 932363.116275
+213655	[1728267808]	2000000 OPS in 2.107624 seconds, throughput 948935.863323
+213655	[1728267809]	2000000 OPS in 2.101278 seconds, throughput 951801.713053
+213655	[1728267809]	2000000 OPS in 2.117377 seconds, throughput 944564.902707
+213655	[1728267809]	2000000 OPS in 2.120320 seconds, throughput 943253.848476
+213655	[1728267811]	2000000 OPS in 2.118873 seconds, throughput 943898.006157
+213655	[1728267811]	2000000 OPS in 2.112790 seconds, throughput 946615.612531
+213655	[1728267811]	2000000 OPS in 2.126198 seconds, throughput 940646.167478
+213655	[1728267811]	2000000 OPS in 2.129158 seconds, throughput 939338.461495
+213655	[1728267813]	2000000 OPS in 2.117215 seconds, throughput 944637.176668
+213655	[1728267813]	2000000 OPS in 2.113028 seconds, throughput 946508.990889
+213655	[1728267813]	2000000 OPS in 2.141665 seconds, throughput 933852.866812
+213655	[1728267814]	2000000 OPS in 2.136158 seconds, throughput 936260.332803
+213655	[1728267815]	2000000 OPS in 2.118985 seconds, throughput 943848.115961
+213655	[1728267815]	2000000 OPS in 2.113895 seconds, throughput 946120.786510
+213655	[1728267815]	2000000 OPS in 2.125975 seconds, throughput 940744.834723
+213655	[1728267816]	2000000 OPS in 2.126173 seconds, throughput 940657.227798
+213655	[1728267817]	2000000 OPS in 2.103536 seconds, throughput 950780.019928
+213655	[1728267817]	2000000 OPS in 2.103368 seconds, throughput 950855.960536
+213655	[1728267818]	2000000 OPS in 2.119886 seconds, throughput 943446.958940
+213655	[1728267818]	2000000 OPS in 2.126329 seconds, throughput 940588.215652
+213655	[1728267819]	2000000 OPS in 2.118594 seconds, throughput 944022.309135
+213655	[1728267819]	2000000 OPS in 2.115915 seconds, throughput 945217.553635
+213655	[1728267820]	2000000 OPS in 2.135654 seconds, throughput 936481.283953
+213655	[1728267820]	2000000 OPS in 2.136776 seconds, throughput 935989.546869
+213655	[1728267821]	2000000 OPS in 2.122251 seconds, throughput 942395.597882
+213655	[1728267821]	2000000 OPS in 2.115792 seconds, throughput 945272.503157
+213655	[1728267822]	2000000 OPS in 2.126988 seconds, throughput 940296.795280
+213655	[1728267822]	2000000 OPS in 2.129559 seconds, throughput 939161.582281
+213655	[1728267823]	2000000 OPS in 2.115686 seconds, throughput 945319.863155
+213655	[1728267823]	2000000 OPS in 2.111048 seconds, throughput 947396.743229
+213655	[1728267824]	2000000 OPS in 2.118006 seconds, throughput 944284.388241
+213655	[1728267824]	2000000 OPS in 2.118227 seconds, throughput 944185.868653
+213655	[1728267825]	2000000 OPS in 2.109886 seconds, throughput 947918.513133
+213655	[1728267825]	2000000 OPS in 2.106342 seconds, throughput 949513.421847
+213655	[1728267826]	2000000 OPS in 2.149068 seconds, throughput 930635.978015
+213655	[1728267826]	2000000 OPS in 2.153449 seconds, throughput 928742.682088
+213655	[1728267827]	2000000 OPS in 2.134717 seconds, throughput 936892.337485
+213655	[1728267828]	2000000 OPS in 2.127358 seconds, throughput 940133.254487
+213655	[1728267828]	2000000 OPS in 2.116571 seconds, throughput 944924.597379
+213655	[1728267828]	2000000 OPS in 2.118011 seconds, throughput 944282.159063
+213655	[1728267830]	2000000 OPS in 2.114278 seconds, throughput 945949.397383
+213655	[1728267830]	2000000 OPS in 2.111514 seconds, throughput 947187.657766
+213655	[1728267830]	2000000 OPS in 2.128867 seconds, throughput 939466.861951
+213655	[1728267831]	2000000 OPS in 2.129965 seconds, throughput 938982.565441
+213655	[1728267832]	2000000 OPS in 2.108337 seconds, throughput 948614.951025
+213655	[1728267832]	2000000 OPS in 2.103222 seconds, throughput 950921.966393
+213655	[1728267832]	2000000 OPS in 2.117570 seconds, throughput 944478.812979
+213655	[1728267833]	2000000 OPS in 2.119558 seconds, throughput 943592.956645
+213655	[1728267834]	2000000 OPS in 2.133349 seconds, throughput 937493.115285
+213655	[1728267834]	2000000 OPS in 2.128885 seconds, throughput 939458.918636
+213655	[1728267835]	2000000 OPS in 2.145501 seconds, throughput 932183.205694
+213655	[1728267835]	2000000 OPS in 2.142241 seconds, throughput 933601.774964
+213655	[1728267836]	2000000 OPS in 2.105134 seconds, throughput 950058.286076
+213655	[1728267836]	2000000 OPS in 2.100102 seconds, throughput 952334.696124
+213655	[1728267837]	2000000 OPS in 2.122356 seconds, throughput 942348.974442
+213655	[1728267837]	2000000 OPS in 2.124212 seconds, throughput 941525.610438
+213655	[1728267838]	2000000 OPS in 2.116511 seconds, throughput 944951.384614
+213655	[1728267838]	2000000 OPS in 2.114476 seconds, throughput 945860.818472
+213655	[1728267839]	2000000 OPS in 2.123593 seconds, throughput 941800.053023
+213655	[1728267839]	2000000 OPS in 2.123494 seconds, throughput 941843.960944
+213655	[1728267840]	2000000 OPS in 2.107074 seconds, throughput 949183.559761
+213655	[1728267840]	2000000 OPS in 2.100765 seconds, throughput 952034.139944
+213655	[1728267841]	2000000 OPS in 2.125589 seconds, throughput 940915.670903
+213655	[1728267841]	2000000 OPS in 2.128649 seconds, throughput 939563.074983
+213655	[1728267842]	2000000 OPS in 2.115846 seconds, throughput 945248.378190
+213655	[1728267842]	2000000 OPS in 2.112579 seconds, throughput 946710.158531
+213655	[1728267843]	2000000 OPS in 2.120357 seconds, throughput 943237.388798
+213655	[1728267843]	2000000 OPS in 2.118145 seconds, throughput 944222.421033
+213655	[1728267844]	2000000 OPS in 2.107394 seconds, throughput 949039.429741
+213655	[1728267844]	2000000 OPS in 2.104972 seconds, throughput 950131.403173
+213655	[1728267845]	2000000 OPS in 2.128696 seconds, throughput 939542.330140
+213655	[1728267845]	2000000 OPS in 2.128451 seconds, throughput 939650.478212
+213655	[1728267846]	2000000 OPS in 2.125417 seconds, throughput 940991.814783
+213655	[1728267847]	2000000 OPS in 2.122953 seconds, throughput 942083.974539
+213655	[1728267847]	2000000 OPS in 2.139759 seconds, throughput 934684.700473
+213655	[1728267848]	2000000 OPS in 2.130920 seconds, throughput 938561.747977
+213655	[1728267849]	2000000 OPS in 2.112270 seconds, throughput 946848.650977
+213655	[1728267849]	2000000 OPS in 2.109699 seconds, throughput 948002.534959
+213655	[1728267850]	2000000 OPS in 2.130872 seconds, throughput 938582.890009
+213655	[1728267850]	2000000 OPS in 2.131151 seconds, throughput 938460.015269
+213655	[1728267851]	2000000 OPS in 2.111163 seconds, throughput 947345.136306
+213655	[1728267851]	2000000 OPS in 2.106098 seconds, throughput 949623.426830
+213655	[1728267852]	2000000 OPS in 2.114614 seconds, throughput 945799.091465
+213655	[1728267852]	2000000 OPS in 2.118546 seconds, throughput 944043.697895
+213655	[1728267853]	2000000 OPS in 2.115062 seconds, throughput 945598.757861
+213655	[1728267853]	2000000 OPS in 2.112121 seconds, throughput 946915.446606
+213655	[1728267854]	2000000 OPS in 2.150899 seconds, throughput 929843.753705
+213655	[1728267854]	2000000 OPS in 2.145266 seconds, throughput 932285.320329
+213655	[1728267855]	2000000 OPS in 2.120676 seconds, throughput 943095.503509
+213655	[1728267855]	2000000 OPS in 2.115821 seconds, throughput 945259.547003
+213655	[1728267856]	2000000 OPS in 2.118318 seconds, throughput 944145.307739
+213655	[1728267856]	2000000 OPS in 2.122896 seconds, throughput 942109.269602
+213655	[1728267857]	2000000 OPS in 2.116372 seconds, throughput 945013.447541
+213655	[1728267857]	2000000 OPS in 2.113542 seconds, throughput 946278.805910
+213655	[1728267858]	2000000 OPS in 2.126136 seconds, throughput 940673.597550
+213655	[1728267858]	2000000 OPS in 2.125041 seconds, throughput 941158.311769
+213655	[1728267859]	2000000 OPS in 2.105022 seconds, throughput 950108.834967
+213655	[1728267859]	2000000 OPS in 2.100665 seconds, throughput 952079.460552
+213655	[1728267860]	2000000 OPS in 2.143878 seconds, throughput 932888.905059
+213655	[1728267860]	2000000 OPS in 2.144934 seconds, throughput 932429.622543
+213655	[1728267861]	2000000 OPS in 2.141459 seconds, throughput 933942.699814
+213655	[1728267861]	2000000 OPS in 2.137612 seconds, throughput 935623.490138
+213655	[1728267862]	2000000 OPS in 2.122611 seconds, throughput 942235.765291
+213655	[1728267862]	2000000 OPS in 2.110243 seconds, throughput 947758.149180
+213655	[1728267863]	2000000 OPS in 2.104764 seconds, throughput 950225.298418
+213655	[1728267863]	2000000 OPS in 2.101465 seconds, throughput 951717.016462
+213655	[1728267864]	2000000 OPS in 2.126800 seconds, throughput 940379.913485
+213655	[1728267865]	2000000 OPS in 2.127843 seconds, throughput 939918.969586
+213655	[1728267866]	2000000 OPS in 2.112908 seconds, throughput 946562.746698
+213655	[1728267866]	2000000 OPS in 2.117039 seconds, throughput 944715.709063
+213655	[1728267867]	2000000 OPS in 2.124701 seconds, throughput 941308.918290
+213655	[1728267867]	2000000 OPS in 2.128901 seconds, throughput 939451.858024
+213655	[1728267868]	2000000 OPS in 2.123206 seconds, throughput 941971.716357
+213655	[1728267868]	2000000 OPS in 2.127208 seconds, throughput 940199.547952
+213655	[1728267869]	2000000 OPS in 2.136725 seconds, throughput 936011.887351
+213655	[1728267869]	2000000 OPS in 2.133339 seconds, throughput 937497.509772
+213655	[1728267870]	2000000 OPS in 2.112603 seconds, throughput 946699.403532
+213655	[1728267870]	2000000 OPS in 2.109670 seconds, throughput 948015.566416
+213655	[1728267871]	2000000 OPS in 2.115092 seconds, throughput 945585.345697
+213655	[1728267871]	2000000 OPS in 2.115887 seconds, throughput 945230.061908
+213655	[1728267872]	2000000 OPS in 2.107516 seconds, throughput 948984.491695
+213655	[1728267872]	2000000 OPS in 2.111195 seconds, throughput 947330.777119
+213655	[1728267873]	2000000 OPS in 2.129605 seconds, throughput 939141.296156
+213655	[1728267873]	2000000 OPS in 2.128518 seconds, throughput 939620.900551
+213655	[1728267874]	2000000 OPS in 2.122495 seconds, throughput 942287.260983
+213655	[1728267874]	2000000 OPS in 2.125017 seconds, throughput 941168.941237
+213655	[1728267875]	2000000 OPS in 2.129065 seconds, throughput 939379.492876
+213655	[1728267875]	2000000 OPS in 2.133392 seconds, throughput 937474.219459
+213655	[1728267876]	2000000 OPS in 2.111874 seconds, throughput 947026.195692
+213655	[1728267876]	2000000 OPS in 2.115734 seconds, throughput 945298.416531
+213655	[1728267877]	2000000 OPS in 2.126482 seconds, throughput 940520.540498
+213655	[1728267877]	2000000 OPS in 2.127022 seconds, throughput 940281.764834
+213655	[1728267878]	2000000 OPS in 2.102514 seconds, throughput 951242.179600
+213655	[1728267878]	2000000 OPS in 2.106776 seconds, throughput 949317.820214
+213655	[1728267879]	2000000 OPS in 2.118663 seconds, throughput 943991.564491
+213655	[1728267879]	2000000 OPS in 2.121793 seconds, throughput 942599.018849
+213655	[1728267880]	2000000 OPS in 2.135157 seconds, throughput 936699.268485
+213655	[1728267880]	2000000 OPS in 2.139675 seconds, throughput 934721.394604
+213655	[1728267881]	2000000 OPS in 2.147552 seconds, throughput 931292.932604
+213655	[1728267882]	2000000 OPS in 2.147760 seconds, throughput 931202.741461
+213655	[1728267882]	2000000 OPS in 2.101724 seconds, throughput 951599.734313
+213655	[1728267882]	2000000 OPS in 2.107330 seconds, throughput 949068.252243
+213655	[1728267884]	2000000 OPS in 2.124818 seconds, throughput 941257.086489
+213655	[1728267884]	2000000 OPS in 2.127637 seconds, throughput 940009.973506
+213655	[1728267885]	2000000 OPS in 2.113284 seconds, throughput 946394.332234
+213655	[1728267885]	2000000 OPS in 2.119040 seconds, throughput 943823.618242
+213655	[1728267886]	2000000 OPS in 2.118929 seconds, throughput 943873.060400
+213655	[1728267886]	2000000 OPS in 2.119711 seconds, throughput 943524.848435
+213655	[1728267887]	2000000 OPS in 2.105047 seconds, throughput 950097.551266
+213655	[1728267887]	2000000 OPS in 2.114615 seconds, throughput 945798.644198
+213655	[1728267888]	2000000 OPS in 2.142948 seconds, throughput 933293.761678
+213655	[1728267888]	2000000 OPS in 2.153537 seconds, throughput 928704.730868
+213655	[1728267889]	2000000 OPS in 2.122690 seconds, throughput 942200.698171
+213655	[1728267889]	2000000 OPS in 2.123857 seconds, throughput 941682.985248
+213655	[1728267890]	2000000 OPS in 2.116765 seconds, throughput 944837.995715
+213655	[1728267890]	2000000 OPS in 2.116835 seconds, throughput 944806.751589
+213655	[1728267891]	2000000 OPS in 2.104763 seconds, throughput 950225.749883
+213655	[1728267891]	2000000 OPS in 2.109518 seconds, throughput 948083.875084
+213655	[1728267892]	2000000 OPS in 2.129703 seconds, throughput 939098.080812
+213655	[1728267892]	2000000 OPS in 2.131112 seconds, throughput 938477.189373
+213655	[1728267893]	2000000 OPS in 2.108711 seconds, throughput 948446.705120
+213655	[1728267893]	2000000 OPS in 2.112841 seconds, throughput 946592.763014
+213655	[1728267894]	2000000 OPS in 2.137253 seconds, throughput 935780.649273
+213655	[1728267894]	2000000 OPS in 2.140699 seconds, throughput 934274.272095
+213655	[1728267895]	2000000 OPS in 2.131171 seconds, throughput 938451.208279
+213655	[1728267895]	2000000 OPS in 2.135861 seconds, throughput 936390.523541
+213655	[1728267896]	2000000 OPS in 2.129711 seconds, throughput 939094.553205
+213655	[1728267897]	2000000 OPS in 2.130768 seconds, throughput 938628.701013
+213655	[1728267897]	2000000 OPS in 2.107674 seconds, throughput 948913.351875
+213655	[1728267897]	2000000 OPS in 2.108825 seconds, throughput 948395.433476
+213655	[1728267898]	2000000 OPS in 2.118462 seconds, throughput 944081.130556
+213655	[1728267899]	2000000 OPS in 2.121827 seconds, throughput 942583.914711
+213655	[1728267899]	2000000 OPS in 2.113892 seconds, throughput 946122.129229
+213655	[1728267899]	2000000 OPS in 2.112563 seconds, throughput 946717.328667
+213655	[1728267901]	2000000 OPS in 2.126590 seconds, throughput 940472.775664
+213655	[1728267901]	2000000 OPS in 2.125942 seconds, throughput 940759.437463
+213655	[1728267901]	2000000 OPS in 2.104277 seconds, throughput 950445.212299
+213655	[1728267902]	2000000 OPS in 2.101343 seconds, throughput 951772.271352
+213655	[1728267903]	2000000 OPS in 2.123477 seconds, throughput 941851.501099
+213655	[1728267903]	2000000 OPS in 2.126389 seconds, throughput 940561.675216
+213655	[1728267904]	2000000 OPS in 2.114528 seconds, throughput 945837.558074
+213655	[1728267904]	2000000 OPS in 2.114480 seconds, throughput 945859.029170
+213655	[1728267905]	2000000 OPS in 2.123599 seconds, throughput 941797.392069
+213655	[1728267905]	2000000 OPS in 2.122707 seconds, throughput 942193.152423
+213655	[1728267906]	2000000 OPS in 2.100518 seconds, throughput 952146.089679
+213655	[1728267906]	2000000 OPS in 2.100034 seconds, throughput 952365.533129
+213655	[1728267907]	2000000 OPS in 2.144337 seconds, throughput 932689.218159
+213655	[1728267907]	2000000 OPS in 2.150209 seconds, throughput 930142.139671
+213655	[1728267908]	2000000 OPS in 2.140301 seconds, throughput 934448.005210
+213655	[1728267908]	2000000 OPS in 2.136510 seconds, throughput 936106.079541
+213655	[1728267909]	2000000 OPS in 2.123675 seconds, throughput 941763.687947
+213655	[1728267909]	2000000 OPS in 2.119874 seconds, throughput 943452.299523
+213655	[1728267910]	2000000 OPS in 2.104085 seconds, throughput 950531.941438
+213655	[1728267910]	2000000 OPS in 2.103946 seconds, throughput 950594.739599
+213655	[1728267911]	2000000 OPS in 2.129293 seconds, throughput 939278.906191
+213655	[1728267911]	2000000 OPS in 2.130588 seconds, throughput 938707.999857
+213655	[1728267912]	2000000 OPS in 2.113268 seconds, throughput 946401.497586
+213655	[1728267912]	2000000 OPS in 2.113412 seconds, throughput 946337.013323
+213655	[1728267913]	2000000 OPS in 2.114802 seconds, throughput 945715.012564
+213655	[1728267914]	2000000 OPS in 2.116923 seconds, throughput 944767.476191
+213655	[1728267914]	2000000 OPS in 2.120700 seconds, throughput 943084.830481
+213655	[1728267914]	2000000 OPS in 2.120938 seconds, throughput 942979.002687
+213655	[1728267915]	2000000 OPS in 2.146492 seconds, throughput 931752.832063
+213655	[1728267916]	2000000 OPS in 2.152935 seconds, throughput 928964.413696
+213655	[1728267916]	2000000 OPS in 2.110646 seconds, throughput 947577.187269
+213655	[1728267916]	2000000 OPS in 2.108819 seconds, throughput 948398.131845
+213655	[1728267918]	2000000 OPS in 2.117536 seconds, throughput 944493.977906
+213655	[1728267918]	2000000 OPS in 2.120232 seconds, throughput 943292.998125
+213655	[1728267918]	2000000 OPS in 2.110090 seconds, throughput 947826.869944
+213655	[1728267918]	2000000 OPS in 2.110073 seconds, throughput 947834.506200
+213655	[1728267920]	2000000 OPS in 2.129437 seconds, throughput 939215.388856
+213655	[1728267920]	2000000 OPS in 2.126697 seconds, throughput 940425.457881
+213655	[1728267921]	2000000 OPS in 2.118235 seconds, throughput 944182.302719
+213655	[1728267921]	2000000 OPS in 2.118615 seconds, throughput 944012.951858
+213655	[1728267922]	2000000 OPS in 2.134962 seconds, throughput 936784.823336
+213655	[1728267922]	2000000 OPS in 2.138301 seconds, throughput 935322.015002
+213655	[1728267923]	2000000 OPS in 2.119296 seconds, throughput 943709.609229
+213655	[1728267923]	2000000 OPS in 2.117713 seconds, throughput 944415.036410
+213655	[1728267924]	2000000 OPS in 2.123343 seconds, throughput 941910.939495
+213655	[1728267924]	2000000 OPS in 2.122719 seconds, throughput 942187.826085
+213655	[1728267925]	2000000 OPS in 2.102617 seconds, throughput 951195.581506
+213655	[1728267925]	2000000 OPS in 2.102653 seconds, throughput 951179.295871
+213655	[1728267926]	2000000 OPS in 2.125832 seconds, throughput 940808.116540
+213655	[1728267926]	2000000 OPS in 2.127394 seconds, throughput 940117.345447
+213655	[1728267927]	2000000 OPS in 2.113361 seconds, throughput 946359.850494
+213655	[1728267927]	2000000 OPS in 2.115629 seconds, throughput 945345.332287
+213655	[1728267928]	2000000 OPS in 2.142401 seconds, throughput 933532.051189
+213655	[1728267928]	2000000 OPS in 2.141370 seconds, throughput 933981.516506
+213655	[1728267929]	2000000 OPS in 2.124906 seconds, throughput 941218.105648
+213655	[1728267929]	2000000 OPS in 2.124894 seconds, throughput 941223.421027
+213655	[1728267930]	2000000 OPS in 2.128663 seconds, throughput 939556.895572
+213655	[1728267931]	2000000 OPS in 2.130546 seconds, throughput 938726.504849
+213655	[1728267931]	2000000 OPS in 2.114529 seconds, throughput 945837.110770
+213655	[1728267931]	2000000 OPS in 2.114846 seconds, throughput 945695.336682
+213655	[1728267933]	2000000 OPS in 2.114285 seconds, throughput 945946.265522
+213655	[1728267933]	2000000 OPS in 2.116741 seconds, throughput 944848.708463
+213655	[1728267933]	2000000 OPS in 2.103795 seconds, throughput 950662.968588
+213655	[1728267933]	2000000 OPS in 2.104026 seconds, throughput 950558.595759
+213655	[1728267935]	2000000 OPS in 2.151599 seconds, throughput 929541.238865
+213655	[1728267935]	2000000 OPS in 2.152478 seconds, throughput 929161.645322
+213655	[1728267935]	2000000 OPS in 2.136046 seconds, throughput 936309.424048
+213655	[1728267935]	2000000 OPS in 2.138498 seconds, throughput 935235.852453
+213655	[1728267937]	2000000 OPS in 2.116924 seconds, throughput 944767.029898
+213655	[1728267937]	2000000 OPS in 2.116086 seconds, throughput 945141.171011
+213655	[1728267937]	2000000 OPS in 2.106352 seconds, throughput 949508.913990
+213655	[1728267937]	2000000 OPS in 2.109200 seconds, throughput 948226.815854
+213655	[1728267939]	2000000 OPS in 2.129207 seconds, throughput 939316.844252
+213655	[1728267939]	2000000 OPS in 2.128249 seconds, throughput 939739.663921
+213655	[1728267940]	2000000 OPS in 2.113156 seconds, throughput 946451.658089
+213655	[1728267940]	2000000 OPS in 2.111310 seconds, throughput 947279.177383
+213655	[1728267941]	2000000 OPS in 2.140469 seconds, throughput 934374.662749
+213655	[1728267941]	2000000 OPS in 2.141572 seconds, throughput 933893.420347
+213655	[1728267942]	2000000 OPS in 2.132833 seconds, throughput 937719.924626
+213655	[1728267942]	2000000 OPS in 2.135668 seconds, throughput 936475.145013
+213655	[1728267943]	2000000 OPS in 2.129688 seconds, throughput 939104.695148
+213655	[1728267943]	2000000 OPS in 2.124093 seconds, throughput 941578.358386
+213655	[1728267944]	2000000 OPS in 2.107843 seconds, throughput 948837.271087
+213655	[1728267944]	2000000 OPS in 2.108667 seconds, throughput 948466.495658
+213655	[1728267945]	2000000 OPS in 2.120671 seconds, throughput 943097.727087
+213655	[1728267946]	2000000 OPS in 2.123687 seconds, throughput 941758.366464
+213655	[1728267946]	2000000 OPS in 2.113592 seconds, throughput 946256.420350
+213655	[1728267946]	2000000 OPS in 2.114877 seconds, throughput 945681.474620
+213655	[1728267947]	2000000 OPS in 2.135485 seconds, throughput 936555.396081
+213655	[1728267948]	2000000 OPS in 2.134013 seconds, throughput 937201.413487
+213655	[1728267948]	2000000 OPS in 2.125673 seconds, throughput 940878.488836
+213655	[1728267948]	2000000 OPS in 2.126065 seconds, throughput 940705.011371
+213655	[1728267950]	2000000 OPS in 2.129690 seconds, throughput 939103.813231
+213655	[1728267950]	2000000 OPS in 2.127318 seconds, throughput 940150.931831
+213655	[1728267950]	2000000 OPS in 2.116900 seconds, throughput 944777.741036
+213655	[1728267950]	2000000 OPS in 2.118838 seconds, throughput 943913.597925
+213655	[1728267952]	2000000 OPS in 2.118988 seconds, throughput 943846.779689
+213655	[1728267952]	2000000 OPS in 2.115742 seconds, throughput 945294.842188
+213655	[1728267952]	2000000 OPS in 2.103937 seconds, throughput 950598.805953
+213655	[1728267952]	2000000 OPS in 2.105795 seconds, throughput 949760.066863
+213655	[1728267954]	2000000 OPS in 2.125821 seconds, throughput 940812.984724
+213655	[1728267954]	2000000 OPS in 2.127172 seconds, throughput 940215.459775
+213655	[1728267954]	2000000 OPS in 2.127536 seconds, throughput 940054.598371
+213655	[1728267954]	2000000 OPS in 2.130010 seconds, throughput 938962.727875
+213655	[1728267956]	2000000 OPS in 2.137919 seconds, throughput 935489.136866
+213655	[1728267956]	2000000 OPS in 2.129606 seconds, throughput 939140.855163
+213655	[1728267956]	2000000 OPS in 2.104020 seconds, throughput 950561.306451
+213655	[1728267957]	2000000 OPS in 2.106508 seconds, throughput 949438.596958
+213655	[1728267958]	2000000 OPS in 2.130516 seconds, throughput 938739.723147
+213655	[1728267958]	2000000 OPS in 2.128365 seconds, throughput 939688.446296
+213655	[1728267959]	2000000 OPS in 2.114880 seconds, throughput 945680.133152
+213655	[1728267959]	2000000 OPS in 2.116306 seconds, throughput 945042.919124
+213655	[1728267960]	2000000 OPS in 2.117832 seconds, throughput 944361.970166
+213655	[1728267960]	2000000 OPS in 2.115387 seconds, throughput 945453.479671
+213655	[1728267961]	2000000 OPS in 2.107860 seconds, throughput 948829.618665
+213655	[1728267961]	2000000 OPS in 2.107276 seconds, throughput 949092.572591
+213655	[1728267962]	2000000 OPS in 2.129964 seconds, throughput 938983.006286
+213655	[1728267963]	2000000 OPS in 2.127980 seconds, throughput 939858.457316
+213655	[1728267963]	2000000 OPS in 2.111683 seconds, throughput 947111.853436
+213655	[1728267963]	2000000 OPS in 2.111707 seconds, throughput 947101.089308
+213655	[1728267964]	2000000 OPS in 2.117273 seconds, throughput 944611.299535
+213655	[1728267965]	2000000 OPS in 2.119968 seconds, throughput 943410.466573
+213655	[1728267965]	2000000 OPS in 2.108650 seconds, throughput 948474.142224
+213655	[1728267965]	2000000 OPS in 2.110252 seconds, throughput 947754.107092
+213655	[1728267967]	2000000 OPS in 2.127191 seconds, throughput 940207.061801
+213655	[1728267967]	2000000 OPS in 2.123758 seconds, throughput 941726.882253
+213655	[1728267967]	2000000 OPS in 2.107850 seconds, throughput 948834.120075
+213655	[1728267967]	2000000 OPS in 2.111260 seconds, throughput 947301.611360
+213655	[1728267969]	2000000 OPS in 2.143263 seconds, throughput 933156.593475
+213655	[1728267969]	2000000 OPS in 2.145730 seconds, throughput 932083.719760
+213655	[1728267969]	2000000 OPS in 2.137190 seconds, throughput 935808.234177
+213655	[1728267969]	2000000 OPS in 2.138534 seconds, throughput 935220.108729
+213655	[1728267971]	2000000 OPS in 2.123911 seconds, throughput 941659.043152
+213655	[1728267971]	2000000 OPS in 2.121073 seconds, throughput 942918.984872
+213655	[1728267971]	2000000 OPS in 2.103961 seconds, throughput 950587.962419
+213655	[1728267971]	2000000 OPS in 2.104891 seconds, throughput 950167.965942
+213655	[1728267973]	2000000 OPS in 2.126610 seconds, throughput 940463.930857
+213655	[1728267973]	2000000 OPS in 2.126300 seconds, throughput 940601.044067
+213655	[1728267973]	2000000 OPS in 2.114029 seconds, throughput 946060.815627
+213655	[1728267973]	2000000 OPS in 2.117408 seconds, throughput 944551.073766
+213655	[1728267975]	2000000 OPS in 2.136811 seconds, throughput 935974.215782
+213655	[1728267975]	2000000 OPS in 2.125260 seconds, throughput 941061.328967
+213655	[1728267976]	2000000 OPS in 2.125485 seconds, throughput 940961.709916
+213655	[1728267976]	2000000 OPS in 2.118954 seconds, throughput 943861.924327
+213655	[1728267977]	2000000 OPS in 2.128863 seconds, throughput 939468.627150
+213655	[1728267977]	2000000 OPS in 2.126492 seconds, throughput 940516.117625
+213655	[1728267978]	2000000 OPS in 2.116955 seconds, throughput 944753.195037
+213655	[1728267978]	2000000 OPS in 2.119579 seconds, throughput 943583.607877
+213655	[1728267979]	2000000 OPS in 2.116172 seconds, throughput 945102.761023
+213655	[1728267980]	2000000 OPS in 2.115492 seconds, throughput 945406.553180
+213655	[1728267980]	2000000 OPS in 2.103210 seconds, throughput 950927.391939
+213655	[1728267980]	2000000 OPS in 2.104483 seconds, throughput 950352.176758
+213655	[1728267981]	2000000 OPS in 2.151950 seconds, throughput 929389.623365
+213655	[1728267982]	2000000 OPS in 2.151002 seconds, throughput 929799.228453
+213655	[1728267982]	2000000 OPS in 2.134705 seconds, throughput 936897.604119
+213655	[1728267982]	2000000 OPS in 2.137703 seconds, throughput 935583.661528
+213655	[1728267984]	2000000 OPS in 2.117355 seconds, throughput 944574.717041
+213655	[1728267984]	2000000 OPS in 2.118435 seconds, throughput 944093.163113
+213655	[1728267984]	2000000 OPS in 2.111401 seconds, throughput 947238.350271
+213655	[1728267984]	2000000 OPS in 2.106848 seconds, throughput 949285.377967
+213655	[1728267986]	2000000 OPS in 2.129476 seconds, throughput 939198.187723
+213655	[1728267986]	2000000 OPS in 2.125363 seconds, throughput 941015.722961
+213655	[1728267986]	2000000 OPS in 2.112109 seconds, throughput 946920.826529
+213655	[1728267986]	2000000 OPS in 2.113014 seconds, throughput 946515.262085
+213655	[1728267988]	2000000 OPS in 2.129559 seconds, throughput 939161.582281
+213655	[1728267988]	2000000 OPS in 2.140468 seconds, throughput 934375.099277
+213655	[1728267988]	2000000 OPS in 2.124793 seconds, throughput 941268.161181
+213655	[1728267988]	2000000 OPS in 2.127819 seconds, throughput 939929.571077
+213655	[1728267990]	2000000 OPS in 2.132305 seconds, throughput 937952.122234
+213655	[1728267990]	2000000 OPS in 2.122665 seconds, throughput 942211.795078
+213655	[1728267990]	2000000 OPS in 2.109269 seconds, throughput 948195.796743
+213655	[1728267990]	2000000 OPS in 2.107709 seconds, throughput 948897.594497
+213655	[1728267992]	2000000 OPS in 2.124904 seconds, throughput 941218.991540
+213655	[1728267992]	2000000 OPS in 2.125111 seconds, throughput 941127.310526
+213655	[1728267992]	2000000 OPS in 2.112030 seconds, throughput 946956.245887
+213655	[1728267993]	2000000 OPS in 2.115094 seconds, throughput 945584.451566
+213655	[1728267994]	2000000 OPS in 2.122048 seconds, throughput 942485.749615
+213655	[1728267994]	2000000 OPS in 2.116674 seconds, throughput 944878.616169
+213655	[1728267995]	2000000 OPS in 2.122216 seconds, throughput 942411.140054
+213655	[1728267995]	2000000 OPS in 2.122863 seconds, throughput 942123.914732
+213655	[1728267996]	2000000 OPS in 2.150879 seconds, throughput 929852.399879
+213655	[1728267997]	2000000 OPS in 2.151891 seconds, throughput 929415.105133
+213655	[1728267997]	2000000 OPS in 2.122781 seconds, throughput 942160.307634
+213655	[1728267997]	2000000 OPS in 2.119690 seconds, throughput 943534.196038
+213655	[1728267999]	2000000 OPS in 2.117463 seconds, throughput 944526.539543
+213655	[1728267999]	2000000 OPS in 2.114004 seconds, throughput 946072.003648
+213655	[1728267999]	2000000 OPS in 2.102289 seconds, throughput 951343.987435
+213655	[1728267999]	2000000 OPS in 2.103687 seconds, throughput 950711.774138
+213655	[1728268001]	2000000 OPS in 2.128643 seconds, throughput 939565.723327
+213655	[1728268001]	2000000 OPS in 2.122973 seconds, throughput 942075.099401
+213655	[1728268001]	2000000 OPS in 2.116305 seconds, throughput 945043.365677
+213655	[1728268001]	2000000 OPS in 2.116613 seconds, throughput 944905.847219
+213655	[1728268003]	2000000 OPS in 2.137922 seconds, throughput 935487.824158
+213655	[1728268003]	2000000 OPS in 2.129421 seconds, throughput 939222.445914
+213655	[1728268003]	2000000 OPS in 2.117327 seconds, throughput 944587.208306
+213655	[1728268003]	2000000 OPS in 2.121475 seconds, throughput 942740.310397
+213655	[1728268005]	2000000 OPS in 2.129827 seconds, throughput 939043.405873
+213655	[1728268005]	2000000 OPS in 2.127564 seconds, throughput 940042.226697
+213655	[1728268005]	2000000 OPS in 2.115176 seconds, throughput 945547.793659
+213655	[1728268005]	2000000 OPS in 2.118194 seconds, throughput 944200.578417
+213655	[1728268007]	2000000 OPS in 2.117198 seconds, throughput 944644.761614
+213655	[1728268007]	2000000 OPS in 2.118451 seconds, throughput 944086.032672
+213655	[1728268007]	2000000 OPS in 2.105748 seconds, throughput 949781.265375
+213655	[1728268007]	2000000 OPS in 2.108660 seconds, throughput 948469.644229
+213655	[1728268009]	2000000 OPS in 2.150035 seconds, throughput 930217.415065
+213655	[1728268009]	2000000 OPS in 2.147006 seconds, throughput 931529.767499
+213655	[1728268009]	2000000 OPS in 2.134116 seconds, throughput 937156.180826
+213655	[1728268009]	2000000 OPS in 2.136700 seconds, throughput 936022.838957
+213655	[1728268011]	2000000 OPS in 2.119258 seconds, throughput 943726.530701
+213655	[1728268011]	2000000 OPS in 2.120792 seconds, throughput 943043.919441
+213655	[1728268011]	2000000 OPS in 2.108692 seconds, throughput 948455.250933
+213655	[1728268012]	2000000 OPS in 2.111076 seconds, throughput 947384.177547
+213655	[1728268013]	2000000 OPS in 2.122558 seconds, throughput 942259.292797
+213655	[1728268014]	2000000 OPS in 2.122522 seconds, throughput 942275.274414
+213655	[1728268014]	2000000 OPS in 2.121798 seconds, throughput 942596.797622
+213655	[1728268014]	2000000 OPS in 2.110061 seconds, throughput 947839.896572
+213655	[1728268016]	2000000 OPS in 2.139263 seconds, throughput 934901.412309
+213655	[1728268016]	2000000 OPS in 2.126762 seconds, throughput 940396.715759
+213655	[1728268016]	2000000 OPS in 2.147462 seconds, throughput 931331.963034
+213655	[1728268016]	2000000 OPS in 2.129076 seconds, throughput 939374.639515
+213655	[1728268018]	2000000 OPS in 2.120685 seconds, throughput 943091.501095
+213655	[1728268018]	2000000 OPS in 2.104882 seconds, throughput 950172.028646
+213655	[1728268018]	2000000 OPS in 2.118141 seconds, throughput 944224.204149
+213655	[1728268018]	2000000 OPS in 2.106527 seconds, throughput 949430.033415
+213655	[1728268020]	2000000 OPS in 2.127687 seconds, throughput 939987.883556
+213655	[1728268020]	2000000 OPS in 2.113193 seconds, throughput 946435.086620
+213655	[1728268020]	2000000 OPS in 2.128176 seconds, throughput 939771.898565
+213655	[1728268020]	2000000 OPS in 2.115980 seconds, throughput 945188.517850
+213655	[1728268022]	2000000 OPS in 2.117057 seconds, throughput 944707.676742
+213655	[1728268022]	2000000 OPS in 2.114122 seconds, throughput 946019.198514
+213655	[1728268022]	2000000 OPS in 2.114632 seconds, throughput 945791.040711
+213655	[1728268022]	2000000 OPS in 2.106293 seconds, throughput 949535.510966
+213655	[1728268024]	2000000 OPS in 2.128871 seconds, throughput 939465.096758
+213655	[1728268024]	2000000 OPS in 2.115010 seconds, throughput 945622.006515
+213655	[1728268024]	2000000 OPS in 2.129360 seconds, throughput 939249.351918
+213655	[1728268024]	2000000 OPS in 2.117974 seconds, throughput 944298.655224
+213655	[1728268026]	2000000 OPS in 2.115987 seconds, throughput 945185.391026
+213655	[1728268026]	2000000 OPS in 2.102737 seconds, throughput 951141.298222
+213655	[1728268026]	2000000 OPS in 2.114924 seconds, throughput 945660.458721
+213655	[1728268026]	2000000 OPS in 2.104205 seconds, throughput 950477.733871
+213655	[1728268028]	2000000 OPS in 2.142694 seconds, throughput 933404.396521
+213655	[1728268028]	2000000 OPS in 2.135922 seconds, throughput 936363.781074
+213655	[1728268028]	2000000 OPS in 2.141266 seconds, throughput 934026.879426
+213655	[1728268028]	2000000 OPS in 2.130650 seconds, throughput 938680.684298
+213655	[1728268030]	2000000 OPS in 2.120922 seconds, throughput 942986.116415
+213655	[1728268031]	2000000 OPS in 2.108887 seconds, throughput 948367.551225
+213655	[1728268031]	2000000 OPS in 2.107876 seconds, throughput 948822.416499
+213655	[1728268031]	2000000 OPS in 2.120101 seconds, throughput 943351.283736
+213655	[1728268033]	2000000 OPS in 2.126648 seconds, throughput 940447.126182
+213655	[1728268033]	2000000 OPS in 2.112975 seconds, throughput 946532.732285
+213655	[1728268033]	2000000 OPS in 2.111779 seconds, throughput 947068.798392
+213655	[1728268033]	2000000 OPS in 2.124217 seconds, throughput 941523.394267
+213655	[1728268035]	2000000 OPS in 2.122159 seconds, throughput 942436.452688
+213655	[1728268035]	2000000 OPS in 2.109308 seconds, throughput 948178.265099
+213655	[1728268035]	2000000 OPS in 2.110000 seconds, throughput 947867.298578
+213655	[1728268035]	2000000 OPS in 2.125877 seconds, throughput 940788.201763
+213655	[1728268037]	2000000 OPS in 2.145752 seconds, throughput 932074.163277
+213655	[1728268037]	2000000 OPS in 2.123740 seconds, throughput 941734.863966
+213655	[1728268037]	2000000 OPS in 2.124138 seconds, throughput 941558.410988
+213655	[1728268037]	2000000 OPS in 2.122918 seconds, throughput 942099.506434
+213655	[1728268039]	2000000 OPS in 2.126901 seconds, throughput 940335.257729
+213655	[1728268039]	2000000 OPS in 2.112975 seconds, throughput 946532.732285
+213655	[1728268039]	2000000 OPS in 2.114934 seconds, throughput 945655.987374
+213655	[1728268039]	2000000 OPS in 2.119694 seconds, throughput 943532.415528
+213655	[1728268041]	2000000 OPS in 2.118092 seconds, throughput 944246.047858
+213655	[1728268041]	2000000 OPS in 2.104189 seconds, throughput 950484.961189
+213655	[1728268041]	2000000 OPS in 2.104109 seconds, throughput 950521.099430
+213655	[1728268041]	2000000 OPS in 2.115792 seconds, throughput 945272.503157
+213655	[1728268043]	2000000 OPS in 2.128994 seconds, throughput 939410.820322
+213655	[1728268043]	2000000 OPS in 2.143105 seconds, throughput 933225.390263
+213655	[1728268043]	2000000 OPS in 2.138245 seconds, throughput 935346.510807
+213655	[1728268043]	2000000 OPS in 2.142843 seconds, throughput 933339.493374
+213655	[1728268045]	2000000 OPS in 2.101980 seconds, throughput 951483.839047
+213655	[1728268045]	2000000 OPS in 2.115372 seconds, throughput 945460.183835
+213655	[1728268045]	2000000 OPS in 2.102192 seconds, throughput 951387.884646
+213655	[1728268045]	2000000 OPS in 2.114707 seconds, throughput 945757.497374
+213655	[1728268047]	2000000 OPS in 2.114107 seconds, throughput 946025.910704
+213655	[1728268047]	2000000 OPS in 2.128315 seconds, throughput 939710.522174
+213655	[1728268048]	2000000 OPS in 2.115908 seconds, throughput 945220.680672
+213655	[1728268048]	2000000 OPS in 2.128648 seconds, throughput 939563.516373
+213655	[1728268050]	2000000 OPS in 2.115704 seconds, throughput 945311.820557
+213655	[1728268050]	2000000 OPS in 2.131263 seconds, throughput 938410.698257
+213655	[1728268050]	2000000 OPS in 2.119886 seconds, throughput 943446.958940
+213655	[1728268050]	2000000 OPS in 2.137081 seconds, throughput 935855.964280
+213655	[1728268052]	2000000 OPS in 2.116362 seconds, throughput 945017.912815
+213655	[1728268052]	2000000 OPS in 2.129219 seconds, throughput 939311.550385
+213655	[1728268052]	2000000 OPS in 2.117128 seconds, throughput 944675.995027
+213655	[1728268052]	2000000 OPS in 2.126198 seconds, throughput 940646.167478
+213655	[1728268054]	2000000 OPS in 2.104286 seconds, throughput 950441.147258
+213655	[1728268054]	2000000 OPS in 2.119677 seconds, throughput 943539.982743
+213655	[1728268054]	2000000 OPS in 2.106233 seconds, throughput 949562.560268
+213655	[1728268054]	2000000 OPS in 2.118881 seconds, throughput 943894.442397
+213655	[1728268056]	2000000 OPS in 2.136334 seconds, throughput 936183.199818
+213655	[1728268056]	2000000 OPS in 2.141011 seconds, throughput 934138.124465
+213655	[1728268056]	2000000 OPS in 2.128151 seconds, throughput 939782.938335
+213655	[1728268056]	2000000 OPS in 2.137606 seconds, throughput 935626.116319
+213655	[1728268058]	2000000 OPS in 2.106040 seconds, throughput 949649.579305
+213655	[1728268058]	2000000 OPS in 2.110036 seconds, throughput 947851.126711
+213655	[1728268058]	2000000 OPS in 2.122950 seconds, throughput 942085.305824
+213655	[1728268058]	2000000 OPS in 2.122509 seconds, throughput 942281.045687
+213655	[1728268060]	2000000 OPS in 2.109880 seconds, throughput 947921.208789
+213655	[1728268060]	2000000 OPS in 2.109880 seconds, throughput 947921.208789
+213655	[1728268060]	2000000 OPS in 2.123854 seconds, throughput 941684.315400
+213655	[1728268060]	2000000 OPS in 2.119988 seconds, throughput 943401.566424
+213655	[1728268062]	2000000 OPS in 2.123388 seconds, throughput 941890.978003
+213655	[1728268062]	2000000 OPS in 2.126515 seconds, throughput 940505.945173
+213655	[1728268062]	2000000 OPS in 2.140887 seconds, throughput 934192.229669
+213655	[1728268062]	2000000 OPS in 2.139295 seconds, throughput 934887.427868
+213655	[1728268064]	2000000 OPS in 2.106338 seconds, throughput 949515.225002
+213655	[1728268064]	2000000 OPS in 2.106294 seconds, throughput 949535.060158
+213655	[1728268064]	2000000 OPS in 2.117799 seconds, throughput 944376.685417
+213655	[1728268065]	2000000 OPS in 2.116374 seconds, throughput 945012.554492
+213655	[1728268066]	2000000 OPS in 2.115036 seconds, throughput 945610.382046
+213655	[1728268067]	2000000 OPS in 2.114870 seconds, throughput 945684.604727
+213655	[1728268067]	2000000 OPS in 2.128548 seconds, throughput 939607.657427
+213655	[1728268067]	2000000 OPS in 2.127955 seconds, throughput 939869.499120
+213655	[1728268069]	2000000 OPS in 2.123540 seconds, throughput 941823.558774
+213655	[1728268069]	2000000 OPS in 2.125294 seconds, throughput 941046.274068
+213655	[1728268069]	2000000 OPS in 2.138220 seconds, throughput 935357.446848
+213655	[1728268069]	2000000 OPS in 2.135697 seconds, throughput 936462.428893
+213655	[1728268071]	2000000 OPS in 2.120749 seconds, throughput 943063.040464
+213655	[1728268071]	2000000 OPS in 2.119598 seconds, throughput 943575.149627
+213655	[1728268071]	2000000 OPS in 2.132197 seconds, throughput 937999.631366
+213655	[1728268071]	2000000 OPS in 2.131592 seconds, throughput 938265.859508
+213655	[1728268073]	2000000 OPS in 2.101685 seconds, throughput 951617.392711
+213655	[1728268073]	2000000 OPS in 2.102047 seconds, throughput 951453.511744
+213655	[1728268073]	2000000 OPS in 2.116242 seconds, throughput 945071.499384
+213655	[1728268073]	2000000 OPS in 2.116262 seconds, throughput 945062.567867
+213655	[1728268075]	2000000 OPS in 2.118075 seconds, throughput 944253.626524
+213655	[1728268075]	2000000 OPS in 2.117893 seconds, throughput 944334.770453
+213655	[1728268075]	2000000 OPS in 2.128837 seconds, throughput 939480.101107
+213655	[1728268075]	2000000 OPS in 2.136238 seconds, throughput 936225.270780
+213655	[1728268077]	2000000 OPS in 2.117879 seconds, throughput 944341.012872
+213655	[1728268077]	2000000 OPS in 2.127683 seconds, throughput 939989.650714
+213655	[1728268077]	2000000 OPS in 2.133231 seconds, throughput 937544.972860
+213655	[1728268077]	2000000 OPS in 2.125594 seconds, throughput 940913.457603
+213655	[1728268079]	2000000 OPS in 2.112685 seconds, throughput 946662.659128
+213655	[1728268079]	2000000 OPS in 2.113785 seconds, throughput 946170.022022
+213655	[1728268079]	2000000 OPS in 2.125659 seconds, throughput 940884.685643
+213655	[1728268080]	2000000 OPS in 2.123835 seconds, throughput 941692.739784
+213655	[1728268081]	2000000 OPS in 2.106092 seconds, throughput 949626.132192
+213655	[1728268081]	2000000 OPS in 2.107774 seconds, throughput 948868.332184
+213655	[1728268082]	2000000 OPS in 2.123077 seconds, throughput 942028.951376
+213655	[1728268082]	2000000 OPS in 2.123194 seconds, throughput 941977.040252
+213655	[1728268083]	2000000 OPS in 2.112654 seconds, throughput 946676.549970
+213655	[1728268083]	2000000 OPS in 2.113200 seconds, throughput 946431.951543
+213655	[1728268084]	2000000 OPS in 2.125173 seconds, throughput 941099.853988
+213655	[1728268084]	2000000 OPS in 2.119845 seconds, throughput 943465.206183
+213655	[1728268085]	2000000 OPS in 2.111366 seconds, throughput 947254.052590
+213655	[1728268086]	2000000 OPS in 2.112008 seconds, throughput 946966.109977
+213655	[1728268086]	2000000 OPS in 2.127596 seconds, throughput 940028.088039
+213655	[1728268086]	2000000 OPS in 2.126954 seconds, throughput 940311.826208
+213655	[1728268088]	2000000 OPS in 2.106986 seconds, throughput 949223.203192
+213655	[1728268088]	2000000 OPS in 2.106593 seconds, throughput 949400.287573
+213655	[1728268088]	2000000 OPS in 2.117766 seconds, throughput 944391.401127
+213655	[1728268088]	2000000 OPS in 2.117141 seconds, throughput 944670.194380
+213655	[1728268090]	2000000 OPS in 2.136070 seconds, throughput 936298.904062
+213655	[1728268090]	2000000 OPS in 2.137566 seconds, throughput 935643.624571
+213655	[1728268090]	2000000 OPS in 2.153212 seconds, throughput 928844.907050
+213655	[1728268090]	2000000 OPS in 2.151979 seconds, throughput 929377.098940
+213655	[1728268092]	2000000 OPS in 2.105332 seconds, throughput 949968.936016
+213655	[1728268092]	2000000 OPS in 2.102660 seconds, throughput 951176.129284
+213655	[1728268092]	2000000 OPS in 2.116066 seconds, throughput 945150.104014
+213655	[1728268092]	2000000 OPS in 2.113651 seconds, throughput 946230.006751
+213655	[1728268094]	2000000 OPS in 2.114878 seconds, throughput 945681.027464
+213655	[1728268094]	2000000 OPS in 2.116581 seconds, throughput 944920.132988
+213655	[1728268094]	2000000 OPS in 2.130529 seconds, throughput 938733.995172
+213655	[1728268094]	2000000 OPS in 2.129525 seconds, throughput 939176.576936
+213655	[1728268096]	2000000 OPS in 2.124497 seconds, throughput 941399.305341
+213655	[1728268096]	2000000 OPS in 2.119316 seconds, throughput 943700.703435
+213655	[1728268096]	2000000 OPS in 2.133762 seconds, throughput 937311.658939
+213655	[1728268097]	2000000 OPS in 2.132294 seconds, throughput 937956.960907
+213655	[1728268098]	2000000 OPS in 2.114577 seconds, throughput 945815.640670
+213655	[1728268098]	2000000 OPS in 2.116164 seconds, throughput 945106.333914
+213655	[1728268099]	2000000 OPS in 2.126896 seconds, throughput 940337.468311
+213655	[1728268099]	2000000 OPS in 2.126973 seconds, throughput 940303.426513
+213655	[1728268100]	2000000 OPS in 2.103836 seconds, throughput 950644.441867
+213655	[1728268100]	2000000 OPS in 2.106078 seconds, throughput 949632.444762
+213655	[1728268101]	2000000 OPS in 2.120959 seconds, throughput 942969.666080
+213655	[1728268101]	2000000 OPS in 2.121371 seconds, throughput 942786.528146
+213655	[1728268102]	2000000 OPS in 2.128961 seconds, throughput 939425.381677
+213655	[1728268103]	2000000 OPS in 2.128222 seconds, throughput 939751.586066
+213655	[1728268103]	2000000 OPS in 2.146951 seconds, throughput 931553.631173
+213655	[1728268103]	2000000 OPS in 2.138312 seconds, throughput 935317.203476
+213655	[1728268105]	2000000 OPS in 2.108027 seconds, throughput 948754.451437
+213655	[1728268105]	2000000 OPS in 2.110559 seconds, throughput 947616.247639
+213655	[1728268105]	2000000 OPS in 2.123041 seconds, throughput 942044.925180
+213655	[1728268105]	2000000 OPS in 2.126806 seconds, throughput 940377.260549
+213655	[1728268107]	2000000 OPS in 2.109988 seconds, throughput 947872.689323
+213655	[1728268107]	2000000 OPS in 2.115699 seconds, throughput 945314.054599
+213655	[1728268107]	2000000 OPS in 2.120445 seconds, throughput 943198.243765
+213655	[1728268107]	2000000 OPS in 2.118410 seconds, throughput 944104.304644
+213655	[1728268109]	2000000 OPS in 2.109296 seconds, throughput 948183.659382
+213655	[1728268109]	2000000 OPS in 2.132153 seconds, throughput 938018.988318
+213655	[1728268109]	2000000 OPS in 2.142012 seconds, throughput 933701.585239
+213655	[1728268109]	2000000 OPS in 2.142187 seconds, throughput 933625.309088
+213655	[1728268111]	2000000 OPS in 2.121885 seconds, throughput 942558.149947
+213655	[1728268111]	2000000 OPS in 2.114096 seconds, throughput 946030.833037
+213655	[1728268111]	2000000 OPS in 2.118693 seconds, throughput 943978.197880
+213655	[1728268111]	2000000 OPS in 2.116693 seconds, throughput 944870.134687
+213655	[1728268113]	2000000 OPS in 2.112638 seconds, throughput 946683.719596
+213655	[1728268113]	2000000 OPS in 2.116421 seconds, throughput 944991.568313
+213655	[1728268113]	2000000 OPS in 2.130796 seconds, throughput 938616.366841
+213655	[1728268114]	2000000 OPS in 2.128918 seconds, throughput 939444.356241
+213655	[1728268115]	2000000 OPS in 2.106725 seconds, throughput 949340.801481
+213655	[1728268115]	2000000 OPS in 2.106341 seconds, throughput 949513.872635
+213655	[1728268116]	2000000 OPS in 2.126877 seconds, throughput 940345.868614
+213655	[1728268116]	2000000 OPS in 2.135436 seconds, throughput 936576.886406
+213655	[1728268117]	2000000 OPS in 2.130678 seconds, throughput 938668.348760
+213655	[1728268117]	2000000 OPS in 2.134282 seconds, throughput 937083.290774
+213655	[1728268118]	2000000 OPS in 2.135474 seconds, throughput 936560.220354
+213655	[1728268118]	2000000 OPS in 2.133508 seconds, throughput 937423.248472
+213655	[1728268119]	2000000 OPS in 2.102118 seconds, throughput 951421.375965
+213655	[1728268119]	2000000 OPS in 2.105473 seconds, throughput 949905.318187
+213655	[1728268120]	2000000 OPS in 2.118357 seconds, throughput 944127.925557
+213655	[1728268120]	2000000 OPS in 2.118308 seconds, throughput 944149.764812
+213655	[1728268121]	2000000 OPS in 2.117068 seconds, throughput 944702.768168
+213655	[1728268122]	2000000 OPS in 2.120109 seconds, throughput 943347.724103
+213655	[1728268122]	2000000 OPS in 2.126382 seconds, throughput 940564.771523
+213655	[1728268122]	2000000 OPS in 2.124967 seconds, throughput 941191.086732
+213655	[1728268124]	2000000 OPS in 2.124220 seconds, throughput 941522.064570
+213655	[1728268124]	2000000 OPS in 2.122665 seconds, throughput 942211.795078
+213655	[1728268124]	2000000 OPS in 2.135733 seconds, throughput 936446.643845
+213655	[1728268124]	2000000 OPS in 2.137002 seconds, throughput 935890.560701
+213655	[1728268126]	2000000 OPS in 2.113422 seconds, throughput 946332.535575
+213655	[1728268126]	2000000 OPS in 2.116791 seconds, throughput 944826.390513
+213655	[1728268126]	2000000 OPS in 2.125208 seconds, throughput 941084.355037
+213655	[1728268126]	2000000 OPS in 2.123879 seconds, throughput 941673.230914
+213655	[1728268128]	2000000 OPS in 2.104754 seconds, throughput 950229.813080
+213655	[1728268128]	2000000 OPS in 2.108668 seconds, throughput 948466.045864
+213655	[1728268128]	2000000 OPS in 2.124501 seconds, throughput 941397.532879
+213655	[1728268128]	2000000 OPS in 2.124914 seconds, throughput 941214.562095
+213655	[1728268130]	2000000 OPS in 2.126373 seconds, throughput 940568.752519
+213655	[1728268130]	2000000 OPS in 2.128560 seconds, throughput 939602.360281
+213655	[1728268130]	2000000 OPS in 2.143265 seconds, throughput 933155.722694
+213655	[1728268131]	2000000 OPS in 2.134265 seconds, throughput 937090.754897
+213655	[1728268132]	2000000 OPS in 2.109054 seconds, throughput 948292.457187
+213655	[1728268132]	2000000 OPS in 2.114895 seconds, throughput 945673.425867
+213655	[1728268133]	2000000 OPS in 2.129052 seconds, throughput 939385.228731
+213655	[1728268133]	2000000 OPS in 2.128356 seconds, throughput 939692.419877
+213655	[1728268134]	2000000 OPS in 2.107980 seconds, throughput 948775.605082
+213655	[1728268134]	2000000 OPS in 2.109797 seconds, throughput 947958.500273
+213655	[1728268135]	2000000 OPS in 2.115716 seconds, throughput 945306.458901
+213655	[1728268135]	2000000 OPS in 2.115333 seconds, throughput 945477.615108
+213655	[1728268136]	2000000 OPS in 2.135171 seconds, throughput 936693.126686
+213655	[1728268136]	2000000 OPS in 2.130962 seconds, throughput 938543.249481
+213655	[1728268137]	2000000 OPS in 2.144163 seconds, throughput 932764.906399
+213655	[1728268137]	2000000 OPS in 2.146659 seconds, throughput 931680.346063
+213655	[1728268138]	2000000 OPS in 2.105570 seconds, throughput 949861.557678
+213655	[1728268139]	2000000 OPS in 2.105662 seconds, throughput 949820.056590
+213655	[1728268139]	2000000 OPS in 2.114292 seconds, throughput 945943.133683
+213655	[1728268139]	2000000 OPS in 2.114999 seconds, throughput 945626.924646
+213655	[1728268140]	2000000 OPS in 2.113747 seconds, throughput 946187.031844
+213655	[1728268141]	2000000 OPS in 2.118181 seconds, throughput 944206.373299
+213655	[1728268141]	2000000 OPS in 2.128952 seconds, throughput 939429.353034
+213655	[1728268141]	2000000 OPS in 2.128880 seconds, throughput 939461.125099
+213655	[1728268143]	2000000 OPS in 2.103816 seconds, throughput 950653.479202
+213655	[1728268143]	2000000 OPS in 2.105065 seconds, throughput 950089.427167
+213655	[1728268143]	2000000 OPS in 2.119073 seconds, throughput 943808.920221
+213655	[1728268143]	2000000 OPS in 2.118359 seconds, throughput 944127.034181
+213655	[1728268145]	2000000 OPS in 2.117079 seconds, throughput 944697.859645
+213655	[1728268145]	2000000 OPS in 2.119320 seconds, throughput 943698.922296
+213655	[1728268145]	2000000 OPS in 2.126123 seconds, throughput 940679.349219
+213655	[1728268145]	2000000 OPS in 2.126454 seconds, throughput 940532.924766
+213655	[1728268147]	2000000 OPS in 2.104406 seconds, throughput 950386.950047
+213655	[1728268147]	2000000 OPS in 2.105905 seconds, throughput 949710.457024
+213655	[1728268147]	2000000 OPS in 2.122287 seconds, throughput 942379.612183
+213655	[1728268148]	2000000 OPS in 2.121352 seconds, throughput 942794.972263
+213655	[1728268149]	2000000 OPS in 2.116213 seconds, throughput 945084.450384
+213655	[1728268149]	2000000 OPS in 2.132713 seconds, throughput 937772.686714
+213655	[1728268150]	2000000 OPS in 2.137222 seconds, throughput 935794.222594
+213655	[1728268150]	2000000 OPS in 2.143549 seconds, throughput 933032.088373
+213655	[1728268151]	2000000 OPS in 2.128813 seconds, throughput 939490.692701
+213655	[1728268151]	2000000 OPS in 2.115653 seconds, throughput 945334.608275
+213655	[1728268152]	2000000 OPS in 2.125802 seconds, throughput 940821.393526
+213655	[1728268152]	2000000 OPS in 2.127554 seconds, throughput 940046.645115
+213655	[1728268153]	2000000 OPS in 2.112477 seconds, throughput 946755.870005
+213655	[1728268153]	2000000 OPS in 2.114783 seconds, throughput 945723.509221
+213655	[1728268154]	2000000 OPS in 2.119508 seconds, throughput 943615.216362
+213655	[1728268154]	2000000 OPS in 2.118053 seconds, throughput 944263.434390
+213655	[1728268155]	2000000 OPS in 2.109211 seconds, throughput 948221.870643
+213655	[1728268155]	2000000 OPS in 2.112277 seconds, throughput 946845.513159
+213655	[1728268156]	2000000 OPS in 2.141768 seconds, throughput 933807.956791
+213655	[1728268156]	2000000 OPS in 2.149256 seconds, throughput 930554.573304
+213655	[1728268157]	2000000 OPS in 2.125001 seconds, throughput 941176.027682
+213655	[1728268158]	2000000 OPS in 2.124704 seconds, throughput 941307.589198
+213655	[1728268158]	2000000 OPS in 2.116975 seconds, throughput 944744.269536
+213655	[1728268158]	2000000 OPS in 2.115692 seconds, throughput 945317.182274
+213655	[1728268160]	2000000 OPS in 2.113046 seconds, throughput 946500.928044
+213655	[1728268160]	2000000 OPS in 2.116309 seconds, throughput 945041.579467
+213655	[1728268160]	2000000 OPS in 2.131140 seconds, throughput 938464.859183
+213655	[1728268160]	2000000 OPS in 2.129255 seconds, throughput 939295.669142
+213655	[1728268162]	2000000 OPS in 2.104824 seconds, throughput 950198.211347
+213655	[1728268162]	2000000 OPS in 2.105530 seconds, throughput 949879.602760
+213655	[1728268162]	2000000 OPS in 2.117542 seconds, throughput 944491.301707
+213655	[1728268162]	2000000 OPS in 2.116784 seconds, throughput 944829.514962
+213655	[1728268164]	2000000 OPS in 2.128755 seconds, throughput 939516.290038
+213655	[1728268164]	2000000 OPS in 2.134229 seconds, throughput 937106.561667
+213655	[1728268165]	2000000 OPS in 2.143201 seconds, throughput 933183.588474
+213655	[1728268165]	2000000 OPS in 2.142607 seconds, throughput 933442.297164
+213655	[1728268166]	2000000 OPS in 2.102218 seconds, throughput 951376.117986
+213655	[1728268166]	2000000 OPS in 2.106526 seconds, throughput 949430.484124
+213655	[1728268167]	2000000 OPS in 2.121868 seconds, throughput 942565.701542
+213655	[1728268167]	2000000 OPS in 2.121854 seconds, throughput 942571.920594
+213655	[1728268168]	2000000 OPS in 2.112431 seconds, throughput 946776.486427
+213655	[1728268168]	2000000 OPS in 2.119304 seconds, throughput 943706.046891
+213655	[1728268169]	2000000 OPS in 2.124487 seconds, throughput 941403.736526
+213655	[1728268169]	2000000 OPS in 2.123933 seconds, throughput 941649.289314
+213655	[1728268170]	2000000 OPS in 2.114318 seconds, throughput 945931.501316
+213655	[1728268170]	2000000 OPS in 2.122603 seconds, throughput 942239.316537
+213655	[1728268171]	2000000 OPS in 2.146385 seconds, throughput 931799.281117
+213655	[1728268171]	2000000 OPS in 2.140240 seconds, throughput 934474.638358
+213655	[1728268172]	2000000 OPS in 2.112008 seconds, throughput 946966.109977
+213655	[1728268172]	2000000 OPS in 2.119098 seconds, throughput 943797.785662
+213655	[1728268173]	2000000 OPS in 2.121900 seconds, throughput 942551.486875
+213655	[1728268173]	2000000 OPS in 2.121973 seconds, throughput 942519.061270
+213655	[1728268174]	2000000 OPS in 2.103965 seconds, throughput 950586.155188
+213655	[1728268174]	2000000 OPS in 2.109716 seconds, throughput 947994.895995
+213655	[1728268175]	2000000 OPS in 2.127825 seconds, throughput 939926.920682
+213655	[1728268175]	2000000 OPS in 2.128576 seconds, throughput 939595.297513
+213655	[1728268176]	2000000 OPS in 2.131786 seconds, throughput 938180.474025
+213655	[1728268177]	2000000 OPS in 2.128937 seconds, throughput 939435.972037
+213655	[1728268177]	2000000 OPS in 2.130962 seconds, throughput 938543.249481
+213655	[1728268177]	2000000 OPS in 2.132849 seconds, throughput 937712.890130
+213655	[1728268179]	2000000 OPS in 2.108103 seconds, throughput 948720.247540
+213655	[1728268179]	2000000 OPS in 2.115529 seconds, throughput 945390.018289
+213655	[1728268179]	2000000 OPS in 2.128291 seconds, throughput 939721.118964
+213655	[1728268180]	2000000 OPS in 2.130152 seconds, throughput 938900.134826
+213655	[1728268181]	2000000 OPS in 2.107342 seconds, throughput 949062.847891
+213655	[1728268181]	2000000 OPS in 2.108711 seconds, throughput 948446.705120
+213655	[1728268182]	2000000 OPS in 2.115718 seconds, throughput 945305.565297
+213655	[1728268182]	2000000 OPS in 2.112192 seconds, throughput 946883.616641
+213655	[1728268183]	2000000 OPS in 2.119943 seconds, throughput 943421.591996
+213655	[1728268183]	2000000 OPS in 2.137843 seconds, throughput 935522.393366
+213655	[1728268184]	2000000 OPS in 2.144471 seconds, throughput 932630.937886
+213655	[1728268184]	2000000 OPS in 2.145573 seconds, throughput 932151.923985
+213655	[1728268185]	2000000 OPS in 2.107458 seconds, throughput 949010.608990
+213655	[1728268185]	2000000 OPS in 2.108896 seconds, throughput 948363.503938
+213655	[1728268186]	2000000 OPS in 2.118591 seconds, throughput 944023.645904
+213655	[1728268186]	2000000 OPS in 2.119974 seconds, throughput 943407.796511
+213655	[1728268187]	2000000 OPS in 2.111164 seconds, throughput 947344.687575
+213655	[1728268187]	2000000 OPS in 2.117591 seconds, throughput 944469.446650
+213655	[1728268188]	2000000 OPS in 2.126899 seconds, throughput 940336.141961
+213655	[1728268188]	2000000 OPS in 2.126900 seconds, throughput 940335.699845
+213655	[1728268189]	2000000 OPS in 2.101098 seconds, throughput 951883.253423
+213655	[1728268189]	2000000 OPS in 2.108676 seconds, throughput 948462.447526
+213655	[1728268190]	2000000 OPS in 2.135297 seconds, throughput 936637.854125
+213655	[1728268190]	2000000 OPS in 2.145249 seconds, throughput 932292.708212
+213655	[1728268191]	2000000 OPS in 2.129995 seconds, throughput 938969.340304
+213655	[1728268191]	2000000 OPS in 2.131304 seconds, throughput 938392.646005
+213655	[1728268192]	2000000 OPS in 2.125954 seconds, throughput 940754.127324
+213655	[1728268192]	2000000 OPS in 2.124935 seconds, throughput 941205.260396
+213655	[1728268193]	2000000 OPS in 2.112221 seconds, throughput 946870.616285
+213655	[1728268194]	2000000 OPS in 2.106452 seconds, throughput 949463.837771
+213655	[1728268194]	2000000 OPS in 2.125087 seconds, throughput 941137.939294
+213655	[1728268194]	2000000 OPS in 2.127174 seconds, throughput 940214.575770
+213655	[1728268195]	2000000 OPS in 2.113695 seconds, throughput 946210.309434
+213655	[1728268196]	2000000 OPS in 2.116045 seconds, throughput 945159.483848
+213655	[1728268196]	2000000 OPS in 2.140975 seconds, throughput 934153.831782
+213655	[1728268197]	2000000 OPS in 2.135725 seconds, throughput 936450.151588
+213655	[1728268198]	2000000 OPS in 2.116920 seconds, throughput 944768.815071
+213655	[1728268198]	2000000 OPS in 2.127396 seconds, throughput 940116.461627
+213655	[1728268199]	2000000 OPS in 2.130816 seconds, throughput 938607.556917
+213655	[1728268199]	2000000 OPS in 2.132006 seconds, throughput 938083.663930
+213655	[1728268200]	2000000 OPS in 2.111146 seconds, throughput 947352.764802
+213655	[1728268200]	2000000 OPS in 2.117593 seconds, throughput 944468.554628
+213655	[1728268201]	2000000 OPS in 2.116350 seconds, throughput 945023.271198
+213655	[1728268201]	2000000 OPS in 2.116497 seconds, throughput 944957.635187
+213655	[1728268202]	2000000 OPS in 2.106154 seconds, throughput 949598.177531
+213655	[1728268202]	2000000 OPS in 2.115874 seconds, throughput 945235.869433
+213655	[1728268203]	2000000 OPS in 2.131595 seconds, throughput 938264.538995
+213655	[1728268203]	2000000 OPS in 2.133418 seconds, throughput 937462.794445
+213655	[1728268204]	2000000 OPS in 2.109030 seconds, throughput 948303.248413
+213655	[1728268204]	2000000 OPS in 2.113643 seconds, throughput 946233.588170
+213655	[1728268205]	2000000 OPS in 2.119445 seconds, throughput 943643.265100
+213655	[1728268205]	2000000 OPS in 2.118968 seconds, throughput 943855.688241
+213655	[1728268206]	2000000 OPS in 2.109017 seconds, throughput 948309.093763
+213655	[1728268206]	2000000 OPS in 2.118967 seconds, throughput 943856.133673
+213655	[1728268207]	2000000 OPS in 2.128894 seconds, throughput 939454.947029
+213655	[1728268207]	2000000 OPS in 2.130092 seconds, throughput 938926.581575
+213655	[1728268208]	2000000 OPS in 2.102581 seconds, throughput 951211.867700
+213655	[1728268208]	2000000 OPS in 2.108738 seconds, throughput 948434.561335
+213655	[1728268209]	2000000 OPS in 2.118055 seconds, throughput 944262.542757
+213655	[1728268209]	2000000 OPS in 2.120681 seconds, throughput 943093.279942
+213655	[1728268210]	2000000 OPS in 2.134680 seconds, throughput 936908.576461
+213655	[1728268211]	2000000 OPS in 2.135749 seconds, throughput 936439.628439
+213655	[1728268211]	2000000 OPS in 2.140410 seconds, throughput 934400.418611
+213655	[1728268211]	2000000 OPS in 2.141704 seconds, throughput 933835.861538
+213655	[1728268212]	2000000 OPS in 2.100534 seconds, throughput 952138.837077
+213655	[1728268213]	2000000 OPS in 2.108132 seconds, throughput 948707.196703
+213655	[1728268213]	2000000 OPS in 2.124682 seconds, throughput 941317.335959
+213655	[1728268214]	2000000 OPS in 2.125255 seconds, throughput 941063.542963
+213655	[1728268214]	2000000 OPS in 2.113291 seconds, throughput 946391.197426
+213655	[1728268215]	2000000 OPS in 2.119233 seconds, throughput 943737.663579
+213655	[1728268216]	2000000 OPS in 2.121968 seconds, throughput 942521.282131
+213655	[1728268216]	2000000 OPS in 2.120894 seconds, throughput 942998.565699
+213655	[1728268217]	2000000 OPS in 2.113085 seconds, throughput 946483.459018
+213655	[1728268217]	2000000 OPS in 2.132499 seconds, throughput 937866.793841
+213655	[1728268218]	2000000 OPS in 2.140357 seconds, throughput 934423.556444
+213655	[1728268218]	2000000 OPS in 2.144423 seconds, throughput 932651.813565
+213655	[1728268219]	2000000 OPS in 2.114849 seconds, throughput 945693.995174
+213655	[1728268219]	2000000 OPS in 2.118718 seconds, throughput 943967.059325
+213655	[1728268220]	2000000 OPS in 2.115712 seconds, throughput 945308.246113
+213655	[1728268220]	2000000 OPS in 2.117894 seconds, throughput 944334.324570
+213655	[1728268221]	2000000 OPS in 2.102362 seconds, throughput 951310.954060
+213655	[1728268221]	2000000 OPS in 2.113688 seconds, throughput 946213.443044
+213655	[1728268222]	2000000 OPS in 2.129998 seconds, throughput 938968.017810
+213655	[1728268222]	2000000 OPS in 2.131347 seconds, throughput 938373.713900
+213655	[1728268223]	2000000 OPS in 2.110524 seconds, throughput 947631.962489
+213655	[1728268223]	2000000 OPS in 2.136012 seconds, throughput 936324.327766
+213655	[1728268224]	2000000 OPS in 2.138268 seconds, throughput 935336.449874
+213655	[1728268224]	2000000 OPS in 2.140586 seconds, throughput 934323.591764
+213655	[1728268225]	2000000 OPS in 2.130007 seconds, throughput 938964.050353
+213655	[1728268225]	2000000 OPS in 2.118083 seconds, throughput 944250.060078
+213655	[1728268226]	2000000 OPS in 2.131591 seconds, throughput 938266.299679
+213655	[1728268226]	2000000 OPS in 2.130770 seconds, throughput 938627.819990
+213655	[1728268227]	2000000 OPS in 2.107472 seconds, throughput 949004.304684
+213655	[1728268227]	2000000 OPS in 2.110854 seconds, throughput 947483.814608
+213655	[1728268228]	2000000 OPS in 2.117194 seconds, throughput 944646.546325
+213655	[1728268228]	2000000 OPS in 2.119895 seconds, throughput 943442.953543
+213655	[1728268229]	2000000 OPS in 2.111463 seconds, throughput 947210.536012
+213655	[1728268230]	2000000 OPS in 2.118750 seconds, throughput 943952.802360
+213655	[1728268231]	2000000 OPS in 2.149684 seconds, throughput 930369.300790
+213655	[1728268231]	2000000 OPS in 2.143893 seconds, throughput 932882.377992
+213655	[1728268231]	2000000 OPS in 2.119249 seconds, throughput 943730.538507
+213655	[1728268232]	2000000 OPS in 2.121803 seconds, throughput 942594.576405
+213655	[1728268233]	2000000 OPS in 2.121773 seconds, throughput 942607.903862
+213655	[1728268233]	2000000 OPS in 2.122823 seconds, throughput 942141.667016
+213655	[1728268233]	2000000 OPS in 2.114152 seconds, throughput 946005.774419
+213655	[1728268234]	2000000 OPS in 2.121280 seconds, throughput 942826.972394
+213655	[1728268235]	2000000 OPS in 2.124505 seconds, throughput 941395.760424
+213655	[1728268235]	2000000 OPS in 2.126575 seconds, throughput 940479.409379
+213655	[1728268236]	2000000 OPS in 2.100660 seconds, throughput 952081.726695
+213655	[1728268236]	2000000 OPS in 2.108457 seconds, throughput 948560.961879
+213655	[1728268237]	2000000 OPS in 2.140549 seconds, throughput 934339.741814
+213655	[1728268237]	2000000 OPS in 2.144013 seconds, throughput 932830.164742
+213655	[1728268238]	2000000 OPS in 2.134375 seconds, throughput 937042.459736
+213655	[1728268238]	2000000 OPS in 2.134737 seconds, throughput 936883.559895
+213655	[1728268239]	2000000 OPS in 2.120977 seconds, throughput 942961.663422
+213655	[1728268239]	2000000 OPS in 2.119973 seconds, throughput 943408.241520
+213655	[1728268240]	2000000 OPS in 2.098764 seconds, throughput 952941.826713
+213655	[1728268240]	2000000 OPS in 2.111344 seconds, throughput 947263.922885
+213655	[1728268241]	2000000 OPS in 2.130578 seconds, throughput 938712.405742
+213655	[1728268241]	2000000 OPS in 2.131440 seconds, throughput 938332.770334
+213655	[1728268242]	2000000 OPS in 2.112371 seconds, throughput 946803.378763
+213655	[1728268242]	2000000 OPS in 2.117106 seconds, throughput 944685.811669
+213655	[1728268243]	2000000 OPS in 2.127860 seconds, throughput 939911.460340
+213655	[1728268243]	2000000 OPS in 2.130830 seconds, throughput 938601.390069
+213655	[1728268244]	2000000 OPS in 2.117727 seconds, throughput 944408.793013
+213655	[1728268244]	2000000 OPS in 2.135916 seconds, throughput 936366.411413
+213655	[1728268245]	2000000 OPS in 2.134844 seconds, throughput 936836.602581
+213655	[1728268246]	2000000 OPS in 2.134594 seconds, throughput 936946.323282
+213655	[1728268246]	2000000 OPS in 2.108734 seconds, throughput 948436.360394
+213655	[1728268247]	2000000 OPS in 2.113380 seconds, throughput 946351.342399
+213655	[1728268248]	2000000 OPS in 2.115629 seconds, throughput 945345.332287
+213655	[1728268248]	2000000 OPS in 2.118223 seconds, throughput 944187.651631
+213655	[1728268248]	2000000 OPS in 2.105192 seconds, throughput 950032.111085
+213655	[1728268249]	2000000 OPS in 2.119309 seconds, throughput 943703.820443
+213655	[1728268250]	2000000 OPS in 2.129393 seconds, throughput 939234.796019
+213655	[1728268250]	2000000 OPS in 2.129448 seconds, throughput 939210.537191
+213655	[1728268250]	2000000 OPS in 2.129738 seconds, throughput 939082.647725
+213655	[1728268251]	2000000 OPS in 2.131469 seconds, throughput 938320.003716
+213655	[1728268252]	2000000 OPS in 2.140542 seconds, throughput 934342.797292
+213655	[1728268252]	2000000 OPS in 2.144091 seconds, throughput 932796.229265
+213655	[1728268252]	2000000 OPS in 2.110465 seconds, throughput 947658.454416
+213655	[1728268253]	2000000 OPS in 2.118565 seconds, throughput 944035.231395
+213655	[1728268254]	2000000 OPS in 2.127647 seconds, throughput 940005.555433
+213655	[1728268254]	2000000 OPS in 2.126200 seconds, throughput 940645.282664
+213655	[1728268255]	2000000 OPS in 2.102366 seconds, throughput 951309.144079
+213655	[1728268255]	2000000 OPS in 2.107605 seconds, throughput 948944.417953
+213655	[1728268256]	2000000 OPS in 2.122820 seconds, throughput 942142.998464
+213655	[1728268256]	2000000 OPS in 2.125281 seconds, throughput 941052.030296
+213655	[1728268257]	2000000 OPS in 2.116722 seconds, throughput 944857.189560
+213655	[1728268257]	2000000 OPS in 2.135017 seconds, throughput 936760.690898
+213655	[1728268258]	2000000 OPS in 2.145708 seconds, throughput 932093.276438
+213655	[1728268258]	2000000 OPS in 2.141378 seconds, throughput 933978.027233
+213655	[1728268259]	2000000 OPS in 2.109605 seconds, throughput 948044.776155
+213655	[1728268259]	2000000 OPS in 2.109682 seconds, throughput 948010.174045
+213655	[1728268260]	2000000 OPS in 2.126231 seconds, throughput 940631.568254
+213655	[1728268260]	2000000 OPS in 2.128310 seconds, throughput 939712.729818
+213655	[1728268261]	2000000 OPS in 2.112397 seconds, throughput 946791.725230
+213655	[1728268261]	2000000 OPS in 2.119134 seconds, throughput 943781.752357
+213655	[1728268262]	2000000 OPS in 2.119422 seconds, throughput 943653.505531
+213655	[1728268263]	2000000 OPS in 2.118920 seconds, throughput 943877.069450
+213655	[1728268263]	2000000 OPS in 2.099978 seconds, throughput 952390.929810
+213655	[1728268264]	2000000 OPS in 2.109936 seconds, throughput 947896.049928
+213655	[1728268265]	2000000 OPS in 2.129806 seconds, throughput 939052.664891
+213655	[1728268265]	2000000 OPS in 2.129906 seconds, throughput 939008.575965
+213655	[1728268265]	2000000 OPS in 2.116586 seconds, throughput 944917.900808
+213655	[1728268266]	2000000 OPS in 2.118466 seconds, throughput 944079.347981
+213655	[1728268267]	2000000 OPS in 2.115956 seconds, throughput 945199.238547
+213655	[1728268267]	2000000 OPS in 2.118682 seconds, throughput 943983.098927
+213655	[1728268267]	2000000 OPS in 2.102848 seconds, throughput 951091.091700
+213655	[1728268268]	2000000 OPS in 2.114172 seconds, throughput 945996.825235
+213655	[1728268269]	2000000 OPS in 2.130568 seconds, throughput 938716.811667
+213655	[1728268269]	2000000 OPS in 2.132752 seconds, throughput 937755.538384
+213655	[1728268269]	2000000 OPS in 2.113172 seconds, throughput 946444.491977
+213655	[1728268270]	2000000 OPS in 2.113388 seconds, throughput 946347.760089
+213655	[1728268271]	2000000 OPS in 2.139168 seconds, throughput 934942.931083
+213655	[1728268271]	2000000 OPS in 2.142169 seconds, throughput 933633.154060
+213655	[1728268271]	2000000 OPS in 2.128616 seconds, throughput 939577.641059
+213655	[1728268272]	2000000 OPS in 2.139254 seconds, throughput 934905.345508
+213655	[1728268273]	2000000 OPS in 2.130087 seconds, throughput 938928.785538
+213655	[1728268273]	2000000 OPS in 2.129552 seconds, throughput 939164.669376
+213655	[1728268274]	2000000 OPS in 2.109363 seconds, throughput 948153.542088
+213655	[1728268274]	2000000 OPS in 2.110937 seconds, throughput 947446.560461
+213655	[1728268275]	2000000 OPS in 2.119118 seconds, throughput 943788.878203
+213655	[1728268275]	2000000 OPS in 2.121272 seconds, throughput 942830.528098
+213655	[1728268276]	2000000 OPS in 2.106691 seconds, throughput 949356.122944
+213655	[1728268276]	2000000 OPS in 2.119223 seconds, throughput 943742.116804
+213655	[1728268277]	2000000 OPS in 2.139323 seconds, throughput 934875.191825
+213655	[1728268277]	2000000 OPS in 2.140993 seconds, throughput 934145.978058
+213655	[1728268278]	2000000 OPS in 2.118903 seconds, throughput 943884.642195
+213655	[1728268278]	2000000 OPS in 2.128497 seconds, throughput 939630.170961
+213655	[1728268279]	2000000 OPS in 2.122845 seconds, throughput 942131.903177
+213655	[1728268280]	2000000 OPS in 2.125741 seconds, throughput 940848.391220
+213655	[1728268280]	2000000 OPS in 2.110990 seconds, throughput 947422.773201
+213655	[1728268280]	2000000 OPS in 2.120124 seconds, throughput 943341.049863
+213655	[1728268282]	2000000 OPS in 2.122787 seconds, throughput 942157.644644
+213655	[1728268282]	2000000 OPS in 2.124159 seconds, throughput 941549.102492
+213655	[1728268282]	2000000 OPS in 2.100267 seconds, throughput 952259.879339
+213655	[1728268283]	2000000 OPS in 2.109741 seconds, throughput 947983.662450
+213655	[1728268284]	2000000 OPS in 2.148700 seconds, throughput 930795.364639
+213655	[1728268284]	2000000 OPS in 2.151435 seconds, throughput 929612.096113
+213655	[1728268284]	2000000 OPS in 2.138147 seconds, throughput 935389.381553
+213655	[1728268285]	2000000 OPS in 2.143227 seconds, throughput 933172.267800
+213655	[1728268286]	2000000 OPS in 2.119413 seconds, throughput 943657.512717
+213655	[1728268286]	2000000 OPS in 2.119400 seconds, throughput 943663.300934
+213655	[1728268286]	2000000 OPS in 2.098483 seconds, throughput 953069.431585
+213655	[1728268287]	2000000 OPS in 2.111122 seconds, throughput 947363.534651
+213655	[1728268288]	2000000 OPS in 2.130402 seconds, throughput 938789.956074
+213655	[1728268288]	2000000 OPS in 2.131820 seconds, throughput 938165.511159
+213655	[1728268288]	2000000 OPS in 2.113724 seconds, throughput 946197.327560
+213655	[1728268289]	2000000 OPS in 2.118124 seconds, throughput 944231.782464
+213655	[1728268290]	2000000 OPS in 2.115533 seconds, throughput 945388.230767
+213655	[1728268290]	2000000 OPS in 2.130013 seconds, throughput 938961.405400
+213655	[1728268290]	2000000 OPS in 2.121443 seconds, throughput 942754.530760
+213655	[1728268291]	2000000 OPS in 2.139044 seconds, throughput 934997.129559
+213655	[1728268292]	2000000 OPS in 2.153415 seconds, throughput 928757.345890
+213655	[1728268292]	2000000 OPS in 2.142640 seconds, throughput 933427.920696
+213655	[1728268293]	2000000 OPS in 2.114049 seconds, throughput 946051.865401
+213655	[1728268293]	2000000 OPS in 2.114143 seconds, throughput 946009.801608
+213655	[1728268294]	2000000 OPS in 2.117483 seconds, throughput 944517.618323
+213655	[1728268295]	2000000 OPS in 2.119545 seconds, throughput 943598.744070
+213655	[1728268295]	2000000 OPS in 2.105577 seconds, throughput 949858.399859
+213655	[1728268295]	2000000 OPS in 2.118749 seconds, throughput 943953.247884
+213655	[1728268296]	2000000 OPS in 2.126312 seconds, throughput 940595.735715
+213655	[1728268297]	2000000 OPS in 2.129052 seconds, throughput 939385.228731
+213655	[1728268297]	2000000 OPS in 2.108097 seconds, throughput 948722.947758
+213655	[1728268297]	2000000 OPS in 2.128200 seconds, throughput 939761.300630
+213655	[1728268299]	2000000 OPS in 2.140949 seconds, throughput 934165.176284
+213655	[1728268299]	2000000 OPS in 2.145303 seconds, throughput 932269.241221
+213655	[1728268299]	2000000 OPS in 2.131665 seconds, throughput 938233.728095
+213655	[1728268300]	2000000 OPS in 2.120722 seconds, throughput 943075.047083
+213655	[1728268301]	2000000 OPS in 2.123075 seconds, throughput 942029.838795
+213655	[1728268301]	2000000 OPS in 2.124765 seconds, throughput 941280.565145
+213655	[1728268301]	2000000 OPS in 2.103842 seconds, throughput 950641.730700
+213655	[1728268302]	2000000 OPS in 2.107409 seconds, throughput 949032.674720
+213655	[1728268303]	2000000 OPS in 2.122856 seconds, throughput 942127.021334
+213655	[1728268303]	2000000 OPS in 2.128408 seconds, throughput 939669.461870
+213655	[1728268303]	2000000 OPS in 2.111731 seconds, throughput 947090.325425
+213655	[1728268304]	2000000 OPS in 2.138682 seconds, throughput 935155.390095
+213655	[1728268305]	2000000 OPS in 2.140248 seconds, throughput 934471.145400
+213655	[1728268305]	2000000 OPS in 2.141961 seconds, throughput 933723.816633
+213655	[1728268305]	2000000 OPS in 2.119621 seconds, throughput 943564.910897
+213655	[1728268306]	2000000 OPS in 2.113080 seconds, throughput 946485.698601
+213655	[1728268307]	2000000 OPS in 2.129678 seconds, throughput 939109.104757
+213655	[1728268307]	2000000 OPS in 2.129997 seconds, throughput 938968.458641
+213655	[1728268307]	2000000 OPS in 2.113203 seconds, throughput 946430.607944
+213655	[1728268308]	2000000 OPS in 2.119684 seconds, throughput 943536.866816
+213655	[1728268309]	2000000 OPS in 2.118549 seconds, throughput 944042.361069
+213655	[1728268309]	2000000 OPS in 2.117324 seconds, throughput 944588.546675
+213655	[1728268309]	2000000 OPS in 2.098966 seconds, throughput 952850.117629
+213655	[1728268310]	2000000 OPS in 2.110480 seconds, throughput 947651.719040
+213655	[1728268311]	2000000 OPS in 2.145316 seconds, throughput 932263.591937
+213655	[1728268312]	2000000 OPS in 2.145802 seconds, throughput 932052.444727
+213655	[1728268312]	2000000 OPS in 2.131170 seconds, throughput 938451.648625
+213655	[1728268312]	2000000 OPS in 2.132096 seconds, throughput 938044.065558
+213655	[1728268314]	2000000 OPS in 2.115839 seconds, throughput 945251.505431
+213655	[1728268314]	2000000 OPS in 2.117314 seconds, throughput 944593.007934
+213655	[1728268314]	2000000 OPS in 2.102219 seconds, throughput 951375.665428
+213655	[1728268314]	2000000 OPS in 2.113140 seconds, throughput 946458.824309
+213655	[1728268316]	2000000 OPS in 2.130206 seconds, throughput 938876.334026
+213655	[1728268316]	2000000 OPS in 2.129793 seconds, throughput 939058.396755
+213655	[1728268316]	2000000 OPS in 2.116278 seconds, throughput 945055.422775
+213655	[1728268317]	2000000 OPS in 2.115182 seconds, throughput 945545.111484
+213655	[1728268318]	2000000 OPS in 2.132799 seconds, throughput 937734.873282
+213655	[1728268318]	2000000 OPS in 2.119465 seconds, throughput 943634.360558
+213655	[1728268318]	2000000 OPS in 2.140410 seconds, throughput 934400.418611
+213655	[1728268319]	2000000 OPS in 2.133780 seconds, throughput 937303.752027
+213655	[1728268320]	2000000 OPS in 2.126771 seconds, throughput 940392.736218
+213655	[1728268320]	2000000 OPS in 2.112010 seconds, throughput 946965.213233
+213655	[1728268320]	2000000 OPS in 2.124459 seconds, throughput 941416.144063
+213655	[1728268321]	2000000 OPS in 2.109886 seconds, throughput 947918.513133
+213655	[1728268322]	2000000 OPS in 2.121985 seconds, throughput 942513.731247
+213655	[1728268322]	2000000 OPS in 2.108839 seconds, throughput 948389.137340
+213655	[1728268322]	2000000 OPS in 2.122325 seconds, throughput 942362.738977
+213655	[1728268323]	2000000 OPS in 2.120285 seconds, throughput 943269.418970
+213655	[1728268324]	2000000 OPS in 2.125805 seconds, throughput 940820.065810
+213655	[1728268324]	2000000 OPS in 2.111045 seconds, throughput 947398.089572
+213655	[1728268324]	2000000 OPS in 2.123612 seconds, throughput 941791.626719
+213655	[1728268325]	2000000 OPS in 2.108453 seconds, throughput 948562.761418
+213655	[1728268326]	2000000 OPS in 2.124995 seconds, throughput 941178.685126
+213655	[1728268326]	2000000 OPS in 2.114174 seconds, throughput 945995.930326
+213655	[1728268326]	2000000 OPS in 2.117999 seconds, throughput 944287.509106
+213655	[1728268327]	2000000 OPS in 2.122241 seconds, throughput 942400.038450
+213655	[1728268328]	2000000 OPS in 2.119103 seconds, throughput 943795.558781
+213655	[1728268329]	2000000 OPS in 2.102283 seconds, throughput 951346.702609
+213655	[1728268329]	2000000 OPS in 2.113292 seconds, throughput 946390.749598
+213655	[1728268329]	2000000 OPS in 2.107424 seconds, throughput 949025.919796
+213655	[1728268331]	2000000 OPS in 2.143265 seconds, throughput 933155.722694
+213655	[1728268331]	2000000 OPS in 2.124114 seconds, throughput 941569.049495
+213655	[1728268331]	2000000 OPS in 2.139142 seconds, throughput 934954.294759
+213655	[1728268331]	2000000 OPS in 2.133128 seconds, throughput 937590.243061
+213655	[1728268333]	2000000 OPS in 2.125708 seconds, throughput 940862.997176
+213655	[1728268333]	2000000 OPS in 2.107696 seconds, throughput 948903.447176
+213655	[1728268333]	2000000 OPS in 2.118162 seconds, throughput 944214.842868
+213655	[1728268333]	2000000 OPS in 2.110197 seconds, throughput 947778.809277
+213655	[1728268335]	2000000 OPS in 2.129552 seconds, throughput 939164.669376
+213655	[1728268335]	2000000 OPS in 2.115229 seconds, throughput 945524.101646
+213655	[1728268335]	2000000 OPS in 2.129734 seconds, throughput 939084.411480
+213655	[1728268336]	2000000 OPS in 2.117152 seconds, throughput 944665.286196
+213655	[1728268337]	2000000 OPS in 2.118076 seconds, throughput 944253.180717
+213655	[1728268337]	2000000 OPS in 2.101328 seconds, throughput 951779.065429
+213655	[1728268337]	2000000 OPS in 2.118127 seconds, throughput 944230.445106
+213655	[1728268338]	2000000 OPS in 2.127838 seconds, throughput 939921.178210
+213655	[1728268339]	2000000 OPS in 2.145752 seconds, throughput 932074.163277
+213655	[1728268339]	2000000 OPS in 2.138909 seconds, throughput 935056.143108
+213655	[1728268339]	2000000 OPS in 2.143434 seconds, throughput 933082.147619
+213655	[1728268340]	2000000 OPS in 2.114469 seconds, throughput 945863.949767
+213655	[1728268341]	2000000 OPS in 2.118225 seconds, throughput 944186.760141
+213655	[1728268341]	2000000 OPS in 2.107409 seconds, throughput 949032.674720
+213655	[1728268341]	2000000 OPS in 2.111545 seconds, throughput 947173.751921
+213655	[1728268342]	2000000 OPS in 2.117639 seconds, throughput 944448.038594
+213655	[1728268343]	2000000 OPS in 2.126512 seconds, throughput 940507.272002
+213655	[1728268343]	2000000 OPS in 2.114273 seconds, throughput 945951.634439
+213655	[1728268343]	2000000 OPS in 2.117955 seconds, throughput 944307.126450
+213655	[1728268344]	2000000 OPS in 2.128447 seconds, throughput 939652.244101
+213655	[1728268345]	2000000 OPS in 2.131528 seconds, throughput 938294.031324
+213655	[1728268345]	2000000 OPS in 2.146082 seconds, throughput 931930.839549
+213655	[1728268346]	2000000 OPS in 2.148357 seconds, throughput 930943.972533
+213655	[1728268346]	2000000 OPS in 2.124772 seconds, throughput 941277.464123
+213655	[1728268348]	2000000 OPS in 2.108206 seconds, throughput 948673.896194
+213655	[1728268348]	2000000 OPS in 2.122867 seconds, throughput 942122.139541
+213655	[1728268348]	2000000 OPS in 2.118731 seconds, throughput 943961.267381
+213655	[1728268348]	2000000 OPS in 2.109004 seconds, throughput 948314.939185
+213655	[1728268350]	2000000 OPS in 2.113075 seconds, throughput 946487.938194
+213655	[1728268350]	2000000 OPS in 2.127313 seconds, throughput 940153.141545
+213655	[1728268350]	2000000 OPS in 2.126774 seconds, throughput 940391.409713
+213655	[1728268350]	2000000 OPS in 2.121532 seconds, throughput 942714.981438
+213655	[1728268352]	2000000 OPS in 2.118119 seconds, throughput 944234.011404
+213655	[1728268352]	2000000 OPS in 2.132206 seconds, throughput 937995.672088
+213655	[1728268352]	2000000 OPS in 2.136955 seconds, throughput 935911.144596
+213655	[1728268353]	2000000 OPS in 2.123911 seconds, throughput 941659.043152
+213655	[1728268354]	2000000 OPS in 2.115469 seconds, throughput 945416.831918
+213655	[1728268354]	2000000 OPS in 2.128261 seconds, throughput 939734.365287
+213655	[1728268354]	2000000 OPS in 2.128129 seconds, throughput 939792.653547
+213655	[1728268355]	2000000 OPS in 2.120404 seconds, throughput 943216.481388
+213655	[1728268356]	2000000 OPS in 2.101287 seconds, throughput 951797.636401
+213655	[1728268356]	2000000 OPS in 2.115682 seconds, throughput 945321.650418
+213655	[1728268356]	2000000 OPS in 2.113700 seconds, throughput 946208.071155
+213655	[1728268357]	2000000 OPS in 2.111175 seconds, throughput 947339.751560
+213655	[1728268358]	2000000 OPS in 2.130372 seconds, throughput 938803.176159
+213655	[1728268358]	2000000 OPS in 2.146931 seconds, throughput 931562.309175
+213655	[1728268358]	2000000 OPS in 2.131874 seconds, throughput 938141.747589
+213655	[1728268359]	2000000 OPS in 2.132941 seconds, throughput 937672.443823
+213655	[1728268360]	2000000 OPS in 2.105554 seconds, throughput 949868.775629
+213655	[1728268360]	2000000 OPS in 2.117152 seconds, throughput 944665.286196
+213655	[1728268360]	2000000 OPS in 2.116263 seconds, throughput 945062.121296
+213655	[1728268361]	2000000 OPS in 2.115203 seconds, throughput 945535.723994
+213655	[1728268362]	2000000 OPS in 2.115666 seconds, throughput 945328.799536
+213655	[1728268362]	2000000 OPS in 2.127469 seconds, throughput 940084.203342
+213655	[1728268363]	2000000 OPS in 2.125984 seconds, throughput 940740.852236
+213655	[1728268363]	2000000 OPS in 2.114935 seconds, throughput 945655.540241
+213655	[1728268364]	2000000 OPS in 2.119660 seconds, throughput 943547.550079
+213655	[1728268365]	2000000 OPS in 2.135246 seconds, throughput 936660.225567
+213655	[1728268365]	2000000 OPS in 2.135854 seconds, throughput 936393.592446
+213655	[1728268365]	2000000 OPS in 2.132570 seconds, throughput 937835.569290
+213655	[1728268367]	2000000 OPS in 2.113107 seconds, throughput 946473.604981
+213655	[1728268367]	2000000 OPS in 2.125075 seconds, throughput 941143.253768
+213655	[1728268367]	2000000 OPS in 2.123586 seconds, throughput 941803.157489
+213655	[1728268367]	2000000 OPS in 2.112686 seconds, throughput 946662.211043
+213655	[1728268369]	2000000 OPS in 2.107984 seconds, throughput 948773.804735
+213655	[1728268369]	2000000 OPS in 2.125266 seconds, throughput 941058.672185
+213655	[1728268369]	2000000 OPS in 2.125634 seconds, throughput 940895.751573
+213655	[1728268370]	2000000 OPS in 2.121187 seconds, throughput 942868.309112
+213655	[1728268371]	2000000 OPS in 2.121706 seconds, throughput 942637.669875
+213655	[1728268371]	2000000 OPS in 2.139489 seconds, throughput 934802.656148
+213655	[1728268371]	2000000 OPS in 2.139708 seconds, throughput 934706.978709
+213655	[1728268372]	2000000 OPS in 2.131193 seconds, throughput 938441.520782
+213655	[1728268373]	2000000 OPS in 2.122363 seconds, throughput 942345.866376
+213655	[1728268373]	2000000 OPS in 2.129635 seconds, throughput 939128.066547
+213655	[1728268373]	2000000 OPS in 2.130347 seconds, throughput 938814.193181
+213655	[1728268374]	2000000 OPS in 2.122349 seconds, throughput 942352.082527
+213655	[1728268375]	2000000 OPS in 2.102003 seconds, throughput 951473.427964
+213655	[1728268375]	2000000 OPS in 2.116039 seconds, throughput 945162.163835
+213655	[1728268375]	2000000 OPS in 2.113722 seconds, throughput 946198.222850
+213655	[1728268376]	2000000 OPS in 2.110233 seconds, throughput 947762.640429
+213655	[1728268377]	2000000 OPS in 2.116679 seconds, throughput 944876.384185
+213655	[1728268377]	2000000 OPS in 2.129262 seconds, throughput 939292.581185
+213655	[1728268377]	2000000 OPS in 2.124757 seconds, throughput 941284.109195
+213655	[1728268378]	2000000 OPS in 2.131317 seconds, throughput 938386.922264
+213655	[1728268379]	2000000 OPS in 2.124305 seconds, throughput 941484.391366
+213655	[1728268380]	2000000 OPS in 2.130456 seconds, throughput 938766.160859
+213655	[1728268380]	2000000 OPS in 2.128821 seconds, throughput 939487.162143
+213655	[1728268380]	2000000 OPS in 2.113226 seconds, throughput 946420.307151
+213655	[1728268381]	2000000 OPS in 2.115387 seconds, throughput 945453.479671
+213655	[1728268382]	2000000 OPS in 2.128341 seconds, throughput 939699.042588
+213655	[1728268382]	2000000 OPS in 2.123573 seconds, throughput 941808.922980
+213655	[1728268382]	2000000 OPS in 2.116606 seconds, throughput 944908.972194
+213655	[1728268384]	2000000 OPS in 2.102934 seconds, throughput 951052.196598
+213655	[1728268384]	2000000 OPS in 2.117879 seconds, throughput 944341.012872
+213655	[1728268384]	2000000 OPS in 2.110347 seconds, throughput 947711.442715
+213655	[1728268384]	2000000 OPS in 2.115882 seconds, throughput 945232.295563
+213655	[1728268386]	2000000 OPS in 2.113788 seconds, throughput 946168.679167
+213655	[1728268386]	2000000 OPS in 2.127740 seconds, throughput 939964.469343
+213655	[1728268386]	2000000 OPS in 2.126236 seconds, throughput 940629.356290
+213655	[1728268386]	2000000 OPS in 2.111325 seconds, throughput 947272.447397
+213655	[1728268388]	2000000 OPS in 2.105005 seconds, throughput 950116.508037
+213655	[1728268388]	2000000 OPS in 2.121891 seconds, throughput 942555.484707
+213655	[1728268388]	2000000 OPS in 2.124675 seconds, throughput 941320.437243
+213655	[1728268389]	2000000 OPS in 2.118628 seconds, throughput 944007.159350
+213655	[1728268390]	2000000 OPS in 2.110977 seconds, throughput 947428.607702
+213655	[1728268390]	2000000 OPS in 2.123559 seconds, throughput 941815.132050
+213655	[1728268390]	2000000 OPS in 2.121494 seconds, throughput 942731.867260
+213655	[1728268391]	2000000 OPS in 2.109109 seconds, throughput 948267.728221
+213655	[1728268392]	2000000 OPS in 2.125552 seconds, throughput 940932.049651
+213655	[1728268392]	2000000 OPS in 2.142697 seconds, throughput 933403.089658
+213655	[1728268392]	2000000 OPS in 2.142306 seconds, throughput 933573.448424
+213655	[1728268393]	2000000 OPS in 2.144151 seconds, throughput 932770.126731
+213655	[1728268394]	2000000 OPS in 2.108929 seconds, throughput 948348.664180
+213655	[1728268394]	2000000 OPS in 2.116583 seconds, throughput 944919.240115
+213655	[1728268394]	2000000 OPS in 2.116003 seconds, throughput 945178.244076
+213655	[1728268395]	2000000 OPS in 2.109132 seconds, throughput 948257.387399
+213655	[1728268396]	2000000 OPS in 2.113565 seconds, throughput 946268.508421
+213655	[1728268397]	2000000 OPS in 2.128418 seconds, throughput 939665.046997
+213655	[1728268397]	2000000 OPS in 2.130286 seconds, throughput 938841.075799
+213655	[1728268397]	2000000 OPS in 2.120743 seconds, throughput 943065.708575
+213655	[1728268398]	2000000 OPS in 2.126517 seconds, throughput 940505.060623
+213655	[1728268399]	2000000 OPS in 2.134094 seconds, throughput 937165.841805
+213655	[1728268399]	2000000 OPS in 2.137975 seconds, throughput 935464.633590
+213655	[1728268399]	2000000 OPS in 2.125801 seconds, throughput 940821.836098
+213655	[1728268400]	2000000 OPS in 2.116678 seconds, throughput 944876.830581
+213655	[1728268401]	2000000 OPS in 2.131103 seconds, throughput 938481.152718
+213655	[1728268401]	2000000 OPS in 2.129761 seconds, throughput 939072.506258
+213655	[1728268401]	2000000 OPS in 2.118142 seconds, throughput 944223.758369
+213655	[1728268403]	2000000 OPS in 2.101306 seconds, throughput 951789.030251
+213655	[1728268403]	2000000 OPS in 2.117464 seconds, throughput 944526.093478
+213655	[1728268403]	2000000 OPS in 2.114969 seconds, throughput 945640.337991
+213655	[1728268403]	2000000 OPS in 2.112883 seconds, throughput 946573.946593
+213655	[1728268405]	2000000 OPS in 2.137233 seconds, throughput 935789.406209
+213655	[1728268405]	2000000 OPS in 2.151641 seconds, throughput 929523.094234
+213655	[1728268405]	2000000 OPS in 2.148150 seconds, throughput 931033.680143
+213655	[1728268406]	2000000 OPS in 2.136266 seconds, throughput 936212.999692
+213655	[1728268407]	2000000 OPS in 2.105822 seconds, throughput 949747.889423
+213655	[1728268407]	2000000 OPS in 2.119077 seconds, throughput 943807.138674
+213655	[1728268407]	2000000 OPS in 2.119538 seconds, throughput 943601.860405
+213655	[1728268408]	2000000 OPS in 2.116970 seconds, throughput 944746.500895
+213655	[1728268409]	2000000 OPS in 2.113614 seconds, throughput 946246.571039
+213655	[1728268409]	2000000 OPS in 2.125025 seconds, throughput 941165.398054
+213655	[1728268409]	2000000 OPS in 2.122689 seconds, throughput 942201.142042
+213655	[1728268410]	2000000 OPS in 2.111671 seconds, throughput 947117.235592
+213655	[1728268411]	2000000 OPS in 2.104837 seconds, throughput 950192.342685
+213655	[1728268411]	2000000 OPS in 2.138771 seconds, throughput 935116.475770
+213655	[1728268412]	2000000 OPS in 2.138018 seconds, throughput 935445.819446
+213655	[1728268412]	2000000 OPS in 2.135004 seconds, throughput 936766.394817
+213655	[1728268413]	2000000 OPS in 2.133645 seconds, throughput 937363.057116
+213655	[1728268414]	2000000 OPS in 2.123392 seconds, throughput 941889.203689
+213655	[1728268414]	2000000 OPS in 2.118906 seconds, throughput 943883.305819
+213655	[1728268414]	2000000 OPS in 2.106870 seconds, throughput 949275.465501
+213655	[1728268415]	2000000 OPS in 2.109290 seconds, throughput 948186.356547
+213655	[1728268416]	2000000 OPS in 2.127565 seconds, throughput 940041.784857
+213655	[1728268416]	2000000 OPS in 2.127722 seconds, throughput 939972.421209
+213655	[1728268416]	2000000 OPS in 2.120676 seconds, throughput 943095.503509
+213655	[1728268417]	2000000 OPS in 2.107312 seconds, throughput 949076.358888
+213655	[1728268418]	2000000 OPS in 2.121393 seconds, throughput 942776.750937
+213655	[1728268418]	2000000 OPS in 2.125371 seconds, throughput 941012.180932
+213655	[1728268418]	2000000 OPS in 2.130799 seconds, throughput 938615.045342
+213655	[1728268419]	2000000 OPS in 2.128572 seconds, throughput 939597.063195
+213655	[1728268420]	2000000 OPS in 2.138324 seconds, throughput 935311.954596
+213655	[1728268420]	2000000 OPS in 2.134054 seconds, throughput 937183.407730
+213655	[1728268420]	2000000 OPS in 2.120003 seconds, throughput 943394.891422
+213655	[1728268422]	2000000 OPS in 2.102779 seconds, throughput 951122.300537
+213655	[1728268422]	2000000 OPS in 2.114684 seconds, throughput 945767.783745
+213655	[1728268422]	2000000 OPS in 2.114366 seconds, throughput 945910.026930
+213655	[1728268423]	2000000 OPS in 2.110458 seconds, throughput 947661.597625
+213655	[1728268424]	2000000 OPS in 2.115056 seconds, throughput 945601.440340
+213655	[1728268424]	2000000 OPS in 2.128914 seconds, throughput 939446.121356
+213655	[1728268424]	2000000 OPS in 2.128588 seconds, throughput 939590.000507
+213655	[1728268425]	2000000 OPS in 2.125896 seconds, throughput 940779.793555
+213655	[1728268426]	2000000 OPS in 2.116977 seconds, throughput 944743.376995
+213655	[1728268426]	2000000 OPS in 2.135012 seconds, throughput 936762.884705
+213655	[1728268426]	2000000 OPS in 2.140896 seconds, throughput 934188.302468
+213655	[1728268427]	2000000 OPS in 2.119467 seconds, throughput 943633.470113
+213655	[1728268428]	2000000 OPS in 2.116429 seconds, throughput 944987.996290
+213655	[1728268428]	2000000 OPS in 2.128221 seconds, throughput 939752.027632
+213655	[1728268429]	2000000 OPS in 2.126281 seconds, throughput 940609.449080
+213655	[1728268429]	2000000 OPS in 2.117532 seconds, throughput 944495.762048
+213655	[1728268430]	2000000 OPS in 2.103227 seconds, throughput 950919.705766
+213655	[1728268431]	2000000 OPS in 2.121528 seconds, throughput 942716.758864
+213655	[1728268431]	2000000 OPS in 2.120983 seconds, throughput 942958.995900
+213655	[1728268431]	2000000 OPS in 2.117726 seconds, throughput 944409.238967
+213655	[1728268432]	2000000 OPS in 2.131233 seconds, throughput 938423.907663
+213655	[1728268433]	2000000 OPS in 2.141299 seconds, throughput 934012.484945
+213655	[1728268433]	2000000 OPS in 2.137912 seconds, throughput 935492.199866
+213655	[1728268433]	2000000 OPS in 2.128622 seconds, throughput 939574.992648
+213655	[1728268434]	2000000 OPS in 2.106777 seconds, throughput 949317.369612
+213655	[1728268435]	2000000 OPS in 2.124506 seconds, throughput 941395.317311
+213655	[1728268435]	2000000 OPS in 2.124989 seconds, throughput 941181.342586
+213655	[1728268435]	2000000 OPS in 2.120664 seconds, throughput 943100.840114
+213655	[1728268436]	2000000 OPS in 2.110439 seconds, throughput 947670.129295
+213655	[1728268437]	2000000 OPS in 2.118812 seconds, throughput 943925.180714
+213655	[1728268437]	2000000 OPS in 2.118747 seconds, throughput 943954.138932
+213655	[1728268437]	2000000 OPS in 2.106612 seconds, throughput 949391.724722
+213655	[1728268439]	2000000 OPS in 2.133067 seconds, throughput 937617.055629
+213655	[1728268439]	2000000 OPS in 2.150594 seconds, throughput 929975.625339
+213655	[1728268439]	2000000 OPS in 2.151631 seconds, throughput 929527.414320
+213655	[1728268439]	2000000 OPS in 2.143202 seconds, throughput 933183.153058
+213655	[1728268441]	2000000 OPS in 2.109633 seconds, throughput 948032.193277
+213655	[1728268441]	2000000 OPS in 2.115036 seconds, throughput 945610.382046
+213655	[1728268441]	2000000 OPS in 2.115527 seconds, throughput 945390.912052
+213655	[1728268442]	2000000 OPS in 2.108166 seconds, throughput 948691.896179
+213655	[1728268443]	2000000 OPS in 2.113089 seconds, throughput 946481.667360
+213655	[1728268443]	2000000 OPS in 2.128209 seconds, throughput 939757.326466
+213655	[1728268443]	2000000 OPS in 2.129834 seconds, throughput 939040.319574
+213655	[1728268444]	2000000 OPS in 2.120807 seconds, throughput 943037.249500
+213655	[1728268445]	2000000 OPS in 2.107006 seconds, throughput 949214.193030
+213655	[1728268445]	2000000 OPS in 2.117271 seconds, throughput 944612.191826
+213655	[1728268446]	2000000 OPS in 2.115452 seconds, throughput 945424.429389
+213655	[1728268446]	2000000 OPS in 2.111017 seconds, throughput 947410.655622
+213655	[1728268447]	2000000 OPS in 2.114198 seconds, throughput 945985.191548
+213655	[1728268448]	2000000 OPS in 2.129290 seconds, throughput 939280.229560
+213655	[1728268448]	2000000 OPS in 2.128697 seconds, throughput 939541.888770
+213655	[1728268448]	2000000 OPS in 2.118425 seconds, throughput 944097.619694
+213655	[1728268449]	2000000 OPS in 2.101408 seconds, throughput 951742.831473
+213655	[1728268450]	2000000 OPS in 2.117568 seconds, throughput 944479.705020
+213655	[1728268450]	2000000 OPS in 2.118335 seconds, throughput 944137.730812
+213655	[1728268450]	2000000 OPS in 2.111702 seconds, throughput 947103.331815
+213655	[1728268451]	2000000 OPS in 2.114529 seconds, throughput 945837.110770
+213655	[1728268452]	2000000 OPS in 2.141534 seconds, throughput 933909.991623
+213655	[1728268452]	2000000 OPS in 2.141363 seconds, throughput 933984.569641
+213655	[1728268452]	2000000 OPS in 2.131605 seconds, throughput 938260.137314
+213655	[1728268453]	2000000 OPS in 2.125998 seconds, throughput 940734.657323
+213655	[1728268454]	2000000 OPS in 2.120709 seconds, throughput 943080.828157
+213655	[1728268454]	2000000 OPS in 2.120737 seconds, throughput 943068.376701
+213655	[1728268454]	2000000 OPS in 2.115718 seconds, throughput 945305.565297
+213655	[1728268455]	2000000 OPS in 2.116636 seconds, throughput 944895.579589
+213655	[1728268456]	2000000 OPS in 2.124681 seconds, throughput 941317.778998
+213655	[1728268456]	2000000 OPS in 2.123609 seconds, throughput 941792.957178
+213655	[1728268456]	2000000 OPS in 2.110868 seconds, throughput 947477.530570
+213655	[1728268458]	2000000 OPS in 2.104579 seconds, throughput 950308.826611
+213655	[1728268458]	2000000 OPS in 2.137756 seconds, throughput 935560.466208
+213655	[1728268458]	2000000 OPS in 2.139430 seconds, throughput 934828.435611
+213655	[1728268459]	2000000 OPS in 2.140930 seconds, throughput 934173.466671
+213655	[1728268460]	2000000 OPS in 2.128623 seconds, throughput 939574.551247
+213655	[1728268460]	2000000 OPS in 2.123385 seconds, throughput 941892.308743
+213655	[1728268460]	2000000 OPS in 2.118743 seconds, throughput 943955.921034
+213655	[1728268461]	2000000 OPS in 2.109106 seconds, throughput 948269.077040
+213655	[1728268462]	2000000 OPS in 2.108348 seconds, throughput 948610.001764
+213655	[1728268462]	2000000 OPS in 2.127703 seconds, throughput 939980.814992
+213655	[1728268463]	2000000 OPS in 2.127344 seconds, throughput 940139.441482
+213655	[1728268463]	2000000 OPS in 2.121235 seconds, throughput 942846.973579
+213655	[1728268464]	2000000 OPS in 2.111047 seconds, throughput 947397.192009
+213655	[1728268465]	2000000 OPS in 2.115030 seconds, throughput 945613.064590
+213655	[1728268465]	2000000 OPS in 2.114808 seconds, throughput 945712.329441
+213655	[1728268465]	2000000 OPS in 2.118123 seconds, throughput 944232.228251
+213655	[1728268466]	2000000 OPS in 2.124947 seconds, throughput 941199.945222
+213655	[1728268467]	2000000 OPS in 2.146439 seconds, throughput 931775.838959
+213655	[1728268467]	2000000 OPS in 2.152049 seconds, throughput 929346.868961
+213655	[1728268467]	2000000 OPS in 2.126385 seconds, throughput 940563.444531
+213655	[1728268468]	2000000 OPS in 2.106598 seconds, throughput 949398.034176
+213655	[1728268469]	2000000 OPS in 2.115554 seconds, throughput 945378.846392
+213655	[1728268469]	2000000 OPS in 2.114071 seconds, throughput 946042.020348
+213655	[1728268469]	2000000 OPS in 2.107323 seconds, throughput 949071.404811
+213655	[1728268470]	2000000 OPS in 2.114090 seconds, throughput 946033.517968
+213655	[1728268471]	2000000 OPS in 2.129807 seconds, throughput 939052.223981
+213655	[1728268471]	2000000 OPS in 2.128929 seconds, throughput 939439.502210
+213655	[1728268471]	2000000 OPS in 2.119167 seconds, throughput 943767.055640
+213655	[1728268472]	2000000 OPS in 2.118758 seconds, throughput 943949.238186
+213655	[1728268473]	2000000 OPS in 2.141342 seconds, throughput 933993.729166
+213655	[1728268473]	2000000 OPS in 2.135196 seconds, throughput 936682.159390
+213655	[1728268473]	2000000 OPS in 2.126226 seconds, throughput 940633.780228
+213655	[1728268474]	2000000 OPS in 2.114864 seconds, throughput 945687.287693
+213655	[1728268475]	2000000 OPS in 2.126250 seconds, throughput 940623.162845
+213655	[1728268475]	2000000 OPS in 2.125264 seconds, throughput 941059.557777
+213655	[1728268476]	2000000 OPS in 2.115477 seconds, throughput 945413.256679
+213655	[1728268477]	2000000 OPS in 2.101884 seconds, throughput 951527.296464
+213655	[1728268477]	2000000 OPS in 2.122208 seconds, throughput 942414.692622
+213655	[1728268477]	2000000 OPS in 2.120860 seconds, throughput 943013.683129
+213655	[1728268478]	2000000 OPS in 2.115964 seconds, throughput 945195.664955
+213655	[1728268479]	2000000 OPS in 2.138160 seconds, throughput 935383.694391
+213655	[1728268480]	2000000 OPS in 2.147130 seconds, throughput 931475.970249
+213655	[1728268480]	2000000 OPS in 2.143303 seconds, throughput 933139.178175
+213655	[1728268480]	2000000 OPS in 2.133747 seconds, throughput 937318.248133
+213655	[1728268481]	2000000 OPS in 2.103670 seconds, throughput 950719.456949
+213655	[1728268482]	2000000 OPS in 2.125855 seconds, throughput 940797.937771
+213655	[1728268482]	2000000 OPS in 2.127178 seconds, throughput 940212.807767
+213655	[1728268482]	2000000 OPS in 2.118654 seconds, throughput 943995.574549
+213655	[1728268483]	2000000 OPS in 2.113150 seconds, throughput 946454.345409
+213655	[1728268484]	2000000 OPS in 2.119024 seconds, throughput 943830.744720
+213655	[1728268484]	2000000 OPS in 2.116895 seconds, throughput 944779.972554
+213655	[1728268484]	2000000 OPS in 2.107207 seconds, throughput 949123.650405
+213655	[1728268485]	2000000 OPS in 2.122076 seconds, throughput 942473.313868
+213655	[1728268486]	2000000 OPS in 2.153238 seconds, throughput 928833.691399
+213655	[1728268486]	2000000 OPS in 2.150518 seconds, throughput 930008.490978
+213655	[1728268486]	2000000 OPS in 2.143365 seconds, throughput 933112.185745
+213655	[1728268487]	2000000 OPS in 2.118644 seconds, throughput 944000.030208
+213655	[1728268488]	2000000 OPS in 2.117210 seconds, throughput 944639.407522
+213655	[1728268488]	2000000 OPS in 2.116153 seconds, throughput 945111.246682
+213655	[1728268488]	2000000 OPS in 2.107211 seconds, throughput 949121.848738
+213655	[1728268489]	2000000 OPS in 2.110418 seconds, throughput 947679.559215
+213655	[1728268490]	2000000 OPS in 2.131404 seconds, throughput 938348.619032
+213655	[1728268490]	2000000 OPS in 2.128028 seconds, throughput 939837.257780
+213655	[1728268490]	2000000 OPS in 2.121277 seconds, throughput 942828.305780
+213655	[1728268491]	2000000 OPS in 2.107472 seconds, throughput 949004.304684
+213655	[1728268492]	2000000 OPS in 2.131948 seconds, throughput 938109.184652
+213655	[1728268492]	2000000 OPS in 2.130421 seconds, throughput 938781.583546
+213655	[1728268492]	2000000 OPS in 2.124513 seconds, throughput 941392.215534
+213655	[1728268493]	2000000 OPS in 2.128888 seconds, throughput 939457.594763
+213655	[1728268494]	2000000 OPS in 2.127619 seconds, throughput 940017.926142
+213655	[1728268495]	2000000 OPS in 2.128196 seconds, throughput 939763.066936
+213655	[1728268495]	2000000 OPS in 2.120125 seconds, throughput 943340.604917
+213655	[1728268496]	2000000 OPS in 2.104539 seconds, throughput 950326.888692
+213655	[1728268497]	2000000 OPS in 2.119519 seconds, throughput 943610.319134
+213655	[1728268497]	2000000 OPS in 2.117379 seconds, throughput 944564.010505
+213655	[1728268497]	2000000 OPS in 2.112121 seconds, throughput 946915.446606
+213655	[1728268498]	2000000 OPS in 2.116212 seconds, throughput 945084.896976
+213655	[1728268499]	2000000 OPS in 2.137425 seconds, throughput 935705.346386
+213655	[1728268499]	2000000 OPS in 2.145124 seconds, throughput 932347.034484
+213655	[1728268499]	2000000 OPS in 2.127956 seconds, throughput 939869.057443
+213655	[1728268500]	2000000 OPS in 2.118542 seconds, throughput 944045.480335
+213655	[1728268501]	2000000 OPS in 2.123396 seconds, throughput 941887.429382
+213655	[1728268501]	2000000 OPS in 2.125007 seconds, throughput 941173.370252
+213655	[1728268501]	2000000 OPS in 2.114433 seconds, throughput 945880.053896
+213655	[1728268502]	2000000 OPS in 2.115271 seconds, throughput 945505.327686
+213655	[1728268503]	2000000 OPS in 2.120068 seconds, throughput 943365.967507
+213655	[1728268503]	2000000 OPS in 2.118719 seconds, throughput 943966.613789
+213655	[1728268503]	2000000 OPS in 2.111639 seconds, throughput 947131.588307
+213655	[1728268504]	2000000 OPS in 2.102778 seconds, throughput 951122.752854
+213655	[1728268505]	2000000 OPS in 2.125575 seconds, throughput 940921.868200
+213655	[1728268505]	2000000 OPS in 2.125075 seconds, throughput 941143.253768
+213655	[1728268505]	2000000 OPS in 2.119497 seconds, throughput 943620.113640
+213655	[1728268506]	2000000 OPS in 2.114722 seconds, throughput 945750.788993
+213655	[1728268507]	2000000 OPS in 2.118606 seconds, throughput 944016.962097
+213655	[1728268507]	2000000 OPS in 2.117031 seconds, throughput 944719.279028
+213655	[1728268507]	2000000 OPS in 2.109632 seconds, throughput 948032.642660
+213655	[1728268509]	2000000 OPS in 2.081220 seconds, throughput 960974.812850
+213655	[1728268509]	2000000 OPS in 2.079493 seconds, throughput 961772.893681
+213655	[1728268509]	2000000 OPS in 2.133598 seconds, throughput 937383.705834
+213655	[1728268511]	2000000 OPS in 2.017308 seconds, throughput 991420.249164
+213655	[1728268511]	2000000 OPS in 2.017719 seconds, throughput 991218.301458
+213655	[1728268512]	2000000 OPS in 2.126944 seconds, throughput 940316.247160
+213655	[1728268513]	2000000 OPS in 2.052321 seconds, throughput 974506.424677
+213655	[1728268513]	2000000 OPS in 2.044590 seconds, throughput 978191.226603
+213655	[1728268514]	2000000 OPS in 2.156716 seconds, throughput 927335.819830
+-----------------------------------------------------------------------------------------------------------------
+Benchmark                                                       Time             CPU   Iterations UserCounters...
+-----------------------------------------------------------------------------------------------------------------
+ViperFixture/bench/50/iterations:1/real_time/threads:4  266294144 us   1065040658 us            4 CompactionCPUUsage=1.9775 CompactionThroughput=803.355k Lat_Get_Avg=599.133 Lat_Get_P50=542.649 Lat_Get_P95=1.2097k Lat_Get_P99=1.89738k Lat_Put_Avg=1.51142k Lat_Put_P50=1.48947k Lat_Put_P95=2.51403k Lat_Put_P99=3.24239k items_per_second=3.75525M/s
+6383.95user 33.46system 18:17.02elapsed 584%CPU (0avgtext+0avgdata 2270896maxresident)k
+323616inputs+33840outputs (1622major+14829388minor)pagefaults 0swaps

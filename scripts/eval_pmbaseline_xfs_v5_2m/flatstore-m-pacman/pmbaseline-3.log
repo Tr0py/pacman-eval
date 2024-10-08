@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS ON
+-- SET HOT_COLD_SEPARATE ON
+-- SET GC_SHORTCUT ON
+-- SET BATCH_COMPACTION ON
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 54%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 59%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T20:59:44-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2000 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.62, 4.16, 4.45
+[1728266384]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728266384]	Setup starts!
+[1728266384]	Setup starts!
+[1728266384]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7fb299800000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728266384]	Initializing log segments...
+Log: pool_start 0x7fb299800000 total segments: 2028  cleaners: 2
+[1728266385]Initialized 2026 free log segments...
+[1728266385]	DB init finished in 0.427412 seconds
+[1728266385]	DB init finished in 0.427649 seconds
+[1728266385]	DB init finished in 0.427587 seconds
+[1728266385]	DB init finished in 0.427544 seconds
+[1728266389]	DB load finished in 4.224445 seconds
+[1728266389]	DB load finished in 4.246725 seconds
+[1728266390]	DB load finished in 4.618680 seconds
+[1728266390]	DB load finished in 5.465623 seconds
+[1728266390]	DB warmup finished in 0.000023 seconds
+[1728266390]	DB warmup finished in 0.846999 seconds
+[1728266390]	DB warmup finished in 1.241245 seconds
+[1728266390]	DB warmup finished in 1.218963 seconds
+[1728266390]	ETC init!
+[1728266390]	ETC starts!
+[1728266390]	ETC init!
+[1728266390]	ETC starts!
+[1728266390]	ETC init!
+[1728266390]	ETC init!
+[1728266390]	ETC starts!
+[1728266390]	ETC starts!
+203381	[1728266393]	2000000 OPS in 2.464103 seconds, throughput 811654.382954
+203381	[1728266393]	2000000 OPS in 2.479997 seconds, throughput 806452.588451
+203381	[1728266393]	2000000 OPS in 2.496580 seconds, throughput 801095.899190
+203381	[1728266393]	2000000 OPS in 2.522325 seconds, throughput 792919.231265
+203381	[1728266395]	2000000 OPS in 2.419604 seconds, throughput 826581.539789
+203381	[1728266395]	2000000 OPS in 2.431167 seconds, throughput 822650.192274
+203381	[1728266395]	2000000 OPS in 2.430856 seconds, throughput 822755.440882
+203381	[1728266395]	2000000 OPS in 2.629273 seconds, throughput 760666.541664
+203381	[1728266398]	2000000 OPS in 2.443260 seconds, throughput 818578.456652
+203381	[1728266398]	2000000 OPS in 2.529102 seconds, throughput 790794.519161
+203381	[1728266398]	2000000 OPS in 2.598705 seconds, throughput 769614.096252
+203381	[1728266398]	2000000 OPS in 2.487723 seconds, throughput 803948.027976
+203381	[1728266400]	2000000 OPS in 2.420380 seconds, throughput 826316.528810
+203381	[1728266400]	2000000 OPS in 2.585483 seconds, throughput 773549.855095
+203381	[1728266400]	2000000 OPS in 2.483019 seconds, throughput 805471.081776
+203381	[1728266401]	2000000 OPS in 2.822221 seconds, throughput 708661.724224
+203381	[1728266403]	2000000 OPS in 2.381714 seconds, throughput 839731.386724
+203381	[1728266403]	2000000 OPS in 2.345246 seconds, throughput 852789.003797
+203381	[1728266403]	2000000 OPS in 2.342856 seconds, throughput 853658.953004
+203381	[1728266403]	2000000 OPS in 2.303782 seconds, throughput 868137.697056
+203381	[1728266404]	2000000 OPS in 1.974460 seconds, throughput 1012935.182278
+203381	[1728266405]	2000000 OPS in 1.980764 seconds, throughput 1009711.404286
+203381	[1728266405]	2000000 OPS in 1.987826 seconds, throughput 1006124.278483
+203381	[1728266405]	2000000 OPS in 1.987127 seconds, throughput 1006478.196914
+203381	[1728266406]	2000000 OPS in 1.987031 seconds, throughput 1006526.823185
+203381	[1728266407]	2000000 OPS in 2.014074 seconds, throughput 993012.173336
+203381	[1728266407]	2000000 OPS in 2.024696 seconds, throughput 987802.613331
+203381	[1728266407]	2000000 OPS in 2.020982 seconds, throughput 989617.918418
+203381	[1728266408]	2000000 OPS in 2.006753 seconds, throughput 996634.862387
+203381	[1728266409]	2000000 OPS in 2.027805 seconds, throughput 986288.129283
+203381	[1728266409]	2000000 OPS in 2.029229 seconds, throughput 985596.007153
+203381	[1728266409]	2000000 OPS in 2.034669 seconds, throughput 982960.864888
+203381	[1728266410]	2000000 OPS in 2.014599 seconds, throughput 992753.396582
+203381	[1728266411]	2000000 OPS in 2.050878 seconds, throughput 975192.088462
+203381	[1728266411]	2000000 OPS in 2.076549 seconds, throughput 963136.434536
+203381	[1728266411]	2000000 OPS in 2.054146 seconds, throughput 973640.627297
+203381	[1728266413]	2000000 OPS in 2.037440 seconds, throughput 981623.998744
+203381	[1728266413]	2000000 OPS in 2.046733 seconds, throughput 977167.026671
+203381	[1728266413]	2000000 OPS in 2.067962 seconds, throughput 967135.759748
+203381	[1728266413]	2000000 OPS in 2.072993 seconds, throughput 964788.593112
+203381	[1728266415]	2000000 OPS in 2.028373 seconds, throughput 986011.941591
+203381	[1728266415]	2000000 OPS in 2.051744 seconds, throughput 974780.479436
+203381	[1728266415]	2000000 OPS in 2.050809 seconds, throughput 975224.899052
+203381	[1728266415]	2000000 OPS in 2.071066 seconds, throughput 965686.269776
+203381	[1728266417]	2000000 OPS in 2.010773 seconds, throughput 994642.358934
+203381	[1728266417]	2000000 OPS in 2.089450 seconds, throughput 957189.691067
+203381	[1728266417]	2000000 OPS in 2.038050 seconds, throughput 981330.193077
+203381	[1728266417]	2000000 OPS in 2.044084 seconds, throughput 978433.371623
+203381	[1728266419]	2000000 OPS in 2.015228 seconds, throughput 992443.534925
+203381	[1728266419]	2000000 OPS in 2.045973 seconds, throughput 977530.006505
+203381	[1728266419]	2000000 OPS in 2.095273 seconds, throughput 954529.552951
+203381	[1728266419]	2000000 OPS in 2.047117 seconds, throughput 976983.728824
+203381	[1728266421]	2000000 OPS in 2.017248 seconds, throughput 991449.737464
+203381	[1728266421]	2000000 OPS in 2.037202 seconds, throughput 981738.678835
+203381	[1728266421]	2000000 OPS in 2.428710 seconds, throughput 823482.424826
+203381	[1728266421]	2000000 OPS in 2.063516 seconds, throughput 969219.526284
+203381	[1728266423]	2000000 OPS in 2.005154 seconds, throughput 997429.623859
+203381	[1728266423]	2000000 OPS in 2.028998 seconds, throughput 985708.216568
+203381	[1728266424]	2000000 OPS in 2.296108 seconds, throughput 871039.167147
+203381	[1728266424]	2000000 OPS in 2.463899 seconds, throughput 811721.584367
+203381	[1728266425]	2000000 OPS in 2.015972 seconds, throughput 992077.270914
+203381	[1728266425]	2000000 OPS in 2.043795 seconds, throughput 978571.725638
+203381	[1728266426]	2000000 OPS in 2.068268 seconds, throughput 966992.672130
+203381	[1728266426]	2000000 OPS in 2.040714 seconds, throughput 980049.139664
+203381	[1728266427]	2000000 OPS in 2.014341 seconds, throughput 992880.550016
+203381	[1728266427]	2000000 OPS in 2.040853 seconds, throughput 979982.389716
+203381	[1728266428]	2000000 OPS in 2.041235 seconds, throughput 979798.994236
+203381	[1728266428]	2000000 OPS in 2.036109 seconds, throughput 982265.684205
+203381	[1728266429]	2000000 OPS in 2.013385 seconds, throughput 993351.991795
+203381	[1728266429]	2000000 OPS in 2.041403 seconds, throughput 979718.360363
+203381	[1728266430]	2000000 OPS in 2.043024 seconds, throughput 978941.020761
+203381	[1728266430]	2000000 OPS in 2.035762 seconds, throughput 982433.113498
+203381	[1728266431]	2000000 OPS in 2.016821 seconds, throughput 991659.646543
+203381	[1728266431]	2000000 OPS in 2.045210 seconds, throughput 977894.690521
+203381	[1728266432]	2000000 OPS in 2.036764 seconds, throughput 981949.798798
+203381	[1728266432]	2000000 OPS in 2.029208 seconds, throughput 985606.206954
+203381	[1728266433]	2000000 OPS in 2.012232 seconds, throughput 993921.178075
+203381	[1728266433]	2000000 OPS in 2.040428 seconds, throughput 980186.509889
+203381	[1728266434]	2000000 OPS in 2.050959 seconds, throughput 975153.574499
+203381	[1728266434]	2000000 OPS in 2.033484 seconds, throughput 983533.679144
+203381	[1728266435]	2000000 OPS in 2.010611 seconds, throughput 994722.499777
+203381	[1728266435]	2000000 OPS in 2.036122 seconds, throughput 982259.412746
+203381	[1728266436]	2000000 OPS in 2.031021 seconds, throughput 984726.401155
+203381	[1728266436]	2000000 OPS in 2.145603 seconds, throughput 932138.890559
+203381	[1728266437]	2000000 OPS in 2.010532 seconds, throughput 994761.585491
+203381	[1728266437]	2000000 OPS in 2.032727 seconds, throughput 983899.953117
+203381	[1728266438]	2000000 OPS in 2.028983 seconds, throughput 985715.503777
+203381	[1728266438]	2000000 OPS in 2.061699 seconds, throughput 970073.711051
+203381	[1728266439]	2000000 OPS in 2.010458 seconds, throughput 994798.200211
+203381	[1728266439]	2000000 OPS in 2.035265 seconds, throughput 982673.018010
+203381	[1728266440]	2000000 OPS in 2.033641 seconds, throughput 983457.748934
+203381	[1728266440]	2000000 OPS in 2.034478 seconds, throughput 983053.146802
+203381	[1728266441]	2000000 OPS in 2.012158 seconds, throughput 993957.730954
+203381	[1728266441]	2000000 OPS in 2.036965 seconds, throughput 981852.903707
+203381	[1728266442]	2000000 OPS in 2.035960 seconds, throughput 982337.570483
+203381	[1728266443]	2000000 OPS in 2.243736 seconds, throughput 891370.464261
+203381	[1728266443]	2000000 OPS in 2.008748 seconds, throughput 995645.048558
+203381	[1728266444]	2000000 OPS in 2.040292 seconds, throughput 980251.846304
+203381	[1728266444]	2000000 OPS in 2.047345 seconds, throughput 976874.928261
+203381	[1728266445]	2000000 OPS in 2.014187 seconds, throughput 992956.463327
+203381	[1728266445]	2000000 OPS in 2.541460 seconds, throughput 786949.233905
+203381	[1728266446]	2000000 OPS in 2.037951 seconds, throughput 981377.864335
+203381	[1728266446]	2000000 OPS in 2.041386 seconds, throughput 979726.519139
+203381	[1728266447]	2000000 OPS in 2.015054 seconds, throughput 992529.232467
+203381	[1728266447]	2000000 OPS in 2.051784 seconds, throughput 974761.475867
+203381	[1728266448]	2000000 OPS in 2.040684 seconds, throughput 980063.547320
+203381	[1728266448]	2000000 OPS in 2.037099 seconds, throughput 981788.317603
+203381	[1728266449]	2000000 OPS in 2.015684 seconds, throughput 992219.018457
+203381	[1728266449]	2000000 OPS in 2.133649 seconds, throughput 937361.299820
+203381	[1728266450]	2000000 OPS in 2.045735 seconds, throughput 977643.731959
+203381	[1728266450]	2000000 OPS in 2.044188 seconds, throughput 978383.592899
+203381	[1728266451]	2000000 OPS in 2.017757 seconds, throughput 991199.634049
+203381	[1728266451]	2000000 OPS in 2.044525 seconds, throughput 978222.325479
+203381	[1728266452]	2000000 OPS in 2.042565 seconds, throughput 979161.005892
+203381	[1728266452]	2000000 OPS in 2.041420 seconds, throughput 979710.201722
+203381	[1728266453]	2000000 OPS in 2.018670 seconds, throughput 990751.336276
+203381	[1728266453]	2000000 OPS in 2.043517 seconds, throughput 978704.850510
+203381	[1728266454]	2000000 OPS in 2.046323 seconds, throughput 977362.811247
+203381	[1728266455]	2000000 OPS in 2.044223 seconds, throughput 978366.841582
+203381	[1728266455]	2000000 OPS in 2.016003 seconds, throughput 992062.015781
+203381	[1728266455]	2000000 OPS in 2.049263 seconds, throughput 975960.625845
+203381	[1728266456]	2000000 OPS in 2.039874 seconds, throughput 980452.714236
+203381	[1728266457]	2000000 OPS in 2.044331 seconds, throughput 978315.155422
+203381	[1728266457]	2000000 OPS in 2.013826 seconds, throughput 993134.461468
+203381	[1728266458]	2000000 OPS in 2.158899 seconds, throughput 926398.131640
+203381	[1728266458]	2000000 OPS in 2.038776 seconds, throughput 980980.745310
+203381	[1728266459]	2000000 OPS in 2.056598 seconds, throughput 972479.794301
+203381	[1728266459]	2000000 OPS in 2.009986 seconds, throughput 995031.806192
+203381	[1728266460]	2000000 OPS in 2.038829 seconds, throughput 980955.244407
+203381	[1728266460]	2000000 OPS in 2.533711 seconds, throughput 789356.007848
+203381	[1728266461]	2000000 OPS in 2.050684 seconds, throughput 975284.344151
+203381	[1728266461]	2000000 OPS in 2.012798 seconds, throughput 993641.686846
+203381	[1728266462]	2000000 OPS in 2.048146 seconds, throughput 976492.886738
+203381	[1728266462]	2000000 OPS in 2.040141 seconds, throughput 980324.399147
+203381	[1728266463]	2000000 OPS in 2.046390 seconds, throughput 977330.811820
+203381	[1728266463]	2000000 OPS in 2.018487 seconds, throughput 990841.159740
+203381	[1728266464]	2000000 OPS in 2.046783 seconds, throughput 977143.155869
+203381	[1728266464]	2000000 OPS in 2.040743 seconds, throughput 980035.212665
+203381	[1728266465]	2000000 OPS in 2.047381 seconds, throughput 976857.751440
+203381	[1728266465]	2000000 OPS in 2.021871 seconds, throughput 989182.791583
+203381	[1728266466]	2000000 OPS in 2.048697 seconds, throughput 976230.257573
+203381	[1728266466]	2000000 OPS in 2.048279 seconds, throughput 976429.480554
+203381	[1728266467]	2000000 OPS in 2.045803 seconds, throughput 977611.236273
+203381	[1728266467]	2000000 OPS in 2.019464 seconds, throughput 990361.798972
+203381	[1728266468]	2000000 OPS in 2.049210 seconds, throughput 975985.867725
+203381	[1728266468]	2000000 OPS in 2.043952 seconds, throughput 978496.559606
+203381	[1728266469]	2000000 OPS in 2.046676 seconds, throughput 977194.240808
+203381	[1728266469]	2000000 OPS in 2.022238 seconds, throughput 989003.272612
+203381	[1728266470]	2000000 OPS in 2.046143 seconds, throughput 977448.790236
+203381	[1728266470]	2000000 OPS in 2.038730 seconds, throughput 981002.879243
+203381	[1728266471]	2000000 OPS in 2.042716 seconds, throughput 979088.625144
+203381	[1728266471]	2000000 OPS in 2.019557 seconds, throughput 990316.193106
+203381	[1728266472]	2000000 OPS in 2.050136 seconds, throughput 975545.037012
+203381	[1728266472]	2000000 OPS in 2.041220 seconds, throughput 979806.194335
+203381	[1728266473]	2000000 OPS in 2.044328 seconds, throughput 978316.591075
+203381	[1728266473]	2000000 OPS in 2.017472 seconds, throughput 991339.656759
+203381	[1728266474]	2000000 OPS in 2.054607 seconds, throughput 973422.167840
+203381	[1728266474]	2000000 OPS in 2.050147 seconds, throughput 975539.802756
+203381	[1728266475]	2000000 OPS in 2.052282 seconds, throughput 974524.943453
+203381	[1728266475]	2000000 OPS in 2.022510 seconds, throughput 988870.265166
+203381	[1728266476]	2000000 OPS in 2.049744 seconds, throughput 975731.603556
+203381	[1728266476]	2000000 OPS in 2.040737 seconds, throughput 980038.094081
+203381	[1728266477]	2000000 OPS in 2.018954 seconds, throughput 990611.970357
+203381	[1728266477]	2000000 OPS in 2.045060 seconds, throughput 977966.416633
+203381	[1728266478]	2000000 OPS in 2.047562 seconds, throughput 976771.399352
+203381	[1728266478]	2000000 OPS in 2.040809 seconds, throughput 980003.518213
+203381	[1728266479]	2000000 OPS in 2.022399 seconds, throughput 988924.539619
+203381	[1728266479]	2000000 OPS in 2.045993 seconds, throughput 977520.450950
+203381	[1728266480]	2000000 OPS in 2.050451 seconds, throughput 975395.169160
+203381	[1728266480]	2000000 OPS in 2.035994 seconds, throughput 982321.165976
+203381	[1728266481]	2000000 OPS in 2.022060 seconds, throughput 989090.333620
+203381	[1728266481]	2000000 OPS in 2.040135 seconds, throughput 980327.282263
+203381	[1728266482]	2000000 OPS in 2.053280 seconds, throughput 974051.274059
+203381	[1728266483]	2000000 OPS in 2.040307 seconds, throughput 980244.639655
+203381	[1728266483]	2000000 OPS in 2.019427 seconds, throughput 990379.944410
+203381	[1728266483]	2000000 OPS in 2.043617 seconds, throughput 978656.959695
+203381	[1728266484]	2000000 OPS in 2.046728 seconds, throughput 977169.413816
+203381	[1728266485]	2000000 OPS in 2.035987 seconds, throughput 982324.543330
+203381	[1728266485]	2000000 OPS in 2.021501 seconds, throughput 989363.843995
+203381	[1728266485]	2000000 OPS in 2.040422 seconds, throughput 980189.392194
+203381	[1728266486]	2000000 OPS in 2.049868 seconds, throughput 975672.579893
+203381	[1728266487]	2000000 OPS in 2.038729 seconds, throughput 981003.360427
+203381	[1728266487]	2000000 OPS in 2.017600 seconds, throughput 991276.764473
+203381	[1728266487]	2000000 OPS in 2.042576 seconds, throughput 979155.732761
+203381	[1728266489]	2000000 OPS in 2.058759 seconds, throughput 971459.019730
+203381	[1728266489]	2000000 OPS in 2.048625 seconds, throughput 976264.567698
+203381	[1728266489]	2000000 OPS in 2.026709 seconds, throughput 986821.492380
+203381	[1728266489]	2000000 OPS in 2.050426 seconds, throughput 975407.061752
+203381	[1728266491]	2000000 OPS in 2.052664 seconds, throughput 974343.584727
+203381	[1728266491]	2000000 OPS in 2.040489 seconds, throughput 980157.207414
+203381	[1728266491]	2000000 OPS in 2.022345 seconds, throughput 988950.945561
+203381	[1728266491]	2000000 OPS in 2.043210 seconds, throughput 978851.904601
+203381	[1728266493]	2000000 OPS in 2.047796 seconds, throughput 976659.784471
+203381	[1728266493]	2000000 OPS in 2.042286 seconds, throughput 979294.770664
+203381	[1728266493]	2000000 OPS in 2.023435 seconds, throughput 988418.209629
+203381	[1728266493]	2000000 OPS in 2.044556 seconds, throughput 978207.493461
+203381	[1728266495]	2000000 OPS in 2.047274 seconds, throughput 976908.806540
+203381	[1728266495]	2000000 OPS in 2.039021 seconds, throughput 980862.874880
+203381	[1728266495]	2000000 OPS in 2.023415 seconds, throughput 988427.979431
+203381	[1728266495]	2000000 OPS in 2.044117 seconds, throughput 978417.575902
+203381	[1728266497]	2000000 OPS in 2.050389 seconds, throughput 975424.663320
+203381	[1728266497]	2000000 OPS in 2.038117 seconds, throughput 981297.933337
+203381	[1728266497]	2000000 OPS in 2.018840 seconds, throughput 990667.908304
+203381	[1728266497]	2000000 OPS in 2.041530 seconds, throughput 979657.413802
+203381	[1728266499]	2000000 OPS in 2.047789 seconds, throughput 976663.123007
+203381	[1728266499]	2000000 OPS in 2.036949 seconds, throughput 981860.616049
+203381	[1728266499]	2000000 OPS in 2.020932 seconds, throughput 989642.402614
+203381	[1728266500]	2000000 OPS in 2.038917 seconds, throughput 980912.906214
+203381	[1728266501]	2000000 OPS in 2.046589 seconds, throughput 977235.781097
+203381	[1728266501]	2000000 OPS in 2.038010 seconds, throughput 981349.453634
+203381	[1728266501]	2000000 OPS in 2.018413 seconds, throughput 990877.486421
+203381	[1728266502]	2000000 OPS in 2.041222 seconds, throughput 979805.234316
+203381	[1728266503]	2000000 OPS in 2.051287 seconds, throughput 974997.647818
+203381	[1728266503]	2000000 OPS in 2.038365 seconds, throughput 981178.542606
+203381	[1728266503]	2000000 OPS in 2.021250 seconds, throughput 989486.703772
+203381	[1728266504]	2000000 OPS in 2.048817 seconds, throughput 976173.079392
+203381	[1728266505]	2000000 OPS in 2.050758 seconds, throughput 975249.151777
+203381	[1728266505]	2000000 OPS in 2.046245 seconds, throughput 977400.066952
+203381	[1728266505]	2000000 OPS in 2.025204 seconds, throughput 987554.833982
+203381	[1728266506]	2000000 OPS in 2.047348 seconds, throughput 976873.496836
+203381	[1728266507]	2000000 OPS in 2.050164 seconds, throughput 975531.713560
+203381	[1728266507]	2000000 OPS in 2.042781 seconds, throughput 979057.471163
+203381	[1728266507]	2000000 OPS in 2.021917 seconds, throughput 989160.286995
+203381	[1728266508]	2000000 OPS in 2.047010 seconds, throughput 977034.797094
+203381	[1728266509]	2000000 OPS in 2.050547 seconds, throughput 975349.504303
+203381	[1728266509]	2000000 OPS in 2.042316 seconds, throughput 979280.385601
+203381	[1728266509]	2000000 OPS in 2.026462 seconds, throughput 986941.773396
+203381	[1728266510]	2000000 OPS in 2.050053 seconds, throughput 975584.533668
+203381	[1728266511]	2000000 OPS in 2.053995 seconds, throughput 973712.204752
+203381	[1728266511]	2000000 OPS in 2.045274 seconds, throughput 977864.090582
+203381	[1728266511]	2000000 OPS in 2.023154 seconds, throughput 988555.493057
+203381	[1728266512]	2000000 OPS in 2.048250 seconds, throughput 976443.305261
+203381	[1728266513]	2000000 OPS in 2.048552 seconds, throughput 976299.356814
+203381	[1728266513]	2000000 OPS in 2.039279 seconds, throughput 980738.780716
+203381	[1728266513]	2000000 OPS in 2.022324 seconds, throughput 988961.214919
+203381	[1728266514]	2000000 OPS in 2.046400 seconds, throughput 977326.035966
+203381	[1728266515]	2000000 OPS in 2.043713 seconds, throughput 978610.988921
+203381	[1728266515]	2000000 OPS in 2.051061 seconds, throughput 975105.079761
+203381	[1728266515]	2000000 OPS in 2.023619 seconds, throughput 988328.336510
+203381	[1728266516]	2000000 OPS in 2.051747 seconds, throughput 974779.054143
+203381	[1728266517]	2000000 OPS in 2.039587 seconds, throughput 980590.678407
+203381	[1728266517]	2000000 OPS in 2.049606 seconds, throughput 975797.299579
+203381	[1728266517]	2000000 OPS in 2.024746 seconds, throughput 987778.220083
+203381	[1728266518]	2000000 OPS in 2.049130 seconds, throughput 976023.971149
+203381	[1728266519]	2000000 OPS in 2.050849 seconds, throughput 975205.878151
+203381	[1728266519]	2000000 OPS in 2.051587 seconds, throughput 974855.075607
+203381	[1728266520]	2000000 OPS in 2.027713 seconds, throughput 986332.878469
+203381	[1728266520]	2000000 OPS in 2.056271 seconds, throughput 972634.443612
+203381	[1728266521]	2000000 OPS in 2.036544 seconds, throughput 982055.875051
+203381	[1728266521]	2000000 OPS in 2.045936 seconds, throughput 977547.684776
+203381	[1728266522]	2000000 OPS in 2.022022 seconds, throughput 989108.921664
+203381	[1728266522]	2000000 OPS in 2.053559 seconds, throughput 973918.937805
+203381	[1728266523]	2000000 OPS in 2.035771 seconds, throughput 982428.770230
+203381	[1728266523]	2000000 OPS in 2.051963 seconds, throughput 974676.443971
+203381	[1728266524]	2000000 OPS in 2.035164 seconds, throughput 982721.785566
+203381	[1728266524]	2000000 OPS in 2.040140 seconds, throughput 980324.879665
+203381	[1728266525]	2000000 OPS in 2.037172 seconds, throughput 981753.136210
+203381	[1728266525]	2000000 OPS in 2.050537 seconds, throughput 975354.260859
+203381	[1728266526]	2000000 OPS in 2.038489 seconds, throughput 981118.858135
+203381	[1728266526]	2000000 OPS in 2.046038 seconds, throughput 977498.951632
+203381	[1728266527]	2000000 OPS in 2.043995 seconds, throughput 978475.974746
+203381	[1728266527]	2000000 OPS in 2.048469 seconds, throughput 976338.914575
+203381	[1728266528]	2000000 OPS in 2.043093 seconds, throughput 978907.959647
+203381	[1728266528]	2000000 OPS in 2.044508 seconds, throughput 978230.459357
+203381	[1728266529]	2000000 OPS in 2.044969 seconds, throughput 978009.935603
+203381	[1728266530]	2000000 OPS in 2.053563 seconds, throughput 973917.040773
+203381	[1728266530]	2000000 OPS in 2.043323 seconds, throughput 978797.772061
+203381	[1728266530]	2000000 OPS in 2.053216 seconds, throughput 974081.635834
+203381	[1728266532]	2000000 OPS in 2.043748 seconds, throughput 978594.229817
+203381	[1728266532]	2000000 OPS in 2.054068 seconds, throughput 973677.599768
+203381	[1728266532]	2000000 OPS in 2.045190 seconds, throughput 977904.253395
+203381	[1728266532]	2000000 OPS in 2.046051 seconds, throughput 977492.740895
+203381	[1728266534]	2000000 OPS in 2.043558 seconds, throughput 978685.214709
+203381	[1728266534]	2000000 OPS in 2.055602 seconds, throughput 972950.989540
+203381	[1728266534]	2000000 OPS in 2.049896 seconds, throughput 975659.252957
+203381	[1728266534]	2000000 OPS in 2.050951 seconds, throughput 975157.378211
+203381	[1728266536]	2000000 OPS in 2.041549 seconds, throughput 979648.296465
+203381	[1728266536]	2000000 OPS in 2.053364 seconds, throughput 974011.427102
+203381	[1728266536]	2000000 OPS in 2.043049 seconds, throughput 978929.041839
+203381	[1728266536]	2000000 OPS in 2.047201 seconds, throughput 976943.641587
+203381	[1728266538]	2000000 OPS in 2.041627 seconds, throughput 979610.869174
+203381	[1728266538]	2000000 OPS in 2.050910 seconds, throughput 975176.872705
+203381	[1728266538]	2000000 OPS in 2.037826 seconds, throughput 981438.061935
+203381	[1728266538]	2000000 OPS in 2.047044 seconds, throughput 977018.569215
+203381	[1728266540]	2000000 OPS in 2.039814 seconds, throughput 980481.553710
+203381	[1728266540]	2000000 OPS in 2.028741 seconds, throughput 985833.085643
+203381	[1728266540]	2000000 OPS in 2.036035 seconds, throughput 982301.384799
+203381	[1728266540]	2000000 OPS in 2.046112 seconds, throughput 977463.599256
+203381	[1728266542]	2000000 OPS in 2.039431 seconds, throughput 980665.685674
+203381	[1728266542]	2000000 OPS in 2.045580 seconds, throughput 977717.811085
+203381	[1728266542]	2000000 OPS in 2.036485 seconds, throughput 982084.326671
+203381	[1728266543]	2000000 OPS in 2.047083 seconds, throughput 976999.955547
+203381	[1728266544]	2000000 OPS in 2.039432 seconds, throughput 980665.204822
+203381	[1728266544]	2000000 OPS in 2.053304 seconds, throughput 974039.888882
+203381	[1728266544]	2000000 OPS in 2.040454 seconds, throughput 980174.020096
+203381	[1728266545]	2000000 OPS in 2.043940 seconds, throughput 978502.304373
+203381	[1728266546]	2000000 OPS in 2.041075 seconds, throughput 979875.800742
+203381	[1728266546]	2000000 OPS in 2.052853 seconds, throughput 974253.879844
+203381	[1728266546]	2000000 OPS in 2.041463 seconds, throughput 979689.565767
+203381	[1728266547]	2000000 OPS in 2.051528 seconds, throughput 974883.111515
+203381	[1728266548]	2000000 OPS in 2.043590 seconds, throughput 978669.889753
+203381	[1728266548]	2000000 OPS in 2.053760 seconds, throughput 973823.621066
+203381	[1728266548]	2000000 OPS in 2.040161 seconds, throughput 980314.788882
+203381	[1728266549]	2000000 OPS in 2.054883 seconds, throughput 973291.423405
+203381	[1728266550]	2000000 OPS in 2.051086 seconds, throughput 975093.194532
+203381	[1728266550]	2000000 OPS in 2.058742 seconds, throughput 971467.041523
+203381	[1728266550]	2000000 OPS in 2.050936 seconds, throughput 975164.510253
+203381	[1728266551]	2000000 OPS in 2.051631 seconds, throughput 974834.168523
+203381	[1728266552]	2000000 OPS in 2.042411 seconds, throughput 979234.835692
+203381	[1728266552]	2000000 OPS in 2.053982 seconds, throughput 973718.367542
+203381	[1728266552]	2000000 OPS in 2.043067 seconds, throughput 978920.417196
+203381	[1728266553]	2000000 OPS in 2.046512 seconds, throughput 977272.549587
+203381	[1728266554]	2000000 OPS in 2.036479 seconds, throughput 982087.220148
+203381	[1728266554]	2000000 OPS in 2.049269 seconds, throughput 975957.768355
+203381	[1728266554]	2000000 OPS in 2.037358 seconds, throughput 981663.507346
+203381	[1728266555]	2000000 OPS in 2.043223 seconds, throughput 978845.676659
+203381	[1728266556]	2000000 OPS in 2.037589 seconds, throughput 981552.216860
+203381	[1728266556]	2000000 OPS in 2.048447 seconds, throughput 976349.400302
+203381	[1728266556]	2000000 OPS in 2.038813 seconds, throughput 980962.942653
+203381	[1728266557]	2000000 OPS in 2.049508 seconds, throughput 975843.958648
+203381	[1728266558]	2000000 OPS in 2.043564 seconds, throughput 978682.341243
+203381	[1728266558]	2000000 OPS in 2.058089 seconds, throughput 971775.273081
+203381	[1728266558]	2000000 OPS in 2.036958 seconds, throughput 981856.277842
+203381	[1728266559]	2000000 OPS in 2.047729 seconds, throughput 976691.739971
+203381	[1728266560]	2000000 OPS in 2.042405 seconds, throughput 979237.712403
+203381	[1728266560]	2000000 OPS in 2.042552 seconds, throughput 979167.237848
+203381	[1728266560]	2000000 OPS in 2.050875 seconds, throughput 975193.514963
+203381	[1728266561]	2000000 OPS in 2.046447 seconds, throughput 977303.590076
+203381	[1728266562]	2000000 OPS in 2.038907 seconds, throughput 980917.717189
+203381	[1728266562]	2000000 OPS in 2.037420 seconds, throughput 981633.634695
+203381	[1728266562]	2000000 OPS in 2.051011 seconds, throughput 975128.851089
+203381	[1728266563]	2000000 OPS in 2.046044 seconds, throughput 977496.085128
+203381	[1728266564]	2000000 OPS in 2.050379 seconds, throughput 975429.420610
+203381	[1728266564]	2000000 OPS in 2.044810 seconds, throughput 978085.983539
+203381	[1728266564]	2000000 OPS in 2.052771 seconds, throughput 974292.797394
+203381	[1728266565]	2000000 OPS in 2.059819 seconds, throughput 970959.098833
+203381	[1728266566]	2000000 OPS in 2.048226 seconds, throughput 976454.746693
+203381	[1728266566]	2000000 OPS in 2.046323 seconds, throughput 977362.811247
+203381	[1728266566]	2000000 OPS in 2.049559 seconds, throughput 975819.676330
+203381	[1728266567]	2000000 OPS in 2.048751 seconds, throughput 976204.526563
+203381	[1728266568]	2000000 OPS in 2.048012 seconds, throughput 976556.777988
+203381	[1728266568]	2000000 OPS in 2.041871 seconds, throughput 979493.807395
+203381	[1728266569]	2000000 OPS in 2.051339 seconds, throughput 974972.932314
+203381	[1728266569]	2000000 OPS in 2.048504 seconds, throughput 976322.233200
+203381	[1728266570]	2000000 OPS in 2.041600 seconds, throughput 979623.824451
+203381	[1728266571]	2000000 OPS in 2.041846 seconds, throughput 979505.800144
+203381	[1728266571]	2000000 OPS in 2.053664 seconds, throughput 973869.143151
+203381	[1728266571]	2000000 OPS in 2.052302 seconds, throughput 974515.446557
+203381	[1728266572]	2000000 OPS in 2.042111 seconds, throughput 979378.691952
+203381	[1728266573]	2000000 OPS in 2.043080 seconds, throughput 978914.188382
+203381	[1728266573]	2000000 OPS in 2.051088 seconds, throughput 975092.243726
+203381	[1728266573]	2000000 OPS in 2.052052 seconds, throughput 974634.171064
+203381	[1728266574]	2000000 OPS in 2.043968 seconds, throughput 978488.900022
+203381	[1728266575]	2000000 OPS in 2.039096 seconds, throughput 980826.797757
+203381	[1728266575]	2000000 OPS in 2.054027 seconds, throughput 973697.035141
+203381	[1728266575]	2000000 OPS in 2.046823 seconds, throughput 977124.060068
+203381	[1728266576]	2000000 OPS in 2.041907 seconds, throughput 979476.538354
+203381	[1728266577]	2000000 OPS in 2.036268 seconds, throughput 982188.984947
+203381	[1728266577]	2000000 OPS in 2.053991 seconds, throughput 973714.100987
+203381	[1728266577]	2000000 OPS in 2.046793 seconds, throughput 977138.381849
+203381	[1728266579]	2000000 OPS in 2.040214 seconds, throughput 980289.322591
+203381	[1728266579]	2000000 OPS in 2.043328 seconds, throughput 978795.376954
+203381	[1728266579]	2000000 OPS in 2.058972 seconds, throughput 971358.522603
+203381	[1728266579]	2000000 OPS in 2.050924 seconds, throughput 975170.215961
+203381	[1728266581]	2000000 OPS in 2.049202 seconds, throughput 975989.677933
+203381	[1728266581]	2000000 OPS in 2.040941 seconds, throughput 979940.135457
+203381	[1728266581]	2000000 OPS in 2.050170 seconds, throughput 975528.858582
+203381	[1728266581]	2000000 OPS in 2.044820 seconds, throughput 978081.200301
+203381	[1728266583]	2000000 OPS in 2.045186 seconds, throughput 977906.165992
+203381	[1728266583]	2000000 OPS in 2.038299 seconds, throughput 981210.313109
+203381	[1728266583]	2000000 OPS in 2.053867 seconds, throughput 973772.887923
+203381	[1728266583]	2000000 OPS in 2.047467 seconds, throughput 976816.720367
+203381	[1728266585]	2000000 OPS in 2.043633 seconds, throughput 978649.297599
+203381	[1728266585]	2000000 OPS in 2.039860 seconds, throughput 980459.443295
+203381	[1728266585]	2000000 OPS in 2.055490 seconds, throughput 973004.003911
+203381	[1728266586]	2000000 OPS in 2.046812 seconds, throughput 977129.311339
+203381	[1728266587]	2000000 OPS in 2.043042 seconds, throughput 978932.395908
+203381	[1728266587]	2000000 OPS in 2.045751 seconds, throughput 977636.085721
+203381	[1728266587]	2000000 OPS in 2.053219 seconds, throughput 974080.212583
+203381	[1728266588]	2000000 OPS in 2.049362 seconds, throughput 975913.479415
+203381	[1728266589]	2000000 OPS in 2.043280 seconds, throughput 978818.370463
+203381	[1728266589]	2000000 OPS in 2.042303 seconds, throughput 979286.619077
+203381	[1728266589]	2000000 OPS in 2.057073 seconds, throughput 972255.238390
+203381	[1728266590]	2000000 OPS in 2.050276 seconds, throughput 975478.423393
+203381	[1728266591]	2000000 OPS in 2.042536 seconds, throughput 979174.908055
+203381	[1728266591]	2000000 OPS in 2.039547 seconds, throughput 980609.909946
+203381	[1728266591]	2000000 OPS in 2.057006 seconds, throughput 972286.906309
+203381	[1728266592]	2000000 OPS in 2.046997 seconds, throughput 977041.002014
+203381	[1728266593]	2000000 OPS in 2.040921 seconds, throughput 979949.738378
+203381	[1728266593]	2000000 OPS in 2.039512 seconds, throughput 980626.738161
+203381	[1728266593]	2000000 OPS in 2.050829 seconds, throughput 975215.388509
+203381	[1728266594]	2000000 OPS in 2.052465 seconds, throughput 974438.053755
+203381	[1728266595]	2000000 OPS in 2.048947 seconds, throughput 976111.143919
+203381	[1728266595]	2000000 OPS in 2.047838 seconds, throughput 976639.753731
+203381	[1728266595]	2000000 OPS in 2.055308 seconds, throughput 973090.164588
+203381	[1728266596]	2000000 OPS in 2.045556 seconds, throughput 977729.282405
+203381	[1728266597]	2000000 OPS in 2.041086 seconds, throughput 979870.519909
+203381	[1728266597]	2000000 OPS in 2.037924 seconds, throughput 981390.866391
+203381	[1728266597]	2000000 OPS in 2.048705 seconds, throughput 976226.445486
+203381	[1728266598]	2000000 OPS in 2.046363 seconds, throughput 977343.706859
+203381	[1728266599]	2000000 OPS in 2.039383 seconds, throughput 980688.767142
+203381	[1728266599]	2000000 OPS in 2.037817 seconds, throughput 981442.396447
+203381	[1728266599]	2000000 OPS in 2.052423 seconds, throughput 974457.994283
+203381	[1728266600]	2000000 OPS in 2.043886 seconds, throughput 978528.156658
+203381	[1728266601]	2000000 OPS in 2.040248 seconds, throughput 980272.986421
+203381	[1728266601]	2000000 OPS in 2.039604 seconds, throughput 980582.505231
+203381	[1728266601]	2000000 OPS in 2.050935 seconds, throughput 975164.985726
+203381	[1728266602]	2000000 OPS in 2.047304 seconds, throughput 976894.491487
+203381	[1728266603]	2000000 OPS in 2.042701 seconds, throughput 979095.814806
+203381	[1728266603]	2000000 OPS in 2.045248 seconds, throughput 977876.521576
+203381	[1728266603]	2000000 OPS in 2.057669 seconds, throughput 971973.626468
+203381	[1728266604]	2000000 OPS in 2.049411 seconds, throughput 975890.145998
+203381	[1728266605]	2000000 OPS in 2.048252 seconds, throughput 976442.351820
+203381	[1728266605]	2000000 OPS in 2.046233 seconds, throughput 977405.798851
+203381	[1728266605]	2000000 OPS in 2.055975 seconds, throughput 972774.474398
+203381	[1728266606]	2000000 OPS in 2.053166 seconds, throughput 974105.357287
+203381	[1728266607]	2000000 OPS in 2.044995 seconds, throughput 977997.501216
+203381	[1728266607]	2000000 OPS in 2.045484 seconds, throughput 977763.697981
+203381	[1728266608]	2000000 OPS in 2.049043 seconds, throughput 976065.412000
+203381	[1728266608]	2000000 OPS in 2.047131 seconds, throughput 976977.047390
+203381	[1728266609]	2000000 OPS in 2.050647 seconds, throughput 975301.941290
+203381	[1728266609]	2000000 OPS in 2.044384 seconds, throughput 978289.792916
+203381	[1728266610]	2000000 OPS in 2.053780 seconds, throughput 973814.137834
+203381	[1728266610]	2000000 OPS in 2.051515 seconds, throughput 974889.289135
+203381	[1728266611]	2000000 OPS in 2.045301 seconds, throughput 977851.181806
+203381	[1728266611]	2000000 OPS in 2.045718 seconds, throughput 977651.856219
+203381	[1728266612]	2000000 OPS in 2.052814 seconds, throughput 974272.389023
+203381	[1728266612]	2000000 OPS in 2.050780 seconds, throughput 975238.689669
+203381	[1728266613]	2000000 OPS in 2.045964 seconds, throughput 977534.306566
+203381	[1728266613]	2000000 OPS in 2.041057 seconds, throughput 979884.442228
+203381	[1728266614]	2000000 OPS in 2.053770 seconds, throughput 973818.879427
+203381	[1728266614]	2000000 OPS in 2.048918 seconds, throughput 976124.959613
+203381	[1728266615]	2000000 OPS in 2.041951 seconds, throughput 979455.432574
+203381	[1728266615]	2000000 OPS in 2.041250 seconds, throughput 979791.794244
+203381	[1728266616]	2000000 OPS in 2.050198 seconds, throughput 975515.535573
+203381	[1728266616]	2000000 OPS in 2.049589 seconds, throughput 975805.393179
+203381	[1728266617]	2000000 OPS in 2.042932 seconds, throughput 978985.105721
+203381	[1728266617]	2000000 OPS in 2.038969 seconds, throughput 980887.889909
+203381	[1728266618]	2000000 OPS in 2.056298 seconds, throughput 972621.672540
+203381	[1728266618]	2000000 OPS in 2.049659 seconds, throughput 975772.067451
+203381	[1728266619]	2000000 OPS in 2.045571 seconds, throughput 977722.112799
+203381	[1728266620]	2000000 OPS in 2.043360 seconds, throughput 978780.048547
+203381	[1728266620]	2000000 OPS in 2.053555 seconds, throughput 973920.834845
+203381	[1728266620]	2000000 OPS in 2.051650 seconds, throughput 974825.140740
+203381	[1728266621]	2000000 OPS in 2.040609 seconds, throughput 980099.568315
+203381	[1728266622]	2000000 OPS in 2.042632 seconds, throughput 979128.888610
+203381	[1728266622]	2000000 OPS in 2.055438 seconds, throughput 973028.619691
+203381	[1728266622]	2000000 OPS in 2.049576 seconds, throughput 975811.582493
+203381	[1728266623]	2000000 OPS in 2.040362 seconds, throughput 980218.216179
+203381	[1728266624]	2000000 OPS in 2.042698 seconds, throughput 979097.252751
+203381	[1728266624]	2000000 OPS in 2.057074 seconds, throughput 972254.765750
+203381	[1728266624]	2000000 OPS in 2.055936 seconds, throughput 972792.927406
+203381	[1728266626]	2000000 OPS in 2.051376 seconds, throughput 974955.347045
+203381	[1728266626]	2000000 OPS in 2.041346 seconds, throughput 979745.716797
+203381	[1728266626]	2000000 OPS in 2.052692 seconds, throughput 974330.294072
+203381	[1728266627]	2000000 OPS in 2.050802 seconds, throughput 975228.227786
+203381	[1728266628]	2000000 OPS in 2.040883 seconds, throughput 979967.984446
+203381	[1728266628]	2000000 OPS in 2.041435 seconds, throughput 979703.003035
+203381	[1728266628]	2000000 OPS in 2.051203 seconds, throughput 975037.575511
+203381	[1728266629]	2000000 OPS in 2.049071 seconds, throughput 976052.074330
+203381	[1728266630]	2000000 OPS in 2.040086 seconds, throughput 980350.828347
+203381	[1728266630]	2000000 OPS in 2.044308 seconds, throughput 978326.162203
+203381	[1728266630]	2000000 OPS in 2.054409 seconds, throughput 973515.984402
+203381	[1728266631]	2000000 OPS in 2.050702 seconds, throughput 975275.783610
+203381	[1728266632]	2000000 OPS in 2.041410 seconds, throughput 979715.000906
+203381	[1728266632]	2000000 OPS in 2.044762 seconds, throughput 978108.943730
+203381	[1728266632]	2000000 OPS in 2.053865 seconds, throughput 973773.836158
+203381	[1728266633]	2000000 OPS in 2.051117 seconds, throughput 975078.457250
+203381	[1728266634]	2000000 OPS in 2.042351 seconds, throughput 979263.603563
+203381	[1728266634]	2000000 OPS in 2.041995 seconds, throughput 979434.327704
+203381	[1728266634]	2000000 OPS in 2.050979 seconds, throughput 975144.065346
+203381	[1728266635]	2000000 OPS in 2.050266 seconds, throughput 975483.181207
+203381	[1728266636]	2000000 OPS in 2.046976 seconds, throughput 977051.025513
+203381	[1728266636]	2000000 OPS in 2.040405 seconds, throughput 980197.558818
+203381	[1728266636]	2000000 OPS in 2.052046 seconds, throughput 974637.020808
+203381	[1728266637]	2000000 OPS in 2.047032 seconds, throughput 977024.296640
+203381	[1728266638]	2000000 OPS in 2.041385 seconds, throughput 979726.999072
+203381	[1728266638]	2000000 OPS in 2.039340 seconds, throughput 980709.445213
+203381	[1728266638]	2000000 OPS in 2.051604 seconds, throughput 974846.997764
+203381	[1728266639]	2000000 OPS in 2.052085 seconds, throughput 974618.497772
+203381	[1728266640]	2000000 OPS in 2.050899 seconds, throughput 975182.103068
+203381	[1728266640]	2000000 OPS in 2.045196 seconds, throughput 977901.384513
+203381	[1728266640]	2000000 OPS in 2.058376 seconds, throughput 971639.778155
+203381	[1728266641]	2000000 OPS in 2.051352 seconds, throughput 974966.753634
+203381	[1728266642]	2000000 OPS in 2.043323 seconds, throughput 978797.772061
+203381	[1728266642]	2000000 OPS in 2.039785 seconds, throughput 980495.493398
+203381	[1728266642]	2000000 OPS in 2.054079 seconds, throughput 973672.385531
+203381	[1728266643]	2000000 OPS in 2.049925 seconds, throughput 975645.450443
+203381	[1728266644]	2000000 OPS in 2.043122 seconds, throughput 978894.065063
+203381	[1728266644]	2000000 OPS in 2.037989 seconds, throughput 981359.565729
+203381	[1728266645]	2000000 OPS in 2.054910 seconds, throughput 973278.635074
+203381	[1728266645]	2000000 OPS in 2.048975 seconds, throughput 976097.805000
+203381	[1728266646]	2000000 OPS in 2.039743 seconds, throughput 980515.682613
+203381	[1728266646]	2000000 OPS in 2.039324 seconds, throughput 980717.139601
+203381	[1728266647]	2000000 OPS in 2.051260 seconds, throughput 975010.481363
+203381	[1728266647]	2000000 OPS in 2.047505 seconds, throughput 976798.591456
+203381	[1728266648]	2000000 OPS in 2.043756 seconds, throughput 978590.399245
+203381	[1728266648]	2000000 OPS in 2.038770 seconds, throughput 980983.632288
+203381	[1728266649]	2000000 OPS in 2.055537 seconds, throughput 972981.756106
+203381	[1728266649]	2000000 OPS in 2.048768 seconds, throughput 976196.426340
+203381	[1728266650]	2000000 OPS in 2.045970 seconds, throughput 977531.439855
+203381	[1728266650]	2000000 OPS in 2.041776 seconds, throughput 979539.381401
+203381	[1728266651]	2000000 OPS in 2.057562 seconds, throughput 972024.172297
+203381	[1728266651]	2000000 OPS in 2.051354 seconds, throughput 974965.803074
+203381	[1728266652]	2000000 OPS in 2.047401 seconds, throughput 976848.209022
+203381	[1728266652]	2000000 OPS in 2.039291 seconds, throughput 980733.009659
+203381	[1728266653]	2000000 OPS in 2.055238 seconds, throughput 973123.307374
+203381	[1728266653]	2000000 OPS in 2.045617 seconds, throughput 977700.126661
+203381	[1728266654]	2000000 OPS in 2.051023 seconds, throughput 975123.145864
+203381	[1728266654]	2000000 OPS in 2.040833 seconds, throughput 979991.993465
+203381	[1728266655]	2000000 OPS in 2.057882 seconds, throughput 971873.022846
+203381	[1728266655]	2000000 OPS in 2.048777 seconds, throughput 976192.138041
+203381	[1728266656]	2000000 OPS in 2.046618 seconds, throughput 977221.933942
+203381	[1728266656]	2000000 OPS in 2.038971 seconds, throughput 980886.927769
+203381	[1728266657]	2000000 OPS in 2.054933 seconds, throughput 973267.741576
+203381	[1728266657]	2000000 OPS in 2.045641 seconds, throughput 977688.656025
+203381	[1728266658]	2000000 OPS in 2.045014 seconds, throughput 977988.414749
+203381	[1728266658]	2000000 OPS in 2.041853 seconds, throughput 979502.442144
+203381	[1728266659]	2000000 OPS in 2.055774 seconds, throughput 972869.585859
+203381	[1728266659]	2000000 OPS in 2.050094 seconds, throughput 975565.022872
+203381	[1728266660]	2000000 OPS in 2.042794 seconds, throughput 979051.240605
+203381	[1728266660]	2000000 OPS in 2.043447 seconds, throughput 978738.376870
+203381	[1728266661]	2000000 OPS in 2.057608 seconds, throughput 972002.441670
+203381	[1728266661]	2000000 OPS in 2.051756 seconds, throughput 974774.778287
+203381	[1728266662]	2000000 OPS in 2.048942 seconds, throughput 976113.525908
+203381	[1728266662]	2000000 OPS in 2.045387 seconds, throughput 977810.067239
+203381	[1728266663]	2000000 OPS in 2.054550 seconds, throughput 973449.173785
+203381	[1728266663]	2000000 OPS in 2.050105 seconds, throughput 975559.788401
+203381	[1728266664]	2000000 OPS in 2.048043 seconds, throughput 976541.996433
+203381	[1728266664]	2000000 OPS in 2.041620 seconds, throughput 979614.227917
+203381	[1728266665]	2000000 OPS in 2.050718 seconds, throughput 975268.174366
+203381	[1728266665]	2000000 OPS in 2.050179 seconds, throughput 975524.576147
+203381	[1728266666]	2000000 OPS in 2.045354 seconds, throughput 977825.843350
+203381	[1728266666]	2000000 OPS in 2.045188 seconds, throughput 977905.209692
+203381	[1728266667]	2000000 OPS in 2.054812 seconds, throughput 973325.053582
+203381	[1728266668]	2000000 OPS in 2.051556 seconds, throughput 974869.806137
+203381	[1728266668]	2000000 OPS in 2.048746 seconds, throughput 976206.909007
+203381	[1728266669]	2000000 OPS in 2.047218 seconds, throughput 976935.529094
+203381	[1728266669]	2000000 OPS in 2.058484 seconds, throughput 971588.800302
+203381	[1728266670]	2000000 OPS in 2.055458 seconds, throughput 973019.151936
+203381	[1728266671]	2000000 OPS in 2.049102 seconds, throughput 976037.308050
+203381	[1728266671]	2000000 OPS in 2.048569 seconds, throughput 976291.255018
+203381	[1728266671]	2000000 OPS in 2.055959 seconds, throughput 972782.044778
+203381	[1728266672]	2000000 OPS in 2.047144 seconds, throughput 976970.843282
+203381	[1728266673]	2000000 OPS in 2.041891 seconds, throughput 979484.213408
+203381	[1728266673]	2000000 OPS in 2.040635 seconds, throughput 980087.080737
+203381	[1728266673]	2000000 OPS in 2.049298 seconds, throughput 975943.957394
+203381	[1728266674]	2000000 OPS in 2.047423 seconds, throughput 976837.712578
+203381	[1728266675]	2000000 OPS in 2.041989 seconds, throughput 979437.205587
+203381	[1728266675]	2000000 OPS in 2.038572 seconds, throughput 981078.912101
+203381	[1728266675]	2000000 OPS in 2.054191 seconds, throughput 973619.298303
+203381	[1728266676]	2000000 OPS in 2.047361 seconds, throughput 976867.294043
+203381	[1728266677]	2000000 OPS in 2.042943 seconds, throughput 978979.834484
+203381	[1728266677]	2000000 OPS in 2.045647 seconds, throughput 977685.788408
+203381	[1728266677]	2000000 OPS in 2.054700 seconds, throughput 973378.108726
+203381	[1728266678]	2000000 OPS in 2.051638 seconds, throughput 974830.842478
+203381	[1728266679]	2000000 OPS in 2.046117 seconds, throughput 977461.210674
+203381	[1728266679]	2000000 OPS in 2.041230 seconds, throughput 979801.394257
+203381	[1728266679]	2000000 OPS in 2.054197 seconds, throughput 973616.454508
+203381	[1728266680]	2000000 OPS in 2.050687 seconds, throughput 975282.917383
+203381	[1728266681]	2000000 OPS in 2.044035 seconds, throughput 978456.826816
+203381	[1728266681]	2000000 OPS in 2.039986 seconds, throughput 980398.885090
+203381	[1728266681]	2000000 OPS in 2.054819 seconds, throughput 973321.737827
+203381	[1728266682]	2000000 OPS in 2.047044 seconds, throughput 977018.569215
+203381	[1728266683]	2000000 OPS in 2.042018 seconds, throughput 979423.295975
+203381	[1728266683]	2000000 OPS in 2.042180 seconds, throughput 979345.601269
+203381	[1728266684]	2000000 OPS in 2.054529 seconds, throughput 973459.123721
+203381	[1728266684]	2000000 OPS in 2.050054 seconds, throughput 975584.057786
+203381	[1728266685]	2000000 OPS in 2.050053 seconds, throughput 975584.533668
+203381	[1728266685]	2000000 OPS in 2.048258 seconds, throughput 976439.491509
+203381	[1728266686]	2000000 OPS in 2.058087 seconds, throughput 971776.217429
+203381	[1728266686]	2000000 OPS in 2.048554 seconds, throughput 976298.403654
+203381	[1728266687]	2000000 OPS in 2.045067 seconds, throughput 977963.069181
+203381	[1728266687]	2000000 OPS in 2.043430 seconds, throughput 978746.519333
+203381	[1728266688]	2000000 OPS in 2.053421 seconds, throughput 973984.389952
+203381	[1728266688]	2000000 OPS in 2.044157 seconds, throughput 978398.430258
+203381	[1728266689]	2000000 OPS in 2.045979 seconds, throughput 977527.139819
+203381	[1728266689]	2000000 OPS in 2.048876 seconds, throughput 976144.969242
+203381	[1728266690]	2000000 OPS in 2.056905 seconds, throughput 972334.648416
+203381	[1728266690]	2000000 OPS in 2.050745 seconds, throughput 975255.334037
+203381	[1728266691]	2000000 OPS in 2.045645 seconds, throughput 977686.744279
+203381	[1728266691]	2000000 OPS in 2.046913 seconds, throughput 977081.097243
+203381	[1728266692]	2000000 OPS in 2.053513 seconds, throughput 973940.754210
+203381	[1728266692]	2000000 OPS in 2.050240 seconds, throughput 975495.551740
+203381	[1728266693]	2000000 OPS in 2.043952 seconds, throughput 978496.559606
+203381	[1728266693]	2000000 OPS in 2.043995 seconds, throughput 978475.974746
+203381	[1728266694]	2000000 OPS in 2.054154 seconds, throughput 973636.835408
+203381	[1728266694]	2000000 OPS in 2.050984 seconds, throughput 975141.688087
+203381	[1728266695]	2000000 OPS in 2.046473 seconds, throughput 977291.173644
+203381	[1728266695]	2000000 OPS in 2.043210 seconds, throughput 978851.904601
+203381	[1728266696]	2000000 OPS in 2.054481 seconds, throughput 973481.867197
+203381	[1728266696]	2000000 OPS in 2.047536 seconds, throughput 976783.802580
+203381	[1728266697]	2000000 OPS in 2.046869 seconds, throughput 977102.100818
+203381	[1728266697]	2000000 OPS in 2.046027 seconds, throughput 977504.206934
+203381	[1728266698]	2000000 OPS in 2.054692 seconds, throughput 973381.898601
+203381	[1728266698]	2000000 OPS in 2.054344 seconds, throughput 973546.786711
+203381	[1728266699]	2000000 OPS in 2.051832 seconds, throughput 974738.672562
+203381	[1728266699]	2000000 OPS in 2.048475 seconds, throughput 976336.054870
+203381	[1728266700]	2000000 OPS in 2.058726 seconds, throughput 971474.591568
+203381	[1728266700]	2000000 OPS in 2.053662 seconds, throughput 973870.091573
+203381	[1728266701]	2000000 OPS in 2.042527 seconds, throughput 979179.222600
+203381	[1728266701]	2000000 OPS in 2.039275 seconds, throughput 980740.704417
+203381	[1728266702]	2000000 OPS in 2.056175 seconds, throughput 972679.854584
+203381	[1728266702]	2000000 OPS in 2.049328 seconds, throughput 975929.670604
+203381	[1728266703]	2000000 OPS in 2.042621 seconds, throughput 979134.161452
+203381	[1728266703]	2000000 OPS in 2.041613 seconds, throughput 979617.586683
+203381	[1728266704]	2000000 OPS in 2.057930 seconds, throughput 971850.354482
+203381	[1728266704]	2000000 OPS in 2.045927 seconds, throughput 977551.984993
+203381	[1728266705]	2000000 OPS in 2.045069 seconds, throughput 977962.112770
+203381	[1728266705]	2000000 OPS in 2.041498 seconds, throughput 979672.769701
+203381	[1728266706]	2000000 OPS in 2.049863 seconds, throughput 975674.959741
+203381	[1728266706]	2000000 OPS in 2.050911 seconds, throughput 975176.397221
+203381	[1728266707]	2000000 OPS in 2.044382 seconds, throughput 978290.749967
+203381	[1728266707]	2000000 OPS in 2.041488 seconds, throughput 979677.568519
+203381	[1728266708]	2000000 OPS in 2.056043 seconds, throughput 972742.301596
+203381	[1728266709]	2000000 OPS in 2.048720 seconds, throughput 976219.297903
+203381	[1728266709]	2000000 OPS in 2.042560 seconds, throughput 979163.402789
+203381	[1728266709]	2000000 OPS in 2.044090 seconds, throughput 978430.499636
+203381	[1728266710]	2000000 OPS in 2.054544 seconds, throughput 973452.016603
+203381	[1728266711]	2000000 OPS in 2.068290 seconds, throughput 966982.386416
+203381	[1728266711]	2000000 OPS in 2.044048 seconds, throughput 978450.603900
+203381	[1728266711]	2000000 OPS in 2.043744 seconds, throughput 978596.145114
+203381	[1728266712]	2000000 OPS in 2.052504 seconds, throughput 974419.538281
+203381	[1728266713]	2000000 OPS in 2.053001 seconds, throughput 974183.646282
+203381	[1728266713]	2000000 OPS in 2.040871 seconds, throughput 979973.746503
+203381	[1728266714]	2000000 OPS in 2.191182 seconds, throughput 912749.374538
+203381	[1728266714]	2000000 OPS in 2.058809 seconds, throughput 971435.426987
+203381	[1728266715]	2000000 OPS in 2.055453 seconds, throughput 973021.518857
+203381	[1728266716]	2000000 OPS in 2.052841 seconds, throughput 974259.574901
+203381	[1728266716]	2000000 OPS in 2.048099 seconds, throughput 976515.295403
+203381	[1728266716]	2000000 OPS in 2.058616 seconds, throughput 971526.501300
+203381	[1728266717]	2000000 OPS in 2.050438 seconds, throughput 975401.353272
+203381	[1728266718]	2000000 OPS in 2.043670 seconds, throughput 978631.579462
+203381	[1728266718]	2000000 OPS in 2.042321 seconds, throughput 979277.988132
+203381	[1728266718]	2000000 OPS in 2.054104 seconds, throughput 973660.535202
+203381	[1728266719]	2000000 OPS in 2.051781 seconds, throughput 974762.901109
+203381	[1728266720]	2000000 OPS in 2.042620 seconds, throughput 979134.640804
+203381	[1728266720]	2000000 OPS in 2.044030 seconds, throughput 978459.220266
+203381	[1728266721]	2000000 OPS in 2.049165 seconds, throughput 976007.300535
+203381	[1728266721]	2000000 OPS in 2.048272 seconds, throughput 976432.817516
+203381	[1728266722]	2000000 OPS in 2.040349 seconds, throughput 980224.461599
+203381	[1728266722]	2000000 OPS in 2.147582 seconds, throughput 931279.923188
+203381	[1728266723]	2000000 OPS in 2.051542 seconds, throughput 974876.458781
+203381	[1728266723]	2000000 OPS in 2.055166 seconds, throughput 973157.399451
+203381	[1728266724]	2000000 OPS in 2.046768 seconds, throughput 977150.316988
+203381	[1728266724]	2000000 OPS in 2.196728 seconds, throughput 910444.989093
+203381	[1728266725]	2000000 OPS in 2.058210 seconds, throughput 971718.143435
+203381	[1728266725]	2000000 OPS in 2.050154 seconds, throughput 975536.471894
+203381	[1728266726]	2000000 OPS in 2.048119 seconds, throughput 976505.759675
+203381	[1728266726]	2000000 OPS in 2.043922 seconds, throughput 978510.921650
+203381	[1728266727]	2000000 OPS in 2.055036 seconds, throughput 973218.960641
+203381	[1728266727]	2000000 OPS in 2.098153 seconds, throughput 953219.331479
+203381	[1728266728]	2000000 OPS in 2.046150 seconds, throughput 977445.446326
+203381	[1728266728]	2000000 OPS in 2.036890 seconds, throughput 981889.056356
+203381	[1728266729]	2000000 OPS in 2.055967 seconds, throughput 972778.259573
+203381	[1728266729]	2000000 OPS in 2.054397 seconds, throughput 973521.670836
+203381	[1728266730]	2000000 OPS in 2.048622 seconds, throughput 976265.997339
+203381	[1728266730]	2000000 OPS in 2.048792 seconds, throughput 976184.990961
+203381	[1728266731]	2000000 OPS in 2.058330 seconds, throughput 971661.492569
+203381	[1728266731]	2000000 OPS in 2.048768 seconds, throughput 976196.426340
+203381	[1728266732]	2000000 OPS in 2.043664 seconds, throughput 978634.452630
+203381	[1728266732]	2000000 OPS in 2.041953 seconds, throughput 979454.473242
+203381	[1728266733]	2000000 OPS in 2.057824 seconds, throughput 971900.415196
+203381	[1728266733]	2000000 OPS in 2.048267 seconds, throughput 976435.201075
+203381	[1728266734]	2000000 OPS in 2.044548 seconds, throughput 978211.321035
+203381	[1728266734]	2000000 OPS in 2.040019 seconds, throughput 980383.025844
+203381	[1728266735]	2000000 OPS in 2.053488 seconds, throughput 973952.611362
+203381	[1728266735]	2000000 OPS in 2.047388 seconds, throughput 976854.411572
+203381	[1728266736]	2000000 OPS in 2.042476 seconds, throughput 979203.672405
+203381	[1728266736]	2000000 OPS in 2.039960 seconds, throughput 980411.380615
+203381	[1728266737]	2000000 OPS in 2.054664 seconds, throughput 973395.163394
+203381	[1728266737]	2000000 OPS in 2.046703 seconds, throughput 977181.349712
+203381	[1728266738]	2000000 OPS in 2.040235 seconds, throughput 980279.232539
+203381	[1728266738]	2000000 OPS in 2.041741 seconds, throughput 979556.172894
+203381	[1728266739]	2000000 OPS in 2.056057 seconds, throughput 972735.678048
+203381	[1728266739]	2000000 OPS in 2.057124 seconds, throughput 972231.134341
+203381	[1728266740]	2000000 OPS in 2.042908 seconds, throughput 978996.606798
+203381	[1728266740]	2000000 OPS in 2.040420 seconds, throughput 980190.352967
+203381	[1728266741]	2000000 OPS in 2.053757 seconds, throughput 973825.043566
+203381	[1728266741]	2000000 OPS in 2.049368 seconds, throughput 975910.622202
+203381	[1728266742]	2000000 OPS in 2.040006 seconds, throughput 980389.273365
+203381	[1728266742]	2000000 OPS in 2.041495 seconds, throughput 979674.209342
+203381	[1728266743]	2000000 OPS in 2.050704 seconds, throughput 975274.832448
+203381	[1728266743]	2000000 OPS in 2.049752 seconds, throughput 975727.795363
+203381	[1728266744]	2000000 OPS in 2.049044 seconds, throughput 976064.935648
+203381	[1728266745]	2000000 OPS in 2.044124 seconds, throughput 978414.225360
+203381	[1728266745]	2000000 OPS in 2.043366 seconds, throughput 978777.174525
+203381	[1728266746]	2000000 OPS in 2.058088 seconds, throughput 971775.745255
+203381	[1728266746]	2000000 OPS in 2.042913 seconds, throughput 978994.210718
+203381	[1728266747]	2000000 OPS in 2.047311 seconds, throughput 976891.151369
+203381	[1728266747]	2000000 OPS in 2.052919 seconds, throughput 974222.558221
+203381	[1728266748]	2000000 OPS in 2.053620 seconds, throughput 973890.008862
+203381	[1728266748]	2000000 OPS in 2.044888 seconds, throughput 978048.675526
+203381	[1728266749]	2000000 OPS in 2.045057 seconds, throughput 977967.851263
+203381	[1728266749]	2000000 OPS in 2.057630 seconds, throughput 971992.049105
+203381	[1728266750]	2000000 OPS in 2.066761 seconds, throughput 967697.764763
+203381	[1728266750]	2000000 OPS in 2.045290 seconds, throughput 977856.440896
+203381	[1728266751]	2000000 OPS in 2.040327 seconds, throughput 980235.030953
+203381	[1728266751]	2000000 OPS in 2.053714 seconds, throughput 973845.433201
+203381	[1728266752]	2000000 OPS in 2.048569 seconds, throughput 976291.255018
+203381	[1728266752]	2000000 OPS in 2.042823 seconds, throughput 979037.341953
+203381	[1728266753]	2000000 OPS in 2.044111 seconds, throughput 978420.447813
+203381	[1728266753]	2000000 OPS in 2.052996 seconds, throughput 974186.018872
+203381	[1728266754]	2000000 OPS in 2.067232 seconds, throughput 967477.283633
+203381	[1728266754]	2000000 OPS in 2.046037 seconds, throughput 977499.429385
+203381	[1728266755]	2000000 OPS in 2.039588 seconds, throughput 980590.197628
+203381	[1728266755]	2000000 OPS in 2.054591 seconds, throughput 973429.748305
+203381	[1728266756]	2000000 OPS in 2.049614 seconds, throughput 975793.490872
+203381	[1728266756]	2000000 OPS in 2.040929 seconds, throughput 979945.897187
+203381	[1728266757]	2000000 OPS in 2.046079 seconds, throughput 977479.364189
+203381	[1728266758]	2000000 OPS in 2.053688 seconds, throughput 973857.762231
+203381	[1728266758]	2000000 OPS in 2.066086 seconds, throughput 968013.916168
+203381	[1728266758]	2000000 OPS in 2.040829 seconds, throughput 979993.914238
+203381	[1728266759]	2000000 OPS in 2.045747 seconds, throughput 977637.997269
+203381	[1728266760]	2000000 OPS in 2.057993 seconds, throughput 971820.603860
+203381	[1728266760]	2000000 OPS in 2.051908 seconds, throughput 974702.569511
+203381	[1728266760]	2000000 OPS in 2.050275 seconds, throughput 975478.899172
+203381	[1728266761]	2000000 OPS in 2.043138 seconds, throughput 978886.399254
+203381	[1728266762]	2000000 OPS in 2.054360 seconds, throughput 973539.204424
+203381	[1728266762]	2000000 OPS in 2.074023 seconds, throughput 964309.460406
+203381	[1728266763]	2000000 OPS in 2.046832 seconds, throughput 977119.763615
+203381	[1728266763]	2000000 OPS in 2.044594 seconds, throughput 978189.312890
+203381	[1728266764]	2000000 OPS in 2.059611 seconds, throughput 971057.155939
+203381	[1728266764]	2000000 OPS in 2.231416 seconds, throughput 896291.861311
+203381	[1728266765]	2000000 OPS in 2.045133 seconds, throughput 977931.508611
+203381	[1728266765]	2000000 OPS in 2.044038 seconds, throughput 978455.390751
+203381	[1728266766]	2000000 OPS in 2.051219 seconds, throughput 975029.969984
+203381	[1728266766]	2000000 OPS in 2.105713 seconds, throughput 949797.052115
+203381	[1728266767]	2000000 OPS in 2.050412 seconds, throughput 975413.721730
+203381	[1728266767]	2000000 OPS in 2.044828 seconds, throughput 978077.373745
+203381	[1728266768]	2000000 OPS in 2.054742 seconds, throughput 973358.212369
+203381	[1728266768]	2000000 OPS in 2.039729 seconds, throughput 980522.412536
+203381	[1728266769]	2000000 OPS in 2.046260 seconds, throughput 977392.902173
+203381	[1728266769]	2000000 OPS in 2.043286 seconds, throughput 978815.496215
+203381	[1728266770]	2000000 OPS in 2.058294 seconds, throughput 971678.487135
+203381	[1728266770]	2000000 OPS in 2.040389 seconds, throughput 980205.245176
+203381	[1728266771]	2000000 OPS in 2.045600 seconds, throughput 977708.251858
+203381	[1728266771]	2000000 OPS in 2.045721 seconds, throughput 977650.422516
+203381	[1728266772]	2000000 OPS in 2.054274 seconds, throughput 973579.960609
+203381	[1728266772]	2000000 OPS in 2.037745 seconds, throughput 981477.073922
+203381	[1728266773]	2000000 OPS in 2.043131 seconds, throughput 978889.753031
+203381	[1728266773]	2000000 OPS in 2.043756 seconds, throughput 978590.399245
+203381	[1728266774]	2000000 OPS in 2.060517 seconds, throughput 970630.186502
+203381	[1728266774]	2000000 OPS in 2.054372 seconds, throughput 973533.517785
+203381	[1728266775]	2000000 OPS in 2.052754 seconds, throughput 974300.866056
+203381	[1728266775]	2000000 OPS in 2.049625 seconds, throughput 975788.253949
+203381	[1728266776]	2000000 OPS in 2.056541 seconds, throughput 972506.747981
+203381	[1728266777]	2000000 OPS in 2.041014 seconds, throughput 979905.086393
+203381	[1728266777]	2000000 OPS in 2.045280 seconds, throughput 977861.221935
+203381	[1728266777]	2000000 OPS in 2.037123 seconds, throughput 981776.750839
+203381	[1728266778]	2000000 OPS in 2.054764 seconds, throughput 973347.790793
+203381	[1728266779]	2000000 OPS in 2.038214 seconds, throughput 981251.232697
+203381	[1728266779]	2000000 OPS in 2.042619 seconds, throughput 979135.120157
+203381	[1728266779]	2000000 OPS in 2.037711 seconds, throughput 981493.450249
+203381	[1728266780]	2000000 OPS in 2.051122 seconds, throughput 975076.080311
+203381	[1728266781]	2000000 OPS in 2.043775 seconds, throughput 978581.301758
+203381	[1728266781]	2000000 OPS in 2.043452 seconds, throughput 978735.982054
+203381	[1728266781]	2000000 OPS in 2.044733 seconds, throughput 978122.816035
+203381	[1728266782]	2000000 OPS in 2.057451 seconds, throughput 972076.613246
+203381	[1728266783]	2000000 OPS in 2.041445 seconds, throughput 979698.203968
+203381	[1728266783]	2000000 OPS in 2.044774 seconds, throughput 978103.203581
+203381	[1728266783]	2000000 OPS in 2.043996 seconds, throughput 978475.496038
+203381	[1728266784]	2000000 OPS in 2.056484 seconds, throughput 972533.703155
+203381	[1728266785]	2000000 OPS in 2.041330 seconds, throughput 979753.396070
+203381	[1728266785]	2000000 OPS in 2.048111 seconds, throughput 976509.573944
+203381	[1728266785]	2000000 OPS in 2.043701 seconds, throughput 978616.735031
+203381	[1728266786]	2000000 OPS in 2.055461 seconds, throughput 973017.731789
+203381	[1728266787]	2000000 OPS in 2.040158 seconds, throughput 980316.230410
+203381	[1728266787]	2000000 OPS in 2.047807 seconds, throughput 976654.538245
+203381	[1728266787]	2000000 OPS in 2.043585 seconds, throughput 978672.284246
+203381	[1728266788]	2000000 OPS in 2.055852 seconds, throughput 972832.674726
+203381	[1728266789]	2000000 OPS in 2.047849 seconds, throughput 976634.507720
+203381	[1728266789]	2000000 OPS in 2.052436 seconds, throughput 974451.822127
+203381	[1728266790]	2000000 OPS in 2.048427 seconds, throughput 976358.932976
+203381	[1728266790]	2000000 OPS in 2.066785 seconds, throughput 967686.527626
+203381	[1728266791]	2000000 OPS in 2.045126 seconds, throughput 977934.855848
+203381	[1728266791]	2000000 OPS in 2.048233 seconds, throughput 976451.409581
+203381	[1728266792]	2000000 OPS in 2.045452 seconds, throughput 977778.994569
+203381	[1728266792]	2000000 OPS in 2.055403 seconds, throughput 973045.188705
+203381	[1728266793]	2000000 OPS in 2.044560 seconds, throughput 978205.579685
+203381	[1728266793]	2000000 OPS in 2.048568 seconds, throughput 976291.731590
+203381	[1728266794]	2000000 OPS in 2.043855 seconds, throughput 978542.998403
+203381	[1728266795]	2000000 OPS in 2.054917 seconds, throughput 973275.319636
+203381	[1728266795]	2000000 OPS in 2.042159 seconds, throughput 979355.672110
+203381	[1728266795]	2000000 OPS in 2.044404 seconds, throughput 978280.222500
+203381	[1728266796]	2000000 OPS in 2.040437 seconds, throughput 980182.186463
+203381	[1728266797]	2000000 OPS in 2.052781 seconds, throughput 974288.051185
+203381	[1728266797]	2000000 OPS in 2.040230 seconds, throughput 980281.634914
+203381	[1728266797]	2000000 OPS in 2.042771 seconds, throughput 979062.263954
+203381	[1728266798]	2000000 OPS in 2.043974 seconds, throughput 978486.027709
+203381	[1728266799]	2000000 OPS in 2.055310 seconds, throughput 973089.217685
+203381	[1728266799]	2000000 OPS in 2.041206 seconds, throughput 979812.914522
+203381	[1728266799]	2000000 OPS in 2.041853 seconds, throughput 979502.442144
+203381	[1728266800]	2000000 OPS in 2.042673 seconds, throughput 979109.235791
+203381	[1728266801]	2000000 OPS in 2.057272 seconds, throughput 972161.192103
+203381	[1728266801]	2000000 OPS in 2.046352 seconds, throughput 977348.960492
+203381	[1728266801]	2000000 OPS in 2.047298 seconds, throughput 976897.354464
+203381	[1728266802]	2000000 OPS in 2.043537 seconds, throughput 978695.271972
+203381	[1728266803]	2000000 OPS in 2.057427 seconds, throughput 972087.952574
+203381	[1728266803]	2000000 OPS in 2.038227 seconds, throughput 981244.974186
+203381	[1728266803]	2000000 OPS in 2.044242 seconds, throughput 978357.748251
+203381	[1728266804]	2000000 OPS in 2.046331 seconds, throughput 977358.990310
+203381	[1728266805]	2000000 OPS in 2.061722 seconds, throughput 970062.889177
+203381	[1728266805]	2000000 OPS in 2.043042 seconds, throughput 978932.395908
+203381	[1728266806]	2000000 OPS in 2.050985 seconds, throughput 975141.212637
+203381	[1728266806]	2000000 OPS in 2.041331 seconds, throughput 979752.916112
+203381	[1728266807]	2000000 OPS in 2.053047 seconds, throughput 974161.818994
+203381	[1728266807]	2000000 OPS in 2.041060 seconds, throughput 979883.001970
+203381	[1728266808]	2000000 OPS in 2.044398 seconds, throughput 978283.093605
+203381	[1728266808]	2000000 OPS in 2.041897 seconds, throughput 979481.335249
+203381	[1728266809]	2000000 OPS in 2.053609 seconds, throughput 973895.225430
+203381	[1728266809]	2000000 OPS in 2.043637 seconds, throughput 978647.382094
+203381	[1728266810]	2000000 OPS in 2.041709 seconds, throughput 979571.525619
+203381	[1728266810]	2000000 OPS in 2.040956 seconds, throughput 979932.933390
+203381	[1728266811]	2000000 OPS in 2.058207 seconds, throughput 971719.559792
+203381	[1728266811]	2000000 OPS in 2.041764 seconds, throughput 979545.138420
+203381	[1728266812]	2000000 OPS in 2.046338 seconds, throughput 977355.647014
+203381	[1728266812]	2000000 OPS in 2.041793 seconds, throughput 979531.225741
+203381	[1728266813]	2000000 OPS in 2.055905 seconds, throughput 972807.595682
+203381	[1728266813]	2000000 OPS in 2.041605 seconds, throughput 979621.425300
+203381	[1728266814]	2000000 OPS in 2.045818 seconds, throughput 977604.068397
+203381	[1728266814]	2000000 OPS in 2.036517 seconds, throughput 982068.895079
+203381	[1728266815]	2000000 OPS in 2.053636 seconds, throughput 973882.421228
+203381	[1728266815]	2000000 OPS in 2.046701 seconds, throughput 977182.304597
+203381	[1728266816]	2000000 OPS in 2.042145 seconds, throughput 979362.386119
+203381	[1728266816]	2000000 OPS in 2.045207 seconds, throughput 977896.124940
+203381	[1728266817]	2000000 OPS in 2.054584 seconds, throughput 973433.064796
+203381	[1728266817]	2000000 OPS in 2.040950 seconds, throughput 979935.814204
+203381	[1728266818]	2000000 OPS in 2.045571 seconds, throughput 977722.112799
+203381	[1728266818]	2000000 OPS in 2.044099 seconds, throughput 978426.191686
+203381	[1728266819]	2000000 OPS in 2.061692 seconds, throughput 970077.004713
+203381	[1728266819]	2000000 OPS in 2.049220 seconds, throughput 975981.105006
+203381	[1728266820]	2000000 OPS in 2.052268 seconds, throughput 974531.591391
+203381	[1728266820]	2000000 OPS in 2.046427 seconds, throughput 977313.141392
+203381	[1728266821]	2000000 OPS in 2.056780 seconds, throughput 972393.741674
+203381	[1728266821]	2000000 OPS in 2.041070 seconds, throughput 979878.201140
+203381	[1728266822]	2000000 OPS in 2.046919 seconds, throughput 977078.233189
+203381	[1728266822]	2000000 OPS in 2.040906 seconds, throughput 979956.940692
+203381	[1728266823]	2000000 OPS in 2.059372 seconds, throughput 971169.851780
+203381	[1728266824]	2000000 OPS in 2.047885 seconds, throughput 976617.339353
+203381	[1728266824]	2000000 OPS in 2.048989 seconds, throughput 976091.135677
+203381	[1728266824]	2000000 OPS in 2.044362 seconds, throughput 978300.320589
+203381	[1728266825]	2000000 OPS in 2.055994 seconds, throughput 972765.484724
+203381	[1728266826]	2000000 OPS in 2.044318 seconds, throughput 978321.376616
+203381	[1728266826]	2000000 OPS in 2.045603 seconds, throughput 977706.817990
+203381	[1728266826]	2000000 OPS in 2.044376 seconds, throughput 978293.621134
+203381	[1728266827]	2000000 OPS in 2.058453 seconds, throughput 971603.432286
+203381	[1728266828]	2000000 OPS in 2.042254 seconds, throughput 979310.115196
+203381	[1728266828]	2000000 OPS in 2.046191 seconds, throughput 977425.861027
+203381	[1728266828]	2000000 OPS in 2.043539 seconds, throughput 978694.314129
+203381	[1728266829]	2000000 OPS in 2.055536 seconds, throughput 972982.229453
+203381	[1728266830]	2000000 OPS in 2.042145 seconds, throughput 979362.386119
+203381	[1728266830]	2000000 OPS in 2.043875 seconds, throughput 978533.423032
+203381	[1728266830]	2000000 OPS in 2.040796 seconds, throughput 980009.760897
+203381	[1728266832]	2000000 OPS in 2.058228 seconds, throughput 971709.645384
+203381	[1728266832]	2000000 OPS in 2.042313 seconds, throughput 979281.824089
+203381	[1728266832]	2000000 OPS in 2.043799 seconds, throughput 978569.810436
+203381	[1728266832]	2000000 OPS in 2.042543 seconds, throughput 979171.552325
+203381	[1728266834]	2000000 OPS in 2.055831 seconds, throughput 972842.612063
+203381	[1728266834]	2000000 OPS in 2.050423 seconds, throughput 975408.488883
+203381	[1728266834]	2000000 OPS in 2.050117 seconds, throughput 975554.078133
+203381	[1728266834]	2000000 OPS in 2.046444 seconds, throughput 977305.022761
+203381	[1728266836]	2000000 OPS in 2.056303 seconds, throughput 972619.307563
+203381	[1728266836]	2000000 OPS in 2.044364 seconds, throughput 978299.363518
+203381	[1728266836]	2000000 OPS in 2.044165 seconds, throughput 978394.601219
+203381	[1728266836]	2000000 OPS in 2.041179 seconds, throughput 979825.875144
+203381	[1728266838]	2000000 OPS in 2.054030 seconds, throughput 973695.613014
+203381	[1728266838]	2000000 OPS in 2.037744 seconds, throughput 981477.555571
+203381	[1728266838]	2000000 OPS in 2.042075 seconds, throughput 979395.957543
+203381	[1728266839]	2000000 OPS in 2.043235 seconds, throughput 978839.927859
+203381	[1728266840]	2000000 OPS in 2.057809 seconds, throughput 971907.499676
+203381	[1728266840]	2000000 OPS in 2.042933 seconds, throughput 978984.626515
+203381	[1728266840]	2000000 OPS in 2.044690 seconds, throughput 978143.386039
+203381	[1728266841]	2000000 OPS in 2.041497 seconds, throughput 979673.249581
+203381	[1728266842]	2000000 OPS in 2.055794 seconds, throughput 972860.121199
+203381	[1728266842]	2000000 OPS in 2.041997 seconds, throughput 979433.368413
+203381	[1728266842]	2000000 OPS in 2.042608 seconds, throughput 979140.393066
+203381	[1728266843]	2000000 OPS in 2.041798 seconds, throughput 979528.827044
+203381	[1728266844]	2000000 OPS in 2.052221 seconds, throughput 974553.910130
+203381	[1728266844]	2000000 OPS in 2.041557 seconds, throughput 979644.457637
+203381	[1728266844]	2000000 OPS in 2.049006 seconds, throughput 976083.037336
+203381	[1728266845]	2000000 OPS in 2.041694 seconds, throughput 979578.722375
+203381	[1728266846]	2000000 OPS in 2.057317 seconds, throughput 972139.927877
+203381	[1728266846]	2000000 OPS in 2.039158 seconds, throughput 980796.976007
+203381	[1728266846]	2000000 OPS in 2.048719 seconds, throughput 976219.774405
+203381	[1728266847]	2000000 OPS in 2.037479 seconds, throughput 981605.209183
+203381	[1728266848]	2000000 OPS in 2.054945 seconds, throughput 973262.058109
+203381	[1728266848]	2000000 OPS in 2.041407 seconds, throughput 979716.440671
+203381	[1728266848]	2000000 OPS in 2.047010 seconds, throughput 977034.797094
+203381	[1728266849]	2000000 OPS in 2.043528 seconds, throughput 978699.582291
+203381	[1728266850]	2000000 OPS in 2.060980 seconds, throughput 970412.134033
+203381	[1728266850]	2000000 OPS in 2.043506 seconds, throughput 978710.118786
+203381	[1728266851]	2000000 OPS in 2.052169 seconds, throughput 974578.604394
+203381	[1728266851]	2000000 OPS in 2.042337 seconds, throughput 979270.316309
+203381	[1728266852]	2000000 OPS in 2.055053 seconds, throughput 973210.909889
+203381	[1728266852]	2000000 OPS in 2.035950 seconds, throughput 982342.395442
+203381	[1728266853]	2000000 OPS in 2.042630 seconds, throughput 979129.847305
+203381	[1728266853]	2000000 OPS in 2.039643 seconds, throughput 980563.755520
+203381	[1728266854]	2000000 OPS in 2.042630 seconds, throughput 979129.847305
+203381	[1728266854]	2000000 OPS in 2.054277 seconds, throughput 973578.538824
+203381	[1728266855]	2000000 OPS in 2.045850 seconds, throughput 977588.777281
+203381	[1728266855]	2000000 OPS in 2.046944 seconds, throughput 977066.299811
+203381	[1728266856]	2000000 OPS in 2.039742 seconds, throughput 980516.163319
+203381	[1728266856]	2000000 OPS in 2.058321 seconds, throughput 971665.741155
+203381	[1728266857]	2000000 OPS in 2.040520 seconds, throughput 980142.316664
+203381	[1728266857]	2000000 OPS in 2.044164 seconds, throughput 978395.079847
+203381	[1728266858]	2000000 OPS in 2.039991 seconds, throughput 980396.482141
+203381	[1728266858]	2000000 OPS in 2.053972 seconds, throughput 973723.108202
+203381	[1728266859]	2000000 OPS in 2.043571 seconds, throughput 978678.988888
+203381	[1728266859]	2000000 OPS in 2.043071 seconds, throughput 978918.500630
+203381	[1728266860]	2000000 OPS in 2.040936 seconds, throughput 979942.536170
+203381	[1728266860]	2000000 OPS in 2.056911 seconds, throughput 972331.812120
+203381	[1728266861]	2000000 OPS in 2.047179 seconds, throughput 976954.140307
+203381	[1728266861]	2000000 OPS in 2.043169 seconds, throughput 978871.547092
+203381	[1728266862]	2000000 OPS in 2.037357 seconds, throughput 981663.989178
+203381	[1728266862]	2000000 OPS in 2.053125 seconds, throughput 974124.809741
+203381	[1728266863]	2000000 OPS in 2.041729 seconds, throughput 979561.930109
+203381	[1728266863]	2000000 OPS in 2.042999 seconds, throughput 978952.999977
+203381	[1728266864]	2000000 OPS in 2.043595 seconds, throughput 978667.495272
+203381	[1728266864]	2000000 OPS in 2.057463 seconds, throughput 972070.943682
+203381	[1728266865]	2000000 OPS in 2.048317 seconds, throughput 976411.366014
+203381	[1728266865]	2000000 OPS in 2.044172 seconds, throughput 978391.250834
+203381	[1728266866]	2000000 OPS in 2.043385 seconds, throughput 978768.073564
+203381	[1728266867]	2000000 OPS in 2.056167 seconds, throughput 972683.639023
+203381	[1728266867]	2000000 OPS in 2.042730 seconds, throughput 979081.914888
+203381	[1728266867]	2000000 OPS in 2.042233 seconds, throughput 979320.185307
+203381	[1728266868]	2000000 OPS in 2.039516 seconds, throughput 980624.814907
+203381	[1728266869]	2000000 OPS in 2.061469 seconds, throughput 970181.943071
+203381	[1728266869]	2000000 OPS in 2.046370 seconds, throughput 977340.363668
+203381	[1728266869]	2000000 OPS in 2.040757 seconds, throughput 980028.489428
+203381	[1728266870]	2000000 OPS in 2.037582 seconds, throughput 981555.588928
+203381	[1728266871]	2000000 OPS in 2.057071 seconds, throughput 972256.183671
+203381	[1728266871]	2000000 OPS in 2.044269 seconds, throughput 978344.826439
+203381	[1728266871]	2000000 OPS in 2.041724 seconds, throughput 979564.328969
+203381	[1728266873]	2000000 OPS in 2.042252 seconds, throughput 979311.074245
+203381	[1728266873]	2000000 OPS in 2.055548 seconds, throughput 972976.549319
+203381	[1728266873]	2000000 OPS in 2.043163 seconds, throughput 978874.421669
+203381	[1728266873]	2000000 OPS in 2.038730 seconds, throughput 981002.879243
+203381	[1728266875]	2000000 OPS in 2.037887 seconds, throughput 981408.684584
+203381	[1728266875]	2000000 OPS in 2.053324 seconds, throughput 974030.401437
+203381	[1728266875]	2000000 OPS in 2.046564 seconds, throughput 977247.718615
+203381	[1728266875]	2000000 OPS in 2.044508 seconds, throughput 978230.459357
+203381	[1728266877]	2000000 OPS in 2.045429 seconds, throughput 977789.989288
+203381	[1728266877]	2000000 OPS in 2.058813 seconds, throughput 971433.539617
+203381	[1728266877]	2000000 OPS in 2.047143 seconds, throughput 976971.320518
+203381	[1728266877]	2000000 OPS in 2.038186 seconds, throughput 981264.712838
+203381	[1728266879]	2000000 OPS in 2.045425 seconds, throughput 977791.901439
+203381	[1728266879]	2000000 OPS in 2.061271 seconds, throughput 970275.136069
+203381	[1728266879]	2000000 OPS in 2.050422 seconds, throughput 975408.964594
+203381	[1728266879]	2000000 OPS in 2.051639 seconds, throughput 974830.367331
+203381	[1728266881]	2000000 OPS in 2.045430 seconds, throughput 977789.511252
+203381	[1728266881]	2000000 OPS in 2.053561 seconds, throughput 973917.989288
+203381	[1728266881]	2000000 OPS in 2.043700 seconds, throughput 978617.213877
+203381	[1728266881]	2000000 OPS in 2.041640 seconds, throughput 979604.631571
+203381	[1728266883]	2000000 OPS in 2.040783 seconds, throughput 980016.003661
+203381	[1728266883]	2000000 OPS in 2.052690 seconds, throughput 974331.243393
+203381	[1728266883]	2000000 OPS in 2.042955 seconds, throughput 978974.084109
+203381	[1728266884]	2000000 OPS in 2.110944 seconds, throughput 947443.418679
+203381	[1728266885]	2000000 OPS in 2.040551 seconds, throughput 980127.426367
+203381	[1728266885]	2000000 OPS in 2.052697 seconds, throughput 974327.920779
+203381	[1728266885]	2000000 OPS in 2.043403 seconds, throughput 978759.451758
+203381	[1728266886]	2000000 OPS in 2.052809 seconds, throughput 974274.762046
+203381	[1728266887]	2000000 OPS in 2.041452 seconds, throughput 979694.844650
+203381	[1728266887]	2000000 OPS in 2.055771 seconds, throughput 972871.005574
+203381	[1728266887]	2000000 OPS in 2.045360 seconds, throughput 977822.974929
+203381	[1728266888]	2000000 OPS in 2.038954 seconds, throughput 980895.106020
+203381	[1728266889]	2000000 OPS in 2.043627 seconds, throughput 978652.170871
+203381	[1728266889]	2000000 OPS in 2.055816 seconds, throughput 972849.710285
+203381	[1728266889]	2000000 OPS in 2.043973 seconds, throughput 978486.506426
+203381	[1728266890]	2000000 OPS in 2.041723 seconds, throughput 979564.808742
+203381	[1728266891]	2000000 OPS in 2.038616 seconds, throughput 981057.737210
+203381	[1728266891]	2000000 OPS in 2.051912 seconds, throughput 974700.669424
+203381	[1728266891]	2000000 OPS in 2.041981 seconds, throughput 979441.042791
+203381	[1728266892]	2000000 OPS in 2.039449 seconds, throughput 980657.030404
+203381	[1728266893]	2000000 OPS in 2.038171 seconds, throughput 981271.934494
+203381	[1728266893]	2000000 OPS in 2.051521 seconds, throughput 974886.437916
+203381	[1728266893]	2000000 OPS in 2.042122 seconds, throughput 979373.416476
+203381	[1728266894]	2000000 OPS in 2.044866 seconds, throughput 978059.198011
+203381	[1728266895]	2000000 OPS in 2.050012 seconds, throughput 975604.045245
+203381	[1728266895]	2000000 OPS in 2.060777 seconds, throughput 970507.725969
+203381	[1728266896]	2000000 OPS in 2.052252 seconds, throughput 974539.189144
+203381	[1728266896]	2000000 OPS in 2.045397 seconds, throughput 977805.286700
+203381	[1728266897]	2000000 OPS in 2.043205 seconds, throughput 978854.299985
+203381	[1728266897]	2000000 OPS in 2.057597 seconds, throughput 972007.638036
+203381	[1728266898]	2000000 OPS in 2.041739 seconds, throughput 979557.132425
+203381	[1728266898]	2000000 OPS in 2.042354 seconds, throughput 979262.165129
+203381	[1728266899]	2000000 OPS in 2.036566 seconds, throughput 982045.266395
+203381	[1728266899]	2000000 OPS in 2.058578 seconds, throughput 971544.435042
+203381	[1728266900]	2000000 OPS in 2.044769 seconds, throughput 978105.595302
+203381	[1728266900]	2000000 OPS in 2.157525 seconds, throughput 926988.099790
+203381	[1728266901]	2000000 OPS in 2.038079 seconds, throughput 981316.229646
+203381	[1728266901]	2000000 OPS in 2.050799 seconds, throughput 975229.654393
+203381	[1728266902]	2000000 OPS in 2.036442 seconds, throughput 982105.063635
+203381	[1728266902]	2000000 OPS in 2.337298 seconds, throughput 855688.919427
+203381	[1728266903]	2000000 OPS in 2.043032 seconds, throughput 978937.187474
+203381	[1728266903]	2000000 OPS in 2.046813 seconds, throughput 977128.833948
+203381	[1728266904]	2000000 OPS in 2.040682 seconds, throughput 980064.507846
+203381	[1728266905]	2000000 OPS in 2.237637 seconds, throughput 893800.022077
+203381	[1728266905]	2000000 OPS in 2.042844 seconds, throughput 979027.277658
+203381	[1728266906]	2000000 OPS in 2.048163 seconds, throughput 976484.781729
+203381	[1728266906]	2000000 OPS in 2.044069 seconds, throughput 978440.551664
+203381	[1728266907]	2000000 OPS in 2.041929 seconds, throughput 979465.985350
+203381	[1728266907]	2000000 OPS in 2.041608 seconds, throughput 979619.985815
+203381	[1728266908]	2000000 OPS in 2.052141 seconds, throughput 974591.901824
+203381	[1728266908]	2000000 OPS in 2.045202 seconds, throughput 977898.515648
+203381	[1728266909]	2000000 OPS in 2.040571 seconds, throughput 980117.819963
+203381	[1728266909]	2000000 OPS in 2.046511 seconds, throughput 977273.027118
+203381	[1728266910]	2000000 OPS in 2.057493 seconds, throughput 972056.770059
+203381	[1728266910]	2000000 OPS in 2.055978 seconds, throughput 972773.054965
+203381	[1728266911]	2000000 OPS in 2.048556 seconds, throughput 976297.450497
+203381	[1728266911]	2000000 OPS in 2.040116 seconds, throughput 980336.412243
+203381	[1728266912]	2000000 OPS in 2.055910 seconds, throughput 972805.229801
+203381	[1728266912]	2000000 OPS in 2.044631 seconds, throughput 978171.611406
+203381	[1728266913]	2000000 OPS in 2.045796 seconds, throughput 977614.581317
+203381	[1728266913]	2000000 OPS in 2.041462 seconds, throughput 979690.045663
+203381	[1728266914]	2000000 OPS in 2.059229 seconds, throughput 971237.293181
+203381	[1728266914]	2000000 OPS in 2.043062 seconds, throughput 978922.812915
+203381	[1728266915]	2000000 OPS in 2.044757 seconds, throughput 978111.335479
+203381	[1728266915]	2000000 OPS in 2.036775 seconds, throughput 981944.495587
+203381	[1728266916]	2000000 OPS in 2.052691 seconds, throughput 974330.768732
+203381	[1728266916]	2000000 OPS in 2.044454 seconds, throughput 978256.297280
+203381	[1728266917]	2000000 OPS in 2.043508 seconds, throughput 978709.160913
+203381	[1728266917]	2000000 OPS in 2.041177 seconds, throughput 979826.835203
+203381	[1728266918]	2000000 OPS in 2.058073 seconds, throughput 971782.827917
+203381	[1728266918]	2000000 OPS in 2.046580 seconds, throughput 977240.078570
+203381	[1728266919]	2000000 OPS in 2.047582 seconds, throughput 976761.858622
+203381	[1728266919]	2000000 OPS in 2.042134 seconds, throughput 979367.661476
+203381	[1728266920]	2000000 OPS in 2.058677 seconds, throughput 971497.714309
+203381	[1728266920]	2000000 OPS in 2.046373 seconds, throughput 977338.930879
+203381	[1728266921]	2000000 OPS in 2.043105 seconds, throughput 978902.210116
+203381	[1728266922]	2000000 OPS in 2.044833 seconds, throughput 978074.982162
+203381	[1728266922]	2000000 OPS in 2.058106 seconds, throughput 971767.246196
+203381	[1728266922]	2000000 OPS in 2.049423 seconds, throughput 975884.431862
+203381	[1728266923]	2000000 OPS in 2.046972 seconds, throughput 977052.934774
+203381	[1728266924]	2000000 OPS in 2.043731 seconds, throughput 978602.369881
+203381	[1728266924]	2000000 OPS in 2.059828 seconds, throughput 970954.856425
+203381	[1728266924]	2000000 OPS in 2.050735 seconds, throughput 975260.089675
+203381	[1728266925]	2000000 OPS in 2.047076 seconds, throughput 977003.296409
+203381	[1728266926]	2000000 OPS in 2.044691 seconds, throughput 978142.907657
+203381	[1728266926]	2000000 OPS in 2.054803 seconds, throughput 973329.316728
+203381	[1728266926]	2000000 OPS in 2.046008 seconds, throughput 977513.284406
+203381	[1728266927]	2000000 OPS in 2.041109 seconds, throughput 979859.478352
+203381	[1728266928]	2000000 OPS in 2.039515 seconds, throughput 980625.295720
+203381	[1728266928]	2000000 OPS in 2.056437 seconds, throughput 972555.930476
+203381	[1728266928]	2000000 OPS in 2.042539 seconds, throughput 979173.469882
+203381	[1728266929]	2000000 OPS in 2.045408 seconds, throughput 977800.028161
+203381	[1728266930]	2000000 OPS in 2.041421 seconds, throughput 979709.721807
+203381	[1728266930]	2000000 OPS in 2.056955 seconds, throughput 972311.013124
+203381	[1728266930]	2000000 OPS in 2.045722 seconds, throughput 977649.944616
+203381	[1728266931]	2000000 OPS in 2.043448 seconds, throughput 978737.897906
+203381	[1728266932]	2000000 OPS in 2.040156 seconds, throughput 980317.191430
+203381	[1728266932]	2000000 OPS in 2.053251 seconds, throughput 974065.031504
+203381	[1728266932]	2000000 OPS in 2.047396 seconds, throughput 976850.594609
+203381	[1728266933]	2000000 OPS in 2.045615 seconds, throughput 977701.082560
+203381	[1728266934]	2000000 OPS in 2.041561 seconds, throughput 979642.538234
+203381	[1728266934]	2000000 OPS in 2.055086 seconds, throughput 973195.282339
+203381	[1728266934]	2000000 OPS in 2.046276 seconds, throughput 977385.259857
+203381	[1728266935]	2000000 OPS in 2.040753 seconds, throughput 980030.410344
+203381	[1728266936]	2000000 OPS in 2.040645 seconds, throughput 980082.277907
+203381	[1728266936]	2000000 OPS in 2.054031 seconds, throughput 973695.138973
+203381	[1728266936]	2000000 OPS in 2.044265 seconds, throughput 978346.740760
+203381	[1728266937]	2000000 OPS in 2.044023 seconds, throughput 978462.571116
+203381	[1728266938]	2000000 OPS in 2.046340 seconds, throughput 977354.691791
+203381	[1728266938]	2000000 OPS in 2.051558 seconds, throughput 974868.855767
+203381	[1728266938]	2000000 OPS in 2.048295 seconds, throughput 976421.853297
+203381	[1728266939]	2000000 OPS in 2.048813 seconds, throughput 976174.985223
+203381	[1728266940]	2000000 OPS in 2.047945 seconds, throughput 976588.726748
+203381	[1728266940]	2000000 OPS in 2.057522 seconds, throughput 972043.069284
+203381	[1728266941]	2000000 OPS in 2.050805 seconds, throughput 975226.801183
+203381	[1728266941]	2000000 OPS in 2.044509 seconds, throughput 978229.980890
+203381	[1728266942]	2000000 OPS in 2.042888 seconds, throughput 979006.191235
+203381	[1728266943]	2000000 OPS in 2.046204 seconds, throughput 977419.651218
+203381	[1728266943]	2000000 OPS in 2.056925 seconds, throughput 972325.194161
+203381	[1728266943]	2000000 OPS in 2.044291 seconds, throughput 978334.297808
+203381	[1728266944]	2000000 OPS in 2.041369 seconds, throughput 979734.678052
+203381	[1728266945]	2000000 OPS in 2.044448 seconds, throughput 978259.168245
+203381	[1728266945]	2000000 OPS in 2.054691 seconds, throughput 973382.372337
+203381	[1728266945]	2000000 OPS in 2.046256 seconds, throughput 977394.812770
+203381	[1728266946]	2000000 OPS in 2.041591 seconds, throughput 979628.142953
+203381	[1728266947]	2000000 OPS in 2.044691 seconds, throughput 978142.907657
+203381	[1728266947]	2000000 OPS in 2.052373 seconds, throughput 974481.734071
+203381	[1728266948]	2000000 OPS in 2.042368 seconds, throughput 979255.452494
+203381	[1728266948]	2000000 OPS in 2.040465 seconds, throughput 980168.736048
+203381	[1728266949]	2000000 OPS in 2.045363 seconds, throughput 977821.540724
+203381	[1728266949]	2000000 OPS in 2.051490 seconds, throughput 974901.169394
+203381	[1728266950]	2000000 OPS in 2.041883 seconds, throughput 979488.050980
+203381	[1728266950]	2000000 OPS in 2.044090 seconds, throughput 978430.499636
+203381	[1728266951]	2000000 OPS in 2.046478 seconds, throughput 977288.785904
+203381	[1728266951]	2000000 OPS in 2.058025 seconds, throughput 971805.493131
+203381	[1728266952]	2000000 OPS in 2.044098 seconds, throughput 978426.670346
+203381	[1728266952]	2000000 OPS in 2.041943 seconds, throughput 979459.269921
+203381	[1728266953]	2000000 OPS in 2.044188 seconds, throughput 978383.592899
+203381	[1728266953]	2000000 OPS in 2.057468 seconds, throughput 972068.581383
+203381	[1728266954]	2000000 OPS in 2.045315 seconds, throughput 977844.488502
+203381	[1728266954]	2000000 OPS in 2.041994 seconds, throughput 979434.807350
+203381	[1728266955]	2000000 OPS in 2.048668 seconds, throughput 976244.076639
+203381	[1728266955]	2000000 OPS in 2.058387 seconds, throughput 971634.585722
+203381	[1728266956]	2000000 OPS in 2.051486 seconds, throughput 974903.070262
+203381	[1728266956]	2000000 OPS in 2.043213 seconds, throughput 978850.467377
+203381	[1728266957]	2000000 OPS in 2.044498 seconds, throughput 978235.244055
+203381	[1728266957]	2000000 OPS in 2.058404 seconds, throughput 971626.561161
+203381	[1728266958]	2000000 OPS in 2.045150 seconds, throughput 977923.379703
+203381	[1728266958]	2000000 OPS in 2.043131 seconds, throughput 978889.753031
+203381	[1728266959]	2000000 OPS in 2.045766 seconds, throughput 977628.917481
+203381	[1728266959]	2000000 OPS in 2.054849 seconds, throughput 973307.527706
+203381	[1728266960]	2000000 OPS in 2.041060 seconds, throughput 979883.001970
+203381	[1728266960]	2000000 OPS in 2.045539 seconds, throughput 977737.408087
+203381	[1728266961]	2000000 OPS in 2.050035 seconds, throughput 975593.099630
+203381	[1728266961]	2000000 OPS in 2.055113 seconds, throughput 973182.496534
+203381	[1728266962]	2000000 OPS in 2.044869 seconds, throughput 978057.763113
+203381	[1728266962]	2000000 OPS in 2.041535 seconds, throughput 979655.014487
+203381	[1728266963]	2000000 OPS in 2.045437 seconds, throughput 977786.165010
+203381	[1728266963]	2000000 OPS in 2.052395 seconds, throughput 974471.288422
+203381	[1728266964]	2000000 OPS in 2.041381 seconds, throughput 979728.918805
+203381	[1728266964]	2000000 OPS in 2.041314 seconds, throughput 979761.075464
+203381	[1728266965]	2000000 OPS in 2.045683 seconds, throughput 977668.583060
+203381	[1728266965]	2000000 OPS in 2.055887 seconds, throughput 972816.112948
+203381	[1728266966]	2000000 OPS in 2.042577 seconds, throughput 979155.253388
+203381	[1728266966]	2000000 OPS in 2.041389 seconds, throughput 979725.079345
+203381	[1728266967]	2000000 OPS in 2.044396 seconds, throughput 978284.050644
+203381	[1728266967]	2000000 OPS in 2.053801 seconds, throughput 973804.180639
+203381	[1728266968]	2000000 OPS in 2.044386 seconds, throughput 978288.835866
+203381	[1728266969]	2000000 OPS in 2.042719 seconds, throughput 979087.187224
+203381	[1728266969]	2000000 OPS in 2.051324 seconds, throughput 974980.061658
+203381	[1728266969]	2000000 OPS in 2.062350 seconds, throughput 969767.498242
+203381	[1728266970]	2000000 OPS in 2.047044 seconds, throughput 977018.569215
+203381	[1728266971]	2000000 OPS in 2.048094 seconds, throughput 976517.679364
+203381	[1728266971]	2000000 OPS in 2.044246 seconds, throughput 978355.833887
+203381	[1728266971]	2000000 OPS in 2.056382 seconds, throughput 972581.942460
+203381	[1728266972]	2000000 OPS in 2.045407 seconds, throughput 977800.506207
+203381	[1728266973]	2000000 OPS in 2.037340 seconds, throughput 981672.180392
+203381	[1728266973]	2000000 OPS in 2.044293 seconds, throughput 978333.340671
+203381	[1728266973]	2000000 OPS in 2.057018 seconds, throughput 972281.234292
+203381	[1728266974]	2000000 OPS in 2.044486 seconds, throughput 978240.985754
+203381	[1728266975]	2000000 OPS in 2.045422 seconds, throughput 977793.335556
+203381	[1728266975]	2000000 OPS in 2.046395 seconds, throughput 977328.423887
+203381	[1728266975]	2000000 OPS in 2.056872 seconds, throughput 972350.248338
+203381	[1728266976]	2000000 OPS in 2.041925 seconds, throughput 979467.904061
+203381	[1728266977]	2000000 OPS in 2.045634 seconds, throughput 977692.001600
+203381	[1728266977]	2000000 OPS in 2.044444 seconds, throughput 978261.082231
+203381	[1728266978]	2000000 OPS in 2.052965 seconds, throughput 974200.729189
+203381	[1728266978]	2000000 OPS in 2.044966 seconds, throughput 978011.370360
+203381	[1728266979]	2000000 OPS in 2.043482 seconds, throughput 978721.613403
+203381	[1728266979]	2000000 OPS in 2.040285 seconds, throughput 980255.209444
+203381	[1728266980]	2000000 OPS in 2.058355 seconds, throughput 971649.691137
+203381	[1728266980]	2000000 OPS in 2.042884 seconds, throughput 979008.108145
+203381	[1728266981]	2000000 OPS in 2.041195 seconds, throughput 979818.194734
+203381	[1728266981]	2000000 OPS in 2.041433 seconds, throughput 979703.962854
+203381	[1728266982]	2000000 OPS in 2.052653 seconds, throughput 974348.806155
+203381	[1728266982]	2000000 OPS in 2.045493 seconds, throughput 977759.395901
+203381	[1728266983]	2000000 OPS in 2.037505 seconds, throughput 981592.683208
+203381	[1728266983]	2000000 OPS in 2.042972 seconds, throughput 978965.937859
+203381	[1728266984]	2000000 OPS in 2.055048 seconds, throughput 973213.277743
+203381	[1728266984]	2000000 OPS in 2.043765 seconds, throughput 978586.089888
+203381	[1728266985]	2000000 OPS in 2.045794 seconds, throughput 977615.537048
+203381	[1728266986]	2000000 OPS in 2.047905 seconds, throughput 976607.801631
+203381	[1728266986]	2000000 OPS in 2.058938 seconds, throughput 971374.563003
+203381	[1728266986]	2000000 OPS in 2.038485 seconds, throughput 981120.783327
+203381	[1728266987]	2000000 OPS in 2.041747 seconds, throughput 979553.294311
+203381	[1728266988]	2000000 OPS in 2.042791 seconds, throughput 979052.678419
+203381	[1728266988]	2000000 OPS in 2.052839 seconds, throughput 974260.524084
+203381	[1728266988]	2000000 OPS in 2.044450 seconds, throughput 978258.211255
+203381	[1728266989]	2000000 OPS in 2.042616 seconds, throughput 979136.558218
+203381	[1728266990]	2000000 OPS in 2.042582 seconds, throughput 979152.856532
+203381	[1728266990]	2000000 OPS in 2.055283 seconds, throughput 973102.001038
+203381	[1728266990]	2000000 OPS in 2.044470 seconds, throughput 978248.641457
+203381	[1728266991]	2000000 OPS in 2.045374 seconds, throughput 977816.282010
+203381	[1728266992]	2000000 OPS in 2.044141 seconds, throughput 978406.088425
+203381	[1728266992]	2000000 OPS in 2.055929 seconds, throughput 972796.239559
+203381	[1728266992]	2000000 OPS in 2.041681 seconds, throughput 979584.959648
+203381	[1728266993]	2000000 OPS in 2.040534 seconds, throughput 980135.591958
+203381	[1728266994]	2000000 OPS in 2.042652 seconds, throughput 979119.301770
+203381	[1728266994]	2000000 OPS in 2.059690 seconds, throughput 971019.910763
+203381	[1728266995]	2000000 OPS in 2.042489 seconds, throughput 979197.439986
+203381	[1728266995]	2000000 OPS in 2.042974 seconds, throughput 978964.979486
+203381	[1728266996]	2000000 OPS in 2.047496 seconds, throughput 976802.885085
+203381	[1728266996]	2000000 OPS in 2.054646 seconds, throughput 973403.690952
+203381	[1728266997]	2000000 OPS in 2.045123 seconds, throughput 977936.290384
+203381	[1728266997]	2000000 OPS in 2.044305 seconds, throughput 978327.597888
+203381	[1728266998]	2000000 OPS in 2.045198 seconds, throughput 977900.428223
+203381	[1728266998]	2000000 OPS in 2.058531 seconds, throughput 971566.617165
+203381	[1728266999]	2000000 OPS in 2.042444 seconds, throughput 979219.014083
+203381	[1728266999]	2000000 OPS in 2.045553 seconds, throughput 977730.716339
+203381	[1728267000]	2000000 OPS in 2.046758 seconds, throughput 977155.091125
+203381	[1728267000]	2000000 OPS in 2.061210 seconds, throughput 970303.850651
+203381	[1728267001]	2000000 OPS in 2.047219 seconds, throughput 976935.051892
+203381	[1728267001]	2000000 OPS in 2.040665 seconds, throughput 980072.672389
+203381	[1728267002]	2000000 OPS in 2.042198 seconds, throughput 979336.969285
+203381	[1728267002]	2000000 OPS in 2.051895 seconds, throughput 974708.744843
+203381	[1728267003]	2000000 OPS in 2.354778 seconds, throughput 849336.965098
+203381	[1728267003]	2000000 OPS in 2.045654 seconds, throughput 977682.442876
+203381	[1728267004]	2000000 OPS in 2.041758 seconds, throughput 979548.016954
+203381	[1728267004]	2000000 OPS in 2.054449 seconds, throughput 973497.030104
+203381	[1728267005]	2000000 OPS in 2.040140 seconds, throughput 980324.879665
+203381	[1728267005]	2000000 OPS in 2.037033 seconds, throughput 981820.127607
+203381	[1728267006]	2000000 OPS in 2.044700 seconds, throughput 978138.602240
+203381	[1728267006]	2000000 OPS in 2.054028 seconds, throughput 973696.561098
+203381	[1728267007]	2000000 OPS in 2.039299 seconds, throughput 980729.162325
+203381	[1728267007]	2000000 OPS in 2.040735 seconds, throughput 980039.054556
+203381	[1728267008]	2000000 OPS in 2.044122 seconds, throughput 978415.182655
+203381	[1728267008]	2000000 OPS in 2.052589 seconds, throughput 974379.186481
+203381	[1728267009]	2000000 OPS in 2.043134 seconds, throughput 978888.315695
+203381	[1728267009]	2000000 OPS in 2.041272 seconds, throughput 979781.234446
+203381	[1728267010]	2000000 OPS in 2.043873 seconds, throughput 978534.380561
+203381	[1728267010]	2000000 OPS in 2.052114 seconds, throughput 974604.724689
+203381	[1728267011]	2000000 OPS in 2.043078 seconds, throughput 978915.146656
+203381	[1728267011]	2000000 OPS in 2.038884 seconds, throughput 980928.782609
+203381	[1728267012]	2000000 OPS in 2.046048 seconds, throughput 977494.174135
+203381	[1728267012]	2000000 OPS in 2.054750 seconds, throughput 973354.422679
+203381	[1728267013]	2000000 OPS in 2.037279 seconds, throughput 981701.573520
+203381	[1728267013]	2000000 OPS in 2.040171 seconds, throughput 980309.983820
+203381	[1728267014]	2000000 OPS in 2.055414 seconds, throughput 973039.981240
+203381	[1728267015]	2000000 OPS in 2.058441 seconds, throughput 971609.096399
+203381	[1728267015]	2000000 OPS in 2.045311 seconds, throughput 977846.400865
+203381	[1728267015]	2000000 OPS in 2.049657 seconds, throughput 975773.019583
+203381	[1728267016]	2000000 OPS in 2.043564 seconds, throughput 978682.341243
+203381	[1728267017]	2000000 OPS in 2.051134 seconds, throughput 975070.375704
+203381	[1728267017]	2000000 OPS in 2.043855 seconds, throughput 978542.998403
+203381	[1728267018]	2000000 OPS in 2.039747 seconds, throughput 980513.759795
+203381	[1728267018]	2000000 OPS in 2.045245 seconds, throughput 977877.955942
+203381	[1728267019]	2000000 OPS in 2.054598 seconds, throughput 973426.431837
+203381	[1728267019]	2000000 OPS in 2.044228 seconds, throughput 978364.448584
+203381	[1728267020]	2000000 OPS in 2.040074 seconds, throughput 980356.594908
+203381	[1728267020]	2000000 OPS in 2.046888 seconds, throughput 977093.030982
+203381	[1728267021]	2000000 OPS in 2.055891 seconds, throughput 972814.220209
+203381	[1728267021]	2000000 OPS in 2.042469 seconds, throughput 979207.028356
+203381	[1728267022]	2000000 OPS in 2.043441 seconds, throughput 978741.250665
+203381	[1728267022]	2000000 OPS in 2.042713 seconds, throughput 979090.063068
+203381	[1728267023]	2000000 OPS in 2.056787 seconds, throughput 972390.432262
+203381	[1728267023]	2000000 OPS in 2.040620 seconds, throughput 980094.285070
+203381	[1728267024]	2000000 OPS in 2.047778 seconds, throughput 976668.369325
+203381	[1728267024]	2000000 OPS in 2.043987 seconds, throughput 978479.804421
+203381	[1728267025]	2000000 OPS in 2.053338 seconds, throughput 974023.760336
+203381	[1728267025]	2000000 OPS in 2.042219 seconds, throughput 979326.898829
+203381	[1728267026]	2000000 OPS in 2.043365 seconds, throughput 978777.653527
+203381	[1728267026]	2000000 OPS in 2.041892 seconds, throughput 979483.733714
+203381	[1728267027]	2000000 OPS in 2.052832 seconds, throughput 974263.846238
+203381	[1728267028]	2000000 OPS in 2.041789 seconds, throughput 979533.144708
+203381	[1728267028]	2000000 OPS in 2.043243 seconds, throughput 978836.095364
+203381	[1728267028]	2000000 OPS in 2.043238 seconds, throughput 978838.490670
+203381	[1728267029]	2000000 OPS in 2.059444 seconds, throughput 971135.898815
+203381	[1728267030]	2000000 OPS in 2.084116 seconds, throughput 959639.482639
+203381	[1728267030]	2000000 OPS in 2.046073 seconds, throughput 977482.230595
+203381	[1728267030]	2000000 OPS in 2.048959 seconds, throughput 976105.427195
+203381	[1728267031]	2000000 OPS in 2.054915 seconds, throughput 973276.266902
+203381	[1728267032]	2000000 OPS in 2.062404 seconds, throughput 969742.106784
+203381	[1728267032]	2000000 OPS in 2.037422 seconds, throughput 981632.671091
+203381	[1728267033]	2000000 OPS in 2.046434 seconds, throughput 977309.798410
+203381	[1728267033]	2000000 OPS in 2.056580 seconds, throughput 972488.305828
+203381	[1728267034]	2000000 OPS in 2.042255 seconds, throughput 979309.635672
+203381	[1728267034]	2000000 OPS in 2.040126 seconds, throughput 980331.606969
+203381	[1728267035]	2000000 OPS in 2.045190 seconds, throughput 977904.253395
+203381	[1728267035]	2000000 OPS in 2.056721 seconds, throughput 972421.636187
+203381	[1728267036]	2000000 OPS in 2.041728 seconds, throughput 979562.409880
+203381	[1728267036]	2000000 OPS in 2.041138 seconds, throughput 979845.556743
+203381	[1728267037]	2000000 OPS in 2.050180 seconds, throughput 975524.100323
+203381	[1728267037]	2000000 OPS in 2.057696 seconds, throughput 971960.872743
+203381	[1728267038]	2000000 OPS in 2.043460 seconds, throughput 978732.150372
+203381	[1728267038]	2000000 OPS in 2.039544 seconds, throughput 980611.352342
+203381	[1728267039]	2000000 OPS in 2.048695 seconds, throughput 976231.210600
+203381	[1728267039]	2000000 OPS in 2.053419 seconds, throughput 973985.338599
+203381	[1728267040]	2000000 OPS in 2.044230 seconds, throughput 978363.491388
+203381	[1728267040]	2000000 OPS in 2.040000 seconds, throughput 980392.156863
+203381	[1728267041]	2000000 OPS in 2.043833 seconds, throughput 978553.531526
+203381	[1728267041]	2000000 OPS in 2.052599 seconds, throughput 974374.439430
+203381	[1728267042]	2000000 OPS in 2.040020 seconds, throughput 980382.545269
+203381	[1728267042]	2000000 OPS in 2.039105 seconds, throughput 980822.468681
+203381	[1728267043]	2000000 OPS in 2.044837 seconds, throughput 978073.068905
+203381	[1728267043]	2000000 OPS in 2.056043 seconds, throughput 972742.301596
+203381	[1728267044]	2000000 OPS in 2.046529 seconds, throughput 977264.431630
+203381	[1728267044]	2000000 OPS in 2.041729 seconds, throughput 979561.930109
+203381	[1728267045]	2000000 OPS in 2.051420 seconds, throughput 974934.435659
+203381	[1728267045]	2000000 OPS in 2.062384 seconds, throughput 969751.510873
+203381	[1728267046]	2000000 OPS in 2.044355 seconds, throughput 978303.670351
+203381	[1728267046]	2000000 OPS in 2.040684 seconds, throughput 980063.547320
+203381	[1728267047]	2000000 OPS in 2.046434 seconds, throughput 977309.798410
+203381	[1728267047]	2000000 OPS in 2.053408 seconds, throughput 973990.556188
+203381	[1728267048]	2000000 OPS in 2.042338 seconds, throughput 979269.836824
+203381	[1728267048]	2000000 OPS in 2.043773 seconds, throughput 978582.259380
+203381	[1728267049]	2000000 OPS in 2.045095 seconds, throughput 977949.679599
+203381	[1728267049]	2000000 OPS in 2.057386 seconds, throughput 972107.324537
+203381	[1728267050]	2000000 OPS in 2.036817 seconds, throughput 981924.247490
+203381	[1728267050]	2000000 OPS in 2.041501 seconds, throughput 979671.330065
+203381	[1728267051]	2000000 OPS in 2.041564 seconds, throughput 979641.098687
+203381	[1728267052]	2000000 OPS in 2.049261 seconds, throughput 975961.578345
+203381	[1728267052]	2000000 OPS in 2.039918 seconds, throughput 980431.566367
+203381	[1728267052]	2000000 OPS in 2.039809 seconds, throughput 980483.957076
+203381	[1728267053]	2000000 OPS in 2.048336 seconds, throughput 976402.308996
+203381	[1728267054]	2000000 OPS in 2.048484 seconds, throughput 976331.765345
+203381	[1728267054]	2000000 OPS in 2.049656 seconds, throughput 975773.495650
+203381	[1728267054]	2000000 OPS in 2.046595 seconds, throughput 977232.916136
+203381	[1728267055]	2000000 OPS in 2.046696 seconds, throughput 977184.691815
+203381	[1728267056]	2000000 OPS in 2.052448 seconds, throughput 974446.124823
+203381	[1728267056]	2000000 OPS in 2.042125 seconds, throughput 979371.977719
+203381	[1728267056]	2000000 OPS in 2.039635 seconds, throughput 980567.601556
+203381	[1728267057]	2000000 OPS in 2.046363 seconds, throughput 977343.706859
+203381	[1728267058]	2000000 OPS in 2.054062 seconds, throughput 973680.443920
+203381	[1728267058]	2000000 OPS in 2.044967 seconds, throughput 978010.892107
+203381	[1728267058]	2000000 OPS in 2.038459 seconds, throughput 981133.297260
+203381	[1728267059]	2000000 OPS in 2.050410 seconds, throughput 975414.673163
+203381	[1728267060]	2000000 OPS in 2.059335 seconds, throughput 971187.300755
+203381	[1728267060]	2000000 OPS in 2.045029 seconds, throughput 977981.241342
+203381	[1728267060]	2000000 OPS in 2.042424 seconds, throughput 979228.602876
+203381	[1728267061]	2000000 OPS in 2.045167 seconds, throughput 977915.250931
+203381	[1728267062]	2000000 OPS in 2.051864 seconds, throughput 974723.470951
+203381	[1728267062]	2000000 OPS in 2.042186 seconds, throughput 979342.723924
+203381	[1728267062]	2000000 OPS in 2.082473 seconds, throughput 960396.605382
+203381	[1728267063]	2000000 OPS in 2.043939 seconds, throughput 978502.783107
+203381	[1728267064]	2000000 OPS in 2.060720 seconds, throughput 970534.570441
+203381	[1728267064]	2000000 OPS in 2.043901 seconds, throughput 978520.975331
+203381	[1728267065]	2000000 OPS in 2.036405 seconds, throughput 982122.907771
+203381	[1728267065]	2000000 OPS in 2.046413 seconds, throughput 977319.827425
+203381	[1728267066]	2000000 OPS in 2.053156 seconds, throughput 974110.101717
+203381	[1728267066]	2000000 OPS in 2.047317 seconds, throughput 976888.288428
+203381	[1728267067]	2000000 OPS in 2.043132 seconds, throughput 978889.273919
+203381	[1728267067]	2000000 OPS in 2.042158 seconds, throughput 979356.151679
+203381	[1728267068]	2000000 OPS in 2.053368 seconds, throughput 974009.529709
+203381	[1728267068]	2000000 OPS in 2.046890 seconds, throughput 977092.076272
+203381	[1728267069]	2000000 OPS in 2.044707 seconds, throughput 978135.253608
+203381	[1728267069]	2000000 OPS in 2.042682 seconds, throughput 979104.921863
+203381	[1728267070]	2000000 OPS in 2.052832 seconds, throughput 974263.846238
+203381	[1728267070]	2000000 OPS in 2.046141 seconds, throughput 977449.745643
+203381	[1728267071]	2000000 OPS in 2.223976 seconds, throughput 899290.280111
+203381	[1728267071]	2000000 OPS in 2.040428 seconds, throughput 980186.509889
+203381	[1728267072]	2000000 OPS in 2.049753 seconds, throughput 975727.319340
+203381	[1728267073]	2000000 OPS in 2.040905 seconds, throughput 979957.420850
+203381	[1728267073]	2000000 OPS in 2.042822 seconds, throughput 979037.821210
+203381	[1728267073]	2000000 OPS in 2.045346 seconds, throughput 977829.667939
+203381	[1728267074]	2000000 OPS in 2.060574 seconds, throughput 970603.336740
+203381	[1728267075]	2000000 OPS in 2.052580 seconds, throughput 974383.458866
+203381	[1728267075]	2000000 OPS in 2.409757 seconds, throughput 829959.203355
+203381	[1728267076]	2000000 OPS in 2.047201 seconds, throughput 976943.641587
+203381	[1728267076]	2000000 OPS in 2.043122 seconds, throughput 978894.065063
+203381	[1728267077]	2000000 OPS in 2.047886 seconds, throughput 976616.862462
+203381	[1728267078]	2000000 OPS in 2.038611 seconds, throughput 981060.143402
+203381	[1728267078]	2000000 OPS in 2.373001 seconds, throughput 842814.646939
+203381	[1728267078]	2000000 OPS in 2.048435 seconds, throughput 976355.119884
+203381	[1728267079]	2000000 OPS in 2.044430 seconds, throughput 978267.781240
+203381	[1728267080]	2000000 OPS in 2.043948 seconds, throughput 978498.474521
+203381	[1728267080]	2000000 OPS in 2.041649 seconds, throughput 979600.313276
+203381	[1728267080]	2000000 OPS in 2.052687 seconds, throughput 974332.667377
+203381	[1728267081]	2000000 OPS in 2.041562 seconds, throughput 979642.058385
+203381	[1728267082]	2000000 OPS in 2.046188 seconds, throughput 977427.294071
+203381	[1728267082]	2000000 OPS in 2.039403 seconds, throughput 980679.149732
+203381	[1728267082]	2000000 OPS in 2.055378 seconds, throughput 973057.024061
+203381	[1728267083]	2000000 OPS in 2.045340 seconds, throughput 977832.536400
+203381	[1728267084]	2000000 OPS in 2.044937 seconds, throughput 978025.239897
+203381	[1728267084]	2000000 OPS in 2.040236 seconds, throughput 980278.752066
+203381	[1728267084]	2000000 OPS in 2.056926 seconds, throughput 972324.721453
+203381	[1728267085]	2000000 OPS in 2.040998 seconds, throughput 979912.768165
+203381	[1728267086]	2000000 OPS in 2.046729 seconds, throughput 977168.936386
+203381	[1728267086]	2000000 OPS in 2.040358 seconds, throughput 980220.137839
+203381	[1728267086]	2000000 OPS in 2.055957 seconds, throughput 972782.991084
+203381	[1728267087]	2000000 OPS in 2.044875 seconds, throughput 978054.893331
+203381	[1728267088]	2000000 OPS in 2.046111 seconds, throughput 977464.076973
+203381	[1728267088]	2000000 OPS in 2.039572 seconds, throughput 980597.890146
+203381	[1728267088]	2000000 OPS in 2.054322 seconds, throughput 973557.212550
+203381	[1728267089]	2000000 OPS in 2.046021 seconds, throughput 977507.073486
+203381	[1728267090]	2000000 OPS in 2.049277 seconds, throughput 975953.958396
+203381	[1728267090]	2000000 OPS in 2.041337 seconds, throughput 979750.036373
+203381	[1728267091]	2000000 OPS in 2.059519 seconds, throughput 971100.533668
+203381	[1728267091]	2000000 OPS in 2.041327 seconds, throughput 979754.835947
+203381	[1728267092]	2000000 OPS in 2.045032 seconds, throughput 977979.806673
+203381	[1728267092]	2000000 OPS in 2.040794 seconds, throughput 980010.721317
+203381	[1728267093]	2000000 OPS in 2.054409 seconds, throughput 973515.984402
+203381	[1728267093]	2000000 OPS in 2.044576 seconds, throughput 978197.924655
+203381	[1728267094]	2000000 OPS in 2.044618 seconds, throughput 978177.830773
+203381	[1728267094]	2000000 OPS in 2.038793 seconds, throughput 980972.565631
+203381	[1728267095]	2000000 OPS in 2.059157 seconds, throughput 971271.253236
+203381	[1728267095]	2000000 OPS in 2.045713 seconds, throughput 977654.245732
+203381	[1728267096]	2000000 OPS in 2.046105 seconds, throughput 977466.943290
+203381	[1728267096]	2000000 OPS in 2.041452 seconds, throughput 979694.844650
+203381	[1728267097]	2000000 OPS in 2.057365 seconds, throughput 972117.247061
+203381	[1728267097]	2000000 OPS in 2.041538 seconds, throughput 979653.574903
+203381	[1728267098]	2000000 OPS in 2.044495 seconds, throughput 978236.679473
+203381	[1728267098]	2000000 OPS in 2.045281 seconds, throughput 977860.743829
+203381	[1728267099]	2000000 OPS in 2.056655 seconds, throughput 972452.842115
+203381	[1728267099]	2000000 OPS in 2.042106 seconds, throughput 979381.089914
+203381	[1728267100]	2000000 OPS in 2.045996 seconds, throughput 977519.017632
+203381	[1728267100]	2000000 OPS in 2.038392 seconds, throughput 981165.546176
+203381	[1728267101]	2000000 OPS in 2.054382 seconds, throughput 973528.778971
+203381	[1728267101]	2000000 OPS in 2.044187 seconds, throughput 978384.071516
+203381	[1728267102]	2000000 OPS in 2.044812 seconds, throughput 978085.026888
+203381	[1728267102]	2000000 OPS in 2.042815 seconds, throughput 979041.176024
+203381	[1728267103]	2000000 OPS in 2.055501 seconds, throughput 972998.796887
+203381	[1728267103]	2000000 OPS in 2.043884 seconds, throughput 978529.114177
+203381	[1728267104]	2000000 OPS in 2.050533 seconds, throughput 975356.163495
+203381	[1728267104]	2000000 OPS in 2.047208 seconds, throughput 976940.301132
+203381	[1728267105]	2000000 OPS in 2.062224 seconds, throughput 969826.750149
+203381	[1728267105]	2000000 OPS in 2.046911 seconds, throughput 977082.051931
+203381	[1728267106]	2000000 OPS in 2.045295 seconds, throughput 977854.050394
+203381	[1728267106]	2000000 OPS in 2.044584 seconds, throughput 978194.097186
+203381	[1728267107]	2000000 OPS in 2.059396 seconds, throughput 971158.533861
+203381	[1728267107]	2000000 OPS in 2.041039 seconds, throughput 979893.083866
+203381	[1728267108]	2000000 OPS in 2.047451 seconds, throughput 976824.353794
+203381	[1728267108]	2000000 OPS in 2.042474 seconds, throughput 979204.631246
+203381	[1728267109]	2000000 OPS in 2.059072 seconds, throughput 971311.348025
+203381	[1728267109]	2000000 OPS in 2.042226 seconds, throughput 979323.542057
+203381	[1728267110]	2000000 OPS in 2.047447 seconds, throughput 976826.262169
+203381	[1728267110]	2000000 OPS in 2.044270 seconds, throughput 978344.347860
+203381	[1728267111]	2000000 OPS in 2.057583 seconds, throughput 972014.251673
+203381	[1728267111]	2000000 OPS in 2.043335 seconds, throughput 978792.023824
+203381	[1728267112]	2000000 OPS in 2.046272 seconds, throughput 977387.170425
+203381	[1728267112]	2000000 OPS in 2.041338 seconds, throughput 979749.556418
+203381	[1728267113]	2000000 OPS in 2.058102 seconds, throughput 971769.134863
+203381	[1728267113]	2000000 OPS in 2.039017 seconds, throughput 980864.799067
+203381	[1728267114]	2000000 OPS in 2.046067 seconds, throughput 977485.097018
+203381	[1728267114]	2000000 OPS in 2.044471 seconds, throughput 978248.162972
+203381	[1728267115]	2000000 OPS in 2.058122 seconds, throughput 971759.691602
+203381	[1728267115]	2000000 OPS in 2.042390 seconds, throughput 979244.904254
+203381	[1728267116]	2000000 OPS in 2.047273 seconds, throughput 976909.283715
+203381	[1728267116]	2000000 OPS in 2.041276 seconds, throughput 979779.314507
+203381	[1728267117]	2000000 OPS in 2.055475 seconds, throughput 973011.104489
+203381	[1728267118]	2000000 OPS in 2.046995 seconds, throughput 977041.956624
+203381	[1728267118]	2000000 OPS in 2.045582 seconds, throughput 977716.855154
+203381	[1728267118]	2000000 OPS in 2.040038 seconds, throughput 980373.894996
+203381	[1728267119]	2000000 OPS in 2.057297 seconds, throughput 972149.378529
+203381	[1728267120]	2000000 OPS in 2.048072 seconds, throughput 976528.168932
+203381	[1728267121]	2000000 OPS in 2.051107 seconds, throughput 975083.211164
+203381	[1728267121]	2000000 OPS in 2.045082 seconds, throughput 977955.896145
+203381	[1728267121]	2000000 OPS in 2.057705 seconds, throughput 971956.621576
+203381	[1728267122]	2000000 OPS in 2.041878 seconds, throughput 979490.449478
+203381	[1728267123]	2000000 OPS in 2.044118 seconds, throughput 978417.097252
+203381	[1728267123]	2000000 OPS in 2.039362 seconds, throughput 980698.865626
+203381	[1728267123]	2000000 OPS in 2.058526 seconds, throughput 971568.977025
+203381	[1728267124]	2000000 OPS in 2.041656 seconds, throughput 979596.954629
+203381	[1728267125]	2000000 OPS in 2.045024 seconds, throughput 977983.632466
+203381	[1728267125]	2000000 OPS in 2.040313 seconds, throughput 980241.757025
+203381	[1728267126]	2000000 OPS in 2.058422 seconds, throughput 971618.064712
+203381	[1728267126]	2000000 OPS in 2.037845 seconds, throughput 981428.911424
+203381	[1728267127]	2000000 OPS in 2.042256 seconds, throughput 979309.156149
+203381	[1728267127]	2000000 OPS in 2.038208 seconds, throughput 981254.121267
+203381	[1728267128]	2000000 OPS in 2.058140 seconds, throughput 971751.192825
+203381	[1728267128]	2000000 OPS in 2.042629 seconds, throughput 979130.326653
+203381	[1728267129]	2000000 OPS in 2.045765 seconds, throughput 977629.395361
+203381	[1728267129]	2000000 OPS in 2.042066 seconds, throughput 979400.274036
+203381	[1728267130]	2000000 OPS in 2.055468 seconds, throughput 973014.418128
+203381	[1728267130]	2000000 OPS in 2.044618 seconds, throughput 978177.830773
+203381	[1728267131]	2000000 OPS in 2.047154 seconds, throughput 976966.070945
+203381	[1728267131]	2000000 OPS in 2.042245 seconds, throughput 979314.430933
+203381	[1728267132]	2000000 OPS in 2.058239 seconds, throughput 971704.452204
+203381	[1728267132]	2000000 OPS in 2.042060 seconds, throughput 979403.151719
+203381	[1728267133]	2000000 OPS in 2.049404 seconds, throughput 975893.479275
+203381	[1728267133]	2000000 OPS in 2.045549 seconds, throughput 977732.628258
+203381	[1728267134]	2000000 OPS in 2.060136 seconds, throughput 970809.694117
+203381	[1728267134]	2000000 OPS in 2.043574 seconds, throughput 978677.552171
+203381	[1728267135]	2000000 OPS in 2.050348 seconds, throughput 975444.168502
+203381	[1728267135]	2000000 OPS in 2.054925 seconds, throughput 973271.530591
+203381	[1728267136]	2000000 OPS in 2.062283 seconds, throughput 969799.004307
+203381	[1728267136]	2000000 OPS in 2.049212 seconds, throughput 975984.915177
+203381	[1728267137]	2000000 OPS in 2.045395 seconds, throughput 977806.242804
+203381	[1728267137]	2000000 OPS in 2.047786 seconds, throughput 976664.553816
+203381	[1728267138]	2000000 OPS in 2.055385 seconds, throughput 973053.710132
+203381	[1728267138]	2000000 OPS in 2.044571 seconds, throughput 978200.316839
+203381	[1728267139]	2000000 OPS in 2.041895 seconds, throughput 979482.294633
+203381	[1728267139]	2000000 OPS in 2.044654 seconds, throughput 978160.608103
+203381	[1728267140]	2000000 OPS in 2.057262 seconds, throughput 972165.917613
+203381	[1728267140]	2000000 OPS in 2.040239 seconds, throughput 980277.310648
+203381	[1728267141]	2000000 OPS in 2.040848 seconds, throughput 979984.790636
+203381	[1728267141]	2000000 OPS in 2.042823 seconds, throughput 979037.341953
+203381	[1728267142]	2000000 OPS in 2.048682 seconds, throughput 976237.405317
+203381	[1728267142]	2000000 OPS in 2.196901 seconds, throughput 910373.294017
+203381	[1728267143]	2000000 OPS in 2.044569 seconds, throughput 978201.273716
+203381	[1728267143]	2000000 OPS in 2.045387 seconds, throughput 977810.067239
+203381	[1728267144]	2000000 OPS in 2.053916 seconds, throughput 973749.656753
+203381	[1728267144]	2000000 OPS in 2.129975 seconds, throughput 938978.157021
+203381	[1728267145]	2000000 OPS in 2.043961 seconds, throughput 978492.251075
+203381	[1728267145]	2000000 OPS in 2.048263 seconds, throughput 976437.107930
+203381	[1728267146]	2000000 OPS in 2.057182 seconds, throughput 972203.723346
+203381	[1728267146]	2000000 OPS in 2.041343 seconds, throughput 979747.156651
+203381	[1728267147]	2000000 OPS in 2.043173 seconds, throughput 978869.630717
+203381	[1728267147]	2000000 OPS in 2.045222 seconds, throughput 977888.952886
+203381	[1728267148]	2000000 OPS in 2.057398 seconds, throughput 972101.654614
+203381	[1728267148]	2000000 OPS in 2.045775 seconds, throughput 977624.616588
+203381	[1728267149]	2000000 OPS in 2.048255 seconds, throughput 976440.921663
+203381	[1728267149]	2000000 OPS in 2.053560 seconds, throughput 973918.463546
+203381	[1728267150]	2000000 OPS in 2.063167 seconds, throughput 969383.476956
+203381	[1728267150]	2000000 OPS in 2.048894 seconds, throughput 976136.393586
+203381	[1728267151]	2000000 OPS in 2.039804 seconds, throughput 980486.360454
+203381	[1728267151]	2000000 OPS in 2.044243 seconds, throughput 978357.269659
+203381	[1728267152]	2000000 OPS in 2.055559 seconds, throughput 972971.342589
+203381	[1728267152]	2000000 OPS in 2.039815 seconds, throughput 980481.073038
+203381	[1728267153]	2000000 OPS in 2.042336 seconds, throughput 979270.795795
+203381	[1728267153]	2000000 OPS in 2.046745 seconds, throughput 977161.297572
+203381	[1728267154]	2000000 OPS in 2.053418 seconds, throughput 973985.812923
+203381	[1728267155]	2000000 OPS in 2.040092 seconds, throughput 980347.945093
+203381	[1728267155]	2000000 OPS in 2.041831 seconds, throughput 979512.995934
+203381	[1728267155]	2000000 OPS in 2.043759 seconds, throughput 978588.962789
+203381	[1728267156]	2000000 OPS in 2.055509 seconds, throughput 972995.009995
+203381	[1728267157]	2000000 OPS in 2.040704 seconds, throughput 980053.942169
+203381	[1728267157]	2000000 OPS in 2.037299 seconds, throughput 981691.936235
+203381	[1728267157]	2000000 OPS in 2.046026 seconds, throughput 977504.684691
+203381	[1728267158]	2000000 OPS in 2.052725 seconds, throughput 974314.630552
+203381	[1728267159]	2000000 OPS in 2.038494 seconds, throughput 981116.451655
+203381	[1728267159]	2000000 OPS in 2.041927 seconds, throughput 979466.944705
+203381	[1728267159]	2000000 OPS in 2.042799 seconds, throughput 979048.844257
+203381	[1728267160]	2000000 OPS in 2.055305 seconds, throughput 973091.584947
+203381	[1728267161]	2000000 OPS in 2.041549 seconds, throughput 979648.296465
+203381	[1728267161]	2000000 OPS in 2.039436 seconds, throughput 980663.281417
+203381	[1728267161]	2000000 OPS in 2.046067 seconds, throughput 977485.097018
+203381	[1728267163]	2000000 OPS in 2.047944 seconds, throughput 976589.203611
+203381	[1728267163]	2000000 OPS in 2.256798 seconds, throughput 886211.349000
+203381	[1728267163]	2000000 OPS in 2.041560 seconds, throughput 979643.018084
+203381	[1728267163]	2000000 OPS in 2.044304 seconds, throughput 978328.076450
+203381	[1728267165]	2000000 OPS in 2.061449 seconds, throughput 970191.355692
+203381	[1728267165]	2000000 OPS in 2.045884 seconds, throughput 977572.530994
+203381	[1728267165]	2000000 OPS in 2.049061 seconds, throughput 976056.837742
+203381	[1728267166]	2000000 OPS in 2.052645 seconds, throughput 974352.603592
+203381	[1728267167]	2000000 OPS in 2.058765 seconds, throughput 971456.188540
+203381	[1728267167]	2000000 OPS in 2.041278 seconds, throughput 979778.354541
+203381	[1728267168]	2000000 OPS in 2.041263 seconds, throughput 979785.554336
+203381	[1728267168]	2000000 OPS in 2.045571 seconds, throughput 977722.112799
+203381	[1728267169]	2000000 OPS in 2.056867 seconds, throughput 972352.612007
+203381	[1728267169]	2000000 OPS in 2.042534 seconds, throughput 979175.866840
+203381	[1728267170]	2000000 OPS in 2.044696 seconds, throughput 978140.515754
+203381	[1728267170]	2000000 OPS in 2.045190 seconds, throughput 977904.253395
+203381	[1728267171]	2000000 OPS in 2.058814 seconds, throughput 971433.067776
+203381	[1728267171]	2000000 OPS in 2.046924 seconds, throughput 977075.846490
+203381	[1728267172]	2000000 OPS in 2.042381 seconds, throughput 979249.219416
+203381	[1728267172]	2000000 OPS in 2.045168 seconds, throughput 977914.772772
+203381	[1728267173]	2000000 OPS in 2.056813 seconds, throughput 972378.140356
+203381	[1728267173]	2000000 OPS in 2.044284 seconds, throughput 978337.647802
+203381	[1728267174]	2000000 OPS in 2.039899 seconds, throughput 980440.698289
+203381	[1728267174]	2000000 OPS in 2.043950 seconds, throughput 978497.517063
+203381	[1728267175]	2000000 OPS in 2.050757 seconds, throughput 975249.627333
+203381	[1728267175]	2000000 OPS in 2.265462 seconds, throughput 882822.135176
+203381	[1728267176]	2000000 OPS in 2.044302 seconds, throughput 978329.033577
+203381	[1728267176]	2000000 OPS in 2.040215 seconds, throughput 980288.842107
+203381	[1728267177]	2000000 OPS in 2.056804 seconds, throughput 972382.395211
+203381	[1728267177]	2000000 OPS in 2.042465 seconds, throughput 979208.946053
+203381	[1728267178]	2000000 OPS in 2.043001 seconds, throughput 978952.041629
+203381	[1728267178]	2000000 OPS in 2.045754 seconds, throughput 977634.652065
+203381	[1728267179]	2000000 OPS in 2.063617 seconds, throughput 969172.089588
+203381	[1728267179]	2000000 OPS in 2.046736 seconds, throughput 977165.594390
+203381	[1728267180]	2000000 OPS in 2.043148 seconds, throughput 978881.608185
+203381	[1728267180]	2000000 OPS in 2.051908 seconds, throughput 974702.569511
+203381	[1728267181]	2000000 OPS in 2.055577 seconds, throughput 972962.822604
+203381	[1728267182]	2000000 OPS in 2.042656 seconds, throughput 979117.384425
+203381	[1728267182]	2000000 OPS in 2.040334 seconds, throughput 980231.667952
+203381	[1728267182]	2000000 OPS in 2.041411 seconds, throughput 979714.520986
+203381	[1728267183]	2000000 OPS in 2.054770 seconds, throughput 973344.948583
+203381	[1728267184]	2000000 OPS in 2.037786 seconds, throughput 981457.326726
+203381	[1728267184]	2000000 OPS in 2.035841 seconds, throughput 982394.990571
+203381	[1728267184]	2000000 OPS in 2.048501 seconds, throughput 976323.663010
+203381	[1728267185]	2000000 OPS in 2.056336 seconds, throughput 972603.699006
+203381	[1728267186]	2000000 OPS in 2.044393 seconds, throughput 978285.486205
+203381	[1728267186]	2000000 OPS in 2.043785 seconds, throughput 978576.513674
+203381	[1728267186]	2000000 OPS in 2.045597 seconds, throughput 977709.685730
+203381	[1728267187]	2000000 OPS in 2.060488 seconds, throughput 970643.847477
+203381	[1728267188]	2000000 OPS in 2.045447 seconds, throughput 977781.384705
+203381	[1728267188]	2000000 OPS in 2.042594 seconds, throughput 979147.104123
+203381	[1728267188]	2000000 OPS in 2.047283 seconds, throughput 976904.511980
+203381	[1728267189]	2000000 OPS in 2.058967 seconds, throughput 971360.881452
+203381	[1728267190]	2000000 OPS in 2.043599 seconds, throughput 978665.579695
+203381	[1728267190]	2000000 OPS in 2.041129 seconds, throughput 979849.877200
+203381	[1728267190]	2000000 OPS in 2.046872 seconds, throughput 977100.668728
+203381	[1728267191]	2000000 OPS in 2.055114 seconds, throughput 973182.022992
+203381	[1728267192]	2000000 OPS in 2.045669 seconds, throughput 977675.273957
+203381	[1728267192]	2000000 OPS in 2.039693 seconds, throughput 980539.718477
+203381	[1728267192]	2000000 OPS in 2.046951 seconds, throughput 977062.958517
+203381	[1728267193]	2000000 OPS in 2.054887 seconds, throughput 973289.528816
+203381	[1728267194]	2000000 OPS in 2.040619 seconds, throughput 980094.765363
+203381	[1728267194]	2000000 OPS in 2.046995 seconds, throughput 977041.956624
+203381	[1728267194]	2000000 OPS in 2.047807 seconds, throughput 976654.538245
+203381	[1728267195]	2000000 OPS in 2.057924 seconds, throughput 971853.187970
+203381	[1728267196]	2000000 OPS in 2.044794 seconds, throughput 978093.636816
+203381	[1728267196]	2000000 OPS in 2.043313 seconds, throughput 978802.562309
+203381	[1728267196]	2000000 OPS in 2.047797 seconds, throughput 976659.307539
+203381	[1728267197]	2000000 OPS in 2.056030 seconds, throughput 972748.452114
+203381	[1728267198]	2000000 OPS in 2.044402 seconds, throughput 978281.179533
+203381	[1728267198]	2000000 OPS in 2.038033 seconds, throughput 981338.378721
+203381	[1728267198]	2000000 OPS in 2.043722 seconds, throughput 978606.679382
+203381	[1728267200]	2000000 OPS in 2.053847 seconds, throughput 973782.370352
+203381	[1728267200]	2000000 OPS in 2.040147 seconds, throughput 980321.516048
+203381	[1728267200]	2000000 OPS in 2.037191 seconds, throughput 981743.979823
+203381	[1728267200]	2000000 OPS in 2.041613 seconds, throughput 979617.586683
+203381	[1728267202]	2000000 OPS in 2.052947 seconds, throughput 974209.270868
+203381	[1728267202]	2000000 OPS in 2.043680 seconds, throughput 978626.790887
+203381	[1728267202]	2000000 OPS in 2.039208 seconds, throughput 980772.927529
+203381	[1728267202]	2000000 OPS in 2.046667 seconds, throughput 977198.537916
+203381	[1728267204]	2000000 OPS in 2.057252 seconds, throughput 972170.643169
+203381	[1728267204]	2000000 OPS in 2.040901 seconds, throughput 979959.341487
+203381	[1728267204]	2000000 OPS in 2.041895 seconds, throughput 979482.294633
+203381	[1728267204]	2000000 OPS in 2.044726 seconds, throughput 978126.164581
+203381	[1728267206]	2000000 OPS in 2.054497 seconds, throughput 973474.285920
+203381	[1728267206]	2000000 OPS in 2.041631 seconds, throughput 979608.949903
+203381	[1728267206]	2000000 OPS in 2.045517 seconds, throughput 977747.923875
+203381	[1728267206]	2000000 OPS in 2.044561 seconds, throughput 978205.101242
+203381	[1728267208]	2000000 OPS in 2.059762 seconds, throughput 970985.968282
+203381	[1728267208]	2000000 OPS in 2.042782 seconds, throughput 979056.991887
+203381	[1728267208]	2000000 OPS in 2.043448 seconds, throughput 978737.897906
+203381	[1728267208]	2000000 OPS in 2.044743 seconds, throughput 978118.032437
+203381	[1728267210]	2000000 OPS in 2.060123 seconds, throughput 970815.820220
+203381	[1728267210]	2000000 OPS in 2.056228 seconds, throughput 972654.783419
+203381	[1728267210]	2000000 OPS in 2.045816 seconds, throughput 977605.024108
+203381	[1728267211]	2000000 OPS in 2.050331 seconds, throughput 975452.256245
+203381	[1728267212]	2000000 OPS in 2.052745 seconds, throughput 974305.137755
+203381	[1728267212]	2000000 OPS in 2.041394 seconds, throughput 979722.679698
+203381	[1728267212]	2000000 OPS in 2.044100 seconds, throughput 978425.713028
+203381	[1728267213]	2000000 OPS in 2.043990 seconds, throughput 978478.368289
+203381	[1728267214]	2000000 OPS in 2.057435 seconds, throughput 972084.172769
+203381	[1728267214]	2000000 OPS in 2.045779 seconds, throughput 977622.705092
+203381	[1728267214]	2000000 OPS in 2.041065 seconds, throughput 979880.601549
+203381	[1728267215]	2000000 OPS in 2.044624 seconds, throughput 978174.960286
+203381	[1728267216]	2000000 OPS in 2.050670 seconds, throughput 975291.002453
+203381	[1728267216]	2000000 OPS in 2.043442 seconds, throughput 978740.771698
+203381	[1728267217]	2000000 OPS in 2.044188 seconds, throughput 978383.592899
+203381	[1728267217]	2000000 OPS in 2.041548 seconds, throughput 979648.776321
+203381	[1728267218]	2000000 OPS in 2.053473 seconds, throughput 973959.725791
+203381	[1728267218]	2000000 OPS in 2.038875 seconds, throughput 980933.112623
+203381	[1728267219]	2000000 OPS in 2.037513 seconds, throughput 981588.829126
+203381	[1728267219]	2000000 OPS in 2.048018 seconds, throughput 976553.917007
+203381	[1728267220]	2000000 OPS in 2.052193 seconds, throughput 974567.206886
+203381	[1728267220]	2000000 OPS in 2.041165 seconds, throughput 979832.595601
+203381	[1728267221]	2000000 OPS in 2.039425 seconds, throughput 980668.570798
+203381	[1728267221]	2000000 OPS in 2.045220 seconds, throughput 977889.909154
+203381	[1728267222]	2000000 OPS in 2.052114 seconds, throughput 974604.724689
+203381	[1728267222]	2000000 OPS in 2.042725 seconds, throughput 979084.311398
+203381	[1728267223]	2000000 OPS in 2.038856 seconds, throughput 980942.253891
+203381	[1728267223]	2000000 OPS in 2.042880 seconds, throughput 979010.025063
+203381	[1728267224]	2000000 OPS in 2.061651 seconds, throughput 970096.296609
+203381	[1728267224]	2000000 OPS in 2.047025 seconds, throughput 977027.637669
+203381	[1728267225]	2000000 OPS in 2.048598 seconds, throughput 976277.434616
+203381	[1728267225]	2000000 OPS in 2.052627 seconds, throughput 974361.147934
+203381	[1728267226]	2000000 OPS in 2.060135 seconds, throughput 970810.165353
+203381	[1728267226]	2000000 OPS in 2.040039 seconds, throughput 980373.414430
+203381	[1728267227]	2000000 OPS in 2.044189 seconds, throughput 978383.114282
+203381	[1728267227]	2000000 OPS in 2.042639 seconds, throughput 979125.533195
+203381	[1728267228]	2000000 OPS in 2.055750 seconds, throughput 972880.943695
+203381	[1728267229]	2000000 OPS in 2.041328 seconds, throughput 979754.355988
+203381	[1728267229]	2000000 OPS in 2.041643 seconds, throughput 979603.192135
+203381	[1728267229]	2000000 OPS in 2.046500 seconds, throughput 977278.279990
+203381	[1728267230]	2000000 OPS in 2.054152 seconds, throughput 973637.783377
+203381	[1728267231]	2000000 OPS in 2.042471 seconds, throughput 979206.069511
+203381	[1728267231]	2000000 OPS in 2.046832 seconds, throughput 977119.763615
+203381	[1728267231]	2000000 OPS in 2.047811 seconds, throughput 976652.630541
+203381	[1728267232]	2000000 OPS in 2.058392 seconds, throughput 971632.225543
+203381	[1728267233]	2000000 OPS in 2.044222 seconds, throughput 978367.320183
+203381	[1728267233]	2000000 OPS in 2.042616 seconds, throughput 979136.558218
+203381	[1728267233]	2000000 OPS in 2.047138 seconds, throughput 976973.706707
+203381	[1728267234]	2000000 OPS in 2.053308 seconds, throughput 974037.991378
+203381	[1728267235]	2000000 OPS in 2.044954 seconds, throughput 978017.109431
+203381	[1728267235]	2000000 OPS in 2.345449 seconds, throughput 852715.194404
+203381	[1728267235]	2000000 OPS in 2.035853 seconds, throughput 982389.200006
+203381	[1728267237]	2000000 OPS in 2.052088 seconds, throughput 974617.072952
+203381	[1728267237]	2000000 OPS in 2.040603 seconds, throughput 980102.450109
+203381	[1728267237]	2000000 OPS in 2.052020 seconds, throughput 974649.369889
+203381	[1728267237]	2000000 OPS in 2.044350 seconds, throughput 978306.063052
+203381	[1728267239]	2000000 OPS in 2.053908 seconds, throughput 973753.449522
+203381	[1728267239]	2000000 OPS in 2.045182 seconds, throughput 977908.078596
+203381	[1728267239]	2000000 OPS in 2.051299 seconds, throughput 974991.944129
+203381	[1728267239]	2000000 OPS in 2.051722 seconds, throughput 974790.931715
+203381	[1728267241]	2000000 OPS in 2.060766 seconds, throughput 970512.906366
+203381	[1728267241]	2000000 OPS in 2.038961 seconds, throughput 980891.738488
+203381	[1728267241]	2000000 OPS in 2.039829 seconds, throughput 980474.343683
+203381	[1728267241]	2000000 OPS in 2.044094 seconds, throughput 978428.584987
+203381	[1728267243]	2000000 OPS in 2.054928 seconds, throughput 973270.109707
+203381	[1728267243]	2000000 OPS in 2.044109 seconds, throughput 978421.405121
+203381	[1728267243]	2000000 OPS in 2.044753 seconds, throughput 978113.248886
+203381	[1728267243]	2000000 OPS in 2.045790 seconds, throughput 977617.448516
+203381	[1728267245]	2000000 OPS in 2.056984 seconds, throughput 972297.305181
+203381	[1728267245]	2000000 OPS in 2.042629 seconds, throughput 979130.326653
+203381	[1728267245]	2000000 OPS in 2.041621 seconds, throughput 979613.748095
+203381	[1728267245]	2000000 OPS in 2.046235 seconds, throughput 977404.843530
+203381	[1728267247]	2000000 OPS in 2.055225 seconds, throughput 973129.462711
+203381	[1728267247]	2000000 OPS in 2.044860 seconds, throughput 978062.067819
+203381	[1728267247]	2000000 OPS in 2.044269 seconds, throughput 978344.826439
+203381	[1728267247]	2000000 OPS in 2.050700 seconds, throughput 975276.734773
+203381	[1728267249]	2000000 OPS in 2.054868 seconds, throughput 973298.528178
+203381	[1728267249]	2000000 OPS in 2.040319 seconds, throughput 980238.874411
+203381	[1728267249]	2000000 OPS in 2.038344 seconds, throughput 981188.651180
+203381	[1728267249]	2000000 OPS in 2.046490 seconds, throughput 977283.055378
+203381	[1728267251]	2000000 OPS in 2.054880 seconds, throughput 973292.844351
+203381	[1728267251]	2000000 OPS in 2.044194 seconds, throughput 978380.721204
+203381	[1728267251]	2000000 OPS in 2.039320 seconds, throughput 980719.063217
+203381	[1728267251]	2000000 OPS in 2.046444 seconds, throughput 977305.022761
+203381	[1728267253]	2000000 OPS in 2.053285 seconds, throughput 974048.902125
+203381	[1728267253]	2000000 OPS in 2.043499 seconds, throughput 978713.471355
+203381	[1728267253]	2000000 OPS in 2.042322 seconds, throughput 979277.508640
+203381	[1728267253]	2000000 OPS in 2.042934 seconds, throughput 978984.147310
+203381	[1728267255]	2000000 OPS in 2.060248 seconds, throughput 970756.918585
+203381	[1728267255]	2000000 OPS in 2.047486 seconds, throughput 976807.655828
+203381	[1728267255]	2000000 OPS in 2.047326 seconds, throughput 976883.994049
+203381	[1728267256]	2000000 OPS in 2.049127 seconds, throughput 976025.400085
+203381	[1728267257]	2000000 OPS in 2.053960 seconds, throughput 973728.797055
+203381	[1728267257]	2000000 OPS in 2.040344 seconds, throughput 980226.863705
+203381	[1728267257]	2000000 OPS in 2.042020 seconds, throughput 979422.336706
+203381	[1728267258]	2000000 OPS in 2.042525 seconds, throughput 979180.181393
+203381	[1728267259]	2000000 OPS in 2.057452 seconds, throughput 972076.140780
+203381	[1728267259]	2000000 OPS in 2.040970 seconds, throughput 979926.211556
+203381	[1728267259]	2000000 OPS in 2.042535 seconds, throughput 979175.387447
+203381	[1728267260]	2000000 OPS in 2.043624 seconds, throughput 978653.607513
+203381	[1728267261]	2000000 OPS in 2.055094 seconds, throughput 973191.493917
+203381	[1728267261]	2000000 OPS in 2.039730 seconds, throughput 980521.931824
+203381	[1728267262]	2000000 OPS in 2.041801 seconds, throughput 979527.387831
+203381	[1728267262]	2000000 OPS in 2.044346 seconds, throughput 978307.977221
+203381	[1728267263]	2000000 OPS in 2.054701 seconds, throughput 973377.634994
+203381	[1728267264]	2000000 OPS in 2.043724 seconds, throughput 978605.721712
+203381	[1728267264]	2000000 OPS in 2.041086 seconds, throughput 979870.519909
+203381	[1728267264]	2000000 OPS in 2.043182 seconds, throughput 978865.318900
+203381	[1728267265]	2000000 OPS in 2.056094 seconds, throughput 972718.173391
+203381	[1728267266]	2000000 OPS in 2.041705 seconds, throughput 979573.444743
+203381	[1728267266]	2000000 OPS in 2.041345 seconds, throughput 979746.196748
+203381	[1728267266]	2000000 OPS in 2.043633 seconds, throughput 978649.297599
+203381	[1728267267]	2000000 OPS in 2.053772 seconds, throughput 973817.931104
+203381	[1728267268]	2000000 OPS in 2.043285 seconds, throughput 978815.975256
+203381	[1728267268]	2000000 OPS in 2.045567 seconds, throughput 977724.024684
+203381	[1728267268]	2000000 OPS in 2.042494 seconds, throughput 979195.042923
+203381	[1728267269]	2000000 OPS in 2.060157 seconds, throughput 970799.798268
+203381	[1728267270]	2000000 OPS in 2.046302 seconds, throughput 977372.841350
+203381	[1728267270]	2000000 OPS in 2.049808 seconds, throughput 975701.138838
+203381	[1728267270]	2000000 OPS in 2.052129 seconds, throughput 974597.600833
+203381	[1728267271]	2000000 OPS in 2.053312 seconds, throughput 974036.093881
+203381	[1728267272]	2000000 OPS in 2.047659 seconds, throughput 976725.128549
+203381	[1728267272]	2000000 OPS in 2.046437 seconds, throughput 977308.365711
+203381	[1728267272]	2000000 OPS in 2.043088 seconds, throughput 978910.355305
+203381	[1728267274]	2000000 OPS in 2.053794 seconds, throughput 973807.499681
+203381	[1728267274]	2000000 OPS in 2.041886 seconds, throughput 979486.611887
+203381	[1728267274]	2000000 OPS in 2.043322 seconds, throughput 978798.251083
+203381	[1728267274]	2000000 OPS in 2.041987 seconds, throughput 979438.164885
+203381	[1728267276]	2000000 OPS in 2.053099 seconds, throughput 974137.145846
+203381	[1728267276]	2000000 OPS in 2.035550 seconds, throughput 982535.432684
+203381	[1728267276]	2000000 OPS in 2.038524 seconds, throughput 981102.013025
+203381	[1728267276]	2000000 OPS in 2.046082 seconds, throughput 977477.930992
+203381	[1728267278]	2000000 OPS in 2.050949 seconds, throughput 975158.329144
+203381	[1728267278]	2000000 OPS in 2.040999 seconds, throughput 979912.288051
+203381	[1728267278]	2000000 OPS in 2.037794 seconds, throughput 981453.473707
+203381	[1728267278]	2000000 OPS in 2.041352 seconds, throughput 979742.837100
+203381	[1728267280]	2000000 OPS in 2.055573 seconds, throughput 972964.715921
+203381	[1728267280]	2000000 OPS in 2.040666 seconds, throughput 980072.192118
+203381	[1728267280]	2000000 OPS in 2.038220 seconds, throughput 981248.344143
+203381	[1728267280]	2000000 OPS in 2.046188 seconds, throughput 977427.294071
+203381	[1728267282]	2000000 OPS in 2.055579 seconds, throughput 972961.875948
+203381	[1728267282]	2000000 OPS in 2.038661 seconds, throughput 981036.082017
+203381	[1728267282]	2000000 OPS in 2.043596 seconds, throughput 978667.016377
+203381	[1728267282]	2000000 OPS in 2.048510 seconds, throughput 976319.373593
+203381	[1728267284]	2000000 OPS in 2.053480 seconds, throughput 973956.405711
+203381	[1728267284]	2000000 OPS in 2.038925 seconds, throughput 980909.057469
+203381	[1728267284]	2000000 OPS in 2.041531 seconds, throughput 979656.933938
+203381	[1728267284]	2000000 OPS in 2.050479 seconds, throughput 975381.849802
+203381	[1728267286]	2000000 OPS in 2.058104 seconds, throughput 971768.190529
+203381	[1728267286]	2000000 OPS in 2.051700 seconds, throughput 974801.384218
+203381	[1728267286]	2000000 OPS in 2.043953 seconds, throughput 978496.080879
+203381	[1728267286]	2000000 OPS in 2.044779 seconds, throughput 978100.811873
+203381	[1728267288]	2000000 OPS in 2.052873 seconds, throughput 974244.388231
+203381	[1728267288]	2000000 OPS in 2.041834 seconds, throughput 979511.556767
+203381	[1728267288]	2000000 OPS in 2.046275 seconds, throughput 977385.737499
+203381	[1728267288]	2000000 OPS in 2.048357 seconds, throughput 976392.298803
+203381	[1728267290]	2000000 OPS in 2.055309 seconds, throughput 973089.691136
+203381	[1728267290]	2000000 OPS in 2.042438 seconds, throughput 979221.890701
+203381	[1728267290]	2000000 OPS in 2.046753 seconds, throughput 977157.478211
+203381	[1728267290]	2000000 OPS in 2.045636 seconds, throughput 977691.045719
+203381	[1728267292]	2000000 OPS in 2.053633 seconds, throughput 973883.843900
+203381	[1728267292]	2000000 OPS in 2.041594 seconds, throughput 979626.703448
+203381	[1728267292]	2000000 OPS in 2.041609 seconds, throughput 979619.505988
+203381	[1728267292]	2000000 OPS in 2.043398 seconds, throughput 978761.846689
+203381	[1728267294]	2000000 OPS in 2.053899 seconds, throughput 973757.716421
+203381	[1728267294]	2000000 OPS in 2.040550 seconds, throughput 980127.906692
+203381	[1728267294]	2000000 OPS in 2.041804 seconds, throughput 979525.948622
+203381	[1728267294]	2000000 OPS in 2.046732 seconds, throughput 977167.504099
+203381	[1728267296]	2000000 OPS in 2.053155 seconds, throughput 974110.576162
+203381	[1728267296]	2000000 OPS in 2.042405 seconds, throughput 979237.712403
+203381	[1728267296]	2000000 OPS in 2.037642 seconds, throughput 981526.686238
+203381	[1728267296]	2000000 OPS in 2.046548 seconds, throughput 977255.358780
+203381	[1728267298]	2000000 OPS in 2.054702 seconds, throughput 973377.161262
+203381	[1728267298]	2000000 OPS in 2.037503 seconds, throughput 981593.646733
+203381	[1728267298]	2000000 OPS in 2.040533 seconds, throughput 980136.072291
+203381	[1728267298]	2000000 OPS in 2.046003 seconds, throughput 977515.673242
+203381	[1728267300]	2000000 OPS in 2.057980 seconds, throughput 971826.742728
+203381	[1728267300]	2000000 OPS in 2.042914 seconds, throughput 978993.731503
+203381	[1728267300]	2000000 OPS in 2.046535 seconds, throughput 977261.566501
+203381	[1728267301]	2000000 OPS in 2.050298 seconds, throughput 975467.956365
+203381	[1728267302]	2000000 OPS in 2.053219 seconds, throughput 974080.212583
+203381	[1728267302]	2000000 OPS in 2.036487 seconds, throughput 982083.362182
+203381	[1728267302]	2000000 OPS in 2.041161 seconds, throughput 979834.515749
+203381	[1728267303]	2000000 OPS in 2.044388 seconds, throughput 978287.878818
+203381	[1728267304]	2000000 OPS in 2.041652 seconds, throughput 979598.873853
+203381	[1728267304]	2000000 OPS in 2.058050 seconds, throughput 971793.688200
+203381	[1728267304]	2000000 OPS in 2.045422 seconds, throughput 977793.335556
+203381	[1728267305]	2000000 OPS in 2.049623 seconds, throughput 975789.206113
+203381	[1728267306]	2000000 OPS in 2.041652 seconds, throughput 979598.873853
+203381	[1728267306]	2000000 OPS in 2.054518 seconds, throughput 973464.335674
+203381	[1728267306]	2000000 OPS in 2.043103 seconds, throughput 978903.168367
+203381	[1728267307]	2000000 OPS in 2.049121 seconds, throughput 976028.257970
+203381	[1728267308]	2000000 OPS in 2.043517 seconds, throughput 978704.850510
+203381	[1728267308]	2000000 OPS in 2.052075 seconds, throughput 974623.247201
+203381	[1728267308]	2000000 OPS in 2.045517 seconds, throughput 977747.923875
+203381	[1728267309]	2000000 OPS in 2.048588 seconds, throughput 976282.200228
+203381	[1728267310]	2000000 OPS in 2.047835 seconds, throughput 976641.184470
+203381	[1728267311]	2000000 OPS in 2.056414 seconds, throughput 972566.808045
+203381	[1728267311]	2000000 OPS in 2.047164 seconds, throughput 976961.298655
+203381	[1728267311]	2000000 OPS in 2.044021 seconds, throughput 978463.528506
+203381	[1728267313]	2000000 OPS in 2.041863 seconds, throughput 979497.645043
+203381	[1728267313]	2000000 OPS in 2.054432 seconds, throughput 973505.085591
+203381	[1728267313]	2000000 OPS in 2.046031 seconds, throughput 977502.295909
+203381	[1728267313]	2000000 OPS in 2.043394 seconds, throughput 978763.762642
+203381	[1728267315]	2000000 OPS in 2.043904 seconds, throughput 978519.539078
+203381	[1728267315]	2000000 OPS in 2.058645 seconds, throughput 971512.815468
+203381	[1728267315]	2000000 OPS in 2.050620 seconds, throughput 975314.782846
+203381	[1728267315]	2000000 OPS in 2.049921 seconds, throughput 975647.354215
+203381	[1728267317]	2000000 OPS in 2.039485 seconds, throughput 980639.720322
+203381	[1728267317]	2000000 OPS in 2.041743 seconds, throughput 979555.213364
+203381	[1728267317]	2000000 OPS in 2.054434 seconds, throughput 973504.137879
+203381	[1728267317]	2000000 OPS in 2.046713 seconds, throughput 977176.575319
+203381	[1728267319]	2000000 OPS in 2.039635 seconds, throughput 980567.601556
+203381	[1728267319]	2000000 OPS in 2.042426 seconds, throughput 979227.643988
+203381	[1728267319]	2000000 OPS in 2.056985 seconds, throughput 972296.832500
+203381	[1728267319]	2000000 OPS in 2.049160 seconds, throughput 976009.682016
+203381	[1728267321]	2000000 OPS in 2.045194 seconds, throughput 977902.340805
+203381	[1728267321]	2000000 OPS in 2.046436 seconds, throughput 977308.843277
+203381	[1728267321]	2000000 OPS in 2.054483 seconds, throughput 973480.919531
+203381	[1728267321]	2000000 OPS in 2.047802 seconds, throughput 976656.922886
+203381	[1728267323]	2000000 OPS in 2.043842 seconds, throughput 978549.222494
+203381	[1728267323]	2000000 OPS in 2.042942 seconds, throughput 978980.313685
+203381	[1728267323]	2000000 OPS in 2.056517 seconds, throughput 972518.097346
+203381	[1728267323]	2000000 OPS in 2.043903 seconds, throughput 978520.017829
+203381	[1728267325]	2000000 OPS in 2.041513 seconds, throughput 979665.571564
+203381	[1728267325]	2000000 OPS in 2.043447 seconds, throughput 978738.376870
+203381	[1728267325]	2000000 OPS in 2.055655 seconds, throughput 972925.904395
+203381	[1728267325]	2000000 OPS in 2.044626 seconds, throughput 978174.003461
+203381	[1728267327]	2000000 OPS in 2.041991 seconds, throughput 979436.246291
+203381	[1728267327]	2000000 OPS in 2.044634 seconds, throughput 978170.176178
+203381	[1728267327]	2000000 OPS in 2.058792 seconds, throughput 971443.448391
+203381	[1728267327]	2000000 OPS in 2.047909 seconds, throughput 976605.894110
+203381	[1728267329]	2000000 OPS in 2.043604 seconds, throughput 978663.185235
+203381	[1728267329]	2000000 OPS in 2.040700 seconds, throughput 980055.863184
+203381	[1728267329]	2000000 OPS in 2.060812 seconds, throughput 970491.243258
+203381	[1728267329]	2000000 OPS in 2.050259 seconds, throughput 975486.511704
+203381	[1728267331]	2000000 OPS in 2.045217 seconds, throughput 977891.343559
+203381	[1728267331]	2000000 OPS in 2.046921 seconds, throughput 977077.278508
+203381	[1728267331]	2000000 OPS in 2.055147 seconds, throughput 973166.396370
+203381	[1728267331]	2000000 OPS in 2.043944 seconds, throughput 978500.389443
+203381	[1728267333]	2000000 OPS in 2.040679 seconds, throughput 980065.948638
+203381	[1728267333]	2000000 OPS in 2.039211 seconds, throughput 980771.484658
+203381	[1728267333]	2000000 OPS in 2.055457 seconds, throughput 973019.625319
+203381	[1728267333]	2000000 OPS in 2.045045 seconds, throughput 977973.589823
+203381	[1728267335]	2000000 OPS in 2.044293 seconds, throughput 978333.340671
+203381	[1728267335]	2000000 OPS in 2.042071 seconds, throughput 979397.875980
+203381	[1728267335]	2000000 OPS in 2.055456 seconds, throughput 973020.098703
+203381	[1728267335]	2000000 OPS in 2.043080 seconds, throughput 978914.188382
+203381	[1728267337]	2000000 OPS in 2.036446 seconds, throughput 982103.134579
+203381	[1728267337]	2000000 OPS in 2.038886 seconds, throughput 980927.820388
+203381	[1728267337]	2000000 OPS in 2.055542 seconds, throughput 972979.389378
+203381	[1728267337]	2000000 OPS in 2.043903 seconds, throughput 978520.017829
+203381	[1728267339]	2000000 OPS in 2.039287 seconds, throughput 980734.933337
+203381	[1728267339]	2000000 OPS in 2.037920 seconds, throughput 981392.792651
+203381	[1728267339]	2000000 OPS in 2.054298 seconds, throughput 973568.586447
+203381	[1728267339]	2000000 OPS in 2.043571 seconds, throughput 978678.988888
+203381	[1728267341]	2000000 OPS in 2.040741 seconds, throughput 980036.173135
+203381	[1728267341]	2000000 OPS in 2.046388 seconds, throughput 977331.766996
+203381	[1728267341]	2000000 OPS in 2.054674 seconds, throughput 973390.425926
+203381	[1728267341]	2000000 OPS in 2.046755 seconds, throughput 977156.523375
+203381	[1728267343]	2000000 OPS in 2.046484 seconds, throughput 977285.920633
+203381	[1728267343]	2000000 OPS in 2.045696 seconds, throughput 977662.370166
+203381	[1728267343]	2000000 OPS in 2.061208 seconds, throughput 970304.792141
+203381	[1728267344]	2000000 OPS in 2.047026 seconds, throughput 977027.160378
+203381	[1728267345]	2000000 OPS in 2.052812 seconds, throughput 974273.338231
+203381	[1728267345]	2000000 OPS in 2.047816 seconds, throughput 976650.245921
+203381	[1728267345]	2000000 OPS in 2.064322 seconds, throughput 968841.101340
+203381	[1728267346]	2000000 OPS in 2.055095 seconds, throughput 973191.020366
+203381	[1728267347]	2000000 OPS in 2.040371 seconds, throughput 980213.892473
+203381	[1728267347]	2000000 OPS in 2.042437 seconds, throughput 979222.370139
+203381	[1728267348]	2000000 OPS in 2.059724 seconds, throughput 971003.882074
+203381	[1728267348]	2000000 OPS in 2.047230 seconds, throughput 976929.802709
+203381	[1728267349]	2000000 OPS in 2.041057 seconds, throughput 979884.442228
+203381	[1728267349]	2000000 OPS in 2.043372 seconds, throughput 978774.300519
+203381	[1728267350]	2000000 OPS in 2.055793 seconds, throughput 972860.594428
+203381	[1728267350]	2000000 OPS in 2.042818 seconds, throughput 979039.738244
+203381	[1728267351]	2000000 OPS in 2.038423 seconds, throughput 981150.624772
+203381	[1728267351]	2000000 OPS in 2.041326 seconds, throughput 979755.315907
+203381	[1728267352]	2000000 OPS in 2.055791 seconds, throughput 972861.540886
+203381	[1728267352]	2000000 OPS in 2.045497 seconds, throughput 977757.483878
+203381	[1728267353]	2000000 OPS in 2.042387 seconds, throughput 979246.342637
+203381	[1728267353]	2000000 OPS in 2.041913 seconds, throughput 979473.660239
+203381	[1728267354]	2000000 OPS in 2.057208 seconds, throughput 972191.436160
+203381	[1728267354]	2000000 OPS in 2.046160 seconds, throughput 977440.669351
+203381	[1728267355]	2000000 OPS in 2.042414 seconds, throughput 979233.397343
+203381	[1728267355]	2000000 OPS in 2.039747 seconds, throughput 980513.759795
+203381	[1728267356]	2000000 OPS in 2.056288 seconds, throughput 972626.402527
+203381	[1728267356]	2000000 OPS in 2.042940 seconds, throughput 978981.272088
+203381	[1728267357]	2000000 OPS in 2.041429 seconds, throughput 979705.882497
+203381	[1728267358]	2000000 OPS in 2.042033 seconds, throughput 979416.101503
+203381	[1728267358]	2000000 OPS in 2.054318 seconds, throughput 973559.108181
+203381	[1728267358]	2000000 OPS in 2.039766 seconds, throughput 980504.626511
+203381	[1728267360]	2000000 OPS in 2.046813 seconds, throughput 977128.833948
+203381	[1728267360]	2000000 OPS in 2.043829 seconds, throughput 978555.446664
+203381	[1728267360]	2000000 OPS in 2.049029 seconds, throughput 976072.080971
+203381	[1728267360]	2000000 OPS in 2.062367 seconds, throughput 969759.504492
+203381	[1728267362]	2000000 OPS in 2.043695 seconds, throughput 978619.608112
+203381	[1728267362]	2000000 OPS in 2.046286 seconds, throughput 977380.483471
+203381	[1728267362]	2000000 OPS in 2.043265 seconds, throughput 978825.556156
+203381	[1728267362]	2000000 OPS in 2.059411 seconds, throughput 971151.460296
+203381	[1728267364]	2000000 OPS in 2.040308 seconds, throughput 980244.159215
+203381	[1728267364]	2000000 OPS in 2.043698 seconds, throughput 978618.171569
+203381	[1728267364]	2000000 OPS in 2.046519 seconds, throughput 977269.206883
+203381	[1728267364]	2000000 OPS in 2.058247 seconds, throughput 971700.675381
+203381	[1728267366]	2000000 OPS in 2.040290 seconds, throughput 980252.807199
+203381	[1728267366]	2000000 OPS in 2.045853 seconds, throughput 977587.343763
+203381	[1728267366]	2000000 OPS in 2.049933 seconds, throughput 975641.642922
+203381	[1728267366]	2000000 OPS in 2.058043 seconds, throughput 971796.993552
+203381	[1728267368]	2000000 OPS in 2.043863 seconds, throughput 978539.168232
+203381	[1728267368]	2000000 OPS in 2.044932 seconds, throughput 978027.631237
+203381	[1728267368]	2000000 OPS in 2.050726 seconds, throughput 975264.369789
+203381	[1728267368]	2000000 OPS in 2.055183 seconds, throughput 973149.349717
+203381	[1728267370]	2000000 OPS in 2.039034 seconds, throughput 980856.621322
+203381	[1728267370]	2000000 OPS in 2.042458 seconds, throughput 979212.302040
+203381	[1728267370]	2000000 OPS in 2.047787 seconds, throughput 976664.076879
+203381	[1728267370]	2000000 OPS in 2.054616 seconds, throughput 973417.903881
+203381	[1728267372]	2000000 OPS in 2.042617 seconds, throughput 979136.078864
+203381	[1728267372]	2000000 OPS in 2.044646 seconds, throughput 978164.435311
+203381	[1728267372]	2000000 OPS in 2.049030 seconds, throughput 976071.604613
+203381	[1728267372]	2000000 OPS in 2.053806 seconds, throughput 973801.809908
+203381	[1728267374]	2000000 OPS in 2.046422 seconds, throughput 977315.529251
+203381	[1728267374]	2000000 OPS in 2.043616 seconds, throughput 978657.438579
+203381	[1728267374]	2000000 OPS in 2.050150 seconds, throughput 975538.375241
+203381	[1728267374]	2000000 OPS in 2.062008 seconds, throughput 969928.341694
+203381	[1728267376]	2000000 OPS in 2.049068 seconds, throughput 976053.503349
+203381	[1728267376]	2000000 OPS in 2.047515 seconds, throughput 976793.820802
+203381	[1728267376]	2000000 OPS in 2.046381 seconds, throughput 977335.110129
+203381	[1728267376]	2000000 OPS in 2.057871 seconds, throughput 971878.217828
+203381	[1728267378]	2000000 OPS in 2.041253 seconds, throughput 979790.354258
+203381	[1728267378]	2000000 OPS in 2.043641 seconds, throughput 978645.466596
+203381	[1728267378]	2000000 OPS in 2.045004 seconds, throughput 977993.197079
+203381	[1728267378]	2000000 OPS in 2.055687 seconds, throughput 972910.759274
+203381	[1728267380]	2000000 OPS in 2.045316 seconds, throughput 977844.010412
+203381	[1728267380]	2000000 OPS in 2.041335 seconds, throughput 979750.996284
+203381	[1728267380]	2000000 OPS in 2.046265 seconds, throughput 977390.513936
+203381	[1728267380]	2000000 OPS in 2.054801 seconds, throughput 973330.264099
+203381	[1728267382]	2000000 OPS in 2.047167 seconds, throughput 976959.866977
+203381	[1728267382]	2000000 OPS in 2.043604 seconds, throughput 978663.185235
+203381	[1728267382]	2000000 OPS in 2.050946 seconds, throughput 975159.755547
+203381	[1728267383]	2000000 OPS in 2.057983 seconds, throughput 971825.326060
+203381	[1728267384]	2000000 OPS in 2.042500 seconds, throughput 979192.166463
+203381	[1728267384]	2000000 OPS in 2.042244 seconds, throughput 979314.910461
+203381	[1728267384]	2000000 OPS in 2.047500 seconds, throughput 976800.976801
+203381	[1728267385]	2000000 OPS in 2.057001 seconds, throughput 972289.269670
+203381	[1728267386]	2000000 OPS in 2.046408 seconds, throughput 977322.215316
+203381	[1728267386]	2000000 OPS in 2.047138 seconds, throughput 976973.706707
+203381	[1728267387]	2000000 OPS in 2.046387 seconds, throughput 977332.244585
+203381	[1728267387]	2000000 OPS in 2.059011 seconds, throughput 971340.123972
+203381	[1728267388]	2000000 OPS in 2.045199 seconds, throughput 977899.950078
+203381	[1728267388]	2000000 OPS in 2.043838 seconds, throughput 978551.137615
+203381	[1728267389]	2000000 OPS in 2.044127 seconds, throughput 978412.789421
+203381	[1728267389]	2000000 OPS in 2.055551 seconds, throughput 972975.129296
+203381	[1728267390]	2000000 OPS in 2.048600 seconds, throughput 976276.481500
+203381	[1728267390]	2000000 OPS in 2.046227 seconds, throughput 977408.664826
+203381	[1728267391]	2000000 OPS in 2.055914 seconds, throughput 972803.337105
+203381	[1728267391]	2000000 OPS in 2.059692 seconds, throughput 971018.967885
+203381	[1728267392]	2000000 OPS in 2.040069 seconds, throughput 980358.997661
+203381	[1728267392]	2000000 OPS in 2.041996 seconds, throughput 979433.848058
+203381	[1728267393]	2000000 OPS in 2.044636 seconds, throughput 978169.219362
+203381	[1728267393]	2000000 OPS in 2.054596 seconds, throughput 973427.379397
+203381	[1728267394]	2000000 OPS in 2.036613 seconds, throughput 982022.603214
+203381	[1728267394]	2000000 OPS in 2.039157 seconds, throughput 980797.456988
+203381	[1728267395]	2000000 OPS in 2.045912 seconds, throughput 977559.152104
+203381	[1728267395]	2000000 OPS in 2.053438 seconds, throughput 973976.326531
+203381	[1728267396]	2000000 OPS in 2.040480 seconds, throughput 980161.530620
+203381	[1728267396]	2000000 OPS in 2.039061 seconds, throughput 980843.633418
+203381	[1728267397]	2000000 OPS in 2.039650 seconds, throughput 980560.390263
+203381	[1728267397]	2000000 OPS in 2.054728 seconds, throughput 973364.844398
+203381	[1728267398]	2000000 OPS in 2.040956 seconds, throughput 979932.933390
+203381	[1728267399]	2000000 OPS in 2.185906 seconds, throughput 914952.427049
+203381	[1728267399]	2000000 OPS in 2.046450 seconds, throughput 977302.157395
+203381	[1728267399]	2000000 OPS in 2.051968 seconds, throughput 974674.068991
+203381	[1728267400]	2000000 OPS in 2.039679 seconds, throughput 980546.448730
+203381	[1728267401]	2000000 OPS in 2.042016 seconds, throughput 979424.255246
+203381	[1728267401]	2000000 OPS in 2.048365 seconds, throughput 976388.485451
+203381	[1728267401]	2000000 OPS in 2.053586 seconds, throughput 973906.132979
+203381	[1728267402]	2000000 OPS in 2.036601 seconds, throughput 982028.389459
+203381	[1728267403]	2000000 OPS in 2.043419 seconds, throughput 978751.788057
+203381	[1728267403]	2000000 OPS in 2.042679 seconds, throughput 979106.359834
+203381	[1728267403]	2000000 OPS in 2.055934 seconds, throughput 972793.873733
+203381	[1728267404]	2000000 OPS in 2.046146 seconds, throughput 977447.357129
+203381	[1728267405]	2000000 OPS in 2.045422 seconds, throughput 977793.335556
+203381	[1728267405]	2000000 OPS in 2.051311 seconds, throughput 974986.240507
+203381	[1728267405]	2000000 OPS in 2.058457 seconds, throughput 971601.544263
+203381	[1728267406]	2000000 OPS in 2.040272 seconds, throughput 980261.455335
+203381	[1728267407]	2000000 OPS in 2.044968 seconds, throughput 978010.413855
+203381	[1728267407]	2000000 OPS in 2.047058 seconds, throughput 977011.887304
+203381	[1728267407]	2000000 OPS in 2.055787 seconds, throughput 972863.433809
+203381	[1728267409]	2000000 OPS in 2.040811 seconds, throughput 980002.557807
+203381	[1728267409]	2000000 OPS in 2.040529 seconds, throughput 980137.993628
+203381	[1728267409]	2000000 OPS in 2.044368 seconds, throughput 978297.449383
+203381	[1728267409]	2000000 OPS in 2.055518 seconds, throughput 972990.749777
+203381	[1728267411]	2000000 OPS in 2.043019 seconds, throughput 978943.416581
+203381	[1728267411]	2000000 OPS in 2.043659 seconds, throughput 978636.846950
+203381	[1728267411]	2000000 OPS in 2.043714 seconds, throughput 978610.510081
+203381	[1728267411]	2000000 OPS in 2.057189 seconds, throughput 972200.415227
+203381	[1728267413]	2000000 OPS in 2.041644 seconds, throughput 979602.712324
+203381	[1728267413]	2000000 OPS in 2.042631 seconds, throughput 979129.367957
+203381	[1728267413]	2000000 OPS in 2.043824 seconds, throughput 978557.840597
+203381	[1728267413]	2000000 OPS in 2.055076 seconds, throughput 973200.017907
+203381	[1728267415]	2000000 OPS in 2.044309 seconds, throughput 978325.683642
+203381	[1728267415]	2000000 OPS in 2.039232 seconds, throughput 980761.384678
+203381	[1728267415]	2000000 OPS in 2.036904 seconds, throughput 981882.307659
+203381	[1728267417]	2000000 OPS in 1.947093 seconds, throughput 1027172.302504
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     256647 ms      1026367 ms            4 CompactionCPUUsage=0.320051 CompactionThroughput=2.87659G Lat_Get_Avg=886.115 Lat_Get_P50=837.348 Lat_Get_P95=1.43353k Lat_Get_P99=2.62436k Lat_Put_Avg=1.17805k Lat_Put_P50=1.13642k Lat_Put_P95=1.83399k Lat_Put_P99=2.42453k items_per_second=3.89641M/s
+4574.70user 26.44system 17:37.19elapsed 435%CPU (0avgtext+0avgdata 871276maxresident)k
+335632inputs+36920outputs (1748major+3308993minor)pagefaults 0swaps

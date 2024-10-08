@@ -1,0 +1,2383 @@
+#! /bin/bash -e
+
+if [[ $(basename $PWD) != "scripts" ]]; then
+  echo 'run this script in "scripts"'
+  exit
+fi
+
+help() {
+  echo "Usage: $0 <db_type> <apply_pacman>"
+  echo "  <db_type>: 1: FlatStore-H, 2: FlatStore-PH, 3: FlatStore-FF, 4: FlatStore-M, 5: Viper, 6: ChameleonDB 7: PMem-RocksDB 8: pmemkv"
+  echo "  <apply_pacman>: 0: false, 1: true (not affects PMem-RocksDB and pmemkv)"
+}
+
+if [[ $# == 1 ]]; then
+  if [[ $1 > 0 && $1 < 6 ]]; then
+    help
+    exit
+  fi
+elif [[ $# != 2 || $1 < 1 || $1 > 8 || ($2 != 0 && $2 != 1) ]]; then
+  help
+  exit
+fi
+
+# to avoid no available space
+sudo chown -R $USER /mnt/pmem0/
+./clean_pmem_dir.sh
+~/clean-up-pmem.sh
+
+cat ./eval_etc.sh
+
+INDEX_TYPE=1
+if [[ $1 == 1 || $1 == 2 || $1 == 5 ]]; then
+  INDEX_TYPE=1
+elif [[ $1 == 3 ]]; then
+  INDEX_TYPE=2
+elif [[ $1 == 4 ]]; then
+  INDEX_TYPE=3
+fi
+
+if [[ $1 == 1 || $1 == 4 || $1 == 5 ]]; then
+  IDX_PERSISTENT="-DIDX_PERSISTENT=OFF"
+else
+  IDX_PERSISTENT="-DIDX_PERSISTENT=ON"
+fi
+
+if [[ $1 -le 4 ]]; then
+  TARGET="pacman_bench"
+  TARGET_CMD="./benchmarks/pacman_bench"
+else
+  WITH_OTHERS="-DEVAL_OTHER_SYSTEMS=ON"
+  if [[ $1 == 5 ]]; then
+    TARGET="viper_bench"
+  elif [[ $1 == 6 ]]; then
+    TARGET="chameleondb_bench"
+  elif [[ $1 == 7 ]]; then
+    TARGET="pmem_rocksdb_bench"
+  elif [[ $1 == 8 ]]; then
+    TARGET="pmemkv_bench"
+  fi
+    TARGET_CMD="./benchmarks/other/${TARGET}"
+fi
+
+PACMAN_OPT=""
+if [[ $2 == 1 ]]; then
+  PACMAN_OPT="-DPACMAN=ON"
+fi
+
+NUMA_AFFINITY=0
+LOG_BATCHING=OFF # simulate FlatStore's batching (if LOG_PERSISTENT), diabled for fair comparison
+#NUM_KEYS=200000000
+NUM_KEYS=20000000
+#NUM_OPS_PER_THREAD=200000000
+#NUM_OPS_PER_THREAD=10000000000
+#NUM_OPS_PER_THREAD=2000000000
+NUM_OPS_PER_THREAD=1000000000
+NUM_WARMUP_OPS_PER_THREAD=0
+ETC_50_50=ON
+FIRST_TOUCH=OFF
+
+mkdir -p ../results
+mkdir -p ../build
+sudo chown $USER -R ../build
+cd ../build
+
+#THREADS=24
+# If using RDRAM to emulate PMEM, use less threads to reduce bandwidth
+# difference
+THREADS=4
+CAPACITY_RATIO=50
+if [[ $1 -le 6 ]]; then
+  FILTER="--benchmark_filter=/(${CAPACITY_RATIO})/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1_$2
+else
+  FILTER="--benchmark_filter=/.*/threads:(${THREADS})$"
+  OUTPUT_FILE=../results/etc_$1
+fi
+# clean the result file
+
+# it may take long to get third-party dependencies, so don't delete _deps
+ls | grep -v _deps | xargs rm -rf
+# build
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_NUMA_NODE=${NUMA_AFFINITY} \
+  ${WITH_OTHERS} -DINDEX_TYPE=${INDEX_TYPE} ${IDX_PERSISTENT} \
+  -DLOG_BATCHING=${LOG_BATCHING} ${PACMAN_OPT} \
+  -DNUM_KEYS=${NUM_KEYS} -DNUM_OPS_PER_THREAD=${NUM_OPS_PER_THREAD} \
+  -DNUM_WARMUP_OPS_PER_THREAD=${NUM_WARMUP_OPS_PER_THREAD} \
+  -DNUM_GC_THREADS=2 -DWORKLOAD_TYPE=ETC -DMEASURE_LATENCY=ON \
+  -DETC_50_50=${ETC_50_50} -DFIRST_TOUCH=${FIRST_TOUCH} ..
+make ${TARGET} -j
+
+# disable cpu scaling
+sudo cpupower frequency-set --governor performance > /dev/null
+# clean cache
+sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+numactl --cpunodebind=${NUMA_AFFINITY} \
+  ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+  --benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+# ${EXTRA_CMD} ${TARGET_CMD} --benchmark_repetitions=1 ${FILTER} \
+# 	--benchmark_out=${OUTPUT_FILE} --benchmark_out_format=json
+
+#sudo cpupower frequency-set --governor powersave > /dev/null
+-- The C compiler identification is GNU 9.4.0
+-- The CXX compiler identification is GNU 9.4.0
+-- Check for working C compiler: /usr/bin/cc
+-- Check for working C compiler: /usr/bin/cc -- works
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Check for working CXX compiler: /usr/bin/c++
+-- Check for working CXX compiler: /usr/bin/c++ -- works
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- SET USE_NUMA_NODE 0
+-- SET INDEX_TYPE 3
+-- SET IDX_PERSISTENT OFF
+-- SET LOG_PERSISTENT ON
+-- SET REDUCE_PM_ACCESS OFF
+-- SET HOT_COLD_SEPARATE OFF
+-- SET GC_SHORTCUT OFF
+-- SET BATCH_COMPACTION OFF
+-- SET ETC_50_50 ON
+-- SET FIRST_TOUCH OFF
+-- Will build and evaluate other systems
+-- Setting build type to 'Release'
+CMake Warning at benchmarks/CMakeLists.txt:2 (find_package):
+  By not providing "Findbenchmark.cmake" in CMAKE_MODULE_PATH this project
+  has asked CMake to find a package configuration file provided by
+  "benchmark", but CMake did not find one.
+
+  Could not find a package configuration file provided by "benchmark" with
+  any of the following names:
+
+    benchmarkConfig.cmake
+    benchmark-config.cmake
+
+  Add the installation prefix of "benchmark" to CMAKE_PREFIX_PATH or set
+  "benchmark_DIR" to a directory containing one of the above files.  If
+  "benchmark" provides a separate development package or SDK, be sure it has
+  been installed.
+
+
+-- Failed to find LLVM FileCheck
+-- Found Git: /usr/bin/git (found version "2.25.1") 
+-- git version: v1.6.0 normalized to 1.6.0
+-- Version: 1.6.0
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11
+-- Performing Test HAVE_CXX_FLAG_STD_CXX11 - Success
+-- Performing Test HAVE_CXX_FLAG_WALL
+-- Performing Test HAVE_CXX_FLAG_WALL - Success
+-- Performing Test HAVE_CXX_FLAG_WEXTRA
+-- Performing Test HAVE_CXX_FLAG_WEXTRA - Success
+-- Performing Test HAVE_CXX_FLAG_WSHADOW
+-- Performing Test HAVE_CXX_FLAG_WSHADOW - Success
+-- Performing Test HAVE_CXX_FLAG_WERROR
+-- Performing Test HAVE_CXX_FLAG_WERROR - Success
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE
+-- Performing Test HAVE_CXX_FLAG_WSUGGEST_OVERRIDE - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC - Success
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS
+-- Performing Test HAVE_CXX_FLAG_PEDANTIC_ERRORS - Success
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32
+-- Performing Test HAVE_CXX_FLAG_WSHORTEN_64_TO_32 - Failed
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_FSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED
+-- Performing Test HAVE_CXX_FLAG_WNO_DEPRECATED - Success
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING
+-- Performing Test HAVE_CXX_FLAG_WSTRICT_ALIASING - Success
+-- Performing Test HAVE_CXX_FLAG_WD654
+-- Performing Test HAVE_CXX_FLAG_WD654 - Failed
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY
+-- Performing Test HAVE_CXX_FLAG_WTHREAD_SAFETY - Failed
+-- Performing Test HAVE_CXX_FLAG_COVERAGE
+-- Performing Test HAVE_CXX_FLAG_COVERAGE - Success
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK
+-- Performing Test HAVE_STEADY_CLOCK -- success
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - yes
+-- Found Threads: TRUE  
+-- CMAKE_BUILD_TYPE: Release
+-- TEST_DIR set to: "/home/ziyi/git/vpm-eval/deps/pacman/build/_deps/pmemkv-build/test"
+-- CMAP engine is ON
+-- CSMAP engine is OFF
+-- VCMAP engine is ON
+-- VSMAP engine is ON
+-- STREE engine is ON
+-- TREE3 engine is OFF
+-- RADIX engine is OFF
+-- ROBINHOOD engine is OFF
+-- DRAM_VCMAP engine is OFF
+-- Performing Test C_HAS__Wall
+-- Performing Test C_HAS__Wall - Success
+-- Performing Test CXX_HAS__Wall
+-- Performing Test CXX_HAS__Wall - Success
+-- Performing Test C_HAS__Wpointer_arith
+-- Performing Test C_HAS__Wpointer_arith - Success
+-- Performing Test CXX_HAS__Wpointer_arith
+-- Performing Test CXX_HAS__Wpointer_arith - Success
+-- Performing Test C_HAS__Wsign_compare
+-- Performing Test C_HAS__Wsign_compare - Success
+-- Performing Test CXX_HAS__Wsign_compare
+-- Performing Test CXX_HAS__Wsign_compare - Success
+-- Performing Test C_HAS__Wunreachable_code_return
+-- Performing Test C_HAS__Wunreachable_code_return - Failed
+-- Performing Test CXX_HAS__Wunreachable_code_return
+-- Performing Test CXX_HAS__Wunreachable_code_return - Failed
+-- Performing Test C_HAS__Wmissing_variable_declarations
+-- Performing Test C_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test CXX_HAS__Wmissing_variable_declarations
+-- Performing Test CXX_HAS__Wmissing_variable_declarations - Failed
+-- Performing Test C_HAS__fno_common
+-- Performing Test C_HAS__fno_common - Success
+-- Performing Test CXX_HAS__fno_common
+-- Performing Test CXX_HAS__fno_common - Success
+-- Performing Test C_HAS__Wunused_macros
+-- Performing Test C_HAS__Wunused_macros - Success
+-- Performing Test CXX_HAS__Wunused_macros
+-- Performing Test CXX_HAS__Wunused_macros - Success
+-- Performing Test C_HAS__Wsign_conversion
+-- Performing Test C_HAS__Wsign_conversion - Success
+-- Performing Test CXX_HAS__Wsign_conversion
+-- Performing Test CXX_HAS__Wsign_conversion - Success
+-- Performing Test C_HAS__Wno_maybe_uninitialized
+-- Performing Test C_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized
+-- Performing Test CXX_HAS__Wno_maybe_uninitialized - Success
+-- Performing Test C_HAS__ggdb
+-- Performing Test C_HAS__ggdb - Success
+-- Performing Test CXX_HAS__ggdb
+-- Performing Test CXX_HAS__ggdb - Success
+-- Performing Test C_HAS__DDEBUG
+-- Performing Test C_HAS__DDEBUG - Success
+-- Performing Test CXX_HAS__DDEBUG
+-- Performing Test CXX_HAS__DDEBUG - Success
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test C_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2
+-- Performing Test CXX_HAS__U_FORTIFY_SOURCE__D_FORTIFY_SOURCE_2 - Success
+-- Found Perl: /usr/bin/perl (found version "5.30.0") 
+-- Checking for module 'libpmemobj++>=1.13.0'
+--   Found libpmemobj++, version 1.13.0-git127.g9c8f5c78
+-- Checking for module 'memkind>=1.8.0'
+--   Found memkind, version 1.14.0+dev65+gc425635f
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT
+-- Performing Test LIBMEMKIND_NAMESPACE_PRESENT - Success
+-- Checking for module 'tbb'
+--   Found in dir '/usr/lib/x86_64-linux-gnu' using pkg-config (ver: )
+-- Performing Test C_HAS__Wno_unused_but_set_variable
+-- Performing Test C_HAS__Wno_unused_but_set_variable - Success
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable
+-- Performing Test CXX_HAS__Wno_unused_but_set_variable - Success
+-- Some examples use csmap engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_CSMAP=ON option.
+-- Some examples use radix engine, which is disabled, hence they are not built. If you want to build them use -DENGINE_RADIX=ON option.
+-- Found pandoc: /usr/bin/pandoc
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Submodule update
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/ziyi/git/vpm-eval/deps/pacman/build
+Scanning dependencies of target masstree
+[ 48%] Built target benchmark
+[ 51%] Building C object CMakeFiles/masstree.dir/db/index/masstree/clp.c.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/compiler.cc.o
+[ 56%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/memdebug.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/masstree_wrapper.cc.o
+[ 62%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/kvthread.cc.o
+[ 64%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string_slice.cc.o
+[ 67%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/misc.cc.o
+[ 70%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/string.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/str.cc.o
+[ 72%] Building CXX object CMakeFiles/masstree.dir/db/index/masstree/straccum.cc.o
+[ 75%] Linking CXX static library libmasstree.a
+[ 75%] Built target masstree
+Scanning dependencies of target pacman_bench
+[ 78%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/histogram.cpp.o
+[ 81%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/benchmark.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/recovery.cpp.o
+[ 86%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/hotkeyset.cpp.o
+[ 89%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/db.cpp.o
+[ 91%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_cleaner.cpp.o
+[ 94%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/db/log_structured.cpp.o
+[ 97%] Building CXX object benchmarks/CMakeFiles/pacman_bench.dir/__/util/index_arena.cpp.o
+In file included from /home/ziyi/git/vpm-eval/deps/pacman/benchmarks/benchmark.cpp:1:
+/home/ziyi/git/vpm-eval/deps/pacman/benchmarks/bench_base.h:303:2: warning: #warning "ETC_50_50" [-Wcpp]
+  303 | #warning "ETC_50_50"
+      |  ^~~~~~~
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp: In constructor ‘LogStructured::LogStructured(std::string, size_t, DB*, int, int)’:
+/home/ziyi/git/vpm-eval/deps/pacman/db/log_structured.cpp:40:30: warning: format ‘%p’ expects argument of type ‘void*’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   40 |     printf("total_log_size_ %p, is aligned to 2M? %d\n", total_log_size_, (total_log_size_ & (2 * 1024 * 1024 - 1)) == 0);
+      |                             ~^                           ~~~~~~~~~~~~~~~
+      |                              |                           |
+      |                              void*                       size_t {aka long unsigned int}
+      |                             %ld
+[100%] Linking CXX executable pacman_bench
+[100%] Built target pacman_bench
+total keys: 20000000 NUM_OPS_PER_THREAD: 1000000000 NUM_WARMUP_OPS_PER_THREAD: 0
+benchmark: ETC
+The number of inputs is very large. DBFixture/bench will be repeated at least 320 times.
+2024-10-06T19:36:12-05:00
+Running ./benchmarks/pacman_bench
+Run on (64 X 2998.61 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x32)
+  L1 Instruction 64 KiB (x32)
+  L2 Unified 512 KiB (x32)
+  L3 Unified 8192 KiB (x8)
+Load Average: 3.44, 4.09, 4.28
+[1728261372]	Setup starts!
+Init capacity utilization 50%  threads of service / gc : 4 / 2
+[1728261372]	Setup starts!
+[1728261372]	Setup starts!
+[1728261372]	Setup starts!
+DB index type: Masstree
+Using MADVISE_HUGE
+pool_start_ 0x7fdcc2800000, is aligned to 2M? 1
+total_log_size_ 0x1fb000000, is aligned to 2M? 1
+[1728261372]	Initializing log segments...
+Log: pool_start 0x7fdcc2800000 total segments: 2028  cleaners: 2
+[1728261373]Initialized 2026 free log segments...
+[1728261373]	DB init finished in 0.419755 seconds
+[1728261373]	DB init finished in 0.419611 seconds
+[1728261373]	DB init finished in 0.419880 seconds
+[1728261373]	DB init finished in 0.419793 seconds
+[1728261377]	DB load finished in 4.040260 seconds
+[1728261377]	DB load finished in 4.153830 seconds
+[1728261377]	DB load finished in 4.500314 seconds
+[1728261377]	DB load finished in 4.713606 seconds
+[1728261377]	DB warmup finished in 0.000013 seconds
+[1728261377]	DB warmup finished in 0.559794 seconds
+[1728261377]	DB warmup finished in 0.673380 seconds
+[1728261377]	DB warmup finished in 0.213338 seconds
+[1728261377]	ETC init!
+[1728261377]	ETC starts!
+[1728261377]	ETC init!
+[1728261377]	ETC starts!
+[1728261377]	ETC init!
+[1728261377]	ETC starts!
+[1728261377]	ETC init!
+[1728261377]	ETC starts!
+152143	[1728261380]	2000000 OPS in 2.241053 seconds, throughput 892437.617495
+152143	[1728261380]	2000000 OPS in 2.320292 seconds, throughput 861960.477388
+152143	[1728261380]	2000000 OPS in 2.382025 seconds, throughput 839621.750401
+152143	[1728261380]	2000000 OPS in 2.663309 seconds, throughput 750945.534296
+152143	[1728261382]	2000000 OPS in 2.203035 seconds, throughput 907838.504608
+152143	[1728261382]	2000000 OPS in 2.207062 seconds, throughput 906182.064663
+152143	[1728261382]	2000000 OPS in 2.225548 seconds, throughput 898655.072818
+152143	[1728261382]	2000000 OPS in 2.587659 seconds, throughput 772899.365797
+152143	[1728261384]	2000000 OPS in 2.202144 seconds, throughput 908205.821236
+152143	[1728261384]	2000000 OPS in 2.214614 seconds, throughput 903091.915792
+152143	[1728261385]	2000000 OPS in 2.209164 seconds, throughput 905319.840446
+152143	[1728261385]	2000000 OPS in 2.208487 seconds, throughput 905597.361452
+152143	[1728261386]	2000000 OPS in 2.210017 seconds, throughput 904970.414255
+152143	[1728261386]	2000000 OPS in 2.218167 seconds, throughput 901645.367549
+152143	[1728261387]	2000000 OPS in 2.215431 seconds, throughput 902758.876264
+152143	[1728261387]	2000000 OPS in 2.219141 seconds, throughput 901249.627671
+152143	[1728261389]	2000000 OPS in 2.229031 seconds, throughput 897250.868202
+152143	[1728261389]	2000000 OPS in 2.243076 seconds, throughput 891632.740041
+152143	[1728261389]	2000000 OPS in 2.191133 seconds, throughput 912769.786225
+152143	[1728261389]	2000000 OPS in 2.188228 seconds, throughput 913981.541229
+152143	[1728261390]	2000000 OPS in 1.836942 seconds, throughput 1088766.003499
+152143	[1728261391]	2000000 OPS in 1.821247 seconds, throughput 1098148.686038
+152143	[1728261391]	2000000 OPS in 1.794594 seconds, throughput 1114458.200574
+152143	[1728261391]	2000000 OPS in 1.798329 seconds, throughput 1112143.551041
+152143	[1728261392]	2000000 OPS in 1.803148 seconds, throughput 1109171.293760
+152143	[1728261392]	2000000 OPS in 1.817239 seconds, throughput 1100570.700937
+152143	[1728261393]	2000000 OPS in 1.810604 seconds, throughput 1104603.767583
+152143	[1728261393]	2000000 OPS in 1.808239 seconds, throughput 1106048.481423
+152143	[1728261394]	2000000 OPS in 1.936591 seconds, throughput 1032742.587361
+152143	[1728261395]	2000000 OPS in 1.995188 seconds, throughput 1002411.802798
+152143	[1728261395]	2000000 OPS in 2.274295 seconds, throughput 879393.394437
+152143	[1728261395]	2000000 OPS in 2.229427 seconds, throughput 897091.494810
+152143	[1728261397]	2000000 OPS in 2.522589 seconds, throughput 792836.248790
+152143	[1728261397]	2000000 OPS in 2.247148 seconds, throughput 890017.034926
+152143	[1728261397]	2000000 OPS in 2.445228 seconds, throughput 817919.637760
+152143	[1728261397]	2000000 OPS in 2.893124 seconds, throughput 691294.254930
+152143	[1728261399]	2000000 OPS in 2.402623 seconds, throughput 832423.563747
+152143	[1728261399]	2000000 OPS in 2.374764 seconds, throughput 842188.950144
+152143	[1728261400]	2000000 OPS in 2.445666 seconds, throughput 817773.154634
+152143	[1728261400]	2000000 OPS in 2.454056 seconds, throughput 814977.327331
+152143	[1728261401]	2000000 OPS in 2.130498 seconds, throughput 938747.654304
+152143	[1728261401]	2000000 OPS in 2.312740 seconds, throughput 864775.115231
+152143	[1728261402]	2000000 OPS in 2.213627 seconds, throughput 903494.581517
+152143	[1728261402]	2000000 OPS in 2.305157 seconds, throughput 867619.862769
+152143	[1728261403]	2000000 OPS in 2.149226 seconds, throughput 930567.562462
+152143	[1728261403]	2000000 OPS in 2.181453 seconds, throughput 916820.119434
+152143	[1728261404]	2000000 OPS in 2.109512 seconds, throughput 948086.571681
+152143	[1728261404]	2000000 OPS in 2.203104 seconds, throughput 907810.071608
+152143	[1728261405]	2000000 OPS in 1.983434 seconds, throughput 1008352.181116
+152143	[1728261405]	2000000 OPS in 2.026027 seconds, throughput 987153.675642
+152143	[1728261406]	2000000 OPS in 2.117691 seconds, throughput 944424.847629
+152143	[1728261406]	2000000 OPS in 2.044509 seconds, throughput 978229.980890
+152143	[1728261407]	2000000 OPS in 1.887896 seconds, throughput 1059380.389598
+152143	[1728261407]	2000000 OPS in 1.887651 seconds, throughput 1059517.887576
+152143	[1728261408]	2000000 OPS in 1.790768 seconds, throughput 1116839.255560
+152143	[1728261408]	2000000 OPS in 1.786800 seconds, throughput 1119319.453772
+152143	[1728261409]	2000000 OPS in 1.781355 seconds, throughput 1122740.834926
+152143	[1728261409]	2000000 OPS in 1.771309 seconds, throughput 1129108.472886
+152143	[1728261410]	2000000 OPS in 1.775938 seconds, throughput 1126165.440460
+152143	[1728261410]	2000000 OPS in 1.786624 seconds, throughput 1119429.717725
+152143	[1728261411]	2000000 OPS in 1.776574 seconds, throughput 1125762.281785
+152143	[1728261411]	2000000 OPS in 1.770109 seconds, throughput 1129873.923018
+152143	[1728261411]	2000000 OPS in 1.773607 seconds, throughput 1127645.526884
+152143	[1728261412]	2000000 OPS in 1.788402 seconds, throughput 1118316.799019
+152143	[1728261413]	2000000 OPS in 1.776769 seconds, throughput 1125638.729627
+152143	[1728261413]	2000000 OPS in 1.769307 seconds, throughput 1130386.077713
+152143	[1728261413]	2000000 OPS in 1.776729 seconds, throughput 1125664.071448
+152143	[1728261414]	2000000 OPS in 1.783370 seconds, throughput 1121472.268794
+152143	[1728261414]	2000000 OPS in 1.775594 seconds, throughput 1126383.621481
+152143	[1728261414]	2000000 OPS in 1.770321 seconds, throughput 1129738.618025
+152143	[1728261415]	2000000 OPS in 1.775500 seconds, throughput 1126443.255421
+152143	[1728261415]	2000000 OPS in 1.789576 seconds, throughput 1117583.159363
+152143	[1728261416]	2000000 OPS in 1.775066 seconds, throughput 1126718.668489
+152143	[1728261416]	2000000 OPS in 1.780506 seconds, throughput 1123276.192273
+152143	[1728261417]	2000000 OPS in 1.776308 seconds, throughput 1125930.863341
+152143	[1728261417]	2000000 OPS in 1.783842 seconds, throughput 1121175.530120
+152143	[1728261418]	2000000 OPS in 1.771626 seconds, throughput 1128906.439621
+152143	[1728261418]	2000000 OPS in 1.778392 seconds, throughput 1124611.446745
+152143	[1728261419]	2000000 OPS in 1.774962 seconds, throughput 1126784.686095
+152143	[1728261419]	2000000 OPS in 1.786738 seconds, throughput 1119358.294277
+152143	[1728261420]	2000000 OPS in 1.773903 seconds, throughput 1127457.363790
+152143	[1728261420]	2000000 OPS in 1.777266 seconds, throughput 1125323.952633
+152143	[1728261420]	2000000 OPS in 1.778329 seconds, throughput 1124651.287810
+152143	[1728261421]	2000000 OPS in 1.787023 seconds, throughput 1119179.775526
+152143	[1728261422]	2000000 OPS in 1.773465 seconds, throughput 1127735.816608
+152143	[1728261422]	2000000 OPS in 1.781996 seconds, throughput 1122336.974943
+152143	[1728261422]	2000000 OPS in 1.777526 seconds, throughput 1125159.350693
+152143	[1728261423]	2000000 OPS in 1.787736 seconds, throughput 1118733.414777
+152143	[1728261423]	2000000 OPS in 1.853835 seconds, throughput 1078844.665248
+152143	[1728261423]	2000000 OPS in 1.857903 seconds, throughput 1076482.464370
+152143	[1728261424]	2000000 OPS in 1.955090 seconds, throughput 1022970.809528
+152143	[1728261425]	2000000 OPS in 2.004421 seconds, throughput 997794.375533
+152143	[1728261425]	2000000 OPS in 2.033866 seconds, throughput 983348.952193
+152143	[1728261425]	2000000 OPS in 2.034521 seconds, throughput 983032.369781
+152143	[1728261426]	2000000 OPS in 2.053017 seconds, throughput 974176.054071
+152143	[1728261427]	2000000 OPS in 2.143726 seconds, throughput 932955.051159
+152143	[1728261427]	2000000 OPS in 2.023177 seconds, throughput 988544.254902
+152143	[1728261427]	2000000 OPS in 2.029099 seconds, throughput 985659.152166
+152143	[1728261428]	2000000 OPS in 1.950356 seconds, throughput 1025453.814586
+152143	[1728261429]	2000000 OPS in 2.034723 seconds, throughput 982934.777854
+152143	[1728261429]	2000000 OPS in 1.871537 seconds, throughput 1068640.374195
+152143	[1728261429]	2000000 OPS in 1.907063 seconds, throughput 1048733.051818
+152143	[1728261430]	2000000 OPS in 1.978456 seconds, throughput 1010889.299535
+152143	[1728261431]	2000000 OPS in 2.001423 seconds, throughput 999289.005872
+152143	[1728261431]	2000000 OPS in 1.888664 seconds, throughput 1058949.606706
+152143	[1728261431]	2000000 OPS in 1.916799 seconds, throughput 1043406.220475
+152143	[1728261432]	2000000 OPS in 1.943422 seconds, throughput 1029112.565362
+152143	[1728261433]	2000000 OPS in 1.930941 seconds, throughput 1035764.427810
+152143	[1728261433]	2000000 OPS in 1.913089 seconds, throughput 1045429.668980
+152143	[1728261433]	2000000 OPS in 1.960560 seconds, throughput 1020116.701351
+152143	[1728261434]	2000000 OPS in 1.884999 seconds, throughput 1061008.520429
+152143	[1728261435]	2000000 OPS in 1.887035 seconds, throughput 1059863.754514
+152143	[1728261435]	2000000 OPS in 1.916675 seconds, throughput 1043473.724027
+152143	[1728261435]	2000000 OPS in 1.931262 seconds, throughput 1035592.270754
+152143	[1728261436]	2000000 OPS in 2.041245 seconds, throughput 979794.194230
+152143	[1728261437]	2000000 OPS in 1.982575 seconds, throughput 1008789.074814
+152143	[1728261437]	2000000 OPS in 1.913278 seconds, throughput 1045326.397941
+152143	[1728261437]	2000000 OPS in 1.974182 seconds, throughput 1013077.821599
+152143	[1728261438]	2000000 OPS in 1.913114 seconds, throughput 1045416.007619
+152143	[1728261439]	2000000 OPS in 1.951198 seconds, throughput 1025011.300750
+152143	[1728261439]	2000000 OPS in 1.840874 seconds, throughput 1086440.462519
+152143	[1728261439]	2000000 OPS in 1.869665 seconds, throughput 1069710.349180
+152143	[1728261440]	2000000 OPS in 1.857248 seconds, throughput 1076862.109961
+152143	[1728261440]	2000000 OPS in 1.843993 seconds, throughput 1084602.815737
+152143	[1728261441]	2000000 OPS in 1.810529 seconds, throughput 1104649.525084
+152143	[1728261441]	2000000 OPS in 1.790015 seconds, throughput 1117309.072829
+152143	[1728261441]	2000000 OPS in 1.791313 seconds, throughput 1116499.461568
+152143	[1728261442]	2000000 OPS in 1.782623 seconds, throughput 1121942.216610
+152143	[1728261442]	2000000 OPS in 1.774857 seconds, throughput 1126851.346334
+152143	[1728261443]	2000000 OPS in 1.786088 seconds, throughput 1119765.655444
+152143	[1728261443]	2000000 OPS in 1.781381 seconds, throughput 1122724.448055
+152143	[1728261444]	2000000 OPS in 1.808166 seconds, throughput 1106093.135254
+152143	[1728261444]	2000000 OPS in 1.779525 seconds, throughput 1123895.421531
+152143	[1728261444]	2000000 OPS in 1.802047 seconds, throughput 1109848.966203
+152143	[1728261445]	2000000 OPS in 1.787636 seconds, throughput 1118795.996500
+152143	[1728261446]	2000000 OPS in 1.811800 seconds, throughput 1103874.599845
+152143	[1728261446]	2000000 OPS in 1.789312 seconds, throughput 1117748.050647
+152143	[1728261446]	2000000 OPS in 1.800948 seconds, throughput 1110526.233961
+152143	[1728261447]	2000000 OPS in 1.814256 seconds, throughput 1102380.259456
+152143	[1728261448]	2000000 OPS in 1.886920 seconds, throughput 1059928.348844
+152143	[1728261448]	2000000 OPS in 1.823765 seconds, throughput 1096632.515702
+152143	[1728261448]	2000000 OPS in 1.829392 seconds, throughput 1093259.399844
+152143	[1728261449]	2000000 OPS in 1.788454 seconds, throughput 1118284.283521
+152143	[1728261449]	2000000 OPS in 1.825072 seconds, throughput 1095847.177536
+152143	[1728261450]	2000000 OPS in 1.825412 seconds, throughput 1095643.065785
+152143	[1728261450]	2000000 OPS in 1.816598 seconds, throughput 1100959.045424
+152143	[1728261450]	2000000 OPS in 1.865199 seconds, throughput 1072271.645009
+152143	[1728261451]	2000000 OPS in 1.931569 seconds, throughput 1035427.675636
+152143	[1728261452]	2000000 OPS in 1.919399 seconds, throughput 1041992.832131
+152143	[1728261452]	2000000 OPS in 1.870410 seconds, throughput 1069284.274571
+152143	[1728261452]	2000000 OPS in 1.847937 seconds, throughput 1082287.978432
+152143	[1728261453]	2000000 OPS in 1.855627 seconds, throughput 1077802.812742
+152143	[1728261453]	2000000 OPS in 1.871269 seconds, throughput 1068793.423073
+152143	[1728261454]	2000000 OPS in 1.850185 seconds, throughput 1080972.983783
+152143	[1728261454]	2000000 OPS in 1.841154 seconds, throughput 1086275.238247
+152143	[1728261455]	2000000 OPS in 1.897243 seconds, throughput 1054161.222363
+152143	[1728261455]	2000000 OPS in 1.854462 seconds, throughput 1078479.904145
+152143	[1728261455]	2000000 OPS in 1.919437 seconds, throughput 1041972.203308
+152143	[1728261456]	2000000 OPS in 1.893789 seconds, throughput 1056083.861507
+152143	[1728261457]	2000000 OPS in 1.868160 seconds, throughput 1070572.113738
+152143	[1728261457]	2000000 OPS in 1.855091 seconds, throughput 1078114.227280
+152143	[1728261457]	2000000 OPS in 1.885026 seconds, throughput 1060993.323169
+152143	[1728261458]	2000000 OPS in 1.848196 seconds, throughput 1082136.310218
+152143	[1728261459]	2000000 OPS in 1.908068 seconds, throughput 1048180.672806
+152143	[1728261459]	2000000 OPS in 1.852156 seconds, throughput 1079822.649928
+152143	[1728261459]	2000000 OPS in 1.871630 seconds, throughput 1068587.274194
+152143	[1728261460]	2000000 OPS in 1.931738 seconds, throughput 1035337.090227
+152143	[1728261461]	2000000 OPS in 1.950889 seconds, throughput 1025173.651602
+152143	[1728261461]	2000000 OPS in 1.897608 seconds, throughput 1053958.457173
+152143	[1728261461]	2000000 OPS in 1.894051 seconds, throughput 1055937.775699
+152143	[1728261462]	2000000 OPS in 1.965209 seconds, throughput 1017703.460548
+152143	[1728261463]	2000000 OPS in 1.921129 seconds, throughput 1041054.504929
+152143	[1728261463]	2000000 OPS in 1.904515 seconds, throughput 1050136.123895
+152143	[1728261463]	2000000 OPS in 1.879232 seconds, throughput 1064264.550625
+152143	[1728261464]	2000000 OPS in 1.903052 seconds, throughput 1050943.431919
+152143	[1728261465]	2000000 OPS in 1.866191 seconds, throughput 1071701.663978
+152143	[1728261465]	2000000 OPS in 1.902701 seconds, throughput 1051137.304285
+152143	[1728261465]	2000000 OPS in 1.917756 seconds, throughput 1042885.539141
+152143	[1728261466]	2000000 OPS in 1.926292 seconds, throughput 1038264.188399
+152143	[1728261467]	2000000 OPS in 1.887839 seconds, throughput 1059412.375738
+152143	[1728261467]	2000000 OPS in 1.974315 seconds, throughput 1013009.575473
+152143	[1728261467]	2000000 OPS in 1.880762 seconds, throughput 1063398.771349
+152143	[1728261468]	2000000 OPS in 1.936254 seconds, throughput 1032922.333537
+152143	[1728261468]	2000000 OPS in 1.849094 seconds, throughput 1081610.778035
+152143	[1728261469]	2000000 OPS in 1.870142 seconds, throughput 1069437.507954
+152143	[1728261469]	2000000 OPS in 1.909414 seconds, throughput 1047441.780567
+152143	[1728261469]	2000000 OPS in 1.866805 seconds, throughput 1071349.176802
+152143	[1728261470]	2000000 OPS in 1.891024 seconds, throughput 1057628.036450
+152143	[1728261470]	2000000 OPS in 1.881701 seconds, throughput 1062868.117730
+152143	[1728261471]	2000000 OPS in 1.885741 seconds, throughput 1060591.035566
+152143	[1728261471]	2000000 OPS in 1.873191 seconds, throughput 1067696.780521
+152143	[1728261472]	2000000 OPS in 1.844265 seconds, throughput 1084442.853928
+152143	[1728261472]	2000000 OPS in 1.900793 seconds, throughput 1052192.427055
+152143	[1728261472]	2000000 OPS in 1.861885 seconds, throughput 1074180.199099
+152143	[1728261473]	2000000 OPS in 1.854574 seconds, throughput 1078414.773420
+152143	[1728261474]	2000000 OPS in 1.898199 seconds, throughput 1053630.309572
+152143	[1728261474]	2000000 OPS in 1.893681 seconds, throughput 1056144.091851
+152143	[1728261474]	2000000 OPS in 1.868672 seconds, throughput 1070278.786218
+152143	[1728261475]	2000000 OPS in 1.836535 seconds, throughput 1089007.288181
+152143	[1728261476]	2000000 OPS in 1.812907 seconds, throughput 1103200.550276
+152143	[1728261476]	2000000 OPS in 1.830789 seconds, throughput 1092425.178434
+152143	[1728261476]	2000000 OPS in 1.819313 seconds, throughput 1099316.060513
+152143	[1728261477]	2000000 OPS in 1.827680 seconds, throughput 1094283.463188
+152143	[1728261478]	2000000 OPS in 1.837691 seconds, throughput 1088322.247864
+152143	[1728261478]	2000000 OPS in 1.822481 seconds, throughput 1097405.130698
+152143	[1728261478]	2000000 OPS in 1.875261 seconds, throughput 1066518.207332
+152143	[1728261479]	2000000 OPS in 1.856720 seconds, throughput 1077168.339868
+152143	[1728261480]	2000000 OPS in 1.885438 seconds, throughput 1060761.478235
+152143	[1728261480]	2000000 OPS in 1.900851 seconds, throughput 1052160.321877
+152143	[1728261480]	2000000 OPS in 1.886723 seconds, throughput 1060039.020036
+152143	[1728261481]	2000000 OPS in 1.841644 seconds, throughput 1085986.216663
+152143	[1728261481]	2000000 OPS in 1.815328 seconds, throughput 1101729.274269
+152143	[1728261482]	2000000 OPS in 1.854472 seconds, throughput 1078474.088582
+152143	[1728261482]	2000000 OPS in 1.813237 seconds, throughput 1102999.773334
+152143	[1728261482]	2000000 OPS in 1.893333 seconds, throughput 1056338.214144
+152143	[1728261483]	2000000 OPS in 1.858840 seconds, throughput 1075939.833445
+152143	[1728261484]	2000000 OPS in 1.870034 seconds, throughput 1069499.271136
+152143	[1728261484]	2000000 OPS in 1.869850 seconds, throughput 1069604.513731
+152143	[1728261484]	2000000 OPS in 1.857072 seconds, throughput 1076964.167248
+152143	[1728261485]	2000000 OPS in 1.842227 seconds, throughput 1085642.540252
+152143	[1728261485]	2000000 OPS in 1.870920 seconds, throughput 1068992.794989
+152143	[1728261485]	2000000 OPS in 1.851988 seconds, throughput 1079920.604237
+152143	[1728261486]	2000000 OPS in 1.906324 seconds, throughput 1049139.600614
+152143	[1728261487]	2000000 OPS in 1.877520 seconds, throughput 1065234.990839
+152143	[1728261487]	2000000 OPS in 1.870760 seconds, throughput 1069084.222455
+152143	[1728261487]	2000000 OPS in 1.872402 seconds, throughput 1068146.690721
+152143	[1728261488]	2000000 OPS in 1.868113 seconds, throughput 1070599.048345
+152143	[1728261489]	2000000 OPS in 1.857068 seconds, throughput 1076966.486957
+152143	[1728261489]	2000000 OPS in 1.859169 seconds, throughput 1075749.434290
+152143	[1728261489]	2000000 OPS in 1.859207 seconds, throughput 1075727.447240
+152143	[1728261490]	2000000 OPS in 1.913699 seconds, throughput 1045096.433661
+152143	[1728261491]	2000000 OPS in 1.906590 seconds, throughput 1048993.228749
+152143	[1728261491]	2000000 OPS in 1.841895 seconds, throughput 1085838.226392
+152143	[1728261491]	2000000 OPS in 1.860226 seconds, throughput 1075138.182135
+152143	[1728261492]	2000000 OPS in 1.845693 seconds, throughput 1083603.827939
+152143	[1728261493]	2000000 OPS in 1.888872 seconds, throughput 1058832.996624
+152143	[1728261493]	2000000 OPS in 1.928760 seconds, throughput 1036935.647774
+152143	[1728261493]	2000000 OPS in 1.899413 seconds, throughput 1052956.887207
+152143	[1728261494]	2000000 OPS in 1.885310 seconds, throughput 1060833.496878
+152143	[1728261494]	2000000 OPS in 1.841137 seconds, throughput 1086285.268288
+152143	[1728261495]	2000000 OPS in 1.878047 seconds, throughput 1064936.074550
+152143	[1728261495]	2000000 OPS in 1.881164 seconds, throughput 1063171.525715
+152143	[1728261496]	2000000 OPS in 1.921495 seconds, throughput 1040856.208317
+152143	[1728261496]	2000000 OPS in 1.917700 seconds, throughput 1042915.993117
+152143	[1728261497]	2000000 OPS in 1.877201 seconds, throughput 1065416.010326
+152143	[1728261497]	2000000 OPS in 1.885591 seconds, throughput 1060675.406278
+152143	[1728261498]	2000000 OPS in 1.928591 seconds, throughput 1037026.513138
+152143	[1728261498]	2000000 OPS in 1.878205 seconds, throughput 1064846.489068
+152143	[1728261499]	2000000 OPS in 1.871528 seconds, throughput 1068645.513185
+152143	[1728261499]	2000000 OPS in 1.855302 seconds, throughput 1077991.615381
+152143	[1728261499]	2000000 OPS in 1.847293 seconds, throughput 1082665.283742
+152143	[1728261500]	2000000 OPS in 1.887779 seconds, throughput 1059446.047445
+152143	[1728261500]	2000000 OPS in 1.905406 seconds, throughput 1049645.062522
+152143	[1728261500]	2000000 OPS in 1.856409 seconds, throughput 1077348.795443
+152143	[1728261501]	2000000 OPS in 1.931707 seconds, throughput 1035353.705298
+152143	[1728261502]	2000000 OPS in 1.913479 seconds, throughput 1045216.592395
+152143	[1728261502]	2000000 OPS in 1.867940 seconds, throughput 1070698.202298
+152143	[1728261502]	2000000 OPS in 1.906240 seconds, throughput 1049185.831795
+152143	[1728261503]	2000000 OPS in 1.865834 seconds, throughput 1071906.718390
+152143	[1728261504]	2000000 OPS in 1.818979 seconds, throughput 1099517.916370
+152143	[1728261504]	2000000 OPS in 1.841697 seconds, throughput 1085954.964362
+152143	[1728261504]	2000000 OPS in 1.848505 seconds, throughput 1081955.418027
+152143	[1728261505]	2000000 OPS in 1.910235 seconds, throughput 1046991.600510
+152143	[1728261506]	2000000 OPS in 1.898583 seconds, throughput 1053417.206411
+152143	[1728261506]	2000000 OPS in 1.918384 seconds, throughput 1042544.141319
+152143	[1728261506]	2000000 OPS in 1.918066 seconds, throughput 1042716.986798
+152143	[1728261507]	2000000 OPS in 1.909744 seconds, throughput 1047260.784692
+152143	[1728261508]	2000000 OPS in 1.816549 seconds, throughput 1100988.742941
+152143	[1728261508]	2000000 OPS in 1.818036 seconds, throughput 1100088.227076
+152143	[1728261508]	2000000 OPS in 1.871661 seconds, throughput 1068569.575366
+152143	[1728261509]	2000000 OPS in 1.832919 seconds, throughput 1091155.692096
+152143	[1728261509]	2000000 OPS in 1.847288 seconds, throughput 1082668.214160
+152143	[1728261510]	2000000 OPS in 1.879019 seconds, throughput 1064385.192486
+152143	[1728261510]	2000000 OPS in 1.870106 seconds, throughput 1069458.094889
+152143	[1728261511]	2000000 OPS in 1.881859 seconds, throughput 1062778.879820
+152143	[1728261511]	2000000 OPS in 1.886368 seconds, throughput 1060238.511255
+152143	[1728261512]	2000000 OPS in 1.829228 seconds, throughput 1093357.416353
+152143	[1728261512]	2000000 OPS in 1.866704 seconds, throughput 1071407.143286
+152143	[1728261513]	2000000 OPS in 1.863344 seconds, throughput 1073339.115053
+152143	[1728261513]	2000000 OPS in 1.842824 seconds, throughput 1085290.836238
+152143	[1728261513]	2000000 OPS in 1.876889 seconds, throughput 1065593.117121
+152143	[1728261514]	2000000 OPS in 1.910879 seconds, throughput 1046638.745834
+152143	[1728261514]	2000000 OPS in 1.833345 seconds, throughput 1090902.148805
+152143	[1728261515]	2000000 OPS in 1.845435 seconds, throughput 1083755.320561
+152143	[1728261515]	2000000 OPS in 1.903478 seconds, throughput 1050708.229882
+152143	[1728261515]	2000000 OPS in 1.825548 seconds, throughput 1095561.442372
+152143	[1728261516]	2000000 OPS in 1.855923 seconds, throughput 1077630.914645
+152143	[1728261517]	2000000 OPS in 1.849759 seconds, throughput 1081221.932154
+152143	[1728261517]	2000000 OPS in 1.860445 seconds, throughput 1075011.623563
+152143	[1728261517]	2000000 OPS in 1.839624 seconds, throughput 1087178.684340
+152143	[1728261518]	2000000 OPS in 1.886563 seconds, throughput 1060128.922278
+152143	[1728261519]	2000000 OPS in 1.889840 seconds, throughput 1058290.648944
+152143	[1728261519]	2000000 OPS in 1.906721 seconds, throughput 1048921.158366
+152143	[1728261519]	2000000 OPS in 1.909346 seconds, throughput 1047479.084461
+152143	[1728261520]	2000000 OPS in 1.875042 seconds, throughput 1066642.773869
+152143	[1728261521]	2000000 OPS in 1.826514 seconds, throughput 1094982.025870
+152143	[1728261521]	2000000 OPS in 1.804605 seconds, throughput 1108275.772260
+152143	[1728261521]	2000000 OPS in 1.855836 seconds, throughput 1077681.433058
+152143	[1728261522]	2000000 OPS in 1.901438 seconds, throughput 1051835.505549
+152143	[1728261522]	2000000 OPS in 1.870827 seconds, throughput 1069045.935300
+152143	[1728261523]	2000000 OPS in 1.867518 seconds, throughput 1070940.146226
+152143	[1728261523]	2000000 OPS in 1.883509 seconds, throughput 1061847.859501
+152143	[1728261524]	2000000 OPS in 1.896377 seconds, throughput 1054642.615893
+152143	[1728261524]	2000000 OPS in 1.883483 seconds, throughput 1061862.517474
+152143	[1728261525]	2000000 OPS in 1.843703 seconds, throughput 1084773.415241
+152143	[1728261525]	2000000 OPS in 1.886761 seconds, throughput 1060017.670495
+152143	[1728261526]	2000000 OPS in 1.991464 seconds, throughput 1004286.293902
+152143	[1728261526]	2000000 OPS in 1.949175 seconds, throughput 1026075.134352
+152143	[1728261527]	2000000 OPS in 1.944370 seconds, throughput 1028610.809671
+152143	[1728261527]	2000000 OPS in 1.938434 seconds, throughput 1031760.689299
+152143	[1728261528]	2000000 OPS in 1.914251 seconds, throughput 1044795.066060
+152143	[1728261528]	2000000 OPS in 1.854808 seconds, throughput 1078278.722110
+152143	[1728261529]	2000000 OPS in 1.865100 seconds, throughput 1072328.561471
+152143	[1728261529]	2000000 OPS in 1.856776 seconds, throughput 1077135.852682
+152143	[1728261530]	2000000 OPS in 1.868635 seconds, throughput 1070299.978326
+152143	[1728261530]	2000000 OPS in 1.834070 seconds, throughput 1090470.919867
+152143	[1728261530]	2000000 OPS in 1.842528 seconds, throughput 1085465.186961
+152143	[1728261530]	2000000 OPS in 1.854967 seconds, throughput 1078186.296576
+152143	[1728261532]	2000000 OPS in 1.873369 seconds, throughput 1067595.332260
+152143	[1728261532]	2000000 OPS in 1.842438 seconds, throughput 1085518.210111
+152143	[1728261532]	2000000 OPS in 1.866858 seconds, throughput 1071318.761256
+152143	[1728261532]	2000000 OPS in 1.907680 seconds, throughput 1048393.860606
+152143	[1728261533]	2000000 OPS in 1.907966 seconds, throughput 1048236.708621
+152143	[1728261534]	2000000 OPS in 1.889766 seconds, throughput 1058332.089793
+152143	[1728261534]	2000000 OPS in 1.851875 seconds, throughput 1079986.500169
+152143	[1728261534]	2000000 OPS in 1.891284 seconds, throughput 1057482.641422
+152143	[1728261535]	2000000 OPS in 1.849232 seconds, throughput 1081530.062210
+152143	[1728261536]	2000000 OPS in 1.838313 seconds, throughput 1087954.010008
+152143	[1728261536]	2000000 OPS in 1.864441 seconds, throughput 1072707.583667
+152143	[1728261536]	2000000 OPS in 1.945935 seconds, throughput 1027783.559060
+152143	[1728261537]	2000000 OPS in 1.939860 seconds, throughput 1031002.237275
+152143	[1728261537]	2000000 OPS in 1.859023 seconds, throughput 1075833.919215
+152143	[1728261538]	2000000 OPS in 1.860719 seconds, throughput 1074853.322828
+152143	[1728261538]	2000000 OPS in 1.870683 seconds, throughput 1069128.227498
+152143	[1728261539]	2000000 OPS in 1.880316 seconds, throughput 1063651.003342
+152143	[1728261539]	2000000 OPS in 1.848655 seconds, throughput 1081867.628086
+152143	[1728261540]	2000000 OPS in 1.872726 seconds, throughput 1067961.890848
+152143	[1728261540]	2000000 OPS in 1.897560 seconds, throughput 1053985.117730
+152143	[1728261541]	2000000 OPS in 1.948820 seconds, throughput 1026262.045751
+152143	[1728261541]	2000000 OPS in 1.876943 seconds, throughput 1065562.459808
+152143	[1728261542]	2000000 OPS in 1.860061 seconds, throughput 1075233.554168
+152143	[1728261542]	2000000 OPS in 1.913166 seconds, throughput 1045387.593131
+152143	[1728261543]	2000000 OPS in 1.906597 seconds, throughput 1048989.377409
+152143	[1728261543]	2000000 OPS in 1.866155 seconds, throughput 1071722.338177
+152143	[1728261543]	2000000 OPS in 1.867751 seconds, throughput 1070806.547554
+152143	[1728261544]	2000000 OPS in 1.896460 seconds, throughput 1054596.458665
+152143	[1728261545]	2000000 OPS in 1.816654 seconds, throughput 1100925.107368
+152143	[1728261545]	2000000 OPS in 1.837870 seconds, throughput 1088216.250333
+152143	[1728261545]	2000000 OPS in 1.802726 seconds, throughput 1109430.939588
+152143	[1728261545]	2000000 OPS in 1.826501 seconds, throughput 1094989.819332
+152143	[1728261547]	2000000 OPS in 1.871224 seconds, throughput 1068819.125877
+152143	[1728261547]	2000000 OPS in 1.867196 seconds, throughput 1071124.831030
+152143	[1728261547]	2000000 OPS in 1.862933 seconds, throughput 1073575.914968
+152143	[1728261547]	2000000 OPS in 1.863081 seconds, throughput 1073490.631916
+152143	[1728261548]	2000000 OPS in 1.852810 seconds, throughput 1079441.496969
+152143	[1728261549]	2000000 OPS in 1.822793 seconds, throughput 1097217.292364
+152143	[1728261549]	2000000 OPS in 1.831054 seconds, throughput 1092267.076777
+152143	[1728261549]	2000000 OPS in 1.826462 seconds, throughput 1095013.200384
+152143	[1728261550]	2000000 OPS in 1.902971 seconds, throughput 1050988.165348
+152143	[1728261550]	2000000 OPS in 1.868480 seconds, throughput 1070388.765200
+152143	[1728261551]	2000000 OPS in 1.892916 seconds, throughput 1056570.920210
+152143	[1728261551]	2000000 OPS in 1.910126 seconds, throughput 1047051.346351
+152143	[1728261552]	2000000 OPS in 1.870861 seconds, throughput 1069026.507047
+152143	[1728261552]	2000000 OPS in 1.894714 seconds, throughput 1055568.281018
+152143	[1728261553]	2000000 OPS in 1.893017 seconds, throughput 1056514.547941
+152143	[1728261553]	2000000 OPS in 1.874324 seconds, throughput 1067051.374255
+152143	[1728261554]	2000000 OPS in 1.860281 seconds, throughput 1075106.395217
+152143	[1728261554]	2000000 OPS in 1.861001 seconds, throughput 1074690.448850
+152143	[1728261555]	2000000 OPS in 1.879729 seconds, throughput 1063983.159275
+152143	[1728261555]	2000000 OPS in 1.917484 seconds, throughput 1043033.475116
+152143	[1728261556]	2000000 OPS in 1.859094 seconds, throughput 1075792.832423
+152143	[1728261556]	2000000 OPS in 1.876374 seconds, throughput 1065885.585709
+152143	[1728261556]	2000000 OPS in 1.861513 seconds, throughput 1074394.860525
+152143	[1728261557]	2000000 OPS in 1.866915 seconds, throughput 1071286.052123
+152143	[1728261558]	2000000 OPS in 1.854462 seconds, throughput 1078479.904145
+152143	[1728261558]	2000000 OPS in 1.896355 seconds, throughput 1054654.851017
+152143	[1728261558]	2000000 OPS in 1.856532 seconds, throughput 1077277.418326
+152143	[1728261559]	2000000 OPS in 1.877601 seconds, throughput 1065189.036435
+152143	[1728261560]	2000000 OPS in 1.837810 seconds, throughput 1088251.777931
+152143	[1728261560]	2000000 OPS in 1.846791 seconds, throughput 1082959.576909
+152143	[1728261560]	2000000 OPS in 1.823615 seconds, throughput 1096722.718337
+152143	[1728261560]	2000000 OPS in 1.866195 seconds, throughput 1071699.366894
+152143	[1728261561]	2000000 OPS in 1.826003 seconds, throughput 1095288.452429
+152143	[1728261562]	2000000 OPS in 1.851252 seconds, throughput 1080349.946955
+152143	[1728261562]	2000000 OPS in 1.853552 seconds, throughput 1079009.383066
+152143	[1728261562]	2000000 OPS in 1.891706 seconds, throughput 1057246.739187
+152143	[1728261563]	2000000 OPS in 1.952811 seconds, throughput 1024164.652903
+152143	[1728261564]	2000000 OPS in 1.914870 seconds, throughput 1044457.326085
+152143	[1728261564]	2000000 OPS in 1.896732 seconds, throughput 1054445.224734
+152143	[1728261564]	2000000 OPS in 1.930924 seconds, throughput 1035773.546758
+152143	[1728261565]	2000000 OPS in 1.866832 seconds, throughput 1071333.681874
+152143	[1728261565]	2000000 OPS in 1.895402 seconds, throughput 1055185.126955
+152143	[1728261566]	2000000 OPS in 1.867258 seconds, throughput 1071089.265650
+152143	[1728261566]	2000000 OPS in 1.858726 seconds, throughput 1076005.823344
+152143	[1728261567]	2000000 OPS in 1.896988 seconds, throughput 1054302.926534
+152143	[1728261567]	2000000 OPS in 1.989292 seconds, throughput 1005382.819616
+152143	[1728261568]	2000000 OPS in 1.906333 seconds, throughput 1049134.647514
+152143	[1728261568]	2000000 OPS in 1.924589 seconds, throughput 1039182.911261
+152143	[1728261569]	2000000 OPS in 1.868539 seconds, throughput 1070354.967170
+152143	[1728261569]	2000000 OPS in 1.921065 seconds, throughput 1041089.187508
+152143	[1728261570]	2000000 OPS in 1.860461 seconds, throughput 1075002.378443
+152143	[1728261570]	2000000 OPS in 1.915226 seconds, throughput 1044263.183562
+152143	[1728261571]	2000000 OPS in 1.865242 seconds, throughput 1072246.925600
+152143	[1728261571]	2000000 OPS in 1.901219 seconds, throughput 1051956.665697
+152143	[1728261571]	2000000 OPS in 1.890743 seconds, throughput 1057785.219884
+152143	[1728261572]	2000000 OPS in 1.850656 seconds, throughput 1080697.871457
+152143	[1728261573]	2000000 OPS in 1.857547 seconds, throughput 1076688.772882
+152143	[1728261573]	2000000 OPS in 1.822905 seconds, throughput 1097149.878902
+152143	[1728261573]	2000000 OPS in 1.836994 seconds, throughput 1088735.183675
+152143	[1728261574]	2000000 OPS in 1.853514 seconds, throughput 1079031.504483
+152143	[1728261575]	2000000 OPS in 1.894427 seconds, throughput 1055728.196441
+152143	[1728261575]	2000000 OPS in 1.937265 seconds, throughput 1032383.282618
+152143	[1728261575]	2000000 OPS in 1.850637 seconds, throughput 1080708.966696
+152143	[1728261576]	2000000 OPS in 1.932807 seconds, throughput 1034764.464326
+152143	[1728261577]	2000000 OPS in 1.848202 seconds, throughput 1082132.797173
+152143	[1728261577]	2000000 OPS in 1.945144 seconds, throughput 1028201.511045
+152143	[1728261577]	2000000 OPS in 1.861490 seconds, throughput 1074408.135418
+152143	[1728261578]	2000000 OPS in 1.886049 seconds, throughput 1060417.836440
+152143	[1728261578]	2000000 OPS in 1.858365 seconds, throughput 1076214.844769
+152143	[1728261579]	2000000 OPS in 1.864196 seconds, throughput 1072848.563134
+152143	[1728261579]	2000000 OPS in 1.852000 seconds, throughput 1079913.606911
+152143	[1728261579]	2000000 OPS in 1.892696 seconds, throughput 1056693.732115
+152143	[1728261580]	2000000 OPS in 1.886819 seconds, throughput 1059985.086010
+152143	[1728261581]	2000000 OPS in 1.873872 seconds, throughput 1067308.759616
+152143	[1728261581]	2000000 OPS in 1.924124 seconds, throughput 1039434.048949
+152143	[1728261581]	2000000 OPS in 1.913544 seconds, throughput 1045181.088075
+152143	[1728261582]	2000000 OPS in 1.822531 seconds, throughput 1097375.024074
+152143	[1728261583]	2000000 OPS in 1.887391 seconds, throughput 1059663.842839
+152143	[1728261583]	2000000 OPS in 1.893153 seconds, throughput 1056438.650231
+152143	[1728261583]	2000000 OPS in 1.870460 seconds, throughput 1069255.691113
+152143	[1728261584]	2000000 OPS in 1.849996 seconds, throughput 1081083.418559
+152143	[1728261584]	2000000 OPS in 1.842852 seconds, throughput 1085274.346502
+152143	[1728261584]	2000000 OPS in 1.882562 seconds, throughput 1062382.009198
+152143	[1728261585]	2000000 OPS in 1.841380 seconds, throughput 1086141.915303
+152143	[1728261586]	2000000 OPS in 1.869620 seconds, throughput 1069736.096105
+152143	[1728261586]	2000000 OPS in 1.846179 seconds, throughput 1083318.573118
+152143	[1728261586]	2000000 OPS in 1.835765 seconds, throughput 1089464.065390
+152143	[1728261587]	2000000 OPS in 1.905011 seconds, throughput 1049862.704205
+152143	[1728261588]	2000000 OPS in 1.844822 seconds, throughput 1084115.432275
+152143	[1728261588]	2000000 OPS in 1.841413 seconds, throughput 1086122.450531
+152143	[1728261588]	2000000 OPS in 1.879214 seconds, throughput 1064274.744654
+152143	[1728261589]	2000000 OPS in 1.804968 seconds, throughput 1108052.885148
+152143	[1728261590]	2000000 OPS in 1.861374 seconds, throughput 1074475.092056
+152143	[1728261590]	2000000 OPS in 1.810166 seconds, throughput 1104871.044976
+152143	[1728261590]	2000000 OPS in 1.816651 seconds, throughput 1100926.925425
+152143	[1728261591]	2000000 OPS in 1.848455 seconds, throughput 1081984.684507
+152143	[1728261591]	2000000 OPS in 1.875290 seconds, throughput 1066501.714402
+152143	[1728261592]	2000000 OPS in 1.904762 seconds, throughput 1049999.947500
+152143	[1728261592]	2000000 OPS in 1.882862 seconds, throughput 1062212.737843
+152143	[1728261592]	2000000 OPS in 1.873524 seconds, throughput 1067507.008184
+152143	[1728261593]	2000000 OPS in 1.812870 seconds, throughput 1103223.066188
+152143	[1728261594]	2000000 OPS in 1.805530 seconds, throughput 1107707.986021
+152143	[1728261594]	2000000 OPS in 1.897141 seconds, throughput 1054217.899460
+152143	[1728261594]	2000000 OPS in 1.835558 seconds, throughput 1089586.926700
+152143	[1728261595]	2000000 OPS in 1.845566 seconds, throughput 1083678.394595
+152143	[1728261596]	2000000 OPS in 1.928737 seconds, throughput 1036948.013130
+152143	[1728261596]	2000000 OPS in 1.936312 seconds, throughput 1032891.393536
+152143	[1728261596]	2000000 OPS in 1.880140 seconds, throughput 1063750.571766
+152143	[1728261597]	2000000 OPS in 1.922324 seconds, throughput 1040407.340282
+152143	[1728261597]	2000000 OPS in 1.910474 seconds, throughput 1046860.622024
+152143	[1728261598]	2000000 OPS in 1.912008 seconds, throughput 1046020.727947
+152143	[1728261598]	2000000 OPS in 1.908708 seconds, throughput 1047829.212221
+152143	[1728261599]	2000000 OPS in 1.872450 seconds, throughput 1068119.308927
+152143	[1728261599]	2000000 OPS in 1.879555 seconds, throughput 1064081.657626
+152143	[1728261600]	2000000 OPS in 1.897260 seconds, throughput 1054151.776773
+152143	[1728261600]	2000000 OPS in 1.854991 seconds, throughput 1078172.346928
+152143	[1728261601]	2000000 OPS in 1.853727 seconds, throughput 1078907.519824
+152143	[1728261601]	2000000 OPS in 1.881560 seconds, throughput 1062947.766747
+152143	[1728261601]	2000000 OPS in 1.944711 seconds, throughput 1028430.445449
+152143	[1728261602]	2000000 OPS in 1.928200 seconds, throughput 1037236.801162
+152143	[1728261603]	2000000 OPS in 1.890072 seconds, throughput 1058160.747315
+152143	[1728261603]	2000000 OPS in 1.864699 seconds, throughput 1072559.163704
+152143	[1728261603]	2000000 OPS in 1.861340 seconds, throughput 1074494.718858
+152143	[1728261604]	2000000 OPS in 1.912699 seconds, throughput 1045642.832458
+152143	[1728261605]	2000000 OPS in 1.897171 seconds, throughput 1054201.229093
+152143	[1728261605]	2000000 OPS in 1.838106 seconds, throughput 1088076.530951
+152143	[1728261605]	2000000 OPS in 1.885877 seconds, throughput 1060514.551055
+152143	[1728261606]	2000000 OPS in 1.896720 seconds, throughput 1054451.895905
+152143	[1728261606]	2000000 OPS in 1.853100 seconds, throughput 1079272.570288
+152143	[1728261607]	2000000 OPS in 1.874897 seconds, throughput 1066725.265441
+152143	[1728261607]	2000000 OPS in 1.895967 seconds, throughput 1054870.680766
+152143	[1728261608]	2000000 OPS in 1.919018 seconds, throughput 1042199.708393
+152143	[1728261608]	2000000 OPS in 1.860291 seconds, throughput 1075100.615979
+152143	[1728261609]	2000000 OPS in 1.865336 seconds, throughput 1072192.891790
+152143	[1728261609]	2000000 OPS in 1.856876 seconds, throughput 1077077.844724
+152143	[1728261610]	2000000 OPS in 1.892566 seconds, throughput 1056766.316208
+152143	[1728261610]	2000000 OPS in 1.842939 seconds, throughput 1085223.113733
+152143	[1728261611]	2000000 OPS in 1.863747 seconds, throughput 1073107.025793
+152143	[1728261611]	2000000 OPS in 1.881294 seconds, throughput 1063098.059102
+152143	[1728261611]	2000000 OPS in 1.868905 seconds, throughput 1070145.352493
+152143	[1728261612]	2000000 OPS in 1.839595 seconds, throughput 1087195.822994
+152143	[1728261612]	2000000 OPS in 1.834054 seconds, throughput 1090480.432964
+152143	[1728261613]	2000000 OPS in 1.888958 seconds, throughput 1058784.790345
+152143	[1728261613]	2000000 OPS in 1.901429 seconds, throughput 1051840.484183
+152143	[1728261614]	2000000 OPS in 1.915233 seconds, throughput 1044259.366876
+152143	[1728261614]	2000000 OPS in 1.862920 seconds, throughput 1073583.406695
+152143	[1728261615]	2000000 OPS in 1.859661 seconds, throughput 1075464.829343
+152143	[1728261615]	2000000 OPS in 1.863841 seconds, throughput 1073052.905264
+152143	[1728261616]	2000000 OPS in 1.837543 seconds, throughput 1088409.903877
+152143	[1728261616]	2000000 OPS in 1.826012 seconds, throughput 1095283.054000
+152143	[1728261616]	2000000 OPS in 1.850210 seconds, throughput 1080958.377698
+152143	[1728261617]	2000000 OPS in 1.859088 seconds, throughput 1075796.304425
+152143	[1728261618]	2000000 OPS in 1.840762 seconds, throughput 1086506.566302
+152143	[1728261618]	2000000 OPS in 1.903120 seconds, throughput 1050905.880869
+152143	[1728261618]	2000000 OPS in 1.848039 seconds, throughput 1082228.243019
+152143	[1728261619]	2000000 OPS in 1.879398 seconds, throughput 1064170.548229
+152143	[1728261619]	2000000 OPS in 1.865501 seconds, throughput 1072098.058377
+152143	[1728261620]	2000000 OPS in 1.867015 seconds, throughput 1071228.672507
+152143	[1728261620]	2000000 OPS in 1.870675 seconds, throughput 1069132.799658
+152143	[1728261621]	2000000 OPS in 1.897308 seconds, throughput 1054125.107784
+152143	[1728261621]	2000000 OPS in 1.914805 seconds, throughput 1044492.781249
+152143	[1728261622]	2000000 OPS in 1.887230 seconds, throughput 1059754.242991
+152143	[1728261622]	2000000 OPS in 1.886346 seconds, throughput 1060250.876562
+152143	[1728261623]	2000000 OPS in 1.858970 seconds, throughput 1075864.591682
+152143	[1728261623]	2000000 OPS in 1.840254 seconds, throughput 1086806.495190
+152143	[1728261624]	2000000 OPS in 1.862935 seconds, throughput 1073574.762404
+152143	[1728261624]	2000000 OPS in 1.882108 seconds, throughput 1062638.275806
+152143	[1728261624]	2000000 OPS in 1.823386 seconds, throughput 1096860.456316
+152143	[1728261625]	2000000 OPS in 1.847345 seconds, throughput 1082634.808333
+152143	[1728261625]	2000000 OPS in 1.873350 seconds, throughput 1067606.160088
+152143	[1728261626]	2000000 OPS in 1.851583 seconds, throughput 1080156.817167
+152143	[1728261626]	2000000 OPS in 1.861984 seconds, throughput 1074123.085913
+152143	[1728261627]	2000000 OPS in 1.846176 seconds, throughput 1083320.333489
+152143	[1728261627]	2000000 OPS in 1.909617 seconds, throughput 1047330.433275
+152143	[1728261628]	2000000 OPS in 1.959654 seconds, throughput 1020588.328348
+152143	[1728261628]	2000000 OPS in 1.976202 seconds, throughput 1012042.291223
+152143	[1728261629]	2000000 OPS in 1.854518 seconds, throughput 1078447.337799
+152143	[1728261629]	2000000 OPS in 1.868178 seconds, throughput 1070561.798715
+152143	[1728261630]	2000000 OPS in 1.931970 seconds, throughput 1035212.762103
+152143	[1728261630]	2000000 OPS in 1.902848 seconds, throughput 1051056.101170
+152143	[1728261631]	2000000 OPS in 1.908515 seconds, throughput 1047935.174730
+152143	[1728261631]	2000000 OPS in 1.844682 seconds, throughput 1084197.709958
+152143	[1728261632]	2000000 OPS in 1.886704 seconds, throughput 1060049.695130
+152143	[1728261632]	2000000 OPS in 1.885899 seconds, throughput 1060502.179597
+152143	[1728261632]	2000000 OPS in 1.850213 seconds, throughput 1080956.624994
+152143	[1728261633]	2000000 OPS in 1.881563 seconds, throughput 1062946.071963
+152143	[1728261633]	2000000 OPS in 1.872935 seconds, throughput 1067842.717446
+152143	[1728261634]	2000000 OPS in 1.858314 seconds, throughput 1076244.380659
+152143	[1728261634]	2000000 OPS in 1.850568 seconds, throughput 1080749.261848
+152143	[1728261635]	2000000 OPS in 1.909333 seconds, throughput 1047486.216391
+152143	[1728261635]	2000000 OPS in 1.839443 seconds, throughput 1087285.662018
+152143	[1728261636]	2000000 OPS in 1.878925 seconds, throughput 1064438.442194
+152143	[1728261636]	2000000 OPS in 1.831468 seconds, throughput 1092020.171797
+152143	[1728261637]	2000000 OPS in 1.884252 seconds, throughput 1061429.150666
+152143	[1728261637]	2000000 OPS in 1.876306 seconds, throughput 1065924.214920
+152143	[1728261638]	2000000 OPS in 1.902799 seconds, throughput 1051083.167481
+152143	[1728261638]	2000000 OPS in 1.864096 seconds, throughput 1072906.116423
+152143	[1728261639]	2000000 OPS in 1.867466 seconds, throughput 1070969.966789
+152143	[1728261639]	2000000 OPS in 1.925271 seconds, throughput 1038814.795424
+152143	[1728261640]	2000000 OPS in 1.946289 seconds, throughput 1027596.621057
+152143	[1728261640]	2000000 OPS in 1.904564 seconds, throughput 1050109.106336
+152143	[1728261641]	2000000 OPS in 1.891819 seconds, throughput 1057183.588916
+152143	[1728261641]	2000000 OPS in 1.935806 seconds, throughput 1033161.380841
+152143	[1728261642]	2000000 OPS in 1.910068 seconds, throughput 1047083.140496
+152143	[1728261642]	2000000 OPS in 1.884605 seconds, throughput 1061230.337392
+152143	[1728261642]	2000000 OPS in 1.890248 seconds, throughput 1058062.222523
+152143	[1728261643]	2000000 OPS in 1.926298 seconds, throughput 1038260.954432
+152143	[1728261643]	2000000 OPS in 1.849805 seconds, throughput 1081195.044883
+152143	[1728261644]	2000000 OPS in 1.850560 seconds, throughput 1080753.933944
+152143	[1728261644]	2000000 OPS in 1.820687 seconds, throughput 1098486.450444
+152143	[1728261645]	2000000 OPS in 1.830066 seconds, throughput 1092856.760357
+152143	[1728261645]	2000000 OPS in 1.852258 seconds, throughput 1079763.186338
+152143	[1728261645]	2000000 OPS in 1.855786 seconds, throughput 1077710.468772
+152143	[1728261646]	2000000 OPS in 1.841989 seconds, throughput 1085782.814121
+152143	[1728261647]	2000000 OPS in 1.850821 seconds, throughput 1080601.527646
+152143	[1728261647]	2000000 OPS in 1.820619 seconds, throughput 1098527.478841
+152143	[1728261647]	2000000 OPS in 1.807692 seconds, throughput 1106383.167044
+152143	[1728261648]	2000000 OPS in 1.855405 seconds, throughput 1077931.772308
+152143	[1728261649]	2000000 OPS in 1.899694 seconds, throughput 1052801.135341
+152143	[1728261649]	2000000 OPS in 1.859520 seconds, throughput 1075546.377560
+152143	[1728261649]	2000000 OPS in 1.859884 seconds, throughput 1075335.881162
+152143	[1728261650]	2000000 OPS in 1.849969 seconds, throughput 1081099.196797
+152143	[1728261650]	2000000 OPS in 1.852581 seconds, throughput 1079574.928168
+152143	[1728261651]	2000000 OPS in 1.876896 seconds, throughput 1065589.142925
+152143	[1728261651]	2000000 OPS in 1.867029 seconds, throughput 1071220.639851
+152143	[1728261652]	2000000 OPS in 1.872573 seconds, throughput 1068049.149486
+152143	[1728261652]	2000000 OPS in 1.921431 seconds, throughput 1040890.877684
+152143	[1728261653]	2000000 OPS in 1.881536 seconds, throughput 1062961.325215
+152143	[1728261653]	2000000 OPS in 1.846661 seconds, throughput 1083035.814370
+152143	[1728261654]	2000000 OPS in 1.848671 seconds, throughput 1081858.264667
+152143	[1728261654]	2000000 OPS in 1.876322 seconds, throughput 1065915.125442
+152143	[1728261655]	2000000 OPS in 1.858773 seconds, throughput 1075978.616001
+152143	[1728261655]	2000000 OPS in 1.869433 seconds, throughput 1069843.102160
+152143	[1728261655]	2000000 OPS in 1.849914 seconds, throughput 1081131.339078
+152143	[1728261656]	2000000 OPS in 1.857816 seconds, throughput 1076532.875161
+152143	[1728261656]	2000000 OPS in 1.887516 seconds, throughput 1059593.667021
+152143	[1728261657]	2000000 OPS in 1.878127 seconds, throughput 1064890.712928
+152143	[1728261657]	2000000 OPS in 1.871788 seconds, throughput 1068497.073387
+152143	[1728261658]	2000000 OPS in 1.847528 seconds, throughput 1082527.571977
+152143	[1728261658]	2000000 OPS in 1.837895 seconds, throughput 1088201.447852
+152143	[1728261658]	2000000 OPS in 1.818194 seconds, throughput 1099992.630049
+152143	[1728261659]	2000000 OPS in 1.831007 seconds, throughput 1092295.114109
+152143	[1728261660]	2000000 OPS in 1.860700 seconds, throughput 1074864.298382
+152143	[1728261660]	2000000 OPS in 1.918442 seconds, throughput 1042512.622222
+152143	[1728261660]	2000000 OPS in 1.906692 seconds, throughput 1048937.112024
+152143	[1728261661]	2000000 OPS in 1.861691 seconds, throughput 1074292.135483
+152143	[1728261662]	2000000 OPS in 1.964357 seconds, throughput 1018144.868779
+152143	[1728261662]	2000000 OPS in 1.906843 seconds, throughput 1048854.048288
+152143	[1728261662]	2000000 OPS in 1.930218 seconds, throughput 1036152.393149
+152143	[1728261663]	2000000 OPS in 1.988996 seconds, throughput 1005532.439482
+152143	[1728261664]	2000000 OPS in 1.894632 seconds, throughput 1055613.966195
+152143	[1728261664]	2000000 OPS in 1.898200 seconds, throughput 1053629.754504
+152143	[1728261664]	2000000 OPS in 1.915123 seconds, throughput 1044319.346590
+152143	[1728261665]	2000000 OPS in 1.899008 seconds, throughput 1053181.450526
+152143	[1728261666]	2000000 OPS in 1.931632 seconds, throughput 1035393.905257
+152143	[1728261666]	2000000 OPS in 1.885497 seconds, throughput 1060728.285433
+152143	[1728261666]	2000000 OPS in 1.879634 seconds, throughput 1064036.934850
+152143	[1728261667]	2000000 OPS in 1.825490 seconds, throughput 1095596.250870
+152143	[1728261667]	2000000 OPS in 1.898121 seconds, throughput 1053673.606688
+152143	[1728261668]	2000000 OPS in 1.916122 seconds, throughput 1043774.874460
+152143	[1728261668]	2000000 OPS in 1.861181 seconds, throughput 1074586.512542
+152143	[1728261668]	2000000 OPS in 1.847060 seconds, throughput 1082801.858088
+152143	[1728261669]	2000000 OPS in 1.857465 seconds, throughput 1076736.304587
+152143	[1728261670]	2000000 OPS in 1.882840 seconds, throughput 1062225.149243
+152143	[1728261670]	2000000 OPS in 1.859219 seconds, throughput 1075720.504147
+152143	[1728261670]	2000000 OPS in 1.910996 seconds, throughput 1046574.665776
+152143	[1728261671]	2000000 OPS in 1.878378 seconds, throughput 1064748.415921
+152143	[1728261672]	2000000 OPS in 1.867151 seconds, throughput 1071150.646091
+152143	[1728261672]	2000000 OPS in 1.875013 seconds, throughput 1066659.271162
+152143	[1728261672]	2000000 OPS in 1.885389 seconds, throughput 1060789.046717
+152143	[1728261673]	2000000 OPS in 1.845830 seconds, throughput 1083523.401397
+152143	[1728261673]	2000000 OPS in 1.821645 seconds, throughput 1097908.758293
+152143	[1728261673]	2000000 OPS in 1.825040 seconds, throughput 1095866.391969
+152143	[1728261674]	2000000 OPS in 1.845815 seconds, throughput 1083532.206640
+152143	[1728261675]	2000000 OPS in 1.891807 seconds, throughput 1057190.294782
+152143	[1728261675]	2000000 OPS in 1.896578 seconds, throughput 1054530.844500
+152143	[1728261675]	2000000 OPS in 1.878844 seconds, throughput 1064484.331855
+152143	[1728261676]	2000000 OPS in 1.891111 seconds, throughput 1057579.380586
+152143	[1728261677]	2000000 OPS in 1.891234 seconds, throughput 1057510.598900
+152143	[1728261677]	2000000 OPS in 1.903788 seconds, throughput 1050537.139639
+152143	[1728261677]	2000000 OPS in 1.888869 seconds, throughput 1058834.678318
+152143	[1728261678]	2000000 OPS in 1.879688 seconds, throughput 1064006.367014
+152143	[1728261679]	2000000 OPS in 1.873563 seconds, throughput 1067484.787007
+152143	[1728261679]	2000000 OPS in 1.858973 seconds, throughput 1075862.855458
+152143	[1728261679]	2000000 OPS in 1.884586 seconds, throughput 1061241.036493
+152143	[1728261680]	2000000 OPS in 1.849788 seconds, throughput 1081204.981328
+152143	[1728261681]	2000000 OPS in 1.830480 seconds, throughput 1092609.588742
+152143	[1728261681]	2000000 OPS in 1.841065 seconds, throughput 1086327.750514
+152143	[1728261681]	2000000 OPS in 1.800674 seconds, throughput 1110695.217457
+152143	[1728261682]	2000000 OPS in 1.808995 seconds, throughput 1105586.250929
+152143	[1728261682]	2000000 OPS in 1.839456 seconds, throughput 1087277.977837
+152143	[1728261683]	2000000 OPS in 1.816452 seconds, throughput 1101047.536626
+152143	[1728261683]	2000000 OPS in 1.835000 seconds, throughput 1089918.256131
+152143	[1728261683]	2000000 OPS in 1.870432 seconds, throughput 1069271.697661
+152143	[1728261684]	2000000 OPS in 1.875643 seconds, throughput 1066300.996512
+152143	[1728261685]	2000000 OPS in 1.923669 seconds, throughput 1039679.903351
+152143	[1728261685]	2000000 OPS in 1.932245 seconds, throughput 1035065.429073
+152143	[1728261685]	2000000 OPS in 1.921149 seconds, throughput 1041043.667097
+152143	[1728261686]	2000000 OPS in 1.892651 seconds, throughput 1056718.856250
+152143	[1728261687]	2000000 OPS in 1.864817 seconds, throughput 1072491.295393
+152143	[1728261687]	2000000 OPS in 1.909826 seconds, throughput 1047215.819661
+152143	[1728261687]	2000000 OPS in 1.876541 seconds, throughput 1065790.728793
+152143	[1728261688]	2000000 OPS in 1.895003 seconds, throughput 1055407.300147
+152143	[1728261688]	2000000 OPS in 1.870318 seconds, throughput 1069336.872125
+152143	[1728261688]	2000000 OPS in 1.874472 seconds, throughput 1066967.124609
+152143	[1728261689]	2000000 OPS in 1.825357 seconds, throughput 1095676.078707
+152143	[1728261690]	2000000 OPS in 1.844273 seconds, throughput 1084438.149883
+152143	[1728261690]	2000000 OPS in 1.853191 seconds, throughput 1079219.573158
+152143	[1728261690]	2000000 OPS in 1.869441 seconds, throughput 1069838.523922
+152143	[1728261691]	2000000 OPS in 1.836746 seconds, throughput 1088882.186214
+152143	[1728261692]	2000000 OPS in 1.890349 seconds, throughput 1058005.691013
+152143	[1728261692]	2000000 OPS in 1.870836 seconds, throughput 1069040.792459
+152143	[1728261692]	2000000 OPS in 1.876295 seconds, throughput 1065930.464026
+152143	[1728261693]	2000000 OPS in 1.888383 seconds, throughput 1059107.183236
+152143	[1728261694]	2000000 OPS in 1.957165 seconds, throughput 1021886.248732
+152143	[1728261694]	2000000 OPS in 1.889960 seconds, throughput 1058223.454465
+152143	[1728261694]	2000000 OPS in 1.938483 seconds, throughput 1031734.608970
+152143	[1728261695]	2000000 OPS in 1.909762 seconds, throughput 1047250.913988
+152143	[1728261696]	2000000 OPS in 1.942729 seconds, throughput 1029479.664946
+152143	[1728261696]	2000000 OPS in 1.939755 seconds, throughput 1031058.045990
+152143	[1728261696]	2000000 OPS in 1.943336 seconds, throughput 1029158.107502
+152143	[1728261697]	2000000 OPS in 1.892183 seconds, throughput 1056980.218087
+152143	[1728261698]	2000000 OPS in 1.855672 seconds, throughput 1077776.676051
+152143	[1728261698]	2000000 OPS in 1.793979 seconds, throughput 1114840.251753
+152143	[1728261698]	2000000 OPS in 1.795642 seconds, throughput 1113807.763463
+152143	[1728261698]	2000000 OPS in 1.818094 seconds, throughput 1100053.132566
+152143	[1728261700]	2000000 OPS in 2.015434 seconds, throughput 992342.096045
+152143	[1728261700]	2000000 OPS in 1.882975 seconds, throughput 1062148.992950
+152143	[1728261700]	2000000 OPS in 1.960708 seconds, throughput 1020039.699945
+152143	[1728261700]	2000000 OPS in 1.877326 seconds, throughput 1065345.070595
+152143	[1728261701]	2000000 OPS in 1.853343 seconds, throughput 1079131.062086
+152143	[1728261701]	2000000 OPS in 1.810822 seconds, throughput 1104470.787300
+152143	[1728261702]	2000000 OPS in 1.859800 seconds, throughput 1075384.449941
+152143	[1728261702]	2000000 OPS in 1.851385 seconds, throughput 1080272.336656
+152143	[1728261703]	2000000 OPS in 1.877827 seconds, throughput 1065060.838938
+152143	[1728261703]	2000000 OPS in 1.864172 seconds, throughput 1072862.375360
+152143	[1728261704]	2000000 OPS in 1.875971 seconds, throughput 1066114.561472
+152143	[1728261704]	2000000 OPS in 1.858740 seconds, throughput 1075997.718885
+152143	[1728261705]	2000000 OPS in 1.865308 seconds, throughput 1072208.986398
+152143	[1728261705]	2000000 OPS in 1.900756 seconds, throughput 1052212.908969
+152143	[1728261705]	2000000 OPS in 1.828352 seconds, throughput 1093881.265752
+152143	[1728261706]	2000000 OPS in 1.932989 seconds, throughput 1034667.036388
+152143	[1728261707]	2000000 OPS in 1.900106 seconds, throughput 1052572.856462
+152143	[1728261707]	2000000 OPS in 1.916015 seconds, throughput 1043833.164145
+152143	[1728261707]	2000000 OPS in 1.836413 seconds, throughput 1089079.635137
+152143	[1728261708]	2000000 OPS in 1.855832 seconds, throughput 1077683.755857
+152143	[1728261709]	2000000 OPS in 1.920113 seconds, throughput 1041605.363851
+152143	[1728261709]	2000000 OPS in 1.873601 seconds, throughput 1067463.136495
+152143	[1728261709]	2000000 OPS in 1.841135 seconds, throughput 1086286.448305
+152143	[1728261710]	2000000 OPS in 1.848609 seconds, throughput 1081894.548820
+152143	[1728261711]	2000000 OPS in 1.891585 seconds, throughput 1057314.368638
+152143	[1728261711]	2000000 OPS in 1.879070 seconds, throughput 1064356.303916
+152143	[1728261711]	2000000 OPS in 1.897856 seconds, throughput 1053820.732448
+152143	[1728261712]	2000000 OPS in 1.891320 seconds, throughput 1057462.512954
+152143	[1728261713]	2000000 OPS in 1.847329 seconds, throughput 1082644.185199
+152143	[1728261713]	2000000 OPS in 1.846609 seconds, throughput 1083066.312360
+152143	[1728261713]	2000000 OPS in 1.846491 seconds, throughput 1083135.525708
+152143	[1728261713]	2000000 OPS in 1.825798 seconds, throughput 1095411.431056
+152143	[1728261715]	2000000 OPS in 1.873071 seconds, throughput 1067765.183487
+152143	[1728261715]	2000000 OPS in 1.875132 seconds, throughput 1066591.578620
+152143	[1728261715]	2000000 OPS in 1.900415 seconds, throughput 1052401.712258
+152143	[1728261715]	2000000 OPS in 1.877250 seconds, throughput 1065388.200826
+152143	[1728261716]	2000000 OPS in 1.840500 seconds, throughput 1086661.233360
+152143	[1728261716]	2000000 OPS in 1.868508 seconds, throughput 1070372.725190
+152143	[1728261717]	2000000 OPS in 1.873492 seconds, throughput 1067525.241634
+152143	[1728261717]	2000000 OPS in 1.883962 seconds, throughput 1061592.537429
+152143	[1728261718]	2000000 OPS in 1.917505 seconds, throughput 1043022.052094
+152143	[1728261718]	2000000 OPS in 1.930092 seconds, throughput 1036220.035107
+152143	[1728261718]	2000000 OPS in 1.881806 seconds, throughput 1062808.812386
+152143	[1728261719]	2000000 OPS in 1.915000 seconds, throughput 1044386.422977
+152143	[1728261720]	2000000 OPS in 1.837948 seconds, throughput 1088170.067924
+152143	[1728261720]	2000000 OPS in 1.855313 seconds, throughput 1077985.224057
+152143	[1728261720]	2000000 OPS in 1.868457 seconds, throughput 1070401.941281
+152143	[1728261721]	2000000 OPS in 1.808950 seconds, throughput 1105613.753835
+152143	[1728261722]	2000000 OPS in 1.820294 seconds, throughput 1098723.612779
+152143	[1728261722]	2000000 OPS in 1.808105 seconds, throughput 1106130.451495
+152143	[1728261722]	2000000 OPS in 1.812348 seconds, throughput 1103540.821079
+152143	[1728261723]	2000000 OPS in 1.812396 seconds, throughput 1103511.594596
+152143	[1728261724]	2000000 OPS in 1.866434 seconds, throughput 1071562.133995
+152143	[1728261724]	2000000 OPS in 1.843847 seconds, throughput 1084688.697056
+152143	[1728261724]	2000000 OPS in 1.822820 seconds, throughput 1097201.040147
+152143	[1728261724]	2000000 OPS in 1.841503 seconds, throughput 1086069.368337
+152143	[1728261726]	2000000 OPS in 1.851729 seconds, throughput 1080071.651953
+152143	[1728261726]	2000000 OPS in 1.888317 seconds, throughput 1059144.200894
+152143	[1728261726]	2000000 OPS in 1.882321 seconds, throughput 1062518.029603
+152143	[1728261726]	2000000 OPS in 1.880576 seconds, throughput 1063503.947727
+152143	[1728261728]	2000000 OPS in 1.912040 seconds, throughput 1046003.221690
+152143	[1728261728]	2000000 OPS in 1.902792 seconds, throughput 1051087.034211
+152143	[1728261728]	2000000 OPS in 1.899511 seconds, throughput 1052902.562817
+152143	[1728261728]	2000000 OPS in 1.931580 seconds, throughput 1035421.779062
+152143	[1728261730]	2000000 OPS in 1.945306 seconds, throughput 1028115.885110
+152143	[1728261730]	2000000 OPS in 1.907534 seconds, throughput 1048474.103214
+152143	[1728261730]	2000000 OPS in 1.905583 seconds, throughput 1049547.566283
+152143	[1728261730]	2000000 OPS in 1.882044 seconds, throughput 1062674.411438
+152143	[1728261731]	2000000 OPS in 1.942993 seconds, throughput 1029339.786608
+152143	[1728261732]	2000000 OPS in 1.906727 seconds, throughput 1048917.857669
+152143	[1728261732]	2000000 OPS in 1.905349 seconds, throughput 1049676.463472
+152143	[1728261732]	2000000 OPS in 1.946669 seconds, throughput 1027396.028806
+152143	[1728261733]	2000000 OPS in 1.872251 seconds, throughput 1068232.838439
+152143	[1728261733]	2000000 OPS in 1.879564 seconds, throughput 1064076.562437
+152143	[1728261733]	2000000 OPS in 1.869724 seconds, throughput 1069676.593979
+152143	[1728261734]	2000000 OPS in 1.877364 seconds, throughput 1065323.506789
+152143	[1728261735]	2000000 OPS in 1.874662 seconds, throughput 1066858.985780
+152143	[1728261735]	2000000 OPS in 1.839711 seconds, throughput 1087127.271620
+152143	[1728261735]	2000000 OPS in 1.869832 seconds, throughput 1069614.810315
+152143	[1728261736]	2000000 OPS in 1.830030 seconds, throughput 1092878.258826
+152143	[1728261737]	2000000 OPS in 1.895654 seconds, throughput 1055044.855232
+152143	[1728261737]	2000000 OPS in 1.922558 seconds, throughput 1040280.709347
+152143	[1728261737]	2000000 OPS in 1.907157 seconds, throughput 1048681.361839
+152143	[1728261738]	2000000 OPS in 1.936252 seconds, throughput 1032923.400466
+152143	[1728261739]	2000000 OPS in 1.839219 seconds, throughput 1087418.083437
+152143	[1728261739]	2000000 OPS in 1.897948 seconds, throughput 1053769.650170
+152143	[1728261739]	2000000 OPS in 1.895937 seconds, throughput 1054887.372312
+152143	[1728261740]	2000000 OPS in 1.876635 seconds, throughput 1065737.343703
+152143	[1728261741]	2000000 OPS in 1.877386 seconds, throughput 1065311.022880
+152143	[1728261741]	2000000 OPS in 1.854278 seconds, throughput 1078586.921702
+152143	[1728261741]	2000000 OPS in 1.946967 seconds, throughput 1027238.777031
+152143	[1728261742]	2000000 OPS in 1.875262 seconds, throughput 1066517.638602
+152143	[1728261743]	2000000 OPS in 1.829070 seconds, throughput 1093451.863515
+152143	[1728261743]	2000000 OPS in 1.839377 seconds, throughput 1087324.675692
+152143	[1728261743]	2000000 OPS in 1.860472 seconds, throughput 1074996.022515
+152143	[1728261743]	2000000 OPS in 1.815093 seconds, throughput 1101871.915103
+152143	[1728261745]	2000000 OPS in 1.833057 seconds, throughput 1091073.545449
+152143	[1728261745]	2000000 OPS in 1.883927 seconds, throughput 1061612.259923
+152143	[1728261745]	2000000 OPS in 1.865111 seconds, throughput 1072322.237122
+152143	[1728261745]	2000000 OPS in 1.869344 seconds, throughput 1069894.037695
+152143	[1728261746]	2000000 OPS in 1.868074 seconds, throughput 1070621.399366
+152143	[1728261746]	2000000 OPS in 1.835798 seconds, throughput 1089444.481365
+152143	[1728261747]	2000000 OPS in 1.877620 seconds, throughput 1065178.257581
+152143	[1728261747]	2000000 OPS in 1.835806 seconds, throughput 1089439.733828
+152143	[1728261748]	2000000 OPS in 1.874248 seconds, throughput 1067094.642758
+152143	[1728261748]	2000000 OPS in 1.886017 seconds, throughput 1060435.828521
+152143	[1728261748]	2000000 OPS in 1.889789 seconds, throughput 1058319.209182
+152143	[1728261749]	2000000 OPS in 1.929788 seconds, throughput 1036383.271116
+152143	[1728261750]	2000000 OPS in 1.876703 seconds, throughput 1065698.728035
+152143	[1728261750]	2000000 OPS in 1.862805 seconds, throughput 1073649.684213
+152143	[1728261750]	2000000 OPS in 1.857455 seconds, throughput 1076742.101424
+152143	[1728261751]	2000000 OPS in 1.878219 seconds, throughput 1064838.551841
+152143	[1728261752]	2000000 OPS in 1.838879 seconds, throughput 1087619.141879
+152143	[1728261752]	2000000 OPS in 1.841616 seconds, throughput 1086002.728039
+152143	[1728261752]	2000000 OPS in 1.832533 seconds, throughput 1091385.530302
+152143	[1728261753]	2000000 OPS in 1.828595 seconds, throughput 1093735.901061
+152143	[1728261754]	2000000 OPS in 1.832283 seconds, throughput 1091534.440913
+152143	[1728261754]	2000000 OPS in 1.853893 seconds, throughput 1078810.913035
+152143	[1728261754]	2000000 OPS in 1.860368 seconds, throughput 1075056.117929
+152143	[1728261755]	2000000 OPS in 1.867517 seconds, throughput 1070940.719683
+152143	[1728261756]	2000000 OPS in 1.855314 seconds, throughput 1077984.643031
+152143	[1728261756]	2000000 OPS in 1.862716 seconds, throughput 1073700.982866
+152143	[1728261756]	2000000 OPS in 1.863419 seconds, throughput 1073295.914660
+152143	[1728261756]	2000000 OPS in 1.836774 seconds, throughput 1088865.587165
+152143	[1728261758]	2000000 OPS in 1.906905 seconds, throughput 1048819.946458
+152143	[1728261758]	2000000 OPS in 1.879416 seconds, throughput 1064160.356196
+152143	[1728261758]	2000000 OPS in 1.909209 seconds, throughput 1047554.248906
+152143	[1728261758]	2000000 OPS in 1.915482 seconds, throughput 1044123.620060
+152143	[1728261760]	2000000 OPS in 1.895874 seconds, throughput 1054922.426279
+152143	[1728261760]	2000000 OPS in 1.906052 seconds, throughput 1049289.316346
+152143	[1728261760]	2000000 OPS in 1.957677 seconds, throughput 1021618.990262
+152143	[1728261760]	2000000 OPS in 1.913993 seconds, throughput 1044935.901019
+152143	[1728261761]	2000000 OPS in 1.892033 seconds, throughput 1057064.015268
+152143	[1728261761]	2000000 OPS in 1.909976 seconds, throughput 1047133.576548
+152143	[1728261762]	2000000 OPS in 1.891522 seconds, throughput 1057349.584092
+152143	[1728261762]	2000000 OPS in 1.861284 seconds, throughput 1074527.046920
+152143	[1728261763]	2000000 OPS in 1.868709 seconds, throughput 1070257.594949
+152143	[1728261763]	2000000 OPS in 1.857303 seconds, throughput 1076830.221025
+152143	[1728261763]	2000000 OPS in 1.879619 seconds, throughput 1064045.426227
+152143	[1728261764]	2000000 OPS in 1.917258 seconds, throughput 1043156.424435
+152143	[1728261765]	2000000 OPS in 1.857828 seconds, throughput 1076525.921668
+152143	[1728261765]	2000000 OPS in 1.874219 seconds, throughput 1067111.154033
+152143	[1728261765]	2000000 OPS in 1.899588 seconds, throughput 1052859.883301
+152143	[1728261766]	2000000 OPS in 1.896414 seconds, throughput 1054622.039280
+152143	[1728261767]	2000000 OPS in 1.888451 seconds, throughput 1059069.046536
+152143	[1728261767]	2000000 OPS in 1.915000 seconds, throughput 1044386.422977
+152143	[1728261767]	2000000 OPS in 1.877619 seconds, throughput 1065178.824884
+152143	[1728261768]	2000000 OPS in 1.905373 seconds, throughput 1049663.241790
+152143	[1728261769]	2000000 OPS in 1.882690 seconds, throughput 1062309.780155
+152143	[1728261769]	2000000 OPS in 1.858370 seconds, throughput 1076211.949181
+152143	[1728261769]	2000000 OPS in 1.899407 seconds, throughput 1052960.213372
+152143	[1728261770]	2000000 OPS in 1.885488 seconds, throughput 1060733.348608
+152143	[1728261771]	2000000 OPS in 1.817743 seconds, throughput 1100265.549090
+152143	[1728261771]	2000000 OPS in 1.848998 seconds, throughput 1081666.935281
+152143	[1728261771]	2000000 OPS in 1.869724 seconds, throughput 1069676.593979
+152143	[1728261772]	2000000 OPS in 1.842964 seconds, throughput 1085208.392568
+152143	[1728261773]	2000000 OPS in 1.841419 seconds, throughput 1086118.911557
+152143	[1728261773]	2000000 OPS in 1.861768 seconds, throughput 1074247.704333
+152143	[1728261773]	2000000 OPS in 1.880217 seconds, throughput 1063707.008287
+152143	[1728261773]	2000000 OPS in 1.862295 seconds, throughput 1073943.709240
+152143	[1728261774]	2000000 OPS in 1.790406 seconds, throughput 1117065.067923
+152143	[1728261775]	2000000 OPS in 1.807615 seconds, throughput 1106430.296274
+152143	[1728261775]	2000000 OPS in 1.840313 seconds, throughput 1086771.652431
+152143	[1728261775]	2000000 OPS in 1.823559 seconds, throughput 1096756.397791
+152143	[1728261776]	2000000 OPS in 1.859415 seconds, throughput 1075607.112990
+152143	[1728261776]	2000000 OPS in 1.941206 seconds, throughput 1030287.357447
+152143	[1728261777]	2000000 OPS in 1.924080 seconds, throughput 1039457.818802
+152143	[1728261777]	2000000 OPS in 1.898474 seconds, throughput 1053477.687869
+152143	[1728261778]	2000000 OPS in 1.833201 seconds, throughput 1090987.840395
+152143	[1728261778]	2000000 OPS in 1.911896 seconds, throughput 1046082.004460
+152143	[1728261779]	2000000 OPS in 1.883665 seconds, throughput 1061759.920156
+152143	[1728261779]	2000000 OPS in 1.868283 seconds, throughput 1070501.631712
+152143	[1728261780]	2000000 OPS in 1.908403 seconds, throughput 1047996.675755
+152143	[1728261780]	2000000 OPS in 1.908131 seconds, throughput 1048146.065443
+152143	[1728261780]	2000000 OPS in 1.907380 seconds, throughput 1048558.755990
+152143	[1728261781]	2000000 OPS in 1.874898 seconds, throughput 1066724.696490
+152143	[1728261782]	2000000 OPS in 1.909396 seconds, throughput 1047451.654869
+152143	[1728261782]	2000000 OPS in 1.840072 seconds, throughput 1086913.990322
+152143	[1728261782]	2000000 OPS in 1.859461 seconds, throughput 1075580.504243
+152143	[1728261783]	2000000 OPS in 1.875973 seconds, throughput 1066113.424873
+152143	[1728261784]	2000000 OPS in 1.890052 seconds, throughput 1058171.944476
+152143	[1728261784]	2000000 OPS in 1.899322 seconds, throughput 1053007.336302
+152143	[1728261784]	2000000 OPS in 1.878222 seconds, throughput 1064836.851022
+152143	[1728261785]	2000000 OPS in 1.869441 seconds, throughput 1069838.523922
+152143	[1728261786]	2000000 OPS in 1.848629 seconds, throughput 1081882.843989
+152143	[1728261786]	2000000 OPS in 1.874065 seconds, throughput 1067198.843156
+152143	[1728261786]	2000000 OPS in 1.913358 seconds, throughput 1045282.691477
+152143	[1728261786]	2000000 OPS in 1.834478 seconds, throughput 1090228.391946
+152143	[1728261787]	2000000 OPS in 1.838416 seconds, throughput 1087893.055761
+152143	[1728261788]	2000000 OPS in 1.865328 seconds, throughput 1072197.490200
+152143	[1728261788]	2000000 OPS in 1.827054 seconds, throughput 1094658.395428
+152143	[1728261788]	2000000 OPS in 1.815055 seconds, throughput 1101894.983899
+152143	[1728261789]	2000000 OPS in 1.860058 seconds, throughput 1075235.288362
+152143	[1728261790]	2000000 OPS in 1.821972 seconds, throughput 1097711.710169
+152143	[1728261790]	2000000 OPS in 1.902008 seconds, throughput 1051520.288032
+152143	[1728261790]	2000000 OPS in 1.942409 seconds, throughput 1029649.265422
+152143	[1728261791]	2000000 OPS in 1.875499 seconds, throughput 1066382.866640
+152143	[1728261791]	2000000 OPS in 1.899408 seconds, throughput 1052959.659010
+152143	[1728261792]	2000000 OPS in 1.926707 seconds, throughput 1038040.553130
+152143	[1728261792]	2000000 OPS in 1.895711 seconds, throughput 1055013.132276
+152143	[1728261793]	2000000 OPS in 1.827394 seconds, throughput 1094454.726239
+152143	[1728261793]	2000000 OPS in 1.874117 seconds, throughput 1067169.232230
+152143	[1728261794]	2000000 OPS in 1.857106 seconds, throughput 1076944.450128
+152143	[1728261794]	2000000 OPS in 1.834500 seconds, throughput 1090215.317525
+152143	[1728261795]	2000000 OPS in 1.924073 seconds, throughput 1039461.600469
+152143	[1728261795]	2000000 OPS in 1.857537 seconds, throughput 1076694.569206
+152143	[1728261796]	2000000 OPS in 1.904352 seconds, throughput 1050226.008637
+152143	[1728261796]	2000000 OPS in 1.924942 seconds, throughput 1038992.343665
+152143	[1728261797]	2000000 OPS in 1.875463 seconds, throughput 1066403.336136
+152143	[1728261797]	2000000 OPS in 1.889423 seconds, throughput 1058524.216123
+152143	[1728261797]	2000000 OPS in 1.890517 seconds, throughput 1057911.671781
+152143	[1728261798]	2000000 OPS in 1.879199 seconds, throughput 1064283.239827
+152143	[1728261799]	2000000 OPS in 1.862360 seconds, throughput 1073906.226508
+152143	[1728261799]	2000000 OPS in 1.839079 seconds, throughput 1087500.863204
+152143	[1728261799]	2000000 OPS in 1.832702 seconds, throughput 1091284.889742
+152143	[1728261800]	2000000 OPS in 1.806414 seconds, throughput 1107165.909919
+152143	[1728261801]	2000000 OPS in 1.873640 seconds, throughput 1067440.917145
+152143	[1728261801]	2000000 OPS in 1.875549 seconds, throughput 1066354.438087
+152143	[1728261801]	2000000 OPS in 1.870186 seconds, throughput 1069412.347221
+152143	[1728261801]	2000000 OPS in 1.834024 seconds, throughput 1090498.270470
+152143	[1728261802]	2000000 OPS in 1.889151 seconds, throughput 1058676.622462
+152143	[1728261803]	2000000 OPS in 1.922293 seconds, throughput 1040424.118488
+152143	[1728261803]	2000000 OPS in 1.925418 seconds, throughput 1038735.484970
+152143	[1728261803]	2000000 OPS in 1.915016 seconds, throughput 1044377.697105
+152143	[1728261804]	2000000 OPS in 1.848329 seconds, throughput 1082058.443059
+152143	[1728261805]	2000000 OPS in 1.885174 seconds, throughput 1060910.027403
+152143	[1728261805]	2000000 OPS in 1.879607 seconds, throughput 1064052.219427
+152143	[1728261805]	2000000 OPS in 1.891919 seconds, throughput 1057127.710013
+152143	[1728261806]	2000000 OPS in 1.874584 seconds, throughput 1066903.376963
+152143	[1728261806]	2000000 OPS in 1.883460 seconds, throughput 1061875.484481
+152143	[1728261807]	2000000 OPS in 1.887564 seconds, throughput 1059566.721976
+152143	[1728261807]	2000000 OPS in 1.871368 seconds, throughput 1068736.881255
+152143	[1728261808]	2000000 OPS in 1.891240 seconds, throughput 1057507.243925
+152143	[1728261808]	2000000 OPS in 1.870525 seconds, throughput 1069218.534903
+152143	[1728261809]	2000000 OPS in 1.838050 seconds, throughput 1088109.681456
+152143	[1728261809]	2000000 OPS in 1.837586 seconds, throughput 1088384.434797
+152143	[1728261810]	2000000 OPS in 1.851454 seconds, throughput 1080232.077059
+152143	[1728261810]	2000000 OPS in 1.860759 seconds, throughput 1074830.217132
+152143	[1728261811]	2000000 OPS in 1.848882 seconds, throughput 1081734.799733
+152143	[1728261811]	2000000 OPS in 1.871576 seconds, throughput 1068618.105810
+152143	[1728261812]	2000000 OPS in 1.894305 seconds, throughput 1055796.189104
+152143	[1728261812]	2000000 OPS in 1.893432 seconds, throughput 1056282.982436
+152143	[1728261812]	2000000 OPS in 1.944260 seconds, throughput 1028669.005174
+152143	[1728261813]	2000000 OPS in 1.937421 seconds, throughput 1032300.155722
+152143	[1728261814]	2000000 OPS in 1.885150 seconds, throughput 1060923.533936
+152143	[1728261814]	2000000 OPS in 1.866463 seconds, throughput 1071545.484695
+152143	[1728261814]	2000000 OPS in 1.891441 seconds, throughput 1057394.864550
+152143	[1728261814]	2000000 OPS in 1.823711 seconds, throughput 1096664.986941
+152143	[1728261816]	2000000 OPS in 1.875408 seconds, throughput 1066434.610495
+152143	[1728261816]	2000000 OPS in 1.883923 seconds, throughput 1061614.513969
+152143	[1728261816]	2000000 OPS in 1.847454 seconds, throughput 1082570.932754
+152143	[1728261816]	2000000 OPS in 1.910467 seconds, throughput 1046864.457748
+152143	[1728261817]	2000000 OPS in 1.865473 seconds, throughput 1072114.150138
+152143	[1728261818]	2000000 OPS in 1.889514 seconds, throughput 1058473.237033
+152143	[1728261818]	2000000 OPS in 1.893279 seconds, throughput 1056368.342965
+152143	[1728261818]	2000000 OPS in 1.849430 seconds, throughput 1081414.273587
+152143	[1728261819]	2000000 OPS in 1.887781 seconds, throughput 1059444.925020
+152143	[1728261820]	2000000 OPS in 1.855413 seconds, throughput 1077927.124581
+152143	[1728261820]	2000000 OPS in 1.877756 seconds, throughput 1065101.110048
+152143	[1728261820]	2000000 OPS in 1.886563 seconds, throughput 1060128.922278
+152143	[1728261821]	2000000 OPS in 1.905646 seconds, throughput 1049512.868602
+152143	[1728261822]	2000000 OPS in 1.922513 seconds, throughput 1040305.059056
+152143	[1728261822]	2000000 OPS in 1.871099 seconds, throughput 1068890.529042
+152143	[1728261822]	2000000 OPS in 1.894618 seconds, throughput 1055621.766499
+152143	[1728261823]	2000000 OPS in 1.909628 seconds, throughput 1047324.400354
+152143	[1728261823]	2000000 OPS in 1.920268 seconds, throughput 1041521.287654
+152143	[1728261824]	2000000 OPS in 1.865301 seconds, throughput 1072213.010125
+152143	[1728261824]	2000000 OPS in 1.910268 seconds, throughput 1046973.513664
+152143	[1728261825]	2000000 OPS in 1.825221 seconds, throughput 1095757.719202
+152143	[1728261825]	2000000 OPS in 1.884976 seconds, throughput 1061021.466586
+152143	[1728261826]	2000000 OPS in 1.869301 seconds, throughput 1069918.648736
+152143	[1728261826]	2000000 OPS in 1.886200 seconds, throughput 1060332.944545
+152143	[1728261827]	2000000 OPS in 1.832112 seconds, throughput 1091636.319177
+152143	[1728261827]	2000000 OPS in 1.851759 seconds, throughput 1080054.153915
+152143	[1728261827]	2000000 OPS in 1.862554 seconds, throughput 1073794.370526
+152143	[1728261828]	2000000 OPS in 1.867888 seconds, throughput 1070728.009388
+152143	[1728261829]	2000000 OPS in 1.866094 seconds, throughput 1071757.371279
+152143	[1728261829]	2000000 OPS in 1.913595 seconds, throughput 1045153.232528
+152143	[1728261829]	2000000 OPS in 1.912505 seconds, throughput 1045748.900003
+152143	[1728261830]	2000000 OPS in 1.903512 seconds, throughput 1050689.462425
+152143	[1728261831]	2000000 OPS in 1.815312 seconds, throughput 1101738.984814
+152143	[1728261831]	2000000 OPS in 1.824692 seconds, throughput 1096075.392450
+152143	[1728261831]	2000000 OPS in 1.808602 seconds, throughput 1105826.489189
+152143	[1728261831]	2000000 OPS in 1.830267 seconds, throughput 1092736.742781
+152143	[1728261832]	2000000 OPS in 1.869017 seconds, throughput 1070081.224515
+152143	[1728261833]	2000000 OPS in 1.858154 seconds, throughput 1076337.052795
+152143	[1728261833]	2000000 OPS in 1.906340 seconds, throughput 1049130.795136
+152143	[1728261833]	2000000 OPS in 1.859284 seconds, throughput 1075682.897287
+152143	[1728261834]	2000000 OPS in 1.879881 seconds, throughput 1063897.129659
+152143	[1728261835]	2000000 OPS in 1.912659 seconds, throughput 1045664.700294
+152143	[1728261835]	2000000 OPS in 1.923981 seconds, throughput 1039511.304945
+152143	[1728261835]	2000000 OPS in 1.891185 seconds, throughput 1057537.998662
+152143	[1728261836]	2000000 OPS in 1.855841 seconds, throughput 1077678.529572
+152143	[1728261837]	2000000 OPS in 1.848996 seconds, throughput 1081668.105285
+152143	[1728261837]	2000000 OPS in 1.881109 seconds, throughput 1063202.610800
+152143	[1728261837]	2000000 OPS in 1.877825 seconds, throughput 1065061.973294
+152143	[1728261838]	2000000 OPS in 1.891731 seconds, throughput 1057232.767238
+152143	[1728261838]	2000000 OPS in 1.878057 seconds, throughput 1064930.404136
+152143	[1728261839]	2000000 OPS in 1.870466 seconds, throughput 1069252.261201
+152143	[1728261839]	2000000 OPS in 1.937786 seconds, throughput 1032105.712395
+152143	[1728261840]	2000000 OPS in 1.903285 seconds, throughput 1050814.775507
+152143	[1728261840]	2000000 OPS in 1.889898 seconds, throughput 1058258.170547
+152143	[1728261841]	2000000 OPS in 1.913286 seconds, throughput 1045322.027130
+152143	[1728261841]	2000000 OPS in 1.837476 seconds, throughput 1088449.590634
+152143	[1728261842]	2000000 OPS in 1.860099 seconds, throughput 1075211.588200
+152143	[1728261842]	2000000 OPS in 1.890048 seconds, throughput 1058174.183936
+152143	[1728261843]	2000000 OPS in 1.853489 seconds, throughput 1079046.058541
+152143	[1728261843]	2000000 OPS in 1.877751 seconds, throughput 1065103.946157
+152143	[1728261844]	2000000 OPS in 1.893766 seconds, throughput 1056096.687764
+152143	[1728261844]	2000000 OPS in 1.856957 seconds, throughput 1077030.862858
+152143	[1728261844]	2000000 OPS in 1.872961 seconds, throughput 1067827.893907
+152143	[1728261845]	2000000 OPS in 1.914473 seconds, throughput 1044673.912873
+152143	[1728261846]	2000000 OPS in 1.875977 seconds, throughput 1066111.151683
+152143	[1728261846]	2000000 OPS in 1.896227 seconds, throughput 1054726.042821
+152143	[1728261846]	2000000 OPS in 1.859423 seconds, throughput 1075602.485287
+152143	[1728261846]	2000000 OPS in 1.844630 seconds, throughput 1084228.273421
+152143	[1728261847]	2000000 OPS in 1.839950 seconds, throughput 1086986.059404
+152143	[1728261848]	2000000 OPS in 1.875304 seconds, throughput 1066493.752480
+152143	[1728261848]	2000000 OPS in 1.856433 seconds, throughput 1077334.867458
+152143	[1728261848]	2000000 OPS in 1.882818 seconds, throughput 1062237.560933
+152143	[1728261849]	2000000 OPS in 1.848422 seconds, throughput 1082004.001251
+152143	[1728261850]	2000000 OPS in 1.902717 seconds, throughput 1051128.465242
+152143	[1728261850]	2000000 OPS in 1.921967 seconds, throughput 1040600.593038
+152143	[1728261850]	2000000 OPS in 1.847621 seconds, throughput 1082473.082954
+152143	[1728261851]	2000000 OPS in 1.840790 seconds, throughput 1086490.039603
+152143	[1728261852]	2000000 OPS in 1.840174 seconds, throughput 1086853.743179
+152143	[1728261852]	2000000 OPS in 1.821891 seconds, throughput 1097760.513664
+152143	[1728261852]	2000000 OPS in 1.840987 seconds, throughput 1086373.776675
+152143	[1728261853]	2000000 OPS in 1.868493 seconds, throughput 1070381.317993
+152143	[1728261853]	2000000 OPS in 1.879632 seconds, throughput 1064038.067026
+152143	[1728261854]	2000000 OPS in 1.904475 seconds, throughput 1050158.180076
+152143	[1728261854]	2000000 OPS in 1.911695 seconds, throughput 1046191.991923
+152143	[1728261855]	2000000 OPS in 1.881593 seconds, throughput 1062929.124417
+152143	[1728261855]	2000000 OPS in 1.856126 seconds, throughput 1077513.056764
+152143	[1728261856]	2000000 OPS in 1.853573 seconds, throughput 1078997.158461
+152143	[1728261856]	2000000 OPS in 1.835256 seconds, throughput 1089766.223350
+152143	[1728261857]	2000000 OPS in 1.887618 seconds, throughput 1059536.410439
+152143	[1728261857]	2000000 OPS in 1.868997 seconds, throughput 1070092.675376
+152143	[1728261857]	2000000 OPS in 1.883558 seconds, throughput 1061820.235958
+152143	[1728261858]	2000000 OPS in 1.903785 seconds, throughput 1050538.795085
+152143	[1728261859]	2000000 OPS in 1.848322 seconds, throughput 1082062.541051
+152143	[1728261859]	2000000 OPS in 1.835850 seconds, throughput 1089413.623117
+152143	[1728261859]	2000000 OPS in 1.864682 seconds, throughput 1072568.942050
+152143	[1728261860]	2000000 OPS in 1.839332 seconds, throughput 1087351.277529
+152143	[1728261860]	2000000 OPS in 1.932475 seconds, throughput 1034942.237286
+152143	[1728261861]	2000000 OPS in 1.937823 seconds, throughput 1032086.005791
+152143	[1728261861]	2000000 OPS in 1.863536 seconds, throughput 1073228.528990
+152143	[1728261861]	2000000 OPS in 1.850419 seconds, throughput 1080836.286268
+152143	[1728261862]	2000000 OPS in 1.918084 seconds, throughput 1042707.201562
+152143	[1728261863]	2000000 OPS in 1.888467 seconds, throughput 1059060.073594
+152143	[1728261863]	2000000 OPS in 1.952913 seconds, throughput 1024111.161122
+152143	[1728261863]	2000000 OPS in 1.955951 seconds, throughput 1022520.502814
+152143	[1728261864]	2000000 OPS in 1.869493 seconds, throughput 1069808.766334
+152143	[1728261865]	2000000 OPS in 1.921437 seconds, throughput 1040887.627333
+152143	[1728261865]	2000000 OPS in 1.849710 seconds, throughput 1081250.574414
+152143	[1728261865]	2000000 OPS in 1.873387 seconds, throughput 1067585.074520
+152143	[1728261866]	2000000 OPS in 1.839013 seconds, throughput 1087539.892323
+152143	[1728261867]	2000000 OPS in 1.863767 seconds, throughput 1073095.510329
+152143	[1728261867]	2000000 OPS in 1.845840 seconds, throughput 1083517.531314
+152143	[1728261867]	2000000 OPS in 1.900983 seconds, throughput 1052087.262222
+152143	[1728261868]	2000000 OPS in 1.823103 seconds, throughput 1097030.721797
+152143	[1728261868]	2000000 OPS in 1.857193 seconds, throughput 1076894.000785
+152143	[1728261869]	2000000 OPS in 1.905906 seconds, throughput 1049369.696092
+152143	[1728261869]	2000000 OPS in 1.874232 seconds, throughput 1067103.752364
+152143	[1728261870]	2000000 OPS in 1.916207 seconds, throughput 1043728.574209
+152143	[1728261870]	2000000 OPS in 1.885287 seconds, throughput 1060846.438765
+152143	[1728261871]	2000000 OPS in 1.851491 seconds, throughput 1080210.489816
+152143	[1728261871]	2000000 OPS in 1.920833 seconds, throughput 1041214.931230
+152143	[1728261872]	2000000 OPS in 1.874790 seconds, throughput 1066786.146715
+152143	[1728261872]	2000000 OPS in 1.906681 seconds, throughput 1048943.163539
+152143	[1728261873]	2000000 OPS in 1.890154 seconds, throughput 1058114.841436
+152143	[1728261873]	2000000 OPS in 1.883440 seconds, throughput 1061886.760396
+152143	[1728261874]	2000000 OPS in 1.864689 seconds, throughput 1072564.915651
+152143	[1728261874]	2000000 OPS in 1.894347 seconds, throughput 1055772.780805
+152143	[1728261874]	2000000 OPS in 1.869607 seconds, throughput 1069743.534336
+152143	[1728261875]	2000000 OPS in 1.859479 seconds, throughput 1075570.092483
+152143	[1728261875]	2000000 OPS in 1.837731 seconds, throughput 1088298.559474
+152143	[1728261876]	2000000 OPS in 1.841906 seconds, throughput 1085831.741685
+152143	[1728261876]	2000000 OPS in 1.856233 seconds, throughput 1077450.945005
+152143	[1728261877]	2000000 OPS in 1.881287 seconds, throughput 1063102.014738
+152143	[1728261877]	2000000 OPS in 1.893495 seconds, throughput 1056247.837993
+152143	[1728261878]	2000000 OPS in 1.871403 seconds, throughput 1068716.893154
+152143	[1728261878]	2000000 OPS in 1.853191 seconds, throughput 1079219.573158
+152143	[1728261878]	2000000 OPS in 1.853128 seconds, throughput 1079256.262924
+152143	[1728261879]	2000000 OPS in 1.807180 seconds, throughput 1106696.621255
+152143	[1728261880]	2000000 OPS in 1.848194 seconds, throughput 1082137.481238
+152143	[1728261880]	2000000 OPS in 1.890711 seconds, throughput 1057803.122741
+152143	[1728261880]	2000000 OPS in 1.852815 seconds, throughput 1079438.583992
+152143	[1728261881]	2000000 OPS in 1.876398 seconds, throughput 1065871.952539
+152143	[1728261882]	2000000 OPS in 1.891055 seconds, throughput 1057610.698790
+152143	[1728261882]	2000000 OPS in 1.914226 seconds, throughput 1044808.711197
+152143	[1728261882]	2000000 OPS in 1.831969 seconds, throughput 1091721.530222
+152143	[1728261883]	2000000 OPS in 1.888765 seconds, throughput 1058892.980334
+152143	[1728261884]	2000000 OPS in 1.896679 seconds, throughput 1054474.689708
+152143	[1728261884]	2000000 OPS in 1.854445 seconds, throughput 1078489.790746
+152143	[1728261884]	2000000 OPS in 1.891437 seconds, throughput 1057397.100723
+152143	[1728261885]	2000000 OPS in 1.889545 seconds, throughput 1058455.871652
+152143	[1728261885]	2000000 OPS in 1.867096 seconds, throughput 1071182.199523
+152143	[1728261886]	2000000 OPS in 1.884594 seconds, throughput 1061236.531582
+152143	[1728261886]	2000000 OPS in 1.892198 seconds, throughput 1056971.839099
+152143	[1728261887]	2000000 OPS in 1.850764 seconds, throughput 1080634.808112
+152143	[1728261887]	2000000 OPS in 1.868727 seconds, throughput 1070247.285987
+152143	[1728261887]	2000000 OPS in 1.850654 seconds, throughput 1080699.039367
+152143	[1728261888]	2000000 OPS in 1.841686 seconds, throughput 1085961.450540
+152143	[1728261888]	2000000 OPS in 1.824421 seconds, throughput 1096238.203792
+152143	[1728261889]	2000000 OPS in 1.867847 seconds, throughput 1070751.512303
+152143	[1728261889]	2000000 OPS in 1.847502 seconds, throughput 1082542.806449
+152143	[1728261890]	2000000 OPS in 1.837436 seconds, throughput 1088473.285600
+152143	[1728261890]	2000000 OPS in 1.864500 seconds, throughput 1072673.639045
+152143	[1728261891]	2000000 OPS in 1.912057 seconds, throughput 1045993.921729
+152143	[1728261891]	2000000 OPS in 1.864714 seconds, throughput 1072550.535900
+152143	[1728261891]	2000000 OPS in 1.859035 seconds, throughput 1075826.974748
+152143	[1728261892]	2000000 OPS in 1.914984 seconds, throughput 1044395.148993
+152143	[1728261893]	2000000 OPS in 1.958303 seconds, throughput 1021292.414912
+152143	[1728261893]	2000000 OPS in 1.948844 seconds, throughput 1026249.407341
+152143	[1728261893]	2000000 OPS in 1.927402 seconds, throughput 1037666.247104
+152143	[1728261894]	2000000 OPS in 1.898474 seconds, throughput 1053477.687869
+152143	[1728261895]	2000000 OPS in 1.860358 seconds, throughput 1075061.896689
+152143	[1728261895]	2000000 OPS in 1.933016 seconds, throughput 1034652.584355
+152143	[1728261895]	2000000 OPS in 1.912670 seconds, throughput 1045658.686548
+152143	[1728261896]	2000000 OPS in 1.938718 seconds, throughput 1031609.548165
+152143	[1728261897]	2000000 OPS in 1.964025 seconds, throughput 1018316.976617
+152143	[1728261897]	2000000 OPS in 1.922007 seconds, throughput 1040578.936497
+152143	[1728261897]	2000000 OPS in 1.865801 seconds, throughput 1071925.676961
+152143	[1728261898]	2000000 OPS in 1.875375 seconds, throughput 1066453.375991
+152143	[1728261899]	2000000 OPS in 1.885082 seconds, throughput 1060961.804314
+152143	[1728261899]	2000000 OPS in 1.903738 seconds, throughput 1050564.731071
+152143	[1728261899]	2000000 OPS in 1.909336 seconds, throughput 1047484.570552
+152143	[1728261900]	2000000 OPS in 1.846463 seconds, throughput 1083151.950513
+152143	[1728261901]	2000000 OPS in 1.874239 seconds, throughput 1067099.766892
+152143	[1728261901]	2000000 OPS in 1.840122 seconds, throughput 1086884.456574
+152143	[1728261901]	2000000 OPS in 1.868146 seconds, throughput 1070580.136670
+152143	[1728261902]	2000000 OPS in 1.827720 seconds, throughput 1094259.514586
+152143	[1728261902]	2000000 OPS in 1.884777 seconds, throughput 1061133.492185
+152143	[1728261903]	2000000 OPS in 1.905938 seconds, throughput 1049352.077560
+152143	[1728261903]	2000000 OPS in 1.896428 seconds, throughput 1054614.253744
+152143	[1728261904]	2000000 OPS in 1.915042 seconds, throughput 1044363.517876
+152143	[1728261904]	2000000 OPS in 1.874706 seconds, throughput 1066833.946229
+152143	[1728261904]	2000000 OPS in 1.847728 seconds, throughput 1082410.398067
+152143	[1728261905]	2000000 OPS in 1.849787 seconds, throughput 1081205.565830
+152143	[1728261905]	2000000 OPS in 1.830121 seconds, throughput 1092823.917107
+152143	[1728261906]	2000000 OPS in 1.878326 seconds, throughput 1064777.892655
+152143	[1728261906]	2000000 OPS in 1.883997 seconds, throughput 1061572.815668
+152143	[1728261906]	2000000 OPS in 1.875976 seconds, throughput 1066111.719979
+152143	[1728261907]	2000000 OPS in 1.862826 seconds, throughput 1073637.580751
+152143	[1728261908]	2000000 OPS in 1.845027 seconds, throughput 1083994.976767
+152143	[1728261908]	2000000 OPS in 1.823872 seconds, throughput 1096568.180223
+152143	[1728261908]	2000000 OPS in 1.824097 seconds, throughput 1096432.919960
+152143	[1728261909]	2000000 OPS in 1.822955 seconds, throughput 1097119.786281
+152143	[1728261910]	2000000 OPS in 1.846488 seconds, throughput 1083137.285485
+152143	[1728261910]	2000000 OPS in 1.838549 seconds, throughput 1087814.357953
+152143	[1728261910]	2000000 OPS in 1.863596 seconds, throughput 1073193.975518
+152143	[1728261911]	2000000 OPS in 1.852883 seconds, throughput 1079398.969066
+152143	[1728261912]	2000000 OPS in 1.872762 seconds, throughput 1067941.361476
+152143	[1728261912]	2000000 OPS in 1.804592 seconds, throughput 1108283.756107
+152143	[1728261912]	2000000 OPS in 1.855023 seconds, throughput 1078153.747959
+152143	[1728261913]	2000000 OPS in 1.832097 seconds, throughput 1091645.256774
+152143	[1728261914]	2000000 OPS in 1.890582 seconds, throughput 1057875.299775
+152143	[1728261914]	2000000 OPS in 1.904146 seconds, throughput 1050339.627318
+152143	[1728261914]	2000000 OPS in 1.869734 seconds, throughput 1069670.872969
+152143	[1728261915]	2000000 OPS in 1.879229 seconds, throughput 1064266.249616
+152143	[1728261916]	2000000 OPS in 1.852313 seconds, throughput 1079731.125355
+152143	[1728261916]	2000000 OPS in 1.860907 seconds, throughput 1074744.734691
+152143	[1728261916]	2000000 OPS in 1.879680 seconds, throughput 1064010.895472
+152143	[1728261916]	2000000 OPS in 1.842435 seconds, throughput 1085519.977638
+152143	[1728261917]	2000000 OPS in 1.896082 seconds, throughput 1054806.701398
+152143	[1728261918]	2000000 OPS in 1.913667 seconds, throughput 1045113.909578
+152143	[1728261918]	2000000 OPS in 1.861060 seconds, throughput 1074656.378623
+152143	[1728261918]	2000000 OPS in 1.853397 seconds, throughput 1079099.620858
+152143	[1728261919]	2000000 OPS in 1.868784 seconds, throughput 1070214.642249
+152143	[1728261919]	2000000 OPS in 1.891169 seconds, throughput 1057546.945831
+152143	[1728261920]	2000000 OPS in 1.892449 seconds, throughput 1056831.650417
+152143	[1728261920]	2000000 OPS in 1.947502 seconds, throughput 1026956.583357
+152143	[1728261921]	2000000 OPS in 1.956707 seconds, throughput 1022125.438300
+152143	[1728261921]	2000000 OPS in 1.915082 seconds, throughput 1044341.704428
+152143	[1728261921]	2000000 OPS in 1.910830 seconds, throughput 1046665.585112
+152143	[1728261922]	2000000 OPS in 1.947239 seconds, throughput 1027095.287225
+152143	[1728261923]	2000000 OPS in 1.954918 seconds, throughput 1023060.813804
+152143	[1728261923]	2000000 OPS in 1.896001 seconds, throughput 1054851.764319
+152143	[1728261923]	2000000 OPS in 1.897485 seconds, throughput 1054026.777550
+152143	[1728261924]	2000000 OPS in 1.860624 seconds, throughput 1074908.202839
+152143	[1728261925]	2000000 OPS in 1.856878 seconds, throughput 1077076.684629
+152143	[1728261925]	2000000 OPS in 1.875588 seconds, throughput 1066332.264868
+152143	[1728261925]	2000000 OPS in 1.843219 seconds, throughput 1085058.259491
+152143	[1728261926]	2000000 OPS in 1.839416 seconds, throughput 1087301.621819
+152143	[1728261927]	2000000 OPS in 1.900412 seconds, throughput 1052403.373584
+152143	[1728261927]	2000000 OPS in 1.865908 seconds, throughput 1071864.207667
+152143	[1728261927]	2000000 OPS in 1.901891 seconds, throughput 1051584.975164
+152143	[1728261928]	2000000 OPS in 1.815402 seconds, throughput 1101684.365226
+152143	[1728261929]	2000000 OPS in 1.881001 seconds, throughput 1063263.655894
+152143	[1728261929]	2000000 OPS in 1.886620 seconds, throughput 1060096.892856
+152143	[1728261929]	2000000 OPS in 1.832652 seconds, throughput 1091314.663122
+152143	[1728261930]	2000000 OPS in 1.925142 seconds, throughput 1038884.404371
+152143	[1728261931]	2000000 OPS in 1.875957 seconds, throughput 1066122.517734
+152143	[1728261931]	2000000 OPS in 1.900241 seconds, throughput 1052498.077875
+152143	[1728261931]	2000000 OPS in 1.897740 seconds, throughput 1053885.147597
+152143	[1728261932]	2000000 OPS in 1.883689 seconds, throughput 1061746.392318
+152143	[1728261933]	2000000 OPS in 1.885401 seconds, throughput 1060782.295119
+152143	[1728261933]	2000000 OPS in 1.908810 seconds, throughput 1047773.219964
+152143	[1728261933]	2000000 OPS in 1.871081 seconds, throughput 1068900.811884
+152143	[1728261933]	2000000 OPS in 1.883099 seconds, throughput 1062079.051606
+152143	[1728261934]	2000000 OPS in 1.860840 seconds, throughput 1074783.431139
+152143	[1728261935]	2000000 OPS in 1.841917 seconds, throughput 1085825.257056
+152143	[1728261935]	2000000 OPS in 1.846083 seconds, throughput 1083374.907845
+152143	[1728261935]	2000000 OPS in 1.834341 seconds, throughput 1090309.816986
+152143	[1728261936]	2000000 OPS in 1.866631 seconds, throughput 1071449.043759
+152143	[1728261936]	2000000 OPS in 1.821724 seconds, throughput 1097861.146914
+152143	[1728261936]	2000000 OPS in 1.878140 seconds, throughput 1064883.342030
+152143	[1728261937]	2000000 OPS in 1.856974 seconds, throughput 1077021.002987
+152143	[1728261938]	2000000 OPS in 1.862660 seconds, throughput 1073733.263183
+152143	[1728261938]	2000000 OPS in 1.860759 seconds, throughput 1074830.217132
+152143	[1728261938]	2000000 OPS in 1.913505 seconds, throughput 1045202.390378
+152143	[1728261939]	2000000 OPS in 1.860616 seconds, throughput 1074912.824570
+152143	[1728261940]	2000000 OPS in 1.907728 seconds, throughput 1048367.482157
+152143	[1728261940]	2000000 OPS in 1.874827 seconds, throughput 1066765.093526
+152143	[1728261940]	2000000 OPS in 1.884696 seconds, throughput 1061179.097319
+152143	[1728261941]	2000000 OPS in 1.895138 seconds, throughput 1055332.118294
+152143	[1728261942]	2000000 OPS in 1.874756 seconds, throughput 1066805.493622
+152143	[1728261942]	2000000 OPS in 1.943516 seconds, throughput 1029062.791353
+152143	[1728261942]	2000000 OPS in 1.932036 seconds, throughput 1035177.398351
+152143	[1728261943]	2000000 OPS in 1.855615 seconds, throughput 1077809.782740
+152143	[1728261944]	2000000 OPS in 1.826842 seconds, throughput 1094785.427530
+152143	[1728261944]	2000000 OPS in 1.870105 seconds, throughput 1069458.666759
+152143	[1728261944]	2000000 OPS in 1.879202 seconds, throughput 1064281.540782
+152143	[1728261945]	2000000 OPS in 1.828959 seconds, throughput 1093518.225395
+152143	[1728261946]	2000000 OPS in 1.867590 seconds, throughput 1070898.858957
+152143	[1728261946]	2000000 OPS in 1.864000 seconds, throughput 1072961.373391
+152143	[1728261946]	2000000 OPS in 1.857397 seconds, throughput 1076775.724307
+152143	[1728261946]	2000000 OPS in 1.855660 seconds, throughput 1077783.645711
+152143	[1728261948]	2000000 OPS in 1.872843 seconds, throughput 1067895.173274
+152143	[1728261948]	2000000 OPS in 1.904820 seconds, throughput 1049967.975977
+152143	[1728261948]	2000000 OPS in 1.906323 seconds, throughput 1049140.150961
+152143	[1728261948]	2000000 OPS in 1.940394 seconds, throughput 1030718.503562
+152143	[1728261949]	2000000 OPS in 1.835537 seconds, throughput 1089599.392439
+152143	[1728261950]	2000000 OPS in 1.912163 seconds, throughput 1045935.937470
+152143	[1728261950]	2000000 OPS in 1.914825 seconds, throughput 1044481.871712
+152143	[1728261950]	2000000 OPS in 1.823676 seconds, throughput 1096686.034142
+152143	[1728261951]	2000000 OPS in 1.838917 seconds, throughput 1087596.666951
+152143	[1728261951]	2000000 OPS in 1.859289 seconds, throughput 1075680.004561
+152143	[1728261951]	2000000 OPS in 1.895858 seconds, throughput 1054931.329245
+152143	[1728261952]	2000000 OPS in 1.905276 seconds, throughput 1049716.681468
+152143	[1728261953]	2000000 OPS in 1.859969 seconds, throughput 1075286.738650
+152143	[1728261953]	2000000 OPS in 1.853010 seconds, throughput 1079324.990151
+152143	[1728261953]	2000000 OPS in 1.883919 seconds, throughput 1061616.768025
+152143	[1728261954]	2000000 OPS in 1.901730 seconds, throughput 1051674.002093
+152143	[1728261955]	2000000 OPS in 1.901616 seconds, throughput 1051737.048910
+152143	[1728261955]	2000000 OPS in 1.970372 seconds, throughput 1015036.754481
+152143	[1728261955]	2000000 OPS in 1.954838 seconds, throughput 1023102.681654
+152143	[1728261956]	2000000 OPS in 1.819105 seconds, throughput 1099441.758447
+152143	[1728261957]	2000000 OPS in 1.903072 seconds, throughput 1050932.387214
+152143	[1728261957]	2000000 OPS in 1.909664 seconds, throughput 1047304.656735
+152143	[1728261957]	2000000 OPS in 1.939533 seconds, throughput 1031176.061454
+152143	[1728261958]	2000000 OPS in 1.936492 seconds, throughput 1032795.384644
+152143	[1728261959]	2000000 OPS in 1.864169 seconds, throughput 1072864.101914
+152143	[1728261959]	2000000 OPS in 1.861651 seconds, throughput 1074315.218051
+152143	[1728261959]	2000000 OPS in 1.862474 seconds, throughput 1073840.493881
+152143	[1728261960]	2000000 OPS in 1.869724 seconds, throughput 1069676.593979
+152143	[1728261961]	2000000 OPS in 1.904539 seconds, throughput 1050122.890631
+152143	[1728261961]	2000000 OPS in 1.898352 seconds, throughput 1053545.390950
+152143	[1728261961]	2000000 OPS in 1.941607 seconds, throughput 1030074.572249
+152143	[1728261961]	2000000 OPS in 1.869458 seconds, throughput 1069828.795298
+152143	[1728261963]	2000000 OPS in 1.848962 seconds, throughput 1081687.995751
+152143	[1728261963]	2000000 OPS in 1.857834 seconds, throughput 1076522.444955
+152143	[1728261963]	2000000 OPS in 1.844260 seconds, throughput 1084445.793977
+152143	[1728261963]	2000000 OPS in 1.841358 seconds, throughput 1086154.892205
+152143	[1728261964]	2000000 OPS in 1.862192 seconds, throughput 1074003.110313
+152143	[1728261965]	2000000 OPS in 1.875371 seconds, throughput 1066455.650642
+152143	[1728261965]	2000000 OPS in 1.895380 seconds, throughput 1055197.374669
+152143	[1728261965]	2000000 OPS in 1.864773 seconds, throughput 1072516.601216
+152143	[1728261966]	2000000 OPS in 1.864664 seconds, throughput 1072579.295787
+152143	[1728261967]	2000000 OPS in 1.848259 seconds, throughput 1082099.424377
+152143	[1728261967]	2000000 OPS in 1.861182 seconds, throughput 1074585.935175
+152143	[1728261967]	2000000 OPS in 1.835750 seconds, throughput 1089472.967452
+152143	[1728261968]	2000000 OPS in 1.840177 seconds, throughput 1086851.971305
+152143	[1728261968]	2000000 OPS in 1.834854 seconds, throughput 1090004.981323
+152143	[1728261968]	2000000 OPS in 1.849510 seconds, throughput 1081367.497337
+152143	[1728261969]	2000000 OPS in 1.859377 seconds, throughput 1075629.095122
+152143	[1728261970]	2000000 OPS in 1.866625 seconds, throughput 1071452.487779
+152143	[1728261970]	2000000 OPS in 1.872243 seconds, throughput 1068237.402944
+152143	[1728261970]	2000000 OPS in 1.874973 seconds, throughput 1066682.026888
+152143	[1728261971]	2000000 OPS in 1.834297 seconds, throughput 1090335.970674
+152143	[1728261972]	2000000 OPS in 1.839471 seconds, throughput 1087269.111609
+152143	[1728261972]	2000000 OPS in 1.826351 seconds, throughput 1095079.751921
+152143	[1728261972]	2000000 OPS in 1.827577 seconds, throughput 1094345.135663
+152143	[1728261973]	2000000 OPS in 1.860103 seconds, throughput 1075209.276045
+152143	[1728261974]	2000000 OPS in 1.926967 seconds, throughput 1037900.493366
+152143	[1728261974]	2000000 OPS in 1.901544 seconds, throughput 1051776.871847
+152143	[1728261974]	2000000 OPS in 1.943331 seconds, throughput 1029160.755425
+152143	[1728261974]	2000000 OPS in 1.905373 seconds, throughput 1049663.241790
+152143	[1728261976]	2000000 OPS in 1.821015 seconds, throughput 1098288.591802
+152143	[1728261976]	2000000 OPS in 1.850088 seconds, throughput 1081029.659130
+152143	[1728261976]	2000000 OPS in 1.836887 seconds, throughput 1088798.603289
+152143	[1728261976]	2000000 OPS in 1.883394 seconds, throughput 1061912.695910
+152143	[1728261977]	2000000 OPS in 1.830682 seconds, throughput 1092489.028679
+152143	[1728261978]	2000000 OPS in 1.833163 seconds, throughput 1091010.455699
+152143	[1728261978]	2000000 OPS in 1.821360 seconds, throughput 1098080.555190
+152143	[1728261978]	2000000 OPS in 1.825100 seconds, throughput 1095830.365459
+152143	[1728261979]	2000000 OPS in 1.884995 seconds, throughput 1061010.771912
+152143	[1728261980]	2000000 OPS in 1.991154 seconds, throughput 1004442.649840
+152143	[1728261980]	2000000 OPS in 2.005111 seconds, throughput 997451.013934
+152143	[1728261980]	2000000 OPS in 1.899796 seconds, throughput 1052744.610474
+152143	[1728261981]	2000000 OPS in 1.857908 seconds, throughput 1076479.567341
+152143	[1728261982]	2000000 OPS in 1.879125 seconds, throughput 1064325.151334
+152143	[1728261982]	2000000 OPS in 1.855369 seconds, throughput 1077952.687579
+152143	[1728261982]	2000000 OPS in 1.889314 seconds, throughput 1058585.285453
+152143	[1728261983]	2000000 OPS in 1.835331 seconds, throughput 1089721.690529
+152143	[1728261983]	2000000 OPS in 1.907236 seconds, throughput 1048637.924200
+152143	[1728261984]	2000000 OPS in 1.932844 seconds, throughput 1034744.656061
+152143	[1728261984]	2000000 OPS in 1.924795 seconds, throughput 1039071.693349
+152143	[1728261985]	2000000 OPS in 1.896327 seconds, throughput 1054670.423403
+152143	[1728261985]	2000000 OPS in 1.855381 seconds, throughput 1077945.715732
+152143	[1728261985]	2000000 OPS in 1.890993 seconds, throughput 1057645.374679
+152143	[1728261986]	2000000 OPS in 1.833291 seconds, throughput 1090934.281573
+152143	[1728261987]	2000000 OPS in 1.857758 seconds, throughput 1076566.484978
+152143	[1728261987]	2000000 OPS in 1.843098 seconds, throughput 1085129.493928
+152143	[1728261987]	2000000 OPS in 1.884076 seconds, throughput 1061528.303529
+152143	[1728261988]	2000000 OPS in 1.875867 seconds, throughput 1066173.667963
+152143	[1728261989]	2000000 OPS in 1.898679 seconds, throughput 1053363.944090
+152143	[1728261989]	2000000 OPS in 1.979971 seconds, throughput 1010115.804726
+152143	[1728261989]	2000000 OPS in 1.930167 seconds, throughput 1036179.770973
+152143	[1728261990]	2000000 OPS in 1.902430 seconds, throughput 1051287.038156
+152143	[1728261991]	2000000 OPS in 1.888857 seconds, throughput 1058841.405146
+152143	[1728261991]	2000000 OPS in 1.878618 seconds, throughput 1064612.390598
+152143	[1728261991]	2000000 OPS in 1.946360 seconds, throughput 1027559.136028
+152143	[1728261991]	2000000 OPS in 1.898699 seconds, throughput 1053352.848450
+152143	[1728261992]	2000000 OPS in 1.920932 seconds, throughput 1041161.269634
+152143	[1728261993]	2000000 OPS in 1.971564 seconds, throughput 1014423.067169
+152143	[1728261993]	2000000 OPS in 1.921013 seconds, throughput 1041117.368805
+152143	[1728261993]	2000000 OPS in 1.947876 seconds, throughput 1026759.403576
+152143	[1728261994]	2000000 OPS in 1.871572 seconds, throughput 1068620.389704
+152143	[1728261995]	2000000 OPS in 1.841040 seconds, throughput 1086342.502064
+152143	[1728261995]	2000000 OPS in 1.900040 seconds, throughput 1052609.418749
+152143	[1728261995]	2000000 OPS in 1.823510 seconds, throughput 1096785.869011
+152143	[1728261996]	2000000 OPS in 1.882858 seconds, throughput 1062214.994439
+152143	[1728261997]	2000000 OPS in 1.879936 seconds, throughput 1063866.003949
+152143	[1728261997]	2000000 OPS in 1.847925 seconds, throughput 1082295.006561
+152143	[1728261997]	2000000 OPS in 1.839010 seconds, throughput 1087541.666440
+152143	[1728261998]	2000000 OPS in 1.836906 seconds, throughput 1088787.341323
+152143	[1728261999]	2000000 OPS in 1.822869 seconds, throughput 1097171.546611
+152143	[1728261999]	2000000 OPS in 1.845213 seconds, throughput 1083885.708588
+152143	[1728261999]	2000000 OPS in 1.848212 seconds, throughput 1082126.942147
+152143	[1728262000]	2000000 OPS in 1.847739 seconds, throughput 1082403.954238
+152143	[1728262000]	2000000 OPS in 1.890582 seconds, throughput 1057875.299775
+152143	[1728262001]	2000000 OPS in 1.900002 seconds, throughput 1052630.470915
+152143	[1728262001]	2000000 OPS in 1.879635 seconds, throughput 1064036.368763
+152143	[1728262002]	2000000 OPS in 1.865008 seconds, throughput 1072381.458954
+152143	[1728262002]	2000000 OPS in 1.857760 seconds, throughput 1076565.325984
+152143	[1728262002]	2000000 OPS in 1.866936 seconds, throughput 1071274.001894
+152143	[1728262003]	2000000 OPS in 1.873572 seconds, throughput 1067479.659175
+152143	[1728262004]	2000000 OPS in 1.859461 seconds, throughput 1075580.504243
+152143	[1728262004]	2000000 OPS in 1.894395 seconds, throughput 1055746.029735
+152143	[1728262004]	2000000 OPS in 1.857060 seconds, throughput 1076971.126404
+152143	[1728262004]	2000000 OPS in 1.820668 seconds, throughput 1098497.913952
+152143	[1728262005]	2000000 OPS in 1.833669 seconds, throughput 1090709.391935
+152143	[1728262006]	2000000 OPS in 1.834637 seconds, throughput 1090133.906598
+152143	[1728262006]	2000000 OPS in 1.834165 seconds, throughput 1090414.439268
+152143	[1728262006]	2000000 OPS in 1.892064 seconds, throughput 1057046.696095
+152143	[1728262007]	2000000 OPS in 1.853115 seconds, throughput 1079263.834139
+152143	[1728262008]	2000000 OPS in 1.938582 seconds, throughput 1031681.920084
+152143	[1728262008]	2000000 OPS in 1.895512 seconds, throughput 1055123.892647
+152143	[1728262008]	2000000 OPS in 1.891527 seconds, throughput 1057346.789129
+152143	[1728262009]	2000000 OPS in 1.886970 seconds, throughput 1059900.263385
+152143	[1728262010]	2000000 OPS in 1.873733 seconds, throughput 1067387.936275
+152143	[1728262010]	2000000 OPS in 1.878962 seconds, throughput 1064417.481567
+152143	[1728262010]	2000000 OPS in 1.864274 seconds, throughput 1072803.675855
+152143	[1728262011]	2000000 OPS in 1.854610 seconds, throughput 1078393.840214
+152143	[1728262012]	2000000 OPS in 1.819612 seconds, throughput 1099135.420079
+152143	[1728262012]	2000000 OPS in 1.839122 seconds, throughput 1087475.436649
+152143	[1728262012]	2000000 OPS in 1.877092 seconds, throughput 1065477.877483
+152143	[1728262013]	2000000 OPS in 1.839300 seconds, throughput 1087370.195183
+152143	[1728262013]	2000000 OPS in 1.838088 seconds, throughput 1088087.186250
+152143	[1728262014]	2000000 OPS in 1.861620 seconds, throughput 1074333.107723
+152143	[1728262014]	2000000 OPS in 1.833569 seconds, throughput 1090768.877528
+152143	[1728262015]	2000000 OPS in 1.859968 seconds, throughput 1075287.316771
+152143	[1728262015]	2000000 OPS in 1.859293 seconds, throughput 1075677.690391
+152143	[1728262016]	2000000 OPS in 1.907726 seconds, throughput 1048368.581232
+152143	[1728262016]	2000000 OPS in 1.872941 seconds, throughput 1067839.296593
+152143	[1728262017]	2000000 OPS in 1.910816 seconds, throughput 1046673.253730
+152143	[1728262017]	2000000 OPS in 1.955529 seconds, throughput 1022741.161087
+152143	[1728262018]	2000000 OPS in 1.933698 seconds, throughput 1034287.670567
+152143	[1728262018]	2000000 OPS in 1.867160 seconds, throughput 1071145.482979
+152143	[1728262019]	2000000 OPS in 1.861079 seconds, throughput 1074645.407315
+152143	[1728262019]	2000000 OPS in 1.889004 seconds, throughput 1058759.007392
+152143	[1728262019]	2000000 OPS in 1.882863 seconds, throughput 1062212.173695
+152143	[1728262019]	2000000 OPS in 1.863729 seconds, throughput 1073117.389921
+152143	[1728262020]	2000000 OPS in 1.872038 seconds, throughput 1068354.381695
+152143	[1728262021]	2000000 OPS in 1.912755 seconds, throughput 1045612.219024
+152143	[1728262021]	2000000 OPS in 1.919644 seconds, throughput 1041859.844846
+152143	[1728262021]	2000000 OPS in 1.918404 seconds, throughput 1042533.272449
+152143	[1728262022]	2000000 OPS in 1.849696 seconds, throughput 1081258.758196
+152143	[1728262023]	2000000 OPS in 1.877367 seconds, throughput 1065321.804421
+152143	[1728262023]	2000000 OPS in 1.888009 seconds, throughput 1059316.984188
+152143	[1728262023]	2000000 OPS in 1.893551 seconds, throughput 1056216.600451
+152143	[1728262024]	2000000 OPS in 1.846728 seconds, throughput 1082996.521415
+152143	[1728262025]	2000000 OPS in 1.849359 seconds, throughput 1081455.790898
+152143	[1728262025]	2000000 OPS in 1.871233 seconds, throughput 1068813.985217
+152143	[1728262025]	2000000 OPS in 1.869017 seconds, throughput 1070081.224515
+152143	[1728262026]	2000000 OPS in 1.908801 seconds, throughput 1047778.160217
+152143	[1728262027]	2000000 OPS in 1.954358 seconds, throughput 1023353.960738
+152143	[1728262027]	2000000 OPS in 1.935621 seconds, throughput 1033260.126853
+152143	[1728262027]	2000000 OPS in 1.921409 seconds, throughput 1040902.795813
+152143	[1728262028]	2000000 OPS in 1.868302 seconds, throughput 1070490.745072
+152143	[1728262029]	2000000 OPS in 1.843190 seconds, throughput 1085075.331355
+152143	[1728262029]	2000000 OPS in 1.862174 seconds, throughput 1074013.491757
+152143	[1728262029]	2000000 OPS in 1.857397 seconds, throughput 1076775.724307
+152143	[1728262030]	2000000 OPS in 1.834495 seconds, throughput 1090218.288957
+152143	[1728262030]	2000000 OPS in 1.865136 seconds, throughput 1072307.863877
+152143	[1728262031]	2000000 OPS in 1.826070 seconds, throughput 1095248.265401
+152143	[1728262031]	2000000 OPS in 1.867252 seconds, throughput 1071092.707358
+152143	[1728262032]	2000000 OPS in 1.892038 seconds, throughput 1057061.221815
+152143	[1728262032]	2000000 OPS in 1.934767 seconds, throughput 1033716.204587
+152143	[1728262033]	2000000 OPS in 1.847316 seconds, throughput 1082651.804023
+152143	[1728262033]	2000000 OPS in 1.845292 seconds, throughput 1083839.305649
+152143	[1728262033]	2000000 OPS in 1.820896 seconds, throughput 1098360.367643
+152143	[1728262034]	2000000 OPS in 1.840657 seconds, throughput 1086568.545905
+152143	[1728262034]	2000000 OPS in 1.854502 seconds, throughput 1078456.642268
+152143	[1728262034]	2000000 OPS in 1.863366 seconds, throughput 1073326.442578
+152143	[1728262035]	2000000 OPS in 1.848929 seconds, throughput 1081707.301903
+152143	[1728262036]	2000000 OPS in 1.884038 seconds, throughput 1061549.713965
+152143	[1728262036]	2000000 OPS in 1.861741 seconds, throughput 1074263.283668
+152143	[1728262036]	2000000 OPS in 1.946392 seconds, throughput 1027542.242262
+152143	[1728262037]	2000000 OPS in 1.907034 seconds, throughput 1048748.999756
+152143	[1728262038]	2000000 OPS in 1.873414 seconds, throughput 1067569.688280
+152143	[1728262038]	2000000 OPS in 1.886867 seconds, throughput 1059958.121055
+152143	[1728262038]	2000000 OPS in 1.878549 seconds, throughput 1064651.494318
+152143	[1728262039]	2000000 OPS in 1.910824 seconds, throughput 1046668.871649
+152143	[1728262040]	2000000 OPS in 1.898472 seconds, throughput 1053478.797686
+152143	[1728262040]	2000000 OPS in 1.831684 seconds, throughput 1091891.396114
+152143	[1728262040]	2000000 OPS in 1.872034 seconds, throughput 1068356.664462
+152143	[1728262041]	2000000 OPS in 1.849577 seconds, throughput 1081328.325341
+152143	[1728262042]	2000000 OPS in 1.915900 seconds, throughput 1043895.819197
+152143	[1728262042]	2000000 OPS in 1.855942 seconds, throughput 1077619.882518
+152143	[1728262042]	2000000 OPS in 1.901631 seconds, throughput 1051728.752844
+152143	[1728262043]	2000000 OPS in 1.880039 seconds, throughput 1063807.718882
+152143	[1728262044]	2000000 OPS in 1.896281 seconds, throughput 1054696.007606
+152143	[1728262044]	2000000 OPS in 1.886685 seconds, throughput 1060060.370438
+152143	[1728262044]	2000000 OPS in 1.942866 seconds, throughput 1029407.071821
+152143	[1728262045]	2000000 OPS in 1.869509 seconds, throughput 1069799.610486
+152143	[1728262046]	2000000 OPS in 1.862353 seconds, throughput 1073910.262985
+152143	[1728262046]	2000000 OPS in 1.882486 seconds, throughput 1062424.899840
+152143	[1728262046]	2000000 OPS in 1.891499 seconds, throughput 1057362.441112
+152143	[1728262047]	2000000 OPS in 1.903965 seconds, throughput 1050439.477616
+152143	[1728262047]	2000000 OPS in 1.887523 seconds, throughput 1059589.737450
+152143	[1728262048]	2000000 OPS in 1.881956 seconds, throughput 1062724.101945
+152143	[1728262048]	2000000 OPS in 1.870500 seconds, throughput 1069232.825448
+152143	[1728262049]	2000000 OPS in 1.931105 seconds, throughput 1035676.465029
+152143	[1728262049]	2000000 OPS in 1.896213 seconds, throughput 1054733.830007
+152143	[1728262049]	2000000 OPS in 1.882463 seconds, throughput 1062437.880585
+152143	[1728262050]	2000000 OPS in 1.876013 seconds, throughput 1066090.693401
+152143	[1728262050]	2000000 OPS in 1.884085 seconds, throughput 1061523.232763
+152143	[1728262051]	2000000 OPS in 1.858753 seconds, throughput 1075990.193425
+152143	[1728262051]	2000000 OPS in 1.879261 seconds, throughput 1064248.127322
+152143	[1728262051]	2000000 OPS in 1.888737 seconds, throughput 1058908.678127
+152143	[1728262052]	2000000 OPS in 1.838617 seconds, throughput 1087774.125878
+152143	[1728262053]	2000000 OPS in 1.841526 seconds, throughput 1086055.803719
+152143	[1728262053]	2000000 OPS in 1.830561 seconds, throughput 1092561.242155
+152143	[1728262053]	2000000 OPS in 1.836529 seconds, throughput 1089010.846004
+152143	[1728262054]	2000000 OPS in 1.890476 seconds, throughput 1057934.615409
+152143	[1728262055]	2000000 OPS in 1.877890 seconds, throughput 1065025.107967
+152143	[1728262055]	2000000 OPS in 1.886847 seconds, throughput 1059969.356286
+152143	[1728262055]	2000000 OPS in 1.871840 seconds, throughput 1068467.390375
+152143	[1728262056]	2000000 OPS in 1.900073 seconds, throughput 1052591.137288
+152143	[1728262057]	2000000 OPS in 1.872096 seconds, throughput 1068321.282669
+152143	[1728262057]	2000000 OPS in 1.920876 seconds, throughput 1041191.622989
+152143	[1728262057]	2000000 OPS in 1.912233 seconds, throughput 1045897.649502
+152143	[1728262058]	2000000 OPS in 1.916296 seconds, throughput 1043680.099525
+152143	[1728262059]	2000000 OPS in 1.843576 seconds, throughput 1084848.142957
+152143	[1728262059]	2000000 OPS in 1.919238 seconds, throughput 1042080.242263
+152143	[1728262059]	2000000 OPS in 1.923209 seconds, throughput 1039928.577705
+152143	[1728262060]	2000000 OPS in 1.872869 seconds, throughput 1067880.348278
+152143	[1728262061]	2000000 OPS in 1.837634 seconds, throughput 1088356.005603
+152143	[1728262061]	2000000 OPS in 1.807420 seconds, throughput 1106549.667482
+152143	[1728262061]	2000000 OPS in 1.811513 seconds, throughput 1104049.487914
+152143	[1728262062]	2000000 OPS in 1.835766 seconds, throughput 1089463.471924
+152143	[1728262062]	2000000 OPS in 1.928475 seconds, throughput 1037088.891482
+152143	[1728262063]	2000000 OPS in 1.875126 seconds, throughput 1066594.991483
+152143	[1728262063]	2000000 OPS in 1.910975 seconds, throughput 1046586.166747
+152143	[1728262064]	2000000 OPS in 1.906447 seconds, throughput 1049071.912306
+152143	[1728262064]	2000000 OPS in 1.874828 seconds, throughput 1066764.524532
+152143	[1728262064]	2000000 OPS in 1.876800 seconds, throughput 1065643.648764
+152143	[1728262065]	2000000 OPS in 1.927699 seconds, throughput 1037506.374180
+152143	[1728262066]	2000000 OPS in 1.904030 seconds, throughput 1050403.617590
+152143	[1728262066]	2000000 OPS in 1.859782 seconds, throughput 1075394.858107
+152143	[1728262066]	2000000 OPS in 1.855118 seconds, throughput 1078098.536050
+152143	[1728262067]	2000000 OPS in 1.863426 seconds, throughput 1073291.882801
+152143	[1728262067]	2000000 OPS in 1.783965 seconds, throughput 1121098.227824
+152143	[1728262068]	2000000 OPS in 1.859532 seconds, throughput 1075539.436805
+152143	[1728262068]	2000000 OPS in 1.872122 seconds, throughput 1068306.445841
+152143	[1728262068]	2000000 OPS in 1.833476 seconds, throughput 1090824.204953
+152143	[1728262069]	2000000 OPS in 1.900709 seconds, throughput 1052238.927684
+152143	[1728262070]	2000000 OPS in 1.853396 seconds, throughput 1079100.203087
+152143	[1728262070]	2000000 OPS in 1.872556 seconds, throughput 1068058.845770
+152143	[1728262070]	2000000 OPS in 1.880345 seconds, throughput 1063634.598970
+152143	[1728262071]	2000000 OPS in 1.850692 seconds, throughput 1080676.849524
+152143	[1728262072]	2000000 OPS in 1.889103 seconds, throughput 1058703.522254
+152143	[1728262072]	2000000 OPS in 1.872173 seconds, throughput 1068277.344028
+152143	[1728262072]	2000000 OPS in 1.911151 seconds, throughput 1046489.785475
+152143	[1728262073]	2000000 OPS in 1.882901 seconds, throughput 1062190.736528
+152143	[1728262074]	2000000 OPS in 1.935508 seconds, throughput 1033320.451272
+152143	[1728262074]	2000000 OPS in 1.915417 seconds, throughput 1044159.052572
+152143	[1728262074]	2000000 OPS in 1.882187 seconds, throughput 1062593.674274
+152143	[1728262075]	2000000 OPS in 1.915600 seconds, throughput 1044059.302568
+152143	[1728262076]	2000000 OPS in 1.881159 seconds, throughput 1063174.351557
+152143	[1728262076]	2000000 OPS in 1.850972 seconds, throughput 1080513.373514
+152143	[1728262076]	2000000 OPS in 1.874741 seconds, throughput 1066814.029245
+152143	[1728262077]	2000000 OPS in 1.839342 seconds, throughput 1087345.365897
+152143	[1728262077]	2000000 OPS in 1.833687 seconds, throughput 1090698.685217
+152143	[1728262077]	2000000 OPS in 1.834661 seconds, throughput 1090119.646082
+152143	[1728262078]	2000000 OPS in 1.814091 seconds, throughput 1102480.526060
+152143	[1728262079]	2000000 OPS in 1.846005 seconds, throughput 1083420.684126
+152143	[1728262079]	2000000 OPS in 1.891262 seconds, throughput 1057494.942530
+152143	[1728262079]	2000000 OPS in 1.866734 seconds, throughput 1071389.924863
+152143	[1728262080]	2000000 OPS in 1.860135 seconds, throughput 1075190.779164
+152143	[1728262080]	2000000 OPS in 1.863427 seconds, throughput 1073291.306823
+152143	[1728262081]	2000000 OPS in 1.912225 seconds, throughput 1045902.025128
+152143	[1728262081]	2000000 OPS in 1.911808 seconds, throughput 1046130.155329
+152143	[1728262082]	2000000 OPS in 1.929916 seconds, throughput 1036314.533897
+152143	[1728262082]	2000000 OPS in 1.892733 seconds, throughput 1056673.075389
+152143	[1728262083]	2000000 OPS in 1.891342 seconds, throughput 1057450.212600
+152143	[1728262083]	2000000 OPS in 1.960100 seconds, throughput 1020356.104280
+152143	[1728262083]	2000000 OPS in 1.933511 seconds, throughput 1034387.701958
+152143	[1728262084]	2000000 OPS in 1.886963 seconds, throughput 1059904.195260
+152143	[1728262085]	2000000 OPS in 1.905010 seconds, throughput 1049863.255311
+152143	[1728262085]	2000000 OPS in 1.945241 seconds, throughput 1028150.239482
+152143	[1728262085]	2000000 OPS in 1.915935 seconds, throughput 1043876.749472
+152143	[1728262086]	2000000 OPS in 1.897877 seconds, throughput 1053809.071926
+152143	[1728262087]	2000000 OPS in 1.872133 seconds, throughput 1068300.168845
+152143	[1728262087]	2000000 OPS in 1.883545 seconds, throughput 1061827.564513
+152143	[1728262087]	2000000 OPS in 1.874417 seconds, throughput 1066998.432046
+152143	[1728262088]	2000000 OPS in 1.857056 seconds, throughput 1076973.446143
+152143	[1728262089]	2000000 OPS in 1.882532 seconds, throughput 1062398.939301
+152143	[1728262089]	2000000 OPS in 1.849205 seconds, throughput 1081545.853488
+152143	[1728262089]	2000000 OPS in 1.855890 seconds, throughput 1077650.076244
+152143	[1728262090]	2000000 OPS in 1.834527 seconds, throughput 1090199.272074
+152143	[1728262091]	2000000 OPS in 1.843526 seconds, throughput 1084877.566142
+152143	[1728262091]	2000000 OPS in 1.900028 seconds, throughput 1052616.066711
+152143	[1728262091]	2000000 OPS in 1.867623 seconds, throughput 1070879.936690
+152143	[1728262092]	2000000 OPS in 1.886850 seconds, throughput 1059967.670986
+152143	[1728262093]	2000000 OPS in 1.887595 seconds, throughput 1059549.320696
+152143	[1728262093]	2000000 OPS in 1.839651 seconds, throughput 1087162.728148
+152143	[1728262093]	2000000 OPS in 1.897481 seconds, throughput 1054028.999500
+152143	[1728262094]	2000000 OPS in 1.867354 seconds, throughput 1071034.201335
+152143	[1728262094]	2000000 OPS in 1.860563 seconds, throughput 1074943.444538
+152143	[1728262094]	2000000 OPS in 1.853689 seconds, throughput 1078929.637064
+152143	[1728262095]	2000000 OPS in 1.903693 seconds, throughput 1050589.564599
+152143	[1728262095]	2000000 OPS in 1.908602 seconds, throughput 1047887.406594
+152143	[1728262096]	2000000 OPS in 1.846203 seconds, throughput 1083304.490351
+152143	[1728262096]	2000000 OPS in 1.859856 seconds, throughput 1075352.070268
+152143	[1728262097]	2000000 OPS in 1.904512 seconds, throughput 1050137.778076
+152143	[1728262097]	2000000 OPS in 1.857953 seconds, throughput 1076453.494787
+152143	[1728262098]	2000000 OPS in 1.822368 seconds, throughput 1097473.177756
+152143	[1728262098]	2000000 OPS in 1.853097 seconds, throughput 1079274.317534
+152143	[1728262099]	2000000 OPS in 1.845643 seconds, throughput 1083633.183666
+152143	[1728262099]	2000000 OPS in 1.847067 seconds, throughput 1082797.754494
+152143	[1728262100]	2000000 OPS in 1.867061 seconds, throughput 1071202.279947
+152143	[1728262100]	2000000 OPS in 1.914268 seconds, throughput 1044785.787570
+152143	[1728262100]	2000000 OPS in 1.877110 seconds, throughput 1065467.660393
+152143	[1728262101]	2000000 OPS in 1.914581 seconds, throughput 1044614.983644
+152143	[1728262102]	2000000 OPS in 1.850595 seconds, throughput 1080733.493822
+152143	[1728262102]	2000000 OPS in 1.882906 seconds, throughput 1062187.915913
+152143	[1728262102]	2000000 OPS in 1.903036 seconds, throughput 1050952.267850
+152143	[1728262103]	2000000 OPS in 1.886720 seconds, throughput 1060040.705563
+152143	[1728262104]	2000000 OPS in 1.837240 seconds, throughput 1088589.405848
+152143	[1728262104]	2000000 OPS in 1.826827 seconds, throughput 1094794.416767
+152143	[1728262104]	2000000 OPS in 1.807801 seconds, throughput 1106316.458504
+152143	[1728262105]	2000000 OPS in 1.786696 seconds, throughput 1119384.607118
+152143	[1728262105]	2000000 OPS in 1.832495 seconds, throughput 1091408.162096
+152143	[1728262106]	2000000 OPS in 1.827541 seconds, throughput 1094366.692731
+152143	[1728262106]	2000000 OPS in 1.921822 seconds, throughput 1040679.105557
+152143	[1728262107]	2000000 OPS in 1.840090 seconds, throughput 1086903.357988
+152143	[1728262107]	2000000 OPS in 1.834186 seconds, throughput 1090401.954873
+152143	[1728262107]	2000000 OPS in 1.839100 seconds, throughput 1087488.445435
+152143	[1728262108]	2000000 OPS in 1.867741 seconds, throughput 1070812.280718
+152143	[1728262108]	2000000 OPS in 1.884349 seconds, throughput 1061374.511834
+152143	[1728262109]	2000000 OPS in 1.847435 seconds, throughput 1082582.066487
+152143	[1728262109]	2000000 OPS in 1.866491 seconds, throughput 1071529.410000
+152143	[1728262110]	2000000 OPS in 1.951580 seconds, throughput 1024810.666229
+152143	[1728262110]	2000000 OPS in 1.862730 seconds, throughput 1073692.913090
+152143	[1728262111]	2000000 OPS in 1.898457 seconds, throughput 1053487.121383
+152143	[1728262111]	2000000 OPS in 1.898931 seconds, throughput 1053224.156117
+152143	[1728262112]	2000000 OPS in 1.873026 seconds, throughput 1067790.836860
+152143	[1728262112]	2000000 OPS in 1.855103 seconds, throughput 1078107.253344
+152143	[1728262113]	2000000 OPS in 1.900362 seconds, throughput 1052431.063134
+152143	[1728262113]	2000000 OPS in 1.902748 seconds, throughput 1051111.340020
+152143	[1728262114]	2000000 OPS in 1.898443 seconds, throughput 1053494.890286
+152143	[1728262114]	2000000 OPS in 1.875807 seconds, throughput 1066207.770842
+152143	[1728262115]	2000000 OPS in 1.939380 seconds, throughput 1031257.412163
+152143	[1728262115]	2000000 OPS in 1.881409 seconds, throughput 1063033.077869
+152143	[1728262115]	2000000 OPS in 1.895244 seconds, throughput 1055273.094124
+152143	[1728262116]	2000000 OPS in 1.867622 seconds, throughput 1070880.510082
+152143	[1728262117]	2000000 OPS in 1.846095 seconds, throughput 1083367.865684
+152143	[1728262117]	2000000 OPS in 1.892985 seconds, throughput 1056532.407811
+152143	[1728262117]	2000000 OPS in 1.977314 seconds, throughput 1011473.139825
+152143	[1728262118]	2000000 OPS in 1.923265 seconds, throughput 1039898.297946
+152143	[1728262119]	2000000 OPS in 1.920325 seconds, throughput 1041490.372723
+152143	[1728262119]	2000000 OPS in 1.915276 seconds, throughput 1044235.922133
+152143	[1728262119]	2000000 OPS in 1.873634 seconds, throughput 1067444.335447
+152143	[1728262120]	2000000 OPS in 1.872028 seconds, throughput 1068360.088631
+152143	[1728262120]	2000000 OPS in 1.842641 seconds, throughput 1085398.620784
+152143	[1728262121]	2000000 OPS in 1.836319 seconds, throughput 1089135.384429
+152143	[1728262121]	2000000 OPS in 1.889235 seconds, throughput 1058629.551115
+152143	[1728262122]	2000000 OPS in 1.865680 seconds, throughput 1071995.197462
+152143	[1728262122]	2000000 OPS in 1.917042 seconds, throughput 1043273.960612
+152143	[1728262123]	2000000 OPS in 1.880634 seconds, throughput 1063471.148559
+152143	[1728262123]	2000000 OPS in 1.960357 seconds, throughput 1020222.337054
+152143	[1728262123]	2000000 OPS in 1.862081 seconds, throughput 1074067.132418
+152143	[1728262124]	2000000 OPS in 1.870771 seconds, throughput 1069077.936316
+152143	[1728262124]	2000000 OPS in 1.872200 seconds, throughput 1068261.937827
+152143	[1728262125]	2000000 OPS in 1.841833 seconds, throughput 1085874.778006
+152143	[1728262125]	2000000 OPS in 1.853789 seconds, throughput 1078871.435746
+152143	[1728262126]	2000000 OPS in 1.876755 seconds, throughput 1065669.200295
+152143	[1728262126]	2000000 OPS in 1.916044 seconds, throughput 1043817.365363
+152143	[1728262127]	2000000 OPS in 1.957213 seconds, throughput 1021861.187311
+152143	[1728262127]	2000000 OPS in 1.942943 seconds, throughput 1029366.275799
+152143	[1728262128]	2000000 OPS in 1.888600 seconds, throughput 1058985.491899
+152143	[1728262128]	2000000 OPS in 1.881316 seconds, throughput 1063085.627295
+152143	[1728262129]	2000000 OPS in 1.846216 seconds, throughput 1083296.862339
+152143	[1728262129]	2000000 OPS in 1.844433 seconds, throughput 1084344.077557
+152143	[1728262130]	2000000 OPS in 1.849913 seconds, throughput 1081131.923501
+152143	[1728262130]	2000000 OPS in 1.861771 seconds, throughput 1074245.973323
+152143	[1728262131]	2000000 OPS in 1.871220 seconds, throughput 1068821.410630
+152143	[1728262131]	2000000 OPS in 1.902693 seconds, throughput 1051141.723862
+152143	[1728262132]	2000000 OPS in 1.853666 seconds, throughput 1078943.024256
+152143	[1728262132]	2000000 OPS in 1.829005 seconds, throughput 1093490.723098
+152143	[1728262133]	2000000 OPS in 1.860729 seconds, throughput 1074847.546311
+152143	[1728262133]	2000000 OPS in 1.822810 seconds, throughput 1097207.059430
+152143	[1728262134]	2000000 OPS in 1.843365 seconds, throughput 1084972.319644
+152143	[1728262134]	2000000 OPS in 1.855921 seconds, throughput 1077632.075934
+152143	[1728262134]	2000000 OPS in 1.905989 seconds, throughput 1049323.999247
+152143	[1728262135]	2000000 OPS in 1.910437 seconds, throughput 1046880.896884
+152143	[1728262135]	2000000 OPS in 1.857957 seconds, throughput 1076451.177288
+152143	[1728262136]	2000000 OPS in 1.874557 seconds, throughput 1066918.744002
+152143	[1728262136]	2000000 OPS in 1.839590 seconds, throughput 1087198.777989
+152143	[1728262137]	2000000 OPS in 1.842275 seconds, throughput 1085614.254115
+152143	[1728262137]	2000000 OPS in 1.830741 seconds, throughput 1092453.820611
+152143	[1728262137]	2000000 OPS in 1.826430 seconds, throughput 1095032.385583
+152143	[1728262138]	2000000 OPS in 1.847417 seconds, throughput 1082592.614445
+152143	[1728262138]	2000000 OPS in 1.868486 seconds, throughput 1070385.328014
+152143	[1728262139]	2000000 OPS in 1.889241 seconds, throughput 1058626.189036
+152143	[1728262139]	2000000 OPS in 1.900017 seconds, throughput 1052622.160749
+152143	[1728262140]	2000000 OPS in 1.855372 seconds, throughput 1077950.944608
+152143	[1728262140]	2000000 OPS in 1.845877 seconds, throughput 1083495.812560
+152143	[1728262141]	2000000 OPS in 1.776292 seconds, throughput 1125941.005195
+152143	[1728262141]	2000000 OPS in 1.827776 seconds, throughput 1094225.988305
+152143	[1728262142]	2000000 OPS in 1.805504 seconds, throughput 1107723.937471
+152143	[1728262142]	2000000 OPS in 1.806412 seconds, throughput 1107167.135736
+152143	[1728262143]	2000000 OPS in 1.863440 seconds, throughput 1073283.819173
+152143	[1728262143]	2000000 OPS in 1.865800 seconds, throughput 1071926.251474
+152143	[1728262144]	2000000 OPS in 1.907959 seconds, throughput 1048240.554435
+152143	[1728262144]	2000000 OPS in 1.907173 seconds, throughput 1048672.564052
+152143	[1728262145]	2000000 OPS in 1.877123 seconds, throughput 1065460.281505
+152143	[1728262145]	2000000 OPS in 1.905830 seconds, throughput 1049411.542478
+152143	[1728262146]	2000000 OPS in 1.907887 seconds, throughput 1048280.113026
+152143	[1728262146]	2000000 OPS in 1.863712 seconds, throughput 1073127.178448
+152143	[1728262147]	2000000 OPS in 1.866026 seconds, throughput 1071796.427274
+152143	[1728262147]	2000000 OPS in 1.869473 seconds, throughput 1069820.211364
+152143	[1728262148]	2000000 OPS in 1.934578 seconds, throughput 1033817.194241
+152143	[1728262148]	2000000 OPS in 1.871384 seconds, throughput 1068727.743745
+152143	[1728262148]	2000000 OPS in 1.882105 seconds, throughput 1062639.969608
+152143	[1728262149]	2000000 OPS in 1.876576 seconds, throughput 1065770.850741
+152143	[1728262150]	2000000 OPS in 1.957400 seconds, throughput 1021763.563911
+152143	[1728262150]	2000000 OPS in 1.919224 seconds, throughput 1042087.843837
+152143	[1728262150]	2000000 OPS in 1.937330 seconds, throughput 1032348.644784
+152143	[1728262151]	2000000 OPS in 1.950183 seconds, throughput 1025544.782208
+152143	[1728262151]	2000000 OPS in 1.869218 seconds, throughput 1069966.156970
+152143	[1728262152]	2000000 OPS in 1.889659 seconds, throughput 1058392.016761
+152143	[1728262152]	2000000 OPS in 1.816578 seconds, throughput 1100971.166666
+152143	[1728262152]	2000000 OPS in 1.832044 seconds, throughput 1091676.837456
+152143	[1728262153]	2000000 OPS in 1.859807 seconds, throughput 1075380.402375
+152143	[1728262153]	2000000 OPS in 1.841700 seconds, throughput 1085953.195417
+152143	[1728262154]	2000000 OPS in 1.912132 seconds, throughput 1045952.894465
+152143	[1728262154]	2000000 OPS in 1.962185 seconds, throughput 1019271.883130
+152143	[1728262155]	2000000 OPS in 1.940886 seconds, throughput 1030457.224175
+152143	[1728262155]	2000000 OPS in 1.923682 seconds, throughput 1039672.877326
+152143	[1728262156]	2000000 OPS in 1.915488 seconds, throughput 1044120.349488
+152143	[1728262156]	2000000 OPS in 1.959591 seconds, throughput 1020621.139819
+152143	[1728262157]	2000000 OPS in 1.882457 seconds, throughput 1062441.266919
+152143	[1728262157]	2000000 OPS in 1.893193 seconds, throughput 1056416.329450
+152143	[1728262158]	2000000 OPS in 1.882982 seconds, throughput 1062145.044403
+152143	[1728262158]	2000000 OPS in 1.867463 seconds, throughput 1070971.687257
+152143	[1728262159]	2000000 OPS in 1.875943 seconds, throughput 1066130.474114
+152143	[1728262159]	2000000 OPS in 1.845033 seconds, throughput 1083991.451643
+152143	[1728262160]	2000000 OPS in 1.847599 seconds, throughput 1082485.972335
+152143	[1728262160]	2000000 OPS in 1.840546 seconds, throughput 1086634.074889
+152143	[1728262161]	2000000 OPS in 1.879859 seconds, throughput 1063909.580453
+152143	[1728262161]	2000000 OPS in 1.859720 seconds, throughput 1075430.709999
+152143	[1728262162]	2000000 OPS in 1.843532 seconds, throughput 1084874.035276
+152143	[1728262162]	2000000 OPS in 1.862386 seconds, throughput 1073891.234148
+152143	[1728262163]	2000000 OPS in 1.872379 seconds, throughput 1068159.811662
+152143	[1728262163]	2000000 OPS in 1.903954 seconds, throughput 1050445.546479
+152143	[1728262163]	2000000 OPS in 1.858708 seconds, throughput 1076016.243541
+152143	[1728262164]	2000000 OPS in 1.882263 seconds, throughput 1062550.770004
+152143	[1728262165]	2000000 OPS in 1.847981 seconds, throughput 1082262.209406
+152143	[1728262165]	2000000 OPS in 1.937002 seconds, throughput 1032523.456352
+152143	[1728262165]	2000000 OPS in 1.897060 seconds, throughput 1054262.912085
+152143	[1728262166]	2000000 OPS in 1.870323 seconds, throughput 1069334.013430
+152143	[1728262166]	2000000 OPS in 1.854144 seconds, throughput 1078664.871768
+152143	[1728262167]	2000000 OPS in 1.845309 seconds, throughput 1083829.320726
+152143	[1728262167]	2000000 OPS in 1.882957 seconds, throughput 1062159.146491
+152143	[1728262168]	2000000 OPS in 1.840386 seconds, throughput 1086728.544990
+152143	[1728262168]	2000000 OPS in 1.860249 seconds, throughput 1075124.889195
+152143	[1728262168]	2000000 OPS in 1.849479 seconds, throughput 1081385.622654
+152143	[1728262169]	2000000 OPS in 1.840689 seconds, throughput 1086549.656134
+152143	[1728262169]	2000000 OPS in 1.885344 seconds, throughput 1060814.365972
+152143	[1728262170]	2000000 OPS in 1.866060 seconds, throughput 1071776.898921
+152143	[1728262170]	2000000 OPS in 1.890124 seconds, throughput 1058131.635808
+152143	[1728262171]	2000000 OPS in 1.915307 seconds, throughput 1044219.020763
+152143	[1728262171]	2000000 OPS in 1.866955 seconds, throughput 1071263.099539
+152143	[1728262172]	2000000 OPS in 1.834114 seconds, throughput 1090444.759704
+152143	[1728262172]	2000000 OPS in 1.845384 seconds, throughput 1083785.271792
+152143	[1728262173]	2000000 OPS in 1.825208 seconds, throughput 1095765.523710
+152143	[1728262173]	2000000 OPS in 1.838796 seconds, throughput 1087668.235084
+152143	[1728262174]	2000000 OPS in 1.859333 seconds, throughput 1075654.549239
+152143	[1728262174]	2000000 OPS in 1.867715 seconds, throughput 1070827.187231
+152143	[1728262175]	2000000 OPS in 1.863116 seconds, throughput 1073470.465607
+152143	[1728262175]	2000000 OPS in 1.922153 seconds, throughput 1040499.897771
+152143	[1728262176]	2000000 OPS in 1.864844 seconds, throughput 1072475.767410
+152143	[1728262176]	2000000 OPS in 1.890438 seconds, throughput 1057955.881124
+152143	[1728262177]	2000000 OPS in 1.848845 seconds, throughput 1081756.447945
+152143	[1728262177]	2000000 OPS in 1.866855 seconds, throughput 1071320.482844
+152143	[1728262178]	2000000 OPS in 1.885204 seconds, throughput 1060893.144721
+152143	[1728262178]	2000000 OPS in 1.887881 seconds, throughput 1059388.806816
+152143	[1728262178]	2000000 OPS in 1.884569 seconds, throughput 1061250.609556
+152143	[1728262179]	2000000 OPS in 1.883521 seconds, throughput 1061841.094418
+152143	[1728262179]	2000000 OPS in 1.874825 seconds, throughput 1066766.231515
+152143	[1728262180]	2000000 OPS in 1.972016 seconds, throughput 1014190.554235
+152143	[1728262180]	2000000 OPS in 1.913157 seconds, throughput 1045392.510913
+152143	[1728262181]	2000000 OPS in 1.890259 seconds, throughput 1058056.065333
+152143	[1728262181]	2000000 OPS in 1.855884 seconds, throughput 1077653.560244
+152143	[1728262182]	2000000 OPS in 1.849942 seconds, throughput 1081114.975497
+152143	[1728262182]	2000000 OPS in 1.859143 seconds, throughput 1075764.478580
+152143	[1728262183]	2000000 OPS in 1.829241 seconds, throughput 1093349.646110
+152143	[1728262183]	2000000 OPS in 1.881081 seconds, throughput 1063218.436633
+152143	[1728262183]	2000000 OPS in 1.859500 seconds, throughput 1075557.945684
+152143	[1728262184]	2000000 OPS in 1.842412 seconds, throughput 1085533.528874
+152143	[1728262184]	2000000 OPS in 1.900071 seconds, throughput 1052592.245237
+152143	[1728262185]	2000000 OPS in 1.854773 seconds, throughput 1078299.069482
+152143	[1728262185]	2000000 OPS in 1.879149 seconds, throughput 1064311.558051
+152143	[1728262186]	2000000 OPS in 1.857396 seconds, throughput 1076776.304030
+152143	[1728262186]	2000000 OPS in 1.860691 seconds, throughput 1074869.497407
+152143	[1728262187]	2000000 OPS in 1.845768 seconds, throughput 1083559.797331
+152143	[1728262187]	2000000 OPS in 1.867175 seconds, throughput 1071136.877904
+152143	[1728262188]	2000000 OPS in 1.868793 seconds, throughput 1070209.488156
+152143	[1728262188]	2000000 OPS in 1.950154 seconds, throughput 1025560.032695
+152143	[1728262189]	2000000 OPS in 1.909281 seconds, throughput 1047514.745079
+152143	[1728262189]	2000000 OPS in 1.844755 seconds, throughput 1084154.806465
+152143	[1728262190]	2000000 OPS in 1.906439 seconds, throughput 1049076.314532
+152143	[1728262190]	2000000 OPS in 1.907177 seconds, throughput 1048670.364628
+152143	[1728262191]	2000000 OPS in 1.883953 seconds, throughput 1061597.608858
+152143	[1728262191]	2000000 OPS in 1.880399 seconds, throughput 1063604.054246
+152143	[1728262191]	2000000 OPS in 1.803768 seconds, throughput 1108790.043952
+152143	[1728262192]	2000000 OPS in 1.845649 seconds, throughput 1083629.660894
+152143	[1728262193]	2000000 OPS in 1.857772 seconds, throughput 1076558.372071
+152143	[1728262193]	2000000 OPS in 1.884063 seconds, throughput 1061535.628055
+152143	[1728262193]	2000000 OPS in 1.937333 seconds, throughput 1032347.046171
+152143	[1728262194]	2000000 OPS in 1.848980 seconds, throughput 1081677.465413
+152143	[1728262194]	2000000 OPS in 1.836381 seconds, throughput 1089098.612978
+152143	[1728262195]	2000000 OPS in 1.865142 seconds, throughput 1072304.414356
+152143	[1728262195]	2000000 OPS in 1.889814 seconds, throughput 1058305.208872
+152143	[1728262196]	2000000 OPS in 1.851807 seconds, throughput 1080026.158234
+152143	[1728262196]	2000000 OPS in 1.941901 seconds, throughput 1029918.620980
+152143	[1728262197]	2000000 OPS in 1.890302 seconds, throughput 1058031.997004
+152143	[1728262197]	2000000 OPS in 1.877257 seconds, throughput 1065384.228158
+152143	[1728262198]	2000000 OPS in 1.945702 seconds, throughput 1027906.637296
+152143	[1728262198]	2000000 OPS in 1.845496 seconds, throughput 1083719.498715
+152143	[1728262199]	2000000 OPS in 1.960050 seconds, throughput 1020382.133109
+152143	[1728262199]	2000000 OPS in 1.900742 seconds, throughput 1052220.659090
+152143	[1728262200]	2000000 OPS in 1.884550 seconds, throughput 1061261.309066
+152143	[1728262200]	2000000 OPS in 1.875583 seconds, throughput 1066335.107537
+152143	[1728262200]	2000000 OPS in 1.869944 seconds, throughput 1069550.745905
+152143	[1728262201]	2000000 OPS in 1.820051 seconds, throughput 1098870.306382
+152143	[1728262201]	2000000 OPS in 1.869887 seconds, throughput 1069583.349154
+152143	[1728262202]	2000000 OPS in 1.841675 seconds, throughput 1085967.936797
+152143	[1728262202]	2000000 OPS in 1.880406 seconds, throughput 1063600.094873
+152143	[1728262203]	2000000 OPS in 1.908286 seconds, throughput 1048060.930070
+152143	[1728262203]	2000000 OPS in 1.897109 seconds, throughput 1054235.681766
+152143	[1728262204]	2000000 OPS in 1.865203 seconds, throughput 1072269.345481
+152143	[1728262204]	2000000 OPS in 1.859246 seconds, throughput 1075704.882517
+152143	[1728262205]	2000000 OPS in 1.885257 seconds, throughput 1060863.319961
+152143	[1728262205]	2000000 OPS in 1.900825 seconds, throughput 1052174.713611
+152143	[1728262206]	2000000 OPS in 1.885180 seconds, throughput 1060906.650824
+152143	[1728262206]	2000000 OPS in 1.912974 seconds, throughput 1045492.515842
+152143	[1728262206]	2000000 OPS in 1.817051 seconds, throughput 1100684.570769
+152143	[1728262207]	2000000 OPS in 1.813904 seconds, throughput 1102594.183595
+152143	[1728262207]	2000000 OPS in 1.796405 seconds, throughput 1113334.687891
+152143	[1728262208]	2000000 OPS in 1.837142 seconds, throughput 1088647.475263
+152143	[1728262208]	2000000 OPS in 1.828208 seconds, throughput 1093967.426026
+152143	[1728262209]	2000000 OPS in 1.837959 seconds, throughput 1088163.555335
+152143	[1728262209]	2000000 OPS in 1.825768 seconds, throughput 1095429.430245
+152143	[1728262210]	2000000 OPS in 1.807292 seconds, throughput 1106628.037971
+152143	[1728262210]	2000000 OPS in 1.878820 seconds, throughput 1064497.929552
+152143	[1728262211]	2000000 OPS in 1.859936 seconds, throughput 1075305.816974
+152143	[1728262211]	2000000 OPS in 1.848315 seconds, throughput 1082066.639074
+152143	[1728262212]	2000000 OPS in 1.962841 seconds, throughput 1018931.232841
+152143	[1728262212]	2000000 OPS in 1.889697 seconds, throughput 1058370.733509
+152143	[1728262213]	2000000 OPS in 1.956744 seconds, throughput 1022106.110968
+152143	[1728262213]	2000000 OPS in 1.883638 seconds, throughput 1061775.139385
+152143	[1728262213]	2000000 OPS in 1.852424 seconds, throughput 1079666.426261
+152143	[1728262214]	2000000 OPS in 1.871742 seconds, throughput 1068523.332810
+152143	[1728262215]	2000000 OPS in 1.929461 seconds, throughput 1036558.914640
+152143	[1728262215]	2000000 OPS in 1.927062 seconds, throughput 1037849.327110
+152143	[1728262215]	2000000 OPS in 1.961465 seconds, throughput 1019646.029881
+152143	[1728262216]	2000000 OPS in 1.992779 seconds, throughput 1003623.582946
+152143	[1728262217]	2000000 OPS in 1.938329 seconds, throughput 1031816.580157
+152143	[1728262217]	2000000 OPS in 1.873705 seconds, throughput 1067403.886951
+152143	[1728262217]	2000000 OPS in 1.905005 seconds, throughput 1049866.010850
+152143	[1728262218]	2000000 OPS in 1.887089 seconds, throughput 1059833.425980
+152143	[1728262218]	2000000 OPS in 1.851359 seconds, throughput 1080287.507717
+152143	[1728262219]	2000000 OPS in 1.836556 seconds, throughput 1088994.835986
+152143	[1728262219]	2000000 OPS in 1.813196 seconds, throughput 1103024.714372
+152143	[1728262220]	2000000 OPS in 1.838592 seconds, throughput 1087788.916736
+152143	[1728262220]	2000000 OPS in 1.877736 seconds, throughput 1065112.454573
+152143	[1728262221]	2000000 OPS in 1.925559 seconds, throughput 1038659.423056
+152143	[1728262221]	2000000 OPS in 1.902088 seconds, throughput 1051476.062096
+152143	[1728262222]	2000000 OPS in 1.876492 seconds, throughput 1065818.559312
+152143	[1728262222]	2000000 OPS in 1.882171 seconds, throughput 1062602.707193
+152143	[1728262222]	2000000 OPS in 1.869959 seconds, throughput 1069542.166433
+152143	[1728262223]	2000000 OPS in 1.873414 seconds, throughput 1067569.688280
+152143	[1728262223]	2000000 OPS in 1.848969 seconds, throughput 1081683.900595
+152143	[1728262224]	2000000 OPS in 1.862777 seconds, throughput 1073665.822586
+152143	[1728262224]	2000000 OPS in 1.829989 seconds, throughput 1092902.744224
+152143	[1728262225]	2000000 OPS in 1.778564 seconds, throughput 1124502.688686
+152143	[1728262225]	2000000 OPS in 1.828559 seconds, throughput 1093757.434133
+152143	[1728262226]	2000000 OPS in 1.854462 seconds, throughput 1078479.904145
+152143	[1728262226]	2000000 OPS in 1.845233 seconds, throughput 1083873.960633
+152143	[1728262227]	2000000 OPS in 1.892791 seconds, throughput 1056640.696199
+152143	[1728262227]	2000000 OPS in 1.850082 seconds, throughput 1081033.165016
+152143	[1728262228]	2000000 OPS in 1.893981 seconds, throughput 1055976.802302
+152143	[1728262228]	2000000 OPS in 1.885130 seconds, throughput 1060934.789643
+152143	[1728262228]	2000000 OPS in 1.856549 seconds, throughput 1077267.553940
+152143	[1728262229]	2000000 OPS in 1.873579 seconds, throughput 1067475.670895
+152143	[1728262230]	2000000 OPS in 1.843140 seconds, throughput 1085104.766865
+152143	[1728262230]	2000000 OPS in 1.870120 seconds, throughput 1069450.088764
+152143	[1728262230]	2000000 OPS in 1.966483 seconds, throughput 1017044.134122
+152143	[1728262231]	2000000 OPS in 1.887282 seconds, throughput 1059725.043740
+152143	[1728262232]	2000000 OPS in 1.913825 seconds, throughput 1045027.627918
+152143	[1728262232]	2000000 OPS in 1.890337 seconds, throughput 1058012.407312
+152143	[1728262232]	2000000 OPS in 1.897184 seconds, throughput 1054194.005431
+152143	[1728262233]	2000000 OPS in 1.875052 seconds, throughput 1066637.085265
+152143	[1728262233]	2000000 OPS in 1.876850 seconds, throughput 1065615.259611
+152143	[1728262234]	2000000 OPS in 1.889096 seconds, throughput 1058707.445254
+152143	[1728262234]	2000000 OPS in 1.912734 seconds, throughput 1045623.698852
+152143	[1728262235]	2000000 OPS in 1.888314 seconds, throughput 1059145.883577
+152143	[1728262235]	2000000 OPS in 1.924516 seconds, throughput 1039222.329147
+152143	[1728262236]	2000000 OPS in 1.859510 seconds, throughput 1075552.161591
+152143	[1728262236]	2000000 OPS in 1.857593 seconds, throughput 1076662.110592
+152143	[1728262237]	2000000 OPS in 1.906908 seconds, throughput 1048818.296425
+152143	[1728262237]	2000000 OPS in 1.851685 seconds, throughput 1080097.316768
+152143	[1728262237]	2000000 OPS in 1.855175 seconds, throughput 1078065.411619
+152143	[1728262238]	2000000 OPS in 1.862494 seconds, throughput 1073828.962670
+152143	[1728262238]	2000000 OPS in 1.848438 seconds, throughput 1081994.635471
+152143	[1728262239]	2000000 OPS in 1.931699 seconds, throughput 1035357.993145
+152143	[1728262239]	2000000 OPS in 1.823804 seconds, throughput 1096609.065448
+152143	[1728262240]	2000000 OPS in 1.888240 seconds, throughput 1059187.391433
+152143	[1728262240]	2000000 OPS in 1.873390 seconds, throughput 1067583.364916
+152143	[1728262241]	2000000 OPS in 1.846330 seconds, throughput 1083229.975140
+152143	[1728262241]	2000000 OPS in 1.888990 seconds, throughput 1058766.854245
+152143	[1728262242]	2000000 OPS in 1.877652 seconds, throughput 1065160.104215
+152143	[1728262242]	2000000 OPS in 1.861633 seconds, throughput 1074325.605530
+152143	[1728262243]	2000000 OPS in 1.886901 seconds, throughput 1059939.021708
+152143	[1728262243]	2000000 OPS in 1.899607 seconds, throughput 1052849.352524
+152143	[1728262244]	2000000 OPS in 1.851354 seconds, throughput 1080290.425278
+152143	[1728262244]	2000000 OPS in 1.866364 seconds, throughput 1071602.324091
+152143	[1728262245]	2000000 OPS in 1.876807 seconds, throughput 1065639.674191
+152143	[1728262245]	2000000 OPS in 1.875913 seconds, throughput 1066147.523899
+152143	[1728262245]	2000000 OPS in 1.845063 seconds, throughput 1083973.826368
+152143	[1728262246]	2000000 OPS in 1.789719 seconds, throughput 1117493.863562
+152143	[1728262247]	2000000 OPS in 1.856919 seconds, throughput 1077052.903223
+152143	[1728262247]	2000000 OPS in 1.823732 seconds, throughput 1096652.359009
+152143	[1728262247]	2000000 OPS in 1.825569 seconds, throughput 1095548.839841
+152143	[1728262248]	2000000 OPS in 1.855239 seconds, throughput 1078028.221701
+152143	[1728262248]	2000000 OPS in 1.880097 seconds, throughput 1063774.900976
+152143	[1728262249]	2000000 OPS in 1.858274 seconds, throughput 1076267.547197
+152143	[1728262249]	2000000 OPS in 1.866697 seconds, throughput 1071411.160997
+152143	[1728262249]	2000000 OPS in 1.876074 seconds, throughput 1066056.029773
+152143	[1728262250]	2000000 OPS in 1.919281 seconds, throughput 1042056.895264
+152143	[1728262250]	2000000 OPS in 1.872256 seconds, throughput 1068229.985643
+152143	[1728262251]	2000000 OPS in 1.905573 seconds, throughput 1049553.074062
+152143	[1728262251]	2000000 OPS in 1.852662 seconds, throughput 1079527.728209
+152143	[1728262252]	2000000 OPS in 1.863943 seconds, throughput 1072994.184908
+152143	[1728262252]	2000000 OPS in 1.915507 seconds, throughput 1044109.992811
+152143	[1728262253]	2000000 OPS in 1.937535 seconds, throughput 1032239.417611
+152143	[1728262253]	2000000 OPS in 1.926526 seconds, throughput 1038138.078593
+152143	[1728262254]	2000000 OPS in 1.891163 seconds, throughput 1057550.301058
+152143	[1728262254]	2000000 OPS in 1.939766 seconds, throughput 1031052.199080
+152143	[1728262255]	2000000 OPS in 1.824230 seconds, throughput 1096352.981806
+152143	[1728262255]	2000000 OPS in 1.870556 seconds, throughput 1069200.815159
+152143	[1728262256]	2000000 OPS in 1.842854 seconds, throughput 1085273.168683
+152143	[1728262256]	2000000 OPS in 1.880195 seconds, throughput 1063719.454631
+152143	[1728262257]	2000000 OPS in 1.901304 seconds, throughput 1051909.636755
+152143	[1728262257]	2000000 OPS in 1.851247 seconds, throughput 1080352.864853
+152143	[1728262258]	2000000 OPS in 1.816642 seconds, throughput 1100932.379632
+152143	[1728262258]	2000000 OPS in 1.866060 seconds, throughput 1071776.898921
+152143	[1728262259]	2000000 OPS in 1.830801 seconds, throughput 1092418.018124
+152143	[1728262259]	2000000 OPS in 1.908750 seconds, throughput 1047806.155861
+152143	[1728262260]	2000000 OPS in 1.883860 seconds, throughput 1061650.016456
+152143	[1728262260]	2000000 OPS in 1.851891 seconds, throughput 1079977.169283
+152143	[1728262260]	2000000 OPS in 1.871711 seconds, throughput 1068541.030106
+152143	[1728262261]	2000000 OPS in 1.815630 seconds, throughput 1101546.019839
+152143	[1728262262]	2000000 OPS in 1.881288 seconds, throughput 1063101.449645
+152143	[1728262262]	2000000 OPS in 1.849757 seconds, throughput 1081223.101197
+152143	[1728262262]	2000000 OPS in 1.876143 seconds, throughput 1066016.822811
+152143	[1728262263]	2000000 OPS in 1.845154 seconds, throughput 1083920.366539
+152143	[1728262263]	2000000 OPS in 1.877814 seconds, throughput 1065068.212294
+152143	[1728262264]	2000000 OPS in 1.876135 seconds, throughput 1066021.368398
+152143	[1728262264]	2000000 OPS in 1.861244 seconds, throughput 1074550.139584
+152143	[1728262264]	2000000 OPS in 1.859639 seconds, throughput 1075477.552364
+152143	[1728262265]	2000000 OPS in 1.905046 seconds, throughput 1049843.415855
+152143	[1728262265]	2000000 OPS in 1.925244 seconds, throughput 1038829.363966
+152143	[1728262266]	2000000 OPS in 1.920174 seconds, throughput 1041572.274179
+152143	[1728262266]	2000000 OPS in 1.893456 seconds, throughput 1056269.593801
+152143	[1728262267]	2000000 OPS in 1.862284 seconds, throughput 1073950.052731
+152143	[1728262267]	2000000 OPS in 1.894570 seconds, throughput 1055648.511272
+152143	[1728262268]	2000000 OPS in 1.892740 seconds, throughput 1056669.167450
+152143	[1728262268]	2000000 OPS in 1.885300 seconds, throughput 1060839.123747
+152143	[1728262269]	2000000 OPS in 1.896345 seconds, throughput 1054660.412530
+152143	[1728262269]	2000000 OPS in 1.918706 seconds, throughput 1042369.180062
+152143	[1728262270]	2000000 OPS in 1.860938 seconds, throughput 1074726.831308
+152143	[1728262270]	2000000 OPS in 1.883080 seconds, throughput 1062089.767827
+152143	[1728262271]	2000000 OPS in 1.842458 seconds, throughput 1085506.426741
+152143	[1728262271]	2000000 OPS in 1.866170 seconds, throughput 1071713.723830
+152143	[1728262272]	2000000 OPS in 1.862666 seconds, throughput 1073729.804485
+152143	[1728262272]	2000000 OPS in 1.877352 seconds, throughput 1065330.316318
+152143	[1728262273]	2000000 OPS in 1.874306 seconds, throughput 1067061.621742
+152143	[1728262273]	2000000 OPS in 1.929133 seconds, throughput 1036735.155119
+152143	[1728262274]	2000000 OPS in 1.870375 seconds, throughput 1069304.283900
+152143	[1728262274]	2000000 OPS in 1.890578 seconds, throughput 1057877.537980
+152143	[1728262275]	2000000 OPS in 1.834440 seconds, throughput 1090250.975775
+152143	[1728262275]	2000000 OPS in 1.821111 seconds, throughput 1098230.695438
+152143	[1728262275]	2000000 OPS in 1.873574 seconds, throughput 1067478.519663
+152143	[1728262276]	2000000 OPS in 1.825408 seconds, throughput 1095645.466657
+152143	[1728262277]	2000000 OPS in 1.872609 seconds, throughput 1068028.616759
+152143	[1728262277]	2000000 OPS in 1.875079 seconds, throughput 1066621.726338
+152143	[1728262277]	2000000 OPS in 1.856692 seconds, throughput 1077184.584196
+152143	[1728262278]	2000000 OPS in 1.911345 seconds, throughput 1046383.567592
+152143	[1728262279]	2000000 OPS in 1.939236 seconds, throughput 1031333.989262
+152143	[1728262279]	2000000 OPS in 1.903900 seconds, throughput 1050475.340091
+152143	[1728262279]	2000000 OPS in 1.965314 seconds, throughput 1017649.088136
+152143	[1728262279]	2000000 OPS in 1.892904 seconds, throughput 1056577.618305
+152143	[1728262280]	2000000 OPS in 1.855072 seconds, throughput 1078125.269531
+152143	[1728262281]	2000000 OPS in 1.900821 seconds, throughput 1052176.927759
+152143	[1728262281]	2000000 OPS in 1.865833 seconds, throughput 1071907.292882
+152143	[1728262281]	2000000 OPS in 1.850761 seconds, throughput 1080636.559772
+152143	[1728262282]	2000000 OPS in 1.853112 seconds, throughput 1079265.581357
+152143	[1728262282]	2000000 OPS in 1.865551 seconds, throughput 1072069.324291
+152143	[1728262283]	2000000 OPS in 1.918776 seconds, throughput 1042331.152777
+152143	[1728262283]	2000000 OPS in 1.876381 seconds, throughput 1065881.609332
+152143	[1728262284]	2000000 OPS in 1.829873 seconds, throughput 1092972.025927
+152143	[1728262284]	2000000 OPS in 1.887687 seconds, throughput 1059497.681554
+152143	[1728262285]	2000000 OPS in 1.905248 seconds, throughput 1049732.108366
+152143	[1728262285]	2000000 OPS in 1.874548 seconds, throughput 1066923.866447
+152143	[1728262286]	2000000 OPS in 1.918050 seconds, throughput 1042725.684940
+152143	[1728262286]	2000000 OPS in 1.879735 seconds, throughput 1063979.763105
+152143	[1728262287]	2000000 OPS in 1.897114 seconds, throughput 1054232.903241
+152143	[1728262287]	2000000 OPS in 1.858664 seconds, throughput 1076041.715985
+152143	[1728262288]	2000000 OPS in 1.853893 seconds, throughput 1078810.913035
+152143	[1728262288]	2000000 OPS in 1.925932 seconds, throughput 1038458.263324
+152143	[1728262289]	2000000 OPS in 1.856501 seconds, throughput 1077295.406789
+152143	[1728262289]	2000000 OPS in 1.895030 seconds, throughput 1055392.262919
+152143	[1728262290]	2000000 OPS in 1.843024 seconds, throughput 1085173.063400
+152143	[1728262290]	2000000 OPS in 1.848760 seconds, throughput 1081806.183604
+152143	[1728262291]	2000000 OPS in 1.863066 seconds, throughput 1073499.274851
+152143	[1728262291]	2000000 OPS in 1.905779 seconds, throughput 1049439.625476
+152143	[1728262292]	2000000 OPS in 1.844430 seconds, throughput 1084345.841263
+152143	[1728262292]	2000000 OPS in 1.847970 seconds, throughput 1082268.651547
+152143	[1728262292]	2000000 OPS in 1.880849 seconds, throughput 1063349.583087
+152143	[1728262293]	2000000 OPS in 1.852479 seconds, throughput 1079634.371024
+152143	[1728262293]	2000000 OPS in 1.958302 seconds, throughput 1021292.936432
+152143	[1728262294]	2000000 OPS in 1.926780 seconds, throughput 1038001.224841
+152143	[1728262294]	2000000 OPS in 1.902723 seconds, throughput 1051125.150639
+152143	[1728262294]	2000000 OPS in 1.872564 seconds, throughput 1068054.282791
+152143	[1728262295]	2000000 OPS in 1.853242 seconds, throughput 1079189.873746
+152143	[1728262296]	2000000 OPS in 1.882494 seconds, throughput 1062420.384872
+152143	[1728262296]	2000000 OPS in 1.857121 seconds, throughput 1076935.751628
+152143	[1728262296]	2000000 OPS in 1.819729 seconds, throughput 1099064.750850
+152143	[1728262297]	2000000 OPS in 1.866367 seconds, throughput 1071600.601597
+152143	[1728262298]	2000000 OPS in 1.888140 seconds, throughput 1059243.488301
+152143	[1728262298]	2000000 OPS in 1.920641 seconds, throughput 1041319.017974
+152143	[1728262298]	2000000 OPS in 1.896599 seconds, throughput 1054519.168259
+152143	[1728262299]	2000000 OPS in 1.840936 seconds, throughput 1086403.872813
+152143	[1728262299]	2000000 OPS in 1.866263 seconds, throughput 1071660.317972
+152143	[1728262300]	2000000 OPS in 1.834611 seconds, throughput 1090149.355913
+152143	[1728262300]	2000000 OPS in 1.854874 seconds, throughput 1078240.354870
+152143	[1728262301]	2000000 OPS in 1.888558 seconds, throughput 1059009.042878
+152143	[1728262301]	2000000 OPS in 1.881558 seconds, throughput 1062948.896606
+152143	[1728262302]	2000000 OPS in 1.821044 seconds, throughput 1098271.101632
+152143	[1728262302]	2000000 OPS in 1.838545 seconds, throughput 1087816.724638
+152143	[1728262303]	2000000 OPS in 1.809596 seconds, throughput 1105219.065471
+152143	[1728262303]	2000000 OPS in 1.836462 seconds, throughput 1089050.576598
+152143	[1728262304]	2000000 OPS in 1.873621 seconds, throughput 1067451.741841
+152143	[1728262304]	2000000 OPS in 1.877803 seconds, throughput 1065074.451367
+152143	[1728262305]	2000000 OPS in 1.884120 seconds, throughput 1061503.513577
+152143	[1728262305]	2000000 OPS in 1.908516 seconds, throughput 1047934.625646
+152143	[1728262306]	2000000 OPS in 1.919143 seconds, throughput 1042131.826550
+152143	[1728262306]	2000000 OPS in 1.912704 seconds, throughput 1045640.099043
+152143	[1728262306]	2000000 OPS in 1.868018 seconds, throughput 1070653.494774
+152143	[1728262307]	2000000 OPS in 1.842001 seconds, throughput 1085775.740621
+152143	[1728262307]	2000000 OPS in 1.807929 seconds, throughput 1106238.132139
+152143	[1728262307]	2000000 OPS in 1.815792 seconds, throughput 1101447.742913
+152143	[1728262308]	2000000 OPS in 1.798645 seconds, throughput 1111948.160977
+152143	[1728262309]	2000000 OPS in 1.802906 seconds, throughput 1109320.175317
+152143	[1728262309]	2000000 OPS in 1.887322 seconds, throughput 1059702.583873
+152143	[1728262309]	2000000 OPS in 1.856789 seconds, throughput 1077128.311294
+152143	[1728262310]	2000000 OPS in 1.955922 seconds, throughput 1022535.663488
+152143	[1728262311]	2000000 OPS in 1.964523 seconds, throughput 1018058.836674
+152143	[1728262311]	2000000 OPS in 1.955102 seconds, throughput 1022964.530751
+152143	[1728262311]	2000000 OPS in 1.898004 seconds, throughput 1053738.559034
+152143	[1728262312]	2000000 OPS in 1.890020 seconds, throughput 1058189.860425
+152143	[1728262313]	2000000 OPS in 1.889561 seconds, throughput 1058446.909097
+152143	[1728262313]	2000000 OPS in 1.872330 seconds, throughput 1068187.766046
+152143	[1728262313]	2000000 OPS in 1.858473 seconds, throughput 1076152.303531
+152143	[1728262314]	2000000 OPS in 1.904661 seconds, throughput 1050055.626697
+152143	[1728262314]	2000000 OPS in 1.844841 seconds, throughput 1084104.266980
+152143	[1728262315]	2000000 OPS in 1.844296 seconds, throughput 1084424.625982
+152143	[1728262316]	2000000 OPS in 1.756286 seconds, throughput 1138766.692896
+152143	[1728262317]	2000000 OPS in 1.726200 seconds, throughput 1158614.297300
+152143	[1728262318]	2000000 OPS in 1.712620 seconds, throughput 1167801.380341
+152143	[1728262318]	2000000 OPS in 1.714726 seconds, throughput 1166367.104715
+152143	[1728262320]	2000000 OPS in 1.737980 seconds, throughput 1150761.228553
+152143	[1728262320]	2000000 OPS in 1.738653 seconds, throughput 1150315.790442
+--------------------------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------
+DBFixture/bench/50/iterations:1/real_time/threads:4     235262 ms       891632 ms            4 CompactionCPUUsage=1.96835 CompactionThroughput=597.249M Lat_Get_Avg=819.314 Lat_Get_P50=806.514 Lat_Get_P95=1.29156k Lat_Get_P99=1.77331k Lat_Put_Avg=1072.52 Lat_Put_P50=987.496 Lat_Put_P95=1.44995k Lat_Put_P99=1.83109k items_per_second=4.25058M/s
+5462.92user 20.11system 16:12.24elapsed 563%CPU (0avgtext+0avgdata 814744maxresident)k
+334752inputs+36736outputs (1726major+2440085minor)pagefaults 0swaps
